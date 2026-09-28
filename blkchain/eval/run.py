@@ -42,6 +42,7 @@ class Case:
     expected_sources: list[str] = field(default_factory=list)
     expected_cwe: str | None = None
     notes: str = ""
+    difficulty: str = "core"  # "core" (on-topic) or "hard" (paraphrase/typo/multi-hop)
 
 
 def load_dataset(path: Path = DATASET_PATH) -> list[Case]:
@@ -58,9 +59,21 @@ def load_dataset(path: Path = DATASET_PATH) -> list[Case]:
                 expected_sources=obj.get("expected_sources", []),
                 expected_cwe=obj.get("expected_cwe"),
                 notes=obj.get("notes", ""),
+                difficulty=obj.get("difficulty", "core"),
             )
         )
     return cases
+
+
+def _breakdown_by_difficulty(case_results: list["CaseResult"]) -> list[tuple[str, int, int]]:
+    """Per-difficulty (label, hits@5, total), so a 'hard' subset can discriminate
+    retriever configs even when the 'core' subset saturates at 100%."""
+    out = []
+    for label in ("core", "hard"):
+        group = [c for c in case_results if c.case.difficulty == label]
+        if group:
+            out.append((label, sum(1 for c in group if c.hit_at(5)), len(group)))
+    return out
 
 
 # --- Retrieval metrics -----------------------------------------------------
@@ -117,11 +130,11 @@ def evaluate_retrieval(case: Case, results: list[dict]) -> CaseResult:
     )
 
 
-def run_retrieval(cases: list[Case], top_k: int) -> list[CaseResult]:
+def run_retrieval(cases: list[Case], top_k: int, collection: str | None = None) -> list[CaseResult]:
     depth = max(top_k, _METRIC_DEPTH)
     out: list[CaseResult] = []
     for case in cases:
-        results = kb_search(case.query, top_k=depth)
+        results = kb_search(case.query, top_k=depth, collection=collection)
         out.append(evaluate_retrieval(case, results))
     return out
 
@@ -265,6 +278,7 @@ def build_report(
     judge_results: list[JudgeResult],
     judge_unavailable: str | None,
     judge_skipped: bool,
+    collection: str | None = None,
 ) -> str:
     n = len(case_results)
     hit5 = sum(1 for c in case_results if c.hit_at(5))
@@ -275,7 +289,7 @@ def build_report(
     lines.append("# blkChain RAG evaluation report")
     lines.append("")
     lines.append(f"- dataset: `{DATASET_PATH}` ({n} cases)")
-    lines.append(f"- collection: `{config.QDRANT_COLLECTION}`  |  pool depth: {max(top_k, _METRIC_DEPTH)}  |  --top-k: {top_k}")
+    lines.append(f"- collection: `{collection or config.QDRANT_COLLECTION}`  |  pool depth: {max(top_k, _METRIC_DEPTH)}  |  --top-k: {top_k}")
     lines.append(f"- llm model: `{config.LLM_MODEL}`")
     lines.append("")
     lines.append("## Retrieval metrics (primary gate, deterministic)")
@@ -283,6 +297,8 @@ def build_report(
     lines.append(f"- hit_rate@5:  **{_fmt_pct(hit5 / n)}** ({hit5}/{n})")
     lines.append(f"- hit_rate@10: **{_fmt_pct(hit10 / n)}** ({hit10}/{n})")
     lines.append(f"- MRR:         **{mrr:.3f}**")
+    for label, h, t in _breakdown_by_difficulty(case_results):
+        lines.append(f"- hit_rate@5 ({label}): {_fmt_pct(h / t)} ({h}/{t})")
     lines.append("")
     lines.append("| # | query | hit@5 | rank | matched substring |")
     lines.append("|---|-------|-------|------|-------------------|")
@@ -338,6 +354,9 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=None, help="evaluate only the first N cases")
     parser.add_argument("--no-judge", action="store_true", help="skip LLM answer metrics")
     parser.add_argument("--judge-limit", type=int, default=3, help="judge only the first N cases (default 3)")
+    parser.add_argument("--collection", default=None,
+                        help="Qdrant collection to evaluate (default config.QDRANT_COLLECTION); "
+                             "use to A/B an alternate-embedder index")
     args = parser.parse_args()
 
     cases = load_dataset()
@@ -347,7 +366,7 @@ def main() -> int:
     print(f"Loaded {len(cases)} case(s) from {DATASET_PATH}")
     print(f"Running retrieval (pool depth {max(args.top_k, _METRIC_DEPTH)}) ...\n")
 
-    case_results = run_retrieval(cases, args.top_k)
+    case_results = run_retrieval(cases, args.top_k, collection=args.collection)
 
     # Console table
     print(f"{'#':>2}  {'hit@5':^5}  {'rank':>4}  {'matched':<24}  query")
@@ -364,6 +383,10 @@ def main() -> int:
     print("-" * 100)
     print(f"hit_rate@5 = {_fmt_pct(hit5 / n)} ({hit5}/{n})   "
           f"hit_rate@10 = {_fmt_pct(hit10 / n)} ({hit10}/{n})   MRR = {mrr:.3f}")
+    breakdown = _breakdown_by_difficulty(case_results)
+    if len(breakdown) > 1:
+        print("  by difficulty:  " + "   ".join(
+            f"{label} {_fmt_pct(h / t)} ({h}/{t})" for label, h, t in breakdown))
 
     misses = [c for c in case_results if not c.hit_at(5)]
     if misses:
@@ -387,7 +410,8 @@ def main() -> int:
                 else:
                     print(f"  - {jr.query}: faithfulness={jr.faithfulness:.3f} relevancy={jr.relevancy:.3f}")
 
-    report = build_report(case_results, args.top_k, judge_results, judge_unavailable, args.no_judge)
+    report = build_report(case_results, args.top_k, judge_results, judge_unavailable,
+                          args.no_judge, collection=args.collection)
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(report, encoding="utf-8")
     print(f"\nReport written to {REPORT_PATH}")

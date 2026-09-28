@@ -23,3 +23,15 @@
 {"query": "linux privilege escalation via sudo misconfiguration", "expected_substrings": ["privilege escalation", "privesc"], "notes": "Local privesc from a low user to root via sudo/SUID issues."}
 {"query": "SecLists directory and file discovery wordlist", "expected_substrings": ["seclists", "wordlist"], "notes": "SecLists catalog query; expect a SecLists path or wordlist mention."}
 {"query": "wordlist of common usernames for brute forcing", "expected_substrings": ["username"], "notes": "Username enumeration wordlist; SecLists Usernames catalog."}
+{"query": "a web app fetches any URL I give it and I aim it at the internal cloud metadata IP to grab credentials", "expected_substrings": ["169.254.169.254"], "difficulty": "hard", "notes": "paraphrase SSRF->metadata without naming SSRF"}
+{"query": "reflcted cross site scripting explanaton", "expected_substrings": ["reflected"], "difficulty": "hard", "notes": "typos; BM25 degrades, dense/rerank must carry"}
+{"query": "sql injektion using union select to read other tables", "expected_substrings": ["union"], "difficulty": "hard", "notes": "obfuscated spelling of SQL injection"}
+{"query": "read arbitrary files on the server by tampering with a path parameter", "expected_substrings": ["/etc/passwd", "inclusion", "traversal"], "difficulty": "hard", "notes": "paraphrase LFI/path traversal"}
+{"query": "abuse an xml parser to disclose local files on the host", "expected_substrings": ["external entity", "xxe"], "difficulty": "hard", "notes": "paraphrase XXE"}
+{"query": "inject an expression into a server-rendered template so it gets evaluated", "expected_substrings": ["template injection", "ssti"], "difficulty": "hard", "notes": "paraphrase SSTI"}
+{"query": "forge a json web token by setting the signature algorithm to none", "expected_substrings": ["alg", "none"], "difficulty": "hard", "notes": "paraphrase JWT alg:none"}
+{"query": "run code by abusing how the app deserializes untrusted objects", "expected_substrings": ["gadget", "deserial"], "difficulty": "hard", "notes": "paraphrase insecure deserialization"}
+{"query": "change the numeric id in a request to view another account's records", "expected_substrings": ["idor", "direct object"], "difficulty": "hard", "notes": "paraphrase IDOR"}
+{"query": "commmand injektion via unsanitized shell input", "expected_substrings": ["command injection"], "difficulty": "hard", "notes": "typo obfuscation of command injection"}
+{"query": "after pulling temporary IAM keys from the metadata service, use them to execute actions in the cloud account", "expected_substrings": ["iam", "credentials"], "difficulty": "hard", "notes": "multi-hop SSRF->creds->cloud use"}
+{"query": "turn an unrestricted file upload into remote code execution via a web shell", "expected_substrings": ["upload", "shell"], "difficulty": "hard", "notes": "multi-hop file upload -> RCE"}
