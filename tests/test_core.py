@@ -236,6 +236,16 @@ class AddPathTest(unittest.TestCase):
             index.add_path("/nonexistent/path/does-not-exist.md")
 
 
+class FetchUrlSSRFTest(unittest.TestCase):
+    def test_rejects_cloud_metadata_ip(self):
+        with self.assertRaises(ValueError):
+            index._fetch_url("http://169.254.169.254/")
+
+    def test_rejects_loopback_ip(self):
+        with self.assertRaises(ValueError):
+            index._fetch_url("http://127.0.0.1/")
+
+
 def config_dim():
     from blkchain import config
     return config.EMBED_DIM

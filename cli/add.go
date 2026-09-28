@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -87,8 +88,10 @@ func runAdd(args []string) error {
 
 	c := exec.Command(python, pyArgs...)
 	c.Dir = root
-	c.Env = append(os.Environ(), "PYTHONPATH="+root)
-	c.Stderr = os.Stderr // stream progress/errors straight through
+	c.Env = stripEnv(os.Environ(), "PYTHONPATH")
+	c.Env = append(c.Env, "PYTHONPATH="+root)
+	var stderrBuf bytes.Buffer
+	c.Stderr = io.MultiWriter(os.Stderr, &stderrBuf) // stream to the operator, keep a copy to inspect
 	stdout, err := c.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("add: %w", err)
@@ -100,7 +103,7 @@ func runAdd(args []string) error {
 	runErr := c.Wait()
 
 	if runErr != nil {
-		if isConnectionRefused(line) || isConnectionRefused(fmt.Sprint(runErr)) {
+		if isConnectionRefused(line) || isConnectionRefused(fmt.Sprint(runErr)) || isConnectionRefused(stderrBuf.String()) {
 			return fmt.Errorf("add: the blkChain services aren't reachable — start them with `blk up`")
 		}
 		return fmt.Errorf("add: %w", runErr)
@@ -131,6 +134,20 @@ func lastNonEmptyLine(r io.Reader) (string, error) {
 		}
 	}
 	return last, sc.Err()
+}
+
+// stripEnv returns a copy of env with any existing "key=..." entry removed,
+// so callers can append a fresh value without duplicating it.
+func stripEnv(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // isConnectionRefused reports whether s looks like the stack (qdrant / embed

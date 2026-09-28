@@ -219,22 +219,18 @@ func TestSearchAcceptsTrailingFlags(t *testing.T) {
 	}
 }
 
-func TestFindStackScriptViaBlkchainRoot(t *testing.T) {
+func TestProjectRootViaBlkchainRoot(t *testing.T) {
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "scripts"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	script := filepath.Join(root, "scripts", "stack.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "pyproject.toml"), []byte("[project]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("BLKCHAIN_ROOT", root)
 
-	got, err := findStackScript()
+	got, err := projectRoot()
 	if err != nil {
-		t.Fatalf("findStackScript() error = %v", err)
+		t.Fatalf("projectRoot() error = %v", err)
 	}
-	if got != script {
-		t.Errorf("findStackScript() = %q, want %q", got, script)
+	if got != root {
+		t.Errorf("projectRoot() = %q, want %q", got, root)
 	}
 }

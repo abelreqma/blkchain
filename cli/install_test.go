@@ -27,14 +27,11 @@ func TestValidRoot(t *testing.T) {
 	if validRoot(root) {
 		t.Fatal("empty dir should not be a valid root")
 	}
-	if err := os.MkdirAll(filepath.Join(root, "scripts"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "scripts", "stack.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "pyproject.toml"), []byte("[project]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if !validRoot(root) {
-		t.Error("dir with scripts/stack.sh should be a valid root")
+		t.Error("dir with pyproject.toml should be a valid root")
 	}
 }
 

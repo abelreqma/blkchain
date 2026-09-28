@@ -9,11 +9,13 @@ optional dependency bundled by qdrant-client[fastembed].
 from __future__ import annotations
 
 import html
+import ipaddress
 import re
+import socket
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from fastembed import SparseTextEmbedding
@@ -209,6 +211,7 @@ _ADD_SKIP_DIR_EXTS = {
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 _MAX_URL_BYTES = 5 * 1024 * 1024  # bound a fetched body to 5 MiB (DoS guard)
 _URL_FETCH_TIMEOUT = 30
+_MAX_URL_REDIRECTS = 5  # follow this many redirects, re-checking the host each hop
 
 _HTML_SKIP_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -290,19 +293,64 @@ def _chunk_text(text: str, source: str, path_str: str, markdown: bool):
             idx += 1
 
 
+def _reject_unsafe_host(url: str) -> None:
+    """Raise ValueError if url's host resolves to a private, loopback,
+    link-local, or otherwise reserved IP address (SSRF guard). This blocks
+    fetches of internal services and cloud metadata endpoints such as
+    169.254.169.254."""
+    host = urlparse(url).hostname
+    if not host:
+        raise ValueError(f"add: could not parse a host from url: {url}")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as exc:
+        raise ValueError(f"add: could not resolve host {host!r}: {exc}") from exc
+    for info in infos:
+        addr = info[4][0]
+        ip = ipaddress.ip_address(addr)
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise ValueError(
+                f"add: refusing to fetch {url!r} — host {host!r} resolves to "
+                f"a non-public address ({addr})"
+            )
+
+
 def _fetch_url(url: str) -> tuple[str, str]:
     """GET url with a timeout and a bound on body size. Returns (text,
-    content_type). Reads at most _MAX_URL_BYTES of the body."""
-    resp = requests.get(url, timeout=_URL_FETCH_TIMEOUT, stream=True)
-    resp.raise_for_status()
-    content_type = resp.headers.get("content-type", "")
-    body = bytearray()
-    for piece in resp.iter_content(chunk_size=65536):
-        body.extend(piece)
-        if len(body) >= _MAX_URL_BYTES:
-            break
-    resp.close()
-    return bytes(body[:_MAX_URL_BYTES]).decode("utf-8", errors="ignore"), content_type
+    content_type). Reads at most _MAX_URL_BYTES of the body.
+
+    Redirects are followed manually (up to _MAX_URL_REDIRECTS) so that EACH
+    hop's host is re-checked with _reject_unsafe_host — a legitimate redirect
+    (http->https, CDN) works, but a redirect to a private/internal address
+    (SSRF) is rejected at that hop rather than followed.
+    """
+    for _ in range(_MAX_URL_REDIRECTS + 1):
+        _reject_unsafe_host(url)
+        resp = requests.get(url, timeout=_URL_FETCH_TIMEOUT, stream=True, allow_redirects=False)
+        if resp.is_redirect or resp.is_permanent_redirect:
+            location = resp.headers.get("location", "")
+            resp.close()
+            if not location:
+                raise ValueError(f"add: {url!r} returned a redirect with no Location")
+            url = urljoin(url, location)  # resolve relative redirects; re-validated next loop
+            continue
+        resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "")
+        body = bytearray()
+        for piece in resp.iter_content(chunk_size=65536):
+            body.extend(piece)
+            if len(body) >= _MAX_URL_BYTES:
+                break
+        resp.close()
+        return bytes(body[:_MAX_URL_BYTES]).decode("utf-8", errors="ignore"), content_type
+    raise ValueError(f"add: too many redirects fetching {url!r} (>{_MAX_URL_REDIRECTS})")
 
 
 def _chunk_url(url: str, source: str, kind: str | None):

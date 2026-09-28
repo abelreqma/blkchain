@@ -407,7 +407,7 @@ func runMCP(args []string) error {
 
 	c := exec.Command(python, "-m", "blkchain.mcp_server")
 	c.Dir = root
-	c.Env = append(os.Environ(), "PYTHONPATH="+root)
+	c.Env = buildChildEnv(root, tavilyToken())
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := c.Run(); err != nil {
 		return fmt.Errorf("mcp: %w", err)

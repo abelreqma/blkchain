@@ -8,7 +8,9 @@ import (
 )
 
 // rootMarker is the file whose presence identifies a blkChain project root.
-const rootMarker = "scripts/stack.sh"
+// It is a stable, always-present root file so the marker survives even after
+// scripts/ is removed (the stack is now orchestrated natively in stack.go).
+const rootMarker = "pyproject.toml"
 
 // validRoot reports whether dir looks like the blkChain project root.
 func validRoot(dir string) bool {
@@ -33,7 +35,7 @@ func candidateRoots(includeSaved bool) []string {
 		}
 	}
 	// Resolve the real binary (os.Executable returns the symlink itself) and
-	// look at its dir and parent: <root>/cli/blk, or a binary beside scripts/.
+	// look at its dir and parent: <root>/cli/blk, or a binary beside the root.
 	if exe, err := os.Executable(); err == nil {
 		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 			exe = resolved
@@ -79,14 +81,6 @@ func discoverRoot() (string, error) {
 		}
 	}
 	return "", errNoRoot
-}
-
-func findStackScript() (string, error) {
-	root, err := projectRoot()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(root, rootMarker), nil
 }
 
 // configPath returns ~/.config/blkchain/root (honoring XDG_CONFIG_HOME).

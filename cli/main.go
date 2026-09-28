@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -336,6 +337,17 @@ func runAsk(args []string) error {
 		return runHermes([]string{query})
 	}
 
+	// RAG streaming to stdout when OMLX_API_KEY is set (V2-BRIEF.md T2). Only the
+	// plain text path streams: --json needs the full struct and --sources needs
+	// the retrieved chunks, neither of which the token stream carries. If the
+	// stream produced no output it falls through to the non-streaming path below,
+	// so ask always works.
+	if !*jsonOut && !*showSources && streamingEnabled() {
+		if done, _ := streamAsk(query); done {
+			return nil
+		}
+	}
+
 	c := client.NewClient()
 	resp, err := c.Answer(query)
 	if err != nil {
@@ -355,12 +367,19 @@ func runAsk(args []string) error {
 		fmt.Println()
 		printResults(query, resp.Results, 0)
 	}
+	printSources(resp.Citations, resp.UsedWeb)
+	return nil
+}
+
+// printSources renders the SOURCES block to stdout, shared by the streaming and
+// non-streaming ask paths.
+func printSources(citations []client.Citation, usedWeb bool) {
 	fmt.Println()
 	fmt.Println(H2.Render("SOURCES"))
-	if len(resp.Citations) == 0 {
+	if len(citations) == 0 {
 		fmt.Println("  " + Meta.Render("(none)"))
 	}
-	for i, cit := range resp.Citations {
+	for i, cit := range citations {
 		line := "  " + Key.Render(fmt.Sprintf("[%d]", i+1)) + "  " + Body.Render(cit.Source)
 		meta := cit.Path
 		if cit.Section != "" {
@@ -374,11 +393,35 @@ func runAsk(args []string) error {
 		}
 		fmt.Println(line)
 	}
-	if resp.UsedWeb {
+	if usedWeb {
 		fmt.Println()
 		fmt.Println(Meta.Render("(this answer used a web search)"))
 	}
-	return nil
+}
+
+// streamAsk streams a RAG answer straight to stdout token by token, then prints
+// the SOURCES block. It returns done=true when the stream produced output (the
+// caller is finished); done=false means it failed before any token, so the
+// caller should fall back to the non-streaming /answer path. Tokens are written
+// raw (no ANSI), so piping stays clean.
+func streamAsk(query string) (bool, error) {
+	c := client.NewClient()
+	streamed := false
+	full, cits, err := StreamRAG(context.Background(), c, query, func(b []byte) {
+		streamed = true
+		os.Stdout.Write(b)
+	})
+	if err != nil && !streamed {
+		return false, err // fall back to /answer
+	}
+	if !strings.HasSuffix(full, "\n") {
+		fmt.Println()
+	}
+	printSources(cits, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s stream ended early: %v\n", red("✗"), err)
+	}
+	return true, nil
 }
 
 func runHealth(args []string) error {

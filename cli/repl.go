@@ -31,14 +31,15 @@ func isInteractive() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
-// plainREPL is the non-TTY fallback: a simple line loop. Bare input is treated
-// as a search; prefixes switch modes. It keeps the last search results so
-// `open N` can open the N-th hit.
+// plainREPL is the non-TTY fallback: a simple line loop that mirrors the TUI's
+// command model so behavior is consistent across both. Bare input is an ask
+// (the headline verb for a Q&A KB); a leading "/" (or the bare verb) switches
+// modes. It keeps the last search results so `open N` can open the N-th hit.
 func plainREPL() error {
 	c := client.NewClient()
 	var last []client.SearchResult
 
-	fmt.Printf("%s  %s\n", bold("blkChain"), dim("interactive — type `help`, or a query to search; Ctrl-D to quit"))
+	fmt.Printf("%s  %s\n", bold("blkChain"), dim("type a question to ask · /search <q> · /help · Ctrl-D to quit"))
 
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 64*1024), 1<<20)
@@ -53,8 +54,8 @@ func plainREPL() error {
 			continue
 		}
 		cmd, rest := splitFirst(line)
-
-		switch cmd {
+		// Accept both "/cmd" and bare "cmd" forms, matching the TUI.
+		switch strings.ToLower(strings.TrimPrefix(cmd, "/")) {
 		case "quit", "exit", "q":
 			return nil
 		case "help", "?":
@@ -62,18 +63,28 @@ func plainREPL() error {
 		case "health":
 			printErr(runHealth(nil))
 		case "up", "down", "status":
-			printErr(runStack(cmd))
+			printErr(runStack(strings.TrimPrefix(cmd, "/")))
+		case "doctor":
+			printErr(runDoctor(nil))
+		case "logs":
+			var largs []string
+			if strings.TrimSpace(rest) != "" {
+				largs = strings.Fields(rest)
+			}
+			printErr(runLogs(largs))
+		case "copy":
+			fmt.Println(dim("/copy is only available in the interactive TUI"))
+		case "search", "s":
+			last = replSearch(c, rest, last)
 		case "ask", "a":
 			printErr(runAsk([]string{rest}))
 		case "agent", "hermes":
 			printErr(runHermes([]string{rest}))
 		case "open", "o":
 			printErr(replOpen(rest, last))
-		case "search", "s":
-			last = replSearch(c, rest, last)
 		default:
-			// Bare input with no recognized verb is a search.
-			last = replSearch(c, line, last)
+			// Bare input with no recognized verb is an ask (matches the TUI).
+			printErr(runAsk([]string{line}))
 		}
 	}
 }
@@ -115,15 +126,19 @@ func replOpen(arg string, last []client.SearchResult) error {
 
 func replHelp() {
 	fmt.Printf(`%s
-  <query>            search (default)
-  ask   <question>   synthesized, cited answer   (alias: a)
-  agent <prompt>     answer via the Hermes agent (alias: hermes)
-  open  <N|path>     open result N from the last search, or a path (alias: o)
-  health             API + dependency status
-  up | down | status manage the local services
-  help               this help                   (alias: ?)
-  quit               leave                        (alias: exit, q, Ctrl-D)
-`, bold("REPL commands:"))
+  <question>          ask the knowledge base (the default)
+  /search <q>        find ranked source chunks   (alias: s)
+  /ask <q>           ask explicitly              (alias: a)
+  /agent <prompt>    answer via the Hermes agent (alias: hermes)
+  /open <N|path>     open result N from the last search, or a path (alias: o)
+  /health            API + dependency status
+  /up | /down | /status  manage the local services
+  /doctor            diagnose the whole stack
+  /logs [name]       tail a service log (api, embed_server)
+  /copy              (TUI only; not available here)
+  /help              this help                   (alias: ?)
+  /quit              leave                        (alias: exit, q, Ctrl-D)
+`, bold("Commands:"))
 }
 
 // splitFirst splits s into its first whitespace-delimited word and the rest.

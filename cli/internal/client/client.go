@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +18,21 @@ const defaultBaseURL = "http://127.0.0.1:8200"
 
 // maxResponseBytes bounds how much of a response body we will read.
 const maxResponseBytes = 10 << 20 // 10 MiB
+
+// defaultTimeout is generous because `ask` waits on local LLM synthesis, which
+// is slow on a memory-constrained machine. Override with BLKCHAIN_TIMEOUT_SECONDS.
+const defaultTimeout = 300 * time.Second
+
+// requestTimeout resolves the per-request timeout from BLKCHAIN_TIMEOUT_SECONDS
+// (a positive integer number of seconds), falling back to defaultTimeout.
+func requestTimeout() time.Duration {
+	if v := os.Getenv("BLKCHAIN_TIMEOUT_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return defaultTimeout
+}
 
 // Client is a thin HTTP client over the blkChain API.
 type Client struct {
@@ -32,7 +49,7 @@ func NewClient() *Client {
 	}
 	return &Client{
 		BaseURL:    base,
-		HTTPClient: &http.Client{Timeout: 30 * time.Second},
+		HTTPClient: &http.Client{Timeout: requestTimeout()},
 	}
 }
 

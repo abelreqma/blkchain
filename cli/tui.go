@@ -36,8 +36,17 @@ import (
 // plain line loop.
 
 // runTUI starts the Bubble Tea program in inline mode with no mouse capture.
+//
+// The model holds a *tea.Program so the RAG streaming callback can push tokens
+// back into the event loop with prog.Send(chunkMsg). Because tea.NewProgram
+// takes the model by value, "p := tea.NewProgram(m); m.prog = p" would set the
+// field on a copy the program never sees. Instead we build the model, hand the
+// program its ADDRESS, then set prog on that same value before Run — the value
+// (with prog set) is copied into every subsequent model returned from Update.
 func runTUI() error {
-	p := tea.NewProgram(initialModel())
+	m := initialModel()
+	p := tea.NewProgram(&m)
+	m.prog = p
 	_, err := p.Run()
 	return err
 }
@@ -91,10 +100,23 @@ type errMsg struct{ err error }
 type canceledMsg struct{}
 type execDoneMsg struct{ err error }
 
+// chunkMsg is one streamed token slice from the RAG synthesizer, pushed into
+// the event loop by the StreamRAG callback via prog.Send.
+type chunkMsg string
+
+// streamDoneMsg is the terminal message of a RAG stream: the full answer, the
+// citations derived from the retrieved chunks, and any error.
+type streamDoneMsg struct {
+	full      string
+	citations []client.Citation
+	err       error
+}
+
 // --- model ---
 
 type model struct {
 	client *client.Client
+	prog   *tea.Program // set in runTUI so the stream callback can Send messages
 
 	ta   textarea.Model
 	sp   spinner.Model
@@ -107,6 +129,7 @@ type model struct {
 	workingVerb string
 	turnStart   time.Time
 	cancel      context.CancelFunc
+	live        string // in-progress streamed answer, committed to scrollback on done
 
 	history   []string
 	histIdx   int
@@ -133,7 +156,7 @@ func initialModel() model {
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Spinner{Frames: SpinnerFrames(), FPS: time.Second / 10}
-	sp.Style = lipgloss.NewStyle().Foreground(Accent)
+	sp.Style = lipgloss.NewStyle().Foreground(Muted)
 
 	hist := loadHistory()
 
@@ -216,29 +239,86 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case answerMsg:
 		m.working = false
-		m.cancel = nil
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
 		m.lastAnswer = msg.resp.Answer
 		m.openTargets = citationPaths(msg.resp.Citations)
 		m.apiOK, m.apiChecked = true, true
 		return m, tea.Println(formatAnswer(msg.resp, msg.elapsed, m.renderWidth()))
 
+	case chunkMsg:
+		if !m.working {
+			return m, nil // stray token after cancel/done
+		}
+		m.live += string(msg)
+		m.workingVerb = "answering" + ellipsis()
+		return m, nil
+
+	case streamDoneMsg:
+		m.working = false
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
+		live := strings.TrimRight(m.live, "\n")
+		m.live = ""
+		m.workingVerb = ""
+		elapsed := time.Since(m.turnStart)
+		full := msg.full
+		if strings.TrimSpace(full) == "" {
+			full = live
+		}
+		if msg.err != nil {
+			if errors.Is(msg.err, context.Canceled) {
+				return m, tea.Println("   " + Meta.Render("canceled"))
+			}
+			// Errored after streaming partial output (an immediate failure is
+			// handled inside streamCmd by falling back to /answer). Commit what
+			// streamed, then note the early end.
+			m.apiChecked = true
+			var b strings.Builder
+			if strings.TrimSpace(full) != "" {
+				resp := &client.AnswerResponse{Answer: full, Citations: msg.citations}
+				b.WriteString(formatAnswer(resp, elapsed, m.renderWidth()))
+				b.WriteByte('\n')
+			}
+			b.WriteString(styleErr(fmt.Errorf("stream ended early: %w", msg.err)))
+			return m, tea.Println(b.String())
+		}
+		m.lastAnswer = full
+		m.openTargets = citationPaths(msg.citations)
+		m.apiOK, m.apiChecked = true, true
+		resp := &client.AnswerResponse{Answer: full, Citations: msg.citations}
+		return m, tea.Println(formatAnswer(resp, elapsed, m.renderWidth()))
+
 	case searchMsg:
 		m.working = false
-		m.cancel = nil
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
 		m.openTargets = resultPaths(msg.results)
 		m.apiOK, m.apiChecked = true, true
 		return m, tea.Println(strings.TrimRight(formatResults(msg.query, msg.results, msg.elapsed), "\n"))
 
 	case healthReportMsg:
 		m.working = false
-		m.cancel = nil
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
 		m.apiChecked = true
 		m.apiOK = msg.err == nil && msg.h != nil && msg.h.Status == "ok"
 		return m, tea.Println(formatHealth(msg.h, msg.err, m.client.BaseURL))
 
 	case errMsg:
 		m.working = false
-		m.cancel = nil
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
 		if isUnreachable(msg.err) {
 			m.apiOK, m.apiChecked = false, true
 		}
@@ -246,7 +326,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case canceledMsg:
 		m.working = false
-		m.cancel = nil
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
 		return m, tea.Println("   " + Meta.Render("canceled"))
 
 	case execDoneMsg:
@@ -306,15 +389,26 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 			largs = strings.Fields(arg)
 		}
 		return m, tea.Sequence(tea.Println(echo), execFuncCmd(func() error { return runLogs(largs) }))
+	case "up", "down", "status":
+		return m, tea.Sequence(tea.Println(echo), execFuncCmd(func() error { return runStack(verb) }))
 	case "search", "ask", "health":
 		if (verb == "search" || verb == "ask") && strings.TrimSpace(arg) == "" {
 			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("%s: give me something to %s", verb, verb))))
 		}
 		m.working = true
 		m.workingVerb = workingVerbLabel(verb)
+		m.live = ""
 		m.turnStart = time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// Match the client's own timeout so the context doesn't fire before the
+		// HTTP call does (ask can be slow; see client.requestTimeout).
+		ctx, cancel := context.WithTimeout(context.Background(), m.client.HTTPClient.Timeout)
 		m.cancel = cancel
+		// RAG mode: stream the synthesis directly from oMLX when OMLX_API_KEY is
+		// set; otherwise fall back to the non-streaming /answer path so ask
+		// always works (V2-BRIEF.md fallback).
+		if verb == "ask" && streamingEnabled() {
+			return m, tea.Batch(tea.Println(echo), m.sp.Tick, m.streamCmd(ctx, arg, m.turnStart))
+		}
 		return m, tea.Batch(tea.Println(echo), m.sp.Tick, dispatchCmd(ctx, m.client, verb, arg, m.turnStart))
 	}
 	// Unknown /verb.
@@ -356,6 +450,10 @@ func (m model) View() string {
 	b.WriteByte('\n')
 	if m.working {
 		b.WriteString(m.spinnerLine())
+		if lr := m.liveRegion(); lr != "" {
+			b.WriteByte('\n')
+			b.WriteString(lr)
+		}
 	} else {
 		b.WriteString(m.ta.View())
 	}
@@ -364,12 +462,32 @@ func (m model) View() string {
 	return b.String()
 }
 
+// liveRegion renders the in-progress streamed answer under a Muted left "│"
+// bar. It shows raw tokens (glamour-rendered only once the turn completes, in
+// the streamDoneMsg handler). Empty when nothing has streamed yet.
+func (m model) liveRegion() string {
+	if strings.TrimSpace(m.live) == "" {
+		return ""
+	}
+	bar := Meta.Render(Glyph(GlyphBar))
+	wrapped := lipgloss.NewStyle().Width(m.renderWidth()).Render(strings.TrimRight(m.live, "\n"))
+	lines := strings.Split(wrapped, "\n")
+	var b strings.Builder
+	for i, ln := range lines {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(" " + bar + " " + Body.Render(ln))
+	}
+	return b.String()
+}
+
 // --- async dispatch ---
 
 // dispatchCmd runs the network call for search/ask/health in a goroutine and
 // selects it against ctx, so a Ctrl+C (which calls cancel) surfaces a
 // canceledMsg immediately even though the underlying HTTP call keeps running
-// until the client's own 30s timeout. A deadline exceeded is reported as a
+// until the client's own timeout. A deadline exceeded is reported as a
 // one-line timeout error.
 func dispatchCmd(ctx context.Context, c *client.Client, verb, arg string, start time.Time) tea.Cmd {
 	return func() tea.Msg {
@@ -398,12 +516,42 @@ func dispatchCmd(ctx context.Context, c *client.Client, verb, arg string, start 
 		select {
 		case <-ctx.Done():
 			if ctx.Err() == context.DeadlineExceeded {
-				return errMsg{errors.New("request timed out after 30s")}
+				return errMsg{errors.New("request timed out (raise BLKCHAIN_TIMEOUT_SECONDS)")}
 			}
 			return canceledMsg{}
 		case msg := <-ch:
 			return msg
 		}
+	}
+}
+
+// streamCmd runs StreamRAG in a goroutine (tea.Cmd), pushing each token back
+// as a chunkMsg via the stored *tea.Program. If the stream fails before any
+// token arrives, it falls back to the non-streaming /answer path so ask always
+// works (V2-BRIEF.md); a cancel returns a canceledMsg.
+func (m model) streamCmd(ctx context.Context, question string, start time.Time) tea.Cmd {
+	prog := m.prog
+	c := m.client
+	return func() tea.Msg {
+		streamed := false
+		full, cits, err := StreamRAG(ctx, c, question, func(b []byte) {
+			streamed = true
+			if prog != nil {
+				prog.Send(chunkMsg(string(b)))
+			}
+		})
+		if err != nil && !streamed {
+			if errors.Is(err, context.Canceled) {
+				return canceledMsg{}
+			}
+			// Immediate stream failure (no tokens): fall back to /answer.
+			resp, aerr := c.Answer(question)
+			if aerr != nil {
+				return errMsg{aerr}
+			}
+			return answerMsg{resp: resp, elapsed: time.Since(start)}
+		}
+		return streamDoneMsg{full: full, citations: cits, err: err}
 	}
 }
 
@@ -624,6 +772,7 @@ func helpBlock() string {
 		{"/health", "API + dependency status"},
 		{"/doctor", "diagnose the whole stack"},
 		{"/logs [name]", "tail a service log (api, embed_server)"},
+		{"/up | /down | /status", "manage the local services"},
 		{"/copy", "copy the last answer to the clipboard"},
 		{"/help", "this help"},
 		{"/quit", "leave (also ctrl+d)"},

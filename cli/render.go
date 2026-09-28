@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -27,12 +26,10 @@ func glowRender(md string, width int) string {
 		w = 100
 	}
 
-	opt := glamour.WithAutoStyle()
-	if !useColor {
-		opt = glamour.WithStandardStyle(styles.NoTTYStyle)
-	}
-
-	r, err := glamour.NewTermRenderer(opt, glamour.WithWordWrap(w))
+	// mdStyle is resolved once at startup (theme.go); using a fixed style here
+	// instead of glamour.WithAutoStyle avoids a per-render OSC 11 background
+	// query, whose "rgb:..." reply would otherwise leak into the TUI input.
+	r, err := glamour.NewTermRenderer(glamour.WithStandardStyle(mdStyle), glamour.WithWordWrap(w))
 	if err != nil {
 		return md
 	}

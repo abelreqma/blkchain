@@ -23,14 +23,20 @@ func runDoctor(args []string) error {
 	fmt.Println(H1.Render("blk doctor"))
 	fmt.Println()
 
-	// 1. Project root + stack script.
+	// 1. Project root + what the native stack needs (venv python, docker).
 	root, rootErr := projectRoot()
 	if rootErr == nil {
 		fmt.Printf("%s project root %s\n", check(true), Meta.Render(root))
-		if _, err := os.Stat(filepath.Join(root, rootMarker)); err == nil {
-			fmt.Printf("%s stack script %s\n", check(true), Meta.Render(rootMarker))
+		py := filepath.Join(root, ".venv", "bin", "python")
+		if _, err := os.Stat(py); err == nil {
+			fmt.Printf("%s python venv %s\n", check(true), Meta.Render(".venv/bin/python"))
 		} else {
-			fmt.Printf("%s stack script missing (%s)\n", check(false), rootMarker)
+			fmt.Printf("%s python venv missing (%s)\n", check(false), Meta.Render(".venv/bin/python"))
+		}
+		if _, err := exec.LookPath("docker"); err == nil {
+			fmt.Printf("%s docker on PATH\n", check(true))
+		} else {
+			fmt.Printf("%s docker not on PATH %s\n", check(false), Meta.Render("(needed for qdrant)"))
 		}
 	} else {
 		fmt.Printf("%s project root not found — run `blk install` from the project\n", check(false))

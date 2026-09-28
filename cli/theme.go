@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 	"golang.org/x/term"
@@ -24,24 +25,30 @@ func c(lHex, l256, l16, dHex, d256, d16 string) lipgloss.CompleteAdaptiveColor {
 	}
 }
 
-// Palette tokens (DESIGN-SPEC.md §1). Never set the terminal background;
-// green is reserved for Success so it never collides with the teal brand
-// accent.
+// Palette tokens (V2-BRIEF.md "Black/gray design"). Never set the terminal
+// background. Accent is brightness (off-white), reserved for marks only
+// (prompt glyph, blk label, [n] citation index, selected marker, ● dot) —
+// H2 and Key use Heading instead so color stays under 10% of glyphs.
 var (
-	Accent  = c("#0D9488", "30", "6", "#2DD4BF", "43", "14")
-	Heading = c("#0F172A", "233", "0", "#F1F5F9", "255", "15")
-	FgBody  = c("#1E293B", "236", "0", "#E2E8F0", "253", "7")
-	Muted   = c("#64748B", "243", "8", "#94A3B8", "246", "7")
-	Success = c("#15803D", "28", "2", "#22C55E", "41", "10")
-	Warn    = c("#B45309", "130", "3", "#FBBF24", "214", "11")
-	Err     = c("#DC2626", "160", "1", "#F87171", "203", "9")
-	Rule    = c("#CBD5E1", "251", "7", "#334155", "239", "8")
+	Accent  = c("#18181B", "234", "0", "#FAFAFA", "231", "15")
+	Heading = c("#18181B", "234", "0", "#E4E4E7", "255", "15")
+	FgBody  = c("#27272A", "235", "0", "#D4D4D8", "253", "7")
+	Muted   = c("#71717A", "243", "8", "#A1A1AA", "246", "8")
+	Rule    = c("#D4D4D8", "252", "7", "#3F3F46", "238", "8")
+	Surface = c("#F4F4F5", "255", "15", "#27272A", "235", "0") // overlay fill only
+	Success = c("#4F7355", "65", "2", "#6E9B77", "108", "2")   // muted sage
+	Warn    = c("#8A6D3B", "94", "3", "#C9A26B", "179", "3")   // muted tan
+	Err     = c("#9B4A4A", "131", "1", "#C77B7B", "167", "1")  // muted rose
 )
 
-// Styles (DESIGN-SPEC.md §2).
+// slateAccent is the BLK_ACCENT=slate opt-in: a low-chroma blue instead of
+// the off-white default, applied once at init below.
+var slateAccent = c("#3E5C82", "60", "4", "#8AA2C8", "110", "12")
+
+// Styles (DESIGN-SPEC.md §2, restyled per V2-BRIEF.md black/gray palette).
 var (
 	H1     = lipgloss.NewStyle().Foreground(Heading).Bold(true)
-	H2     = lipgloss.NewStyle().Foreground(Accent).Bold(true)
+	H2     = lipgloss.NewStyle().Foreground(Heading).Bold(true)
 	Body   = lipgloss.NewStyle().Foreground(FgBody)
 	Meta   = lipgloss.NewStyle().Foreground(Muted).Faint(true)
 	Code   = lipgloss.NewStyle().Foreground(FgBody).Faint(true)
@@ -190,6 +197,11 @@ func isTerminalStdout() bool {
 var (
 	useColor   bool
 	useUnicode bool
+	// mdStyle is glamour's markdown style name, resolved ONCE at startup (see
+	// init). Rendering with a fixed style avoids glamour.WithAutoStyle's
+	// per-Render OSC 11 background query, which inside the TUI leaks the
+	// terminal's "rgb:..." reply into the input line.
+	mdStyle string
 )
 
 func init() {
@@ -204,6 +216,15 @@ func init() {
 	useColor = caps.color
 	useUnicode = caps.unicode
 
+	// BLK_ACCENT=slate opts into a low-chroma blue accent instead of the
+	// off-white default (V2-BRIEF.md "Black/gray design"). Prompt is
+	// recomputed here because it's a package-level var initialized before
+	// init() runs, so it would otherwise bake in the pre-switch Accent value.
+	if os.Getenv("BLK_ACCENT") == "slate" {
+		Accent = slateAccent
+	}
+	Prompt = lipgloss.NewStyle().Foreground(Accent).Bold(true)
+
 	// lipgloss v1.1's default renderer already auto-detects NO_COLOR (via
 	// termenv's EnvColorProfile), but it does NOT honor our CLICOLOR_FORCE
 	// override, and relying on implicit detection would leave the "explicit"
@@ -214,6 +235,21 @@ func init() {
 	// correctly for the terminal.
 	if !useColor {
 		lipgloss.SetColorProfile(termenv.Ascii)
+	}
+
+	// Resolve the markdown style once, here, before any Bubble Tea program
+	// takes over the tty. Detecting the background now (rather than per Render
+	// via glamour.WithAutoStyle) keeps the terminal's OSC 11 "rgb:..." reply
+	// out of the TUI input.
+	switch {
+	case !useColor:
+		mdStyle = styles.NoTTYStyle
+	case isTerminalStdout() && lipgloss.HasDarkBackground():
+		mdStyle = styles.DarkStyle
+	case isTerminalStdout():
+		mdStyle = styles.LightStyle
+	default:
+		mdStyle = styles.DarkStyle
 	}
 }
 
