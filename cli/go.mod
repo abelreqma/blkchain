@@ -1,0 +1,3 @@
+module blkchain/cli
+
+go 1.27.1

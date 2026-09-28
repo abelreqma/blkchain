@@ -1,0 +1,39 @@
+[project]
+name = "blkchain"
+version = "0.1.0"
+description = "Local offensive-security hybrid agentic RAG (Apple Silicon / oMLX)."
+requires-python = "==3.12.*"
+dependencies = [
+  # chunking (the only LangChain package used; pulls langchain-core only)
+  "langchain-text-splitters==1.1.2",
+  # vector store + sparse (BM25 via FastEmbed)
+  "qdrant-client==1.19.1",
+  "fastembed==0.8.1",
+  # local MLX embedder + reranker serving
+  "mlx-embeddings==0.1.0",
+  "mlx-lm==0.31.3",
+  # LLM client, tokenization, PDF, web search
+  "openai==3.19.2",
+  "tiktoken==0.14.0",
+  "pypdf==6.19.0",
+  "tavily-python==0.8.4",
+  "requests==2.34.2",
+  "httpx==0.28.1",
+  "numpy==2.5.3",
+  "transformers==5.17.0",  # tokenizer-only (jina reranker); no torch
+  # Hermes MCP server
+  "mcp==2.2.0",
+  "deepeval==4.2.6",
+]
+
+# Notes:
+# - Secrets are read from the environment only; never listed or stored here.
+# - LangChain: only langchain-text-splitters is used (ingest.py). langchain,
+#   langgraph, langchain-community, and langchain-graph-retriever were removed
+#   graph) is built, which is its natural home.
+# - ragas is intentionally excluded (its latest release is incompatible with
+#   langchain 1.x; DeepEval covers evaluation).
+# - The uv-managed .venv is the full transitive lock; these are the direct deps.
+
+[tool.uv]
+package = false

@@ -1,0 +1,25 @@
+{"query": "SSRF to cloud metadata to steal IAM credentials", "expected_substrings": ["169.254.169.254", "security-credentials", "metadata"], "expected_sources": ["skills", "hacktricks", "hacktricks-cloud"], "notes": "AWS IMDS endpoint is the canonical SSRF->cloud creds pivot; non-circular fact."}
+{"query": "server-side request forgery exploitation techniques", "expected_substrings": ["ssrf", "server-side request forgery"], "notes": "General SSRF concept; either the acronym or the full name should surface."}
+{"query": "how does reflected cross-site scripting work", "expected_substrings": ["reflected"], "expected_cwe": "xss", "notes": "Reflected XSS is echoed in the immediate response; cwe_class tag exists in corpus."}
+{"query": "stored persistent XSS payload delivery", "expected_substrings": ["stored", "persistent"], "notes": "Stored/persistent XSS is saved server-side and served to later victims."}
+{"query": "DOM-based XSS sink and source analysis", "expected_substrings": ["dom"], "notes": "DOM XSS executes purely client-side via a JS sink; expect the DOM term."}
+{"query": "union-based SQL injection to extract columns", "expected_substrings": ["union"], "expected_cwe": "sqli", "notes": "UNION SELECT appends attacker rows to the result set."}
+{"query": "blind SQL injection boolean and time based", "expected_substrings": ["blind"], "notes": "Blind SQLi infers data from behaviour, no direct output."}
+{"query": "stacked queries SQL injection multiple statements", "expected_substrings": ["stacked"], "notes": "Stacked queries run a second statement after a semicolon."}
+{"query": "local file inclusion read /etc/passwd", "expected_substrings": ["/etc/passwd", "local file inclusion"], "notes": "/etc/passwd is the classic LFI proof target on Linux."}
+{"query": "remote file inclusion include attacker hosted php", "expected_substrings": ["remote file inclusion", "allow_url_include"], "notes": "RFI pulls a remote payload, gated by allow_url_include in PHP."}
+{"query": "XXE XML external entity file disclosure", "expected_substrings": ["external entity"], "expected_cwe": "xxe", "notes": "XXE abuses a DOCTYPE ENTITY to read files or reach internal hosts."}
+{"query": "server-side template injection jinja2 exploitation", "expected_substrings": ["template injection"], "expected_cwe": "ssti", "notes": "SSTI evaluates attacker template syntax in the engine context."}
+{"query": "IDOR broken object level authorization", "expected_substrings": ["direct object", "idor"], "expected_cwe": "idor", "notes": "IDOR/BOLA exposes objects by predictable identifier without authz."}
+{"query": "JWT alg none signature bypass", "expected_substrings": ["alg", "none"], "expected_cwe": "jwt", "notes": "alg:none tells a naive verifier to accept an unsigned token."}
+{"query": "JWT RS256 to HS256 key confusion attack", "expected_substrings": ["hs256", "key confusion"], "notes": "Key confusion signs with the public key as an HMAC secret."}
+{"query": "insecure deserialization gadget chain to RCE", "expected_substrings": ["gadget", "deserializ"], "notes": "Untrusted deserialization triggers gadget chains (e.g. ysoserial)."}
+{"query": "OS command injection through unsanitized input", "expected_substrings": ["command injection"], "notes": "Shell metacharacters break out into the underlying command."}
+{"query": "directory path traversal dot dot slash", "expected_substrings": ["traversal", "../"], "notes": "../ sequences escape the intended directory."}
+{"query": "prompt injection against an LLM application", "expected_substrings": ["prompt injection"], "notes": "Prompt injection overrides system instructions via untrusted input."}
+{"query": "CSRF cross-site request forgery token defense", "expected_substrings": ["csrf"], "notes": "CSRF forces an authenticated request; anti-CSRF tokens mitigate."}
+{"query": "open redirect abuse of redirect parameter", "expected_substrings": ["open redirect"], "notes": "Open redirect sends users to an attacker URL via an unchecked param."}
+{"query": "clickjacking with iframe and X-Frame-Options", "expected_substrings": ["clickjacking"], "notes": "Clickjacking overlays a hidden frame; X-Frame-Options/CSP defend it."}
+{"query": "linux privilege escalation via sudo misconfiguration", "expected_substrings": ["privilege escalation", "privesc"], "notes": "Local privesc from a low user to root via sudo/SUID issues."}
+{"query": "SecLists directory and file discovery wordlist", "expected_substrings": ["seclists", "wordlist"], "notes": "SecLists catalog query; expect a SecLists path or wordlist mention."}
+{"query": "wordlist of common usernames for brute forcing", "expected_substrings": ["username"], "notes": "Username enumeration wordlist; SecLists Usernames catalog."}

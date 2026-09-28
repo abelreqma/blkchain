@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+data/
+*.log
+.env
+.DS_Store
+.pytest_cache/
+.reranker-report.md
+.reports/
+.run/
+cli/blk
