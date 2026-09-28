@@ -54,7 +54,9 @@ def _embed(texts: list[str]) -> list[list[float]]:
         for i in range(0, len(texts), config.EMBED_SUBBATCH):
             out = _mlx_generate(_EMB_MODEL, _EMB_TOK, texts[i:i + config.EMBED_SUBBATCH])
             embs = out.text_embeds if hasattr(out, "text_embeds") else out
-            arr = np.array(embs).astype("float32")
+            # Cast in MLX first: some models (e.g. 4-bit DWQ) emit bfloat16, which
+            # numpy cannot read directly ("bfloat16 is not a valid PEP 3118 buffer").
+            arr = np.array(mx.array(embs).astype(mx.float32))
             if arr.ndim == 1:
                 arr = arr.reshape(1, -1)
             rows.append(arr)

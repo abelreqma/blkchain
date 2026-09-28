@@ -75,7 +75,19 @@ def omlx_api_key() -> str:
         return ""
 
 # --- Embedder + reranker (served by embed_server on its own port) -----------
-EMBEDDER_PATH = MODELS_DIR / "Qwen3-Embedding-0.6B-8bit"
+# EMBEDDER_PATH is env-overridable so embed_server can serve an alternate model
+# (e.g. an A/B against Qwen3-Embedding-0.6B-4bit-DWQ) without editing code. A
+# swapped embedder must keep EMBED_DIM (1024) or a new Qdrant collection is
+# needed. BLKCHAIN_EMBEDDER_PATH may be absolute or relative to MODELS_DIR.
+def _embedder_path() -> Path:
+    v = os.environ.get("BLKCHAIN_EMBEDDER_PATH", "").strip()
+    if not v:
+        return MODELS_DIR / "Qwen3-Embedding-0.6B-8bit"
+    p = Path(v).expanduser()
+    return p if p.is_absolute() else (MODELS_DIR / p)
+
+
+EMBEDDER_PATH = _embedder_path()
 RERANKER_PATH = MODELS_DIR / "jina-reranker-v3-4bit-mxfp4"
 EMBED_DIM = 1024  # Qwen3-Embedding-0.6B native dim (MRL-truncatable later)
 

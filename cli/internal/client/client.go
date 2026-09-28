@@ -45,9 +45,13 @@ func (e *UnreachableError) Error() string {
 	return fmt.Sprintf("blkChain API not reachable at %s — is it running?", e.URL)
 }
 
-// HealthResponse is the response body of GET /health.
+// HealthResponse is the response body of GET /health. The API reports not just
+// its own liveness but whether each dependency answered, so a caller can tell
+// "up" from "up but /search would 500".
 type HealthResponse struct {
-	Status string `json:"status"`
+	Status      string `json:"status"`
+	Qdrant      bool   `json:"qdrant"`
+	EmbedServer bool   `json:"embed_server"`
 }
 
 // Payload describes a search result's underlying document chunk.
@@ -90,11 +94,14 @@ type AnswerRequest struct {
 	Query string `json:"query"`
 }
 
-// AnswerResponse is the response body of POST /answer.
+// AnswerResponse is the response body of POST /answer. Results carries the
+// retrieved chunks the answer was synthesized from, so callers can show the
+// evidence behind an answer, not just the citation list.
 type AnswerResponse struct {
-	Answer    string     `json:"answer"`
-	Citations []Citation `json:"citations"`
-	UsedWeb   bool       `json:"used_web"`
+	Answer    string         `json:"answer"`
+	Citations []Citation     `json:"citations"`
+	UsedWeb   bool           `json:"used_web"`
+	Results   []SearchResult `json:"results,omitempty"`
 }
 
 // Health calls GET /health.

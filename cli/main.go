@@ -15,7 +15,12 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		usage(os.Stdout)
+		// Bare `blk` drops into the interactive REPL — the friendliest entry
+		// point for repeated search/ask without re-invoking the binary.
+		if err := runREPL(); err != nil {
+			fmt.Fprintf(os.Stderr, "%s %v\n", red("✗"), err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -34,6 +39,21 @@ func main() {
 		err = runStack(cmd)
 	case "install":
 		err = runInstall(args)
+	case "doctor":
+		err = runDoctor(args)
+	case "logs":
+		err = runLogs(args)
+	case "open":
+		err = runOpen(args)
+	case "hermes":
+		err = runHermes(args)
+	case "repl", "chat":
+		err = runREPL()
+	case "version", "--version", "-v":
+		printVersion(os.Stdout)
+		return
+	case "completion":
+		err = runCompletion(args)
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		return
@@ -59,21 +79,34 @@ func usage(w *os.File) {
 	fmt.Fprintf(w, `%s - command-line client for the blkChain RAG knowledge base
 
 %s
+  blk                       interactive REPL (search / ask without re-launching)
   blk search <query...>     find ranked source chunks   %s
   blk ask <query...>        get a synthesized, cited answer
+  blk open <path|N>         open a source file in $PAGER/$EDITOR
+  blk hermes <prompt...>    run a Hermes agent turn (has the blkChain KB tools)
   blk up | down | status    start / stop / check the local services
-  blk health                check that the API is up
+  blk health                check the API and its dependencies
+  blk doctor                diagnose the whole stack (+ Hermes MCP wiring)
+  blk logs [name]           tail a service log (api, embed_server)
   blk install               install blk onto your PATH (run once, from the project)
+  blk version               show version and build info
+  blk completion bash|zsh   print a shell-completion script
   blk help                  show this help
 
 %s
-  --top-k N    (search) how many results to return
-  --json       print raw JSON instead of formatted text
+  --top-k N            (search) how many results to return
+  --source S           (search) only results from source S (repeatable)
+  --type T             (search) only results of type T
+  --filter k=v         (search) arbitrary payload filter (repeatable)
+  --sources            (ask) also print the retrieved chunks
+  --agent              (ask) answer via the Hermes agent instead of plain RAG
+  --json               print raw JSON instead of formatted text
   Flags may appear anywhere, before or after the query.
 
 %s
   BLKCHAIN_API_URL   API base URL (default http://127.0.0.1:8200)
   BLKCHAIN_ROOT      project root, if blk is run from outside it and not installed
+  NO_COLOR           disable colored output
 `,
 		bold("blk"),
 		bold("Commands:"),
@@ -123,7 +156,13 @@ func runSearch(args []string) error {
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	topK := fs.Int("top-k", 0, "number of results to return")
 	jsonOut := fs.Bool("json", false, "print raw JSON")
-	if err := fs.Parse(reorder(args, map[string]bool{"top-k": true})); err != nil {
+	var sources, filters multiFlag
+	var typ string
+	fs.Var(&sources, "source", "only results from this source (repeatable)")
+	fs.StringVar(&typ, "type", "", "only results of this type")
+	fs.Var(&filters, "filter", "payload filter key=value (repeatable)")
+	valueFlags := map[string]bool{"top-k": true, "source": true, "type": true, "filter": true}
+	if err := fs.Parse(reorder(args, valueFlags)); err != nil {
 		return err
 	}
 
@@ -132,8 +171,13 @@ func runSearch(args []string) error {
 		return errors.New("search: give me something to search for, e.g.  blk search SSRF to cloud metadata")
 	}
 
+	filterMap, err := buildFilters(sources, typ, filters)
+	if err != nil {
+		return err
+	}
+
 	c := client.NewClient()
-	resp, err := c.Search(query, *topK, nil)
+	resp, err := c.Search(query, *topK, filterMap)
 	if err != nil {
 		return err
 	}
@@ -141,13 +185,42 @@ func runSearch(args []string) error {
 	if *jsonOut {
 		return printJSON(resp)
 	}
+	printResults(query, resp.Results)
+	return nil
+}
 
-	if len(resp.Results) == 0 {
-		fmt.Printf("No results for %q.\n", query)
-		return nil
+// buildFilters folds --source/--type/--filter into the API's {field: value}
+// filter map. Later values win on key collision; an empty result is nil (no
+// filtering), which the API treats as "match everything".
+func buildFilters(sources multiFlag, typ string, kv multiFlag) (map[string]interface{}, error) {
+	m := map[string]interface{}{}
+	for _, s := range sources {
+		m["source"] = s // last --source wins; the API filter is single-valued per field
 	}
-	fmt.Printf("%s\n\n", bold(fmt.Sprintf("%d result(s) for %q", len(resp.Results), query)))
-	for i, r := range resp.Results {
+	if typ != "" {
+		m["type"] = typ
+	}
+	for _, f := range kv {
+		k, v, ok := strings.Cut(f, "=")
+		if !ok || k == "" {
+			return nil, fmt.Errorf("search: --filter must be key=value, got %q", f)
+		}
+		m[k] = v
+	}
+	if len(m) == 0 {
+		return nil, nil
+	}
+	return m, nil
+}
+
+// printResults renders ranked search results, or a friendly empty message.
+func printResults(query string, results []client.SearchResult) {
+	if len(results) == 0 {
+		fmt.Printf("No results for %q.\n", query)
+		return
+	}
+	fmt.Printf("%s\n\n", bold(fmt.Sprintf("%d result(s) for %q", len(results), query)))
+	for i, r := range results {
 		meta := fmt.Sprintf("score %.4f", r.Score)
 		if r.Payload.Section != "" {
 			meta += " · " + r.Payload.Section
@@ -158,12 +231,13 @@ func runSearch(args []string) error {
 		}
 		fmt.Printf("   %s\n\n", truncate(r.Payload.Text, 240))
 	}
-	return nil
 }
 
 func runAsk(args []string) error {
 	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
 	jsonOut := fs.Bool("json", false, "print raw JSON")
+	showSources := fs.Bool("sources", false, "also print the retrieved chunks")
+	agent := fs.Bool("agent", false, "answer via the Hermes agent instead of plain RAG")
 	if err := fs.Parse(reorder(args, nil)); err != nil {
 		return err
 	}
@@ -171,6 +245,12 @@ func runAsk(args []string) error {
 	query := strings.Join(fs.Args(), " ")
 	if query == "" {
 		return errors.New("ask: give me a question, e.g.  blk ask how do I chain this SSRF to RCE?")
+	}
+
+	// --agent hands the question to the Hermes agent (which has the blkChain KB
+	// tools plus web/tool access), rather than the API's single-shot RAG answer.
+	if *agent {
+		return runHermes([]string{query})
 	}
 
 	c := client.NewClient()
@@ -184,6 +264,10 @@ func runAsk(args []string) error {
 	}
 
 	fmt.Println(resp.Answer)
+	if *showSources && len(resp.Results) > 0 {
+		fmt.Printf("\n%s\n\n", bold("Retrieved chunks:"))
+		printResults(query, resp.Results)
+	}
 	fmt.Println()
 	fmt.Println(bold("Sources:"))
 	if len(resp.Citations) == 0 {
@@ -216,8 +300,22 @@ func runHealth(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s blkChain API: %s  %s\n", green("✓"), h.Status, dim("("+c.BaseURL+")"))
+	mark := green("✓")
+	if h.Status != "ok" {
+		mark = red("!")
+	}
+	fmt.Printf("%s blkChain API: %s  %s\n", mark, h.Status, dim("("+c.BaseURL+")"))
+	fmt.Printf("  %s qdrant\n", check(h.Qdrant))
+	fmt.Printf("  %s embed_server\n", check(h.EmbedServer))
 	return nil
+}
+
+// check renders a green ✓ or red ✗ for a boolean dependency state.
+func check(ok bool) string {
+	if ok {
+		return green("✓")
+	}
+	return red("✗")
 }
 
 func printJSON(v interface{}) error {
@@ -236,4 +334,15 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "..."
+}
+
+// multiFlag is a flag.Value that accumulates repeated occurrences, so a flag
+// like --source may be given more than once.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
 }
