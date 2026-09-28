@@ -407,7 +407,7 @@ func printSources(citations []client.Citation, usedWeb bool) {
 func streamAsk(query string) (bool, error) {
 	c := client.NewClient()
 	streamed := false
-	full, cits, err := StreamRAG(context.Background(), c, query, func(b []byte) {
+	full, cits, _, err := StreamRAG(context.Background(), c, query, "", "", "", func(b []byte) {
 		streamed = true
 		os.Stdout.Write(b)
 	})

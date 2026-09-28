@@ -53,10 +53,12 @@ const (
 // deltas / commentary / the model id / the terminal final text; tool carries the
 // tool name for tool activity (with text = "running"|"done"|"failed").
 type agentEvent struct {
-	kind agentEventKind
-	text string
-	tool string
-	err  error
+	kind        agentEventKind
+	text        string
+	tool        string
+	err         error
+	tokens      int // completion tokens from run.completed usage (0 if absent)
+	totalTokens int
 }
 
 // --- config ---
@@ -140,8 +142,15 @@ func ensureSession(ctx context.Context) (string, error) {
 // onEvent for each mapped (non-terminal) event. It returns the terminal event's
 // error (nil on run.completed) or any transport error. ctx cancels the turn:
 // cancelling ctx aborts the in-flight request so Body.Read unblocks.
-func StreamAgent(ctx context.Context, sessionID, message string, onEvent func(agentEvent)) error {
-	payload, err := json.Marshal(map[string]string{"message": message})
+func StreamAgent(ctx context.Context, sessionID, message, model, reasoning string, onEvent func(agentEvent)) error {
+	body := map[string]any{"message": message}
+	if strings.TrimSpace(model) != "" {
+		body["model"] = model
+	}
+	if strings.TrimSpace(reasoning) != "" {
+		body["model_options"] = map[string]string{"reasoning_effort": reasoning}
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
@@ -173,6 +182,7 @@ func StreamAgent(ctx context.Context, sessionID, message string, onEvent func(ag
 		if ev.kind == agentTerminal {
 			terminal = true
 			termErr = ev.err
+			onEvent(ev)       // surface usage/final text to the caller
 			resp.Body.Close() // break the scan loop; server may hold the stream open
 			return
 		}
@@ -286,7 +296,19 @@ func mapAgentEvent(event, data string) (agentEvent, bool) {
 		return agentEvent{kind: agentToolActivity, text: "failed", tool: firstNonEmpty(d.Tool, "tool")}, true
 
 	case "run.completed":
-		return agentEvent{kind: agentTerminal}, true
+		var d struct {
+			Usage struct {
+				CompletionTokens int `json:"completion_tokens"`
+				OutputTokens     int `json:"output_tokens"`
+				TotalTokens      int `json:"total_tokens"`
+			} `json:"usage"`
+		}
+		_ = json.Unmarshal([]byte(data), &d)
+		ct := d.Usage.CompletionTokens
+		if ct == 0 {
+			ct = d.Usage.OutputTokens
+		}
+		return agentEvent{kind: agentTerminal, tokens: ct, totalTokens: d.Usage.TotalTokens}, true
 
 	case "run.failed":
 		var d struct {

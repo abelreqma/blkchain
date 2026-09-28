@@ -88,8 +88,23 @@ def _embedder_path() -> Path:
 
 
 EMBEDDER_PATH = _embedder_path()
-RERANKER_PATH = MODELS_DIR / "jina-reranker-v3-4bit-mxfp4"
 EMBED_DIM = 1024  # Qwen3-Embedding-0.6B native dim (MRL-truncatable later)
+
+# Reranker models are selected through configuration.
+RERANKER_KIND = os.environ.get("BLKCHAIN_RERANKER_KIND", "modernbert").strip().lower()
+
+
+def _reranker_path() -> Path:
+    v = os.environ.get("BLKCHAIN_RERANKER_PATH", "").strip()
+    if v:
+        p = Path(v).expanduser()
+        return p if p.is_absolute() else (MODELS_DIR / p)
+    default = ("gte-reranker-modernbert-base-mlx" if RERANKER_KIND == "modernbert"
+               else "jina-reranker-v3-4bit-mxfp4")
+    return MODELS_DIR / default
+
+
+RERANKER_PATH = _reranker_path()
 
 EMBED_SERVER_HOST = os.environ.get("BLKCHAIN_EMBED_HOST", "127.0.0.1")
 EMBED_SERVER_PORT = int(os.environ.get("BLKCHAIN_EMBED_PORT", "8100"))

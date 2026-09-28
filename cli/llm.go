@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -203,22 +204,39 @@ func newOMLX() (*openai.LLM, error) {
 // citations derived from the retrieved chunks, and any error. ctx cancels the
 // stream: when ctx is done the streaming callback returns ctx.Err(), which
 // aborts GenerateContent (Ctrl-C in the TUI).
-func StreamRAG(ctx context.Context, c *client.Client, question string, onChunk func([]byte)) (string, []client.Citation, error) {
+//
+// model overrides the oMLX model for this turn when non-empty (from the /model
+// picker); "" uses the resolved default. reasoning is tracked for the status
+// line and session record but is NOT sent to oMLX: langchaingo v0.1.13 exposes no
+// reasoning_effort call option, so RAG reasoning selection is display-only.
+// preface, when non-empty, is extra context (@file attachments, /init ambient
+// context) prepended to the human message; the retrieval query stays the clean
+// question. It returns the completion-token count when the model reports usage
+// (0 otherwise), for the /cost footer.
+func StreamRAG(ctx context.Context, c *client.Client, question, preface, model, reasoning string, onChunk func([]byte)) (string, []client.Citation, int, error) {
+	_ = reasoning // display-only in RAG mode (see doc comment)
 	resp, err := c.Search(question, 0, nil)
 	if err != nil {
-		return "", nil, err
+		return "", nil, 0, err
 	}
 	chunks := boundChunks(resp.Results)
 	if len(chunks) == 0 {
-		return "", nil, fmt.Errorf("no sources found for %q", question)
+		return "", nil, 0, fmt.Errorf("no sources found for %q", question)
 	}
 
 	msgs := buildMessages(question, chunks)
+	if strings.TrimSpace(preface) != "" {
+		human := "Additional context:\n" + preface + "\n\n" + buildUserPrompt(question, chunks)
+		msgs = []llms.MessageContent{
+			llms.TextParts(llms.ChatMessageTypeSystem, answerSystemPrompt),
+			llms.TextParts(llms.ChatMessageTypeHuman, human),
+		}
+	}
 	citations := deriveCitations(chunks)
 
 	l, err := newOMLX()
 	if err != nil {
-		return "", citations, err
+		return "", citations, 0, err
 	}
 
 	var full strings.Builder
@@ -233,9 +251,87 @@ func StreamRAG(ctx context.Context, c *client.Client, question string, onChunk f
 		return nil
 	}
 
-	_, err = l.GenerateContent(ctx, msgs,
+	opts := []llms.CallOption{
 		llms.WithStreamingFunc(stream),
 		llms.WithTemperature(0.2),
-	)
-	return full.String(), citations, err
+	}
+	if strings.TrimSpace(model) != "" {
+		opts = append(opts, llms.WithModel(model))
+	}
+	cr, err := l.GenerateContent(ctx, msgs, opts...)
+	return full.String(), citations, completionTokens(cr), err
+}
+
+// completionTokens extracts the completion-token count from a langchaingo
+// response's GenerationInfo when the model reported it (0 otherwise; streaming
+// responses often omit usage).
+func completionTokens(cr *llms.ContentResponse) int {
+	if cr == nil {
+		return 0
+	}
+	for _, ch := range cr.Choices {
+		if ch == nil || ch.GenerationInfo == nil {
+			continue
+		}
+		for _, k := range []string{"CompletionTokens", "completion_tokens", "OutputTokens"} {
+			if v, ok := ch.GenerationInfo[k]; ok {
+				if n := asInt(v); n > 0 {
+					return n
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// asInt coerces the numeric shapes GenerationInfo may hold into an int.
+func asInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+// omlxModels queries GET {base}/models and returns every model id, or nil on any
+// failure. It seeds the RAG-mode model picker (V2-BRIEF.md T4).
+func omlxModels() []string {
+	base := omlxBaseURL()
+	key := strings.TrimSpace(os.Getenv("OMLX_API_KEY"))
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(base, "/")+"/models", nil)
+	if err != nil {
+		return nil
+	}
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	hc := &http.Client{Timeout: 5 * time.Second}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(out.Data))
+	for _, d := range out.Data {
+		if d.ID != "" {
+			ids = append(ids, d.ID)
+		}
+	}
+	return ids
 }
