@@ -38,8 +38,9 @@ func isInteractive() bool {
 func plainREPL() error {
 	c := client.NewClient()
 	var last []client.SearchResult
+	mode := "rag"
 
-	fmt.Printf("%s  %s\n", bold("blkChain"), dim("type a question to ask · /search <q> · /help · Ctrl-D to quit"))
+	fmt.Printf("%s  %s\n", bold("blkChain"), dim("type a question to ask · /mode · /search <q> · /help · Ctrl-D to quit"))
 
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 64*1024), 1<<20)
@@ -74,19 +75,43 @@ func plainREPL() error {
 			printErr(runLogs(largs))
 		case "copy":
 			fmt.Println(dim("/copy is only available in the interactive TUI"))
+		case "mode":
+			if mode == "agent" {
+				mode = "rag"
+			} else {
+				mode = "agent"
+			}
+			fmt.Println(dim("mode: " + mode))
+		case "agent":
+			mode = "agent"
+			fmt.Println(dim("mode: agent"))
+		case "rag":
+			mode = "rag"
+			fmt.Println(dim("mode: rag"))
 		case "search", "s":
 			last = replSearch(c, rest, last)
 		case "ask", "a":
-			printErr(runAsk([]string{rest}))
-		case "agent", "hermes":
+			printErr(replAsk(mode, rest))
+		case "hermes":
 			printErr(runHermes([]string{rest}))
 		case "open", "o":
 			printErr(replOpen(rest, last))
 		default:
-			// Bare input with no recognized verb is an ask (matches the TUI).
-			printErr(runAsk([]string{line}))
+			// Bare input with no recognized verb is an ask (matches the TUI); in
+			// agent mode it runs the hermes agent instead.
+			printErr(replAsk(mode, line))
 		}
 	}
+}
+
+// replAsk routes a question by mode: rag mode uses the RAG answer path
+// (runAsk); agent mode runs the hermes agent (subprocess one-shot). It mirrors
+// the TUI's dual-mode dispatch for the non-TTY fallback.
+func replAsk(mode, query string) error {
+	if mode == "agent" {
+		return runHermes([]string{query})
+	}
+	return runAsk([]string{query})
 }
 
 // replSearch runs a search, prints it, and returns the new results (or the
@@ -126,10 +151,11 @@ func replOpen(arg string, last []client.SearchResult) error {
 
 func replHelp() {
 	fmt.Printf(`%s
-  <question>          ask the knowledge base (the default)
+  <question>          ask (rag streams a cited answer; agent runs Hermes)
+  /mode              toggle rag / agent mode     (also /agent, /rag)
   /search <q>        find ranked source chunks   (alias: s)
   /ask <q>           ask explicitly              (alias: a)
-  /agent <prompt>    answer via the Hermes agent (alias: hermes)
+  /hermes <prompt>   one-shot Hermes agent turn
   /open <N|path>     open result N from the last search, or a path (alias: o)
   /health            API + dependency status
   /up | /down | /status  manage the local services

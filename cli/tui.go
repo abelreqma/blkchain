@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -104,12 +105,28 @@ type execDoneMsg struct{ err error }
 // the event loop by the StreamRAG callback via prog.Send.
 type chunkMsg string
 
-// streamDoneMsg is the terminal message of a RAG stream: the full answer, the
-// citations derived from the retrieved chunks, and any error.
+// streamDoneMsg is the terminal message of a stream: the full answer, the
+// citations derived from the retrieved chunks (RAG only), and any error. agent
+// marks an agent-mode turn, which renders without a SOURCES block.
 type streamDoneMsg struct {
 	full      string
 	citations []client.Citation
 	err       error
+	agent     bool
+}
+
+// Agent-mode streaming messages (V2-BRIEF.md T3), pushed into the event loop by
+// the StreamAgent/StreamAgentSubprocess callback via prog.Send. Answer deltas
+// reuse chunkMsg; these carry the non-answer signals.
+type agentToolMsg struct{ verb, tool string } // muted "· running <tool>…" line
+type agentNoteMsg string                      // muted commentary / fallback note line
+type agentModelMsg string                     // model id for the status line
+type agentSessionMsg string                   // gateway session id to cache
+type agentXportMsg string                     // "gateway" | "subprocess" for this turn
+type agentHealthMsg struct {                  // startup/mode-switch agent health
+	gwOK  bool
+	binOK bool
+	model string
 }
 
 // --- model ---
@@ -140,6 +157,17 @@ type model struct {
 
 	apiOK      bool
 	apiChecked bool
+
+	// Agent mode (V2-BRIEF.md T3). mode is "rag" (default) or "agent"; the agent
+	// fields track the gateway session handle and the health/transport shown in
+	// the status line.
+	mode         string
+	agentSession string // cached hermes gateway session id (conversation handle)
+	agentModel   string // display model id, discovered from events / model options
+	agentXport   string // last-used transport: "gateway" | "subprocess"
+	agentGwOK    bool   // gateway /health reachable+authorized
+	agentBinOK   bool   // hermes CLI on PATH (subprocess fallback possible)
+	agentChecked bool
 }
 
 func initialModel() model {
@@ -168,6 +196,7 @@ func initialModel() model {
 		keys:    defaultKeys(),
 		history: hist,
 		histIdx: len(hist),
+		mode:    "rag",
 	}
 }
 
@@ -270,6 +299,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(full) == "" {
 			full = live
 		}
+		if msg.agent {
+			if msg.err != nil && errors.Is(msg.err, context.Canceled) {
+				return m, tea.Println("   " + Meta.Render("canceled"))
+			}
+			m.lastAnswer = full
+			m.openTargets = nil
+			if msg.err != nil {
+				var b strings.Builder
+				if strings.TrimSpace(full) != "" {
+					b.WriteString(formatAgentAnswer(full, elapsed, m.renderWidth()))
+					b.WriteByte('\n')
+				}
+				b.WriteString(styleErr(fmt.Errorf("agent turn ended early: %w", msg.err)))
+				return m, tea.Println(b.String())
+			}
+			if strings.TrimSpace(full) == "" {
+				return m, tea.Println("   " + Meta.Render("(agent returned no output)"))
+			}
+			return m, tea.Println(formatAgentAnswer(full, elapsed, m.renderWidth()))
+		}
 		if msg.err != nil {
 			if errors.Is(msg.err, context.Canceled) {
 				return m, tea.Println("   " + Meta.Render("canceled"))
@@ -342,6 +391,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.apiOK = msg.ok
 		m.apiChecked = true
 		return m, nil
+
+	case agentToolMsg:
+		if !m.working {
+			return m, nil
+		}
+		line := " " + Meta.Render(Glyph(GlyphBullet)+" "+msg.verb+" "+msg.tool)
+		if msg.verb == "running" {
+			line += Meta.Render(ellipsis())
+		}
+		return m, tea.Println(line)
+
+	case agentNoteMsg:
+		if strings.TrimSpace(string(msg)) == "" {
+			return m, nil
+		}
+		return m, tea.Println("   " + Meta.Render(oneLine(string(msg))))
+
+	case agentModelMsg:
+		if s := strings.TrimSpace(string(msg)); s != "" {
+			m.agentModel = s
+		}
+		return m, nil
+
+	case agentSessionMsg:
+		m.agentSession = string(msg)
+		return m, nil
+
+	case agentXportMsg:
+		m.agentXport = string(msg)
+		m.agentChecked = true
+		return m, nil
+
+	case agentHealthMsg:
+		m.agentGwOK = msg.gwOK
+		m.agentBinOK = msg.binOK
+		m.agentChecked = true
+		if msg.model != "" {
+			m.agentModel = msg.model
+		}
+		return m, nil
 	}
 
 	return m, nil
@@ -372,6 +461,19 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "help":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(helpBlock()))
+	case "mode":
+		if m.mode == "agent" {
+			m.mode = "rag"
+		} else {
+			m.mode = "agent"
+		}
+		return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
+	case "agent":
+		m.mode = "agent"
+		return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
+	case "rag":
+		m.mode = "rag"
+		return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
 	case "copy":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(m.doCopy()))
 	case "open":
@@ -403,6 +505,11 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		// HTTP call does (ask can be slow; see client.requestTimeout).
 		ctx, cancel := context.WithTimeout(context.Background(), m.client.HTTPClient.Timeout)
 		m.cancel = cancel
+		// AGENT mode: an ask runs a full agentic turn via the hermes gateway (or
+		// the subprocess fallback), streaming into the same live buffer.
+		if verb == "ask" && m.mode == "agent" {
+			return m, tea.Batch(tea.Println(echo), m.sp.Tick, m.agentStreamCmd(ctx, arg))
+		}
 		// RAG mode: stream the synthesis directly from oMLX when OMLX_API_KEY is
 		// set; otherwise fall back to the non-streaming /answer path so ask
 		// always works (V2-BRIEF.md fallback).
@@ -562,6 +669,112 @@ func healthCmd(c *client.Client) tea.Cmd {
 	}
 }
 
+// agentStreamCmd runs one AGENT-mode turn in a goroutine (tea.Cmd). It decides
+// the transport once per turn: prefer the hermes gateway when reachable, else
+// the `hermes chat` subprocess. Answer deltas become chunkMsg (the shared live
+// buffer); tool activity and commentary become muted scrollback lines; the
+// terminal event yields a streamDoneMsg (agent). Ctrl-C (ctx cancel) aborts the
+// gateway request or kills the subprocess.
+func (m model) agentStreamCmd(ctx context.Context, message string) tea.Cmd {
+	prog := m.prog
+	sessID := m.agentSession
+	return func() tea.Msg {
+		var full strings.Builder
+		onEvent := func(ev agentEvent) {
+			switch ev.kind {
+			case agentText:
+				full.WriteString(ev.text)
+				if prog != nil {
+					prog.Send(chunkMsg(ev.text))
+				}
+			case agentCommentary:
+				if prog != nil {
+					prog.Send(agentNoteMsg(ev.text))
+				}
+			case agentToolActivity:
+				if prog != nil {
+					prog.Send(agentToolMsg{verb: ev.text, tool: ev.tool})
+				}
+			case agentModelInfo:
+				if prog != nil {
+					prog.Send(agentModelMsg(ev.text))
+				}
+			case agentTerminal:
+				// Use the terminal final text only when nothing streamed (a
+				// non-streaming run); otherwise the deltas already hold the answer.
+				if ev.text != "" && full.Len() == 0 {
+					full.WriteString(ev.text)
+				}
+			}
+		}
+
+		if hermesAvailable(ctx) {
+			id := sessID
+			var err error
+			if id == "" {
+				id, err = ensureSession(ctx)
+			}
+			if err == nil {
+				if prog != nil {
+					if id != sessID {
+						prog.Send(agentSessionMsg(id))
+					}
+					prog.Send(agentXportMsg("gateway"))
+				}
+				serr := StreamAgent(ctx, id, message, onEvent)
+				if errors.Is(serr, context.Canceled) {
+					return canceledMsg{}
+				}
+				return streamDoneMsg{full: full.String(), agent: true, err: serr}
+			}
+			// Gateway reachable but session setup failed: fall back with a note.
+			if prog != nil {
+				prog.Send(agentNoteMsg("gateway session failed, using hermes subprocess"))
+			}
+		}
+
+		// Subprocess fallback: gateway unreachable, or session setup failed.
+		if prog != nil {
+			prog.Send(agentXportMsg("subprocess"))
+		}
+		serr := StreamAgentSubprocess(ctx, message, onEvent)
+		if errors.Is(serr, context.Canceled) {
+			return canceledMsg{}
+		}
+		if serr != nil && full.Len() == 0 {
+			if errors.Is(serr, errHermesMissing) {
+				return errMsg{errors.New("agent mode unavailable: run `hermes gateway`, or install the hermes CLI")}
+			}
+			return errMsg{fmt.Errorf("agent turn failed: %w", serr)}
+		}
+		return streamDoneMsg{full: full.String(), agent: true, err: serr}
+	}
+}
+
+// modeSwitchCmd refreshes the status-line health after a mode change: the agent
+// gateway/binary for agent mode, the blkChain API for rag mode.
+func (m model) modeSwitchCmd() tea.Cmd {
+	if m.mode == "agent" {
+		return agentHealthCmd()
+	}
+	return healthCmd(m.client)
+}
+
+// agentHealthCmd probes the hermes gateway and the hermes binary so the status
+// line can show the transport before the first agent turn.
+func agentHealthCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), agentSessionTimeout)
+		defer cancel()
+		gwOK := hermesAvailable(ctx)
+		model := ""
+		if gwOK {
+			model = currentAgentModel(ctx)
+		}
+		return agentHealthMsg{gwOK: gwOK, binOK: hermesBinAvailable(), model: model}
+	}
+}
+
 // --- exec (suspend the TUI to run an interactive/verbose command) ---
 
 // funcExec adapts a plain func to tea.ExecCommand, so tea.Exec releases the
@@ -659,7 +872,13 @@ func parseInput(line string) (verb, arg string) {
 
 // --- rendering helpers (all return strings for tea.Println) ---
 
+// statusLine shows the active mode, the model, and an api-health dot on one
+// muted line (V2-BRIEF.md T3). In rag mode the dot reflects the blkChain API; in
+// agent mode it reflects the hermes gateway (or "subprocess" on fallback).
 func (m model) statusLine() string {
+	if m.mode == "agent" {
+		return m.agentStatusLine()
+	}
 	dot := Glyph(GlyphDot)
 	style := Caut
 	label := "checking"
@@ -670,7 +889,68 @@ func (m model) statusLine() string {
 			style, label = Fail, "api down"
 		}
 	}
-	return " " + style.Render(dot) + " " + Meta.Render(label) + "  " + Meta.Render(m.client.BaseURL)
+	return " " + style.Render(dot) + " " + Meta.Render("rag") + "  " +
+		Meta.Render(ragModelLabel()) + "  " + Meta.Render(label)
+}
+
+// agentStatusLine renders the agent-mode status line: dot + "agent" + model +
+// transport. The transport is the one used on the last turn, or the health-probe
+// result before the first turn.
+func (m model) agentStatusLine() string {
+	dot := Glyph(GlyphDot)
+	xport := m.agentXport
+	if xport == "" {
+		switch {
+		case !m.agentChecked:
+			xport = "checking"
+		case m.agentGwOK:
+			xport = "gateway"
+		case m.agentBinOK:
+			xport = "subprocess"
+		default:
+			xport = "unavailable"
+		}
+	}
+	style := Caut
+	switch xport {
+	case "gateway":
+		style = OK
+	case "unavailable":
+		style = Fail
+	}
+	model := m.agentModel
+	if model == "" {
+		model = "unknown"
+	}
+	return " " + style.Render(dot) + " " + Meta.Render("agent") + "  " +
+		Meta.Render(model) + "  " + Meta.Render(xport)
+}
+
+// ragModelLabel is the oMLX model shown in rag-mode status, without a network
+// call: OMLX_MODEL when set, else the built-in default.
+func ragModelLabel() string {
+	if v := strings.TrimSpace(os.Getenv("OMLX_MODEL")); v != "" {
+		return v
+	}
+	return defaultOMLXModel
+}
+
+// modeNote is the one-line confirmation printed when the mode changes.
+func modeNote(mode string) string {
+	if mode == "agent" {
+		return "   " + Meta.Render("mode: agent (full hermes agent with tools, web, memory)")
+	}
+	return "   " + Meta.Render("mode: rag (retrieve then stream a cited answer)")
+}
+
+// formatAgentAnswer glamour-renders an agent turn's answer with a muted timing
+// header and no SOURCES block (agent turns carry no citation list).
+func formatAgentAnswer(full string, elapsed time.Duration, width int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, " %s %s\n", OK.Render(Glyph(GlyphOK)),
+		Meta.Render("Agent answered in "+elapsed.Round(100*time.Millisecond).String()))
+	b.WriteString(strings.TrimRight(glowRender(full, width), "\n"))
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m model) spinnerLine() string {
@@ -759,13 +1039,14 @@ func promptEcho(q string) string {
 
 func welcomeBanner() string {
 	return " " + H1.Render("blk") + " " +
-		Meta.Render("· ask the knowledge base — Enter to ask, /help for commands, ctrl+d to quit")
+		Meta.Render("· ask the knowledge base — Enter to ask, /mode for agent, /help for commands, ctrl+d to quit")
 }
 
 func helpBlock() string {
 	rows := []usageRow{
-		{"<question>", "ask the knowledge base (the default)"},
+		{"<question>", "ask (rag mode streams a cited answer; agent mode runs hermes)"},
 		{"/ask <q>", "ask explicitly"},
+		{"/mode", "toggle rag / agent mode (also /agent, /rag)"},
 		{"/search <q>", "find ranked source chunks (also: s <q>)"},
 		{"/open <N|path>", "open source N from the last answer/search, or a path"},
 		{"/hermes <prompt>", "run a Hermes agent turn"},
