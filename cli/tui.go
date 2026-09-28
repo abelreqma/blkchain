@@ -425,7 +425,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.agent {
 			if msg.err != nil && errors.Is(msg.err, context.Canceled) {
-				return m, m.finish(tea.Println("   " + Meta.Render("canceled")))
+				return m, m.finishNoDequeue(tea.Println("   " + Meta.Render("canceled")))
 			}
 			m.lastAnswer = full
 			m.openTargets = nil
@@ -436,7 +436,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					b.WriteByte('\n')
 				}
 				b.WriteString(styleErr(fmt.Errorf("agent turn ended early: %w", msg.err)))
-				return m, m.finish(tea.Println(b.String()))
+				return m, m.finishNoDequeue(tea.Println(b.String()))
 			}
 			if strings.TrimSpace(full) == "" {
 				return m, m.finish(tea.Println("   " + Meta.Render("(agent returned no output)")))
@@ -448,7 +448,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if errors.Is(msg.err, context.Canceled) {
-				return m, m.finish(tea.Println("   " + Meta.Render("canceled")))
+				return m, m.finishNoDequeue(tea.Println("   " + Meta.Render("canceled")))
 			}
 			// Errored after streaming partial output (an immediate failure is
 			// handled inside streamCmd by falling back to /answer). Commit what
@@ -461,7 +461,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				b.WriteByte('\n')
 			}
 			b.WriteString(styleErr(fmt.Errorf("stream ended early: %w", msg.err)))
-			return m, m.finish(tea.Println(b.String()))
+			return m, m.finishNoDequeue(tea.Println(b.String()))
 		}
 		m.lastAnswer = full
 		m.openTargets = citationPaths(msg.citations)
@@ -501,7 +501,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if isUnreachable(msg.err) {
 			m.apiOK, m.apiChecked = false, true
 		}
-		return m, m.finish(tea.Println(styleErr(msg.err)))
+		return m, m.finishNoDequeue(tea.Println(styleErr(msg.err)))
 
 	case canceledMsg:
 		m.working = false
@@ -509,7 +509,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel()
 			m.cancel = nil
 		}
-		return m, m.finish(tea.Println("   " + Meta.Render("canceled")))
+		return m, m.finishNoDequeue(tea.Println("   " + Meta.Render("canceled")))
 
 	case execDoneMsg:
 		if msg.err != nil {
@@ -563,6 +563,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case openModelPickerMsg:
+		// A /resume or other overlay (or reverse-search/palette) may have opened
+		// while this async discovery was in flight; don't clobber it.
+		if m.overlay != nil || m.rsearch.open || m.pal.open {
+			return m, nil
+		}
 		m.overlay = newModelPicker(msg.models, msg.current, msg.reasoning, m.width)
 		return m, nil
 
@@ -611,6 +616,13 @@ func (m model) finish(cmd tea.Cmd) tea.Cmd {
 		return cmd
 	}
 	return tea.Batch(cmd, func() tea.Msg { return dequeueMsg{} })
+}
+
+// finishNoDequeue is like finish but never schedules a dequeueMsg: used when a
+// turn ends via cancel or error, so a Ctrl-C or a failed turn doesn't
+// auto-submit the next queued prompt. The queue is left intact either way.
+func (m model) finishNoDequeue(cmd tea.Cmd) tea.Cmd {
+	return cmd
 }
 
 // clearQueue drops all queued prompts with a muted note (Ctrl-U, V2-BRIEF.md T5).
@@ -852,9 +864,18 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.workingVerb = workingVerbLabel(verb)
 		m.live = ""
 		m.turnStart = time.Now()
-		// Match the client's own timeout so the context doesn't fire before the
-		// HTTP call does (ask can be slow; see client.requestTimeout).
-		ctx, cancel := context.WithTimeout(context.Background(), m.client.HTTPClient.Timeout)
+		var ctx context.Context
+		var cancel context.CancelFunc
+		if verb == "ask" && m.mode == "agent" {
+			// Agent turns can run for a long time (multi-step tool use) and
+			// StreamAgent assumes a long-lived ctx; only Ctrl-C should end one,
+			// not the RAG client's HTTP timeout.
+			ctx, cancel = context.WithCancel(context.Background())
+		} else {
+			// Match the client's own timeout so the context doesn't fire before the
+			// HTTP call does (ask can be slow; see client.requestTimeout).
+			ctx, cancel = context.WithTimeout(context.Background(), m.client.HTTPClient.Timeout)
+		}
 		m.cancel = cancel
 		if verb == "ask" {
 			// @file attachments + /init ambient context ride along with this turn.
@@ -1060,8 +1081,13 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 			if errors.Is(err, context.Canceled) {
 				return canceledMsg{}
 			}
-			// Immediate stream failure (no tokens): fall back to /answer.
-			resp, aerr := c.Answer(question)
+			// Immediate stream failure (no tokens): fall back to /answer, carrying
+			// along the same @file/ambient preface the streaming path got.
+			fallbackQ := question
+			if preface != "" {
+				fallbackQ = preface + "\n\n" + question
+			}
+			resp, aerr := c.Answer(fallbackQ)
 			if aerr != nil {
 				return errMsg{aerr}
 			}

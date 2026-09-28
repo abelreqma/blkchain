@@ -108,14 +108,14 @@ func TestDockerRunQdrantArgs(t *testing.T) {
 		"-p 127.0.0.1:6333:6333",
 		"-p 127.0.0.1:6334:6334",
 		"-v /root/data/qdrant_storage:/qdrant/storage",
-		"dhi.io/qdrant:1",
+		"dhi.io/qdrant@sha256:047fe742edb0c61908acca3fb726b14018f5361d2e0dbabb1a94e47a72448cba",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("dockerRunQdrantArgs() = %q, missing %q", joined, want)
 		}
 	}
 	// The image must be the last argument (docker run syntax).
-	if args[len(args)-1] != "dhi.io/qdrant:1" {
+	if args[len(args)-1] != "dhi.io/qdrant@sha256:047fe742edb0c61908acca3fb726b14018f5361d2e0dbabb1a94e47a72448cba" {
 		t.Errorf("dockerRunQdrantArgs() last arg = %q, want image name", args[len(args)-1])
 	}
 }

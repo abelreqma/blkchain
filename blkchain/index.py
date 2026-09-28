@@ -8,8 +8,10 @@ optional dependency bundled by qdrant-client[fastembed].
 """
 from __future__ import annotations
 
+import contextlib
 import html
 import ipaddress
+import os
 import re
 import socket
 import uuid
@@ -111,6 +113,8 @@ def _index_chunks(
     existing: dict[str, str | None],
     resume: bool,
     snapshot_version: str,
+    index_scope: str | None = None,
+    index_generation: str | None = None,
 ) -> dict:
     """Embed + upsert an iterable of chunks into `collection`, resumably.
 
@@ -124,6 +128,18 @@ def _index_chunks(
     skipped = 0
     batches = 0
     pending: list = []
+    seen_ids: list[str] = []
+
+    def mark_seen() -> None:
+        if index_scope is None or not seen_ids:
+            return
+        client.set_payload(
+            collection_name=collection,
+            payload={"snapshot_version": snapshot_version, "index_scope": index_scope,
+                     "index_generation": index_generation},
+            points=seen_ids.copy(),
+        )
+        seen_ids.clear()
 
     def flush(pending_chunks: list) -> None:
         nonlocal indexed, batches
@@ -142,7 +158,7 @@ def _index_chunks(
                         values=sparse.values.tolist(),
                     ),
                 },
-                payload=chunk.payload(snapshot_version),
+                payload=chunk.payload(snapshot_version, index_scope, index_generation),
             )
             for chunk, dense, sparse in zip(pending_chunks, dense_vecs, sparse_vecs)
         ]
@@ -158,6 +174,10 @@ def _index_chunks(
                 # Skip unchanged chunks (and legacy points with no stored hash);
                 # re-embed when the content changed, overwriting the same id.
                 if stored is None or stored == content_hash(chunk.text):
+                    if index_scope is not None:
+                        seen_ids.append(pid)
+                        if len(seen_ids) >= 1000:
+                            mark_seen()
                     skipped += 1
                     continue
                 updated += 1
@@ -166,8 +186,55 @@ def _index_chunks(
             flush(pending)
             pending = []
     flush(pending)
+    mark_seen()
 
     return {"indexed": indexed, "updated": updated, "skipped": skipped, "batches": batches}
+
+
+def _reconcile_corpus(
+    client: QdrantClient,
+    collection: str,
+    index_generation: str,
+    prune_missing_sources: bool = False,
+) -> int:
+    """Delete stale configured-corpus points after a complete successful ingest."""
+    from blkchain import ingest
+
+    # A missing configured source may mean an unmounted corpus volume. Preserve
+    # its points instead of treating an unavailable source as an empty snapshot.
+    managed_sources = {
+        ingest._source_name(spec) for spec in config.CORPUS_SOURCES
+        if prune_missing_sources or spec.path.exists()
+    }
+    stale: list[str] = []
+    offset = None
+    while True:
+        records, offset = client.scroll(
+            collection_name=collection,
+            limit=1000,
+            offset=offset,
+            with_payload=["source", "path", "index_scope", "index_generation"],
+            with_vectors=False,
+        )
+        for record in records:
+            payload = record.payload or {}
+            source = payload.get("source")
+            if not isinstance(source, str) or source not in managed_sources:
+                continue
+            scope = payload.get("index_scope")
+            path = str(payload.get("path") or "")
+            legacy_corpus_point = scope is None and not (
+                Path(path).is_absolute() or _URL_RE.match(path)
+            )
+            if ((scope == "corpus" or legacy_corpus_point)
+                    and payload.get("index_generation") != index_generation):
+                stale.append(str(record.id))
+        if offset is None:
+            break
+
+    for start in range(0, len(stale), 1000):
+        client.delete(collection_name=collection, points_selector=stale[start:start + 1000])
+    return len(stale)
 
 
 def build_index(
@@ -175,16 +242,19 @@ def build_index(
     snapshot_version: str | None = None,
     resume: bool = True,
     collection: str | None = None,
+    prune_missing_sources: bool = False,
 ) -> dict:
     """Embed and upsert chunks into `collection` (default config.QDRANT_COLLECTION).
 
-    Returns {"indexed": n, "updated": u, "skipped": m, "batches": b}, where
-    `updated` counts re-embedded chunks whose content changed (a subset of
-    `indexed`, since they overwrite their existing point).
+    Returns index counts; full manifest builds also report `deleted` for stale
+    points removed after a successful complete pass. `updated` counts changed
+    chunks re-embedded over their existing point. Set `prune_missing_sources`
+    only when configured source roots were intentionally removed, not unmounted.
     """
     collection = collection or config.QDRANT_COLLECTION
     if snapshot_version is None:
         snapshot_version = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    reconcile = chunks is None
     if chunks is None:
         from blkchain import ingest  # lazy: ingest.py may not exist yet
         chunks = ingest.iter_chunks()
@@ -193,7 +263,14 @@ def build_index(
     sparse_model = SparseTextEmbedding(model_name=config.SPARSE_MODEL)
     existing = _existing_hashes(client, collection) if resume else {}
 
-    return _index_chunks(client, sparse_model, collection, chunks, existing, resume, snapshot_version)
+    generation = uuid.uuid4().hex if reconcile else None
+    stats = _index_chunks(client, sparse_model, collection, chunks, existing, resume,
+                          snapshot_version, "corpus" if reconcile else None, generation)
+    if reconcile:
+        stats["deleted"] = _reconcile_corpus(
+            client, collection, generation, prune_missing_sources=prune_missing_sources
+        )
+    return stats
 
 
 # --- blk add: load arbitrary content (file/dir/URL) into the live index ----
@@ -242,12 +319,36 @@ def _chunk_file(file_path: Path, source: str, kind: str, base_dir: Path):
 
 def _chunk_dir(root: Path, source: str, kind: str | None):
     """Walk a directory and chunk each supported file, inferring kind per file
-    from its extension unless `kind` forces one kind for everything."""
+    from its extension unless `kind` forces one kind for everything.
+
+    Enforces BLKCHAIN_ADD_MAX_FILES (default 5000) and BLKCHAIN_ADD_MAX_BYTES
+    (default 512 MiB) during the walk (DoS guard) so a huge tree cannot exhaust
+    memory/time on a single add. Read from env at call time; raise a clear
+    ValueError when either cap is exceeded."""
     from blkchain import ingest
 
+    max_files = int(os.environ.get("BLKCHAIN_ADD_MAX_FILES", "5000"))
+    max_bytes = int(os.environ.get("BLKCHAIN_ADD_MAX_BYTES", str(512 * 1024 * 1024)))
+    files = 0
+    total_bytes = 0
     for file_path in ingest._iter_files(root, None, (".git",)):
         if file_path.suffix.lower() in _ADD_SKIP_DIR_EXTS:
             continue
+        files += 1
+        if files > max_files:
+            raise ValueError(
+                f"add: directory {root} exceeds BLKCHAIN_ADD_MAX_FILES ({max_files}); "
+                f"narrow the path or raise the cap"
+            )
+        try:
+            total_bytes += file_path.stat().st_size
+        except OSError:
+            pass
+        if total_bytes > max_bytes:
+            raise ValueError(
+                f"add: directory {root} exceeds BLKCHAIN_ADD_MAX_BYTES ({max_bytes} bytes); "
+                f"narrow the path or raise the cap"
+            )
         file_kind = kind or _infer_kind(file_path.suffix)
         yield from _chunk_file(file_path, source, file_kind, root)
 
@@ -293,63 +394,109 @@ def _chunk_text(text: str, source: str, path_str: str, markdown: bool):
             idx += 1
 
 
-def _reject_unsafe_host(url: str) -> None:
-    """Raise ValueError if url's host resolves to a private, loopback,
-    link-local, or otherwise reserved IP address (SSRF guard). This blocks
-    fetches of internal services and cloud metadata endpoints such as
-    169.254.169.254."""
-    host = urlparse(url).hostname
+def _reject_unsafe_addr(addr: str, url: str, host: str) -> None:
+    """Raise ValueError if addr is a private, loopback, link-local, reserved,
+    multicast, or unspecified IP (SSRF guard). Blocks internal services and
+    cloud metadata endpoints such as 169.254.169.254."""
+    ip = ipaddress.ip_address(addr)
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    ):
+        raise ValueError(
+            f"add: refusing to fetch {url!r} — host {host!r} resolves to "
+            f"a non-public address ({addr})"
+        )
+
+
+def _resolve_safe_host(url: str) -> tuple[str, tuple]:
+    """Resolve url's host ONCE, validate EVERY returned address, and return
+    (host, addrinfo) for the first validated address.
+
+    Resolving a single time and pinning the returned address (see
+    _pin_resolution) closes the DNS-rebinding / TOCTOU window: without it,
+    requests re-resolves the host at connect time, so a resolver returning a
+    public IP at check time and a private IP at connect time would bypass the
+    guard. Rejecting when ANY resolved address is non-public also stops a
+    round-robin resolver from smuggling in a private record.
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname
     if not host:
         raise ValueError(f"add: could not parse a host from url: {url}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
-        infos = socket.getaddrinfo(host, None)
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise ValueError(f"add: could not resolve host {host!r}: {exc}") from exc
+    if not infos:
+        raise ValueError(f"add: could not resolve host {host!r}")
     for info in infos:
-        addr = info[4][0]
-        ip = ipaddress.ip_address(addr)
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            raise ValueError(
-                f"add: refusing to fetch {url!r} — host {host!r} resolves to "
-                f"a non-public address ({addr})"
-            )
+        _reject_unsafe_addr(info[4][0], url, host)
+    return host, infos[0]  # every address validated; pin the first for the fetch
+
+
+def _reject_unsafe_host(url: str) -> None:
+    """Back-compat wrapper: resolve + validate url's host, discarding the
+    pinned address. Raises ValueError on an unsafe or unresolvable host."""
+    _resolve_safe_host(url)
+
+
+@contextlib.contextmanager
+def _pin_resolution(host: str, addrinfo: tuple):
+    """Force socket.getaddrinfo to return only `addrinfo` for `host` while the
+    fetch runs, so requests/urllib3 connect to the exact validated IP instead
+    of independently re-resolving (DNS-rebinding / TOCTOU guard). Other hosts
+    resolve normally. Only the address is pinned; the URL hostname is left
+    intact, so TLS SNI and certificate verification still validate against the
+    hostname."""
+    real_getaddrinfo = socket.getaddrinfo
+
+    def pinned(node, *args, **kwargs):
+        if node == host:
+            return [addrinfo]
+        return real_getaddrinfo(node, *args, **kwargs)
+
+    socket.getaddrinfo = pinned
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = real_getaddrinfo
 
 
 def _fetch_url(url: str) -> tuple[str, str]:
     """GET url with a timeout and a bound on body size. Returns (text,
     content_type). Reads at most _MAX_URL_BYTES of the body.
 
-    Redirects are followed manually (up to _MAX_URL_REDIRECTS) so that EACH
-    hop's host is re-checked with _reject_unsafe_host — a legitimate redirect
-    (http->https, CDN) works, but a redirect to a private/internal address
-    (SSRF) is rejected at that hop rather than followed.
+    Redirects are followed manually (up to _MAX_URL_REDIRECTS). EACH hop
+    resolves + validates its own host and pins that validated IP for the
+    connection, so a legitimate redirect (http->https, CDN) works while a
+    redirect to a private/internal address (SSRF) is rejected at that hop.
     """
     for _ in range(_MAX_URL_REDIRECTS + 1):
-        _reject_unsafe_host(url)
-        resp = requests.get(url, timeout=_URL_FETCH_TIMEOUT, stream=True, allow_redirects=False)
-        if resp.is_redirect or resp.is_permanent_redirect:
-            location = resp.headers.get("location", "")
+        host, addrinfo = _resolve_safe_host(url)  # resolve once + validate all
+        with _pin_resolution(host, addrinfo):     # connect only to that IP
+            resp = requests.get(url, timeout=_URL_FETCH_TIMEOUT, stream=True, allow_redirects=False)
+            if resp.is_redirect or resp.is_permanent_redirect:
+                location = resp.headers.get("location", "")
+                resp.close()
+                if not location:
+                    raise ValueError(f"add: {url!r} returned a redirect with no Location")
+                url = urljoin(url, location)  # resolve relative redirects; re-validated next loop
+                continue
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "")
+            body = bytearray()
+            for piece in resp.iter_content(chunk_size=65536):
+                body.extend(piece)
+                if len(body) >= _MAX_URL_BYTES:
+                    break
             resp.close()
-            if not location:
-                raise ValueError(f"add: {url!r} returned a redirect with no Location")
-            url = urljoin(url, location)  # resolve relative redirects; re-validated next loop
-            continue
-        resp.raise_for_status()
-        content_type = resp.headers.get("content-type", "")
-        body = bytearray()
-        for piece in resp.iter_content(chunk_size=65536):
-            body.extend(piece)
-            if len(body) >= _MAX_URL_BYTES:
-                break
-        resp.close()
-        return bytes(body[:_MAX_URL_BYTES]).decode("utf-8", errors="ignore"), content_type
+            return bytes(body[:_MAX_URL_BYTES]).decode("utf-8", errors="ignore"), content_type
     raise ValueError(f"add: too many redirects fetching {url!r} (>{_MAX_URL_REDIRECTS})")
 
 
@@ -406,21 +553,24 @@ def add_path(
     snapshot_version = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     label = derive_source_label(path, source)
 
+    # Stream chunks (generators, not materialized lists) into _index_chunks so
+    # memory stays bounded on a large add; _index_chunks consumes and batches.
     if _URL_RE.match(path):
-        chunks = list(_chunk_url(path, label, kind))
+        chunks = _chunk_url(path, label, kind)
     else:
         p = Path(path).expanduser().resolve()
         if not p.exists():
             raise FileNotFoundError(f"add: no such file or directory: {path}")
         if p.is_dir():
-            chunks = list(_chunk_dir(p, label, kind))
+            chunks = _chunk_dir(p, label, kind)
         else:
             file_kind = kind or _infer_kind(p.suffix)
-            chunks = list(_chunk_file(p, label, file_kind, p.parent))
+            chunks = _chunk_file(p, label, file_kind, p.parent)
 
     ensure_collection(collection)
     client = QdrantClient(url=config.QDRANT_URL)
     sparse_model = SparseTextEmbedding(model_name=config.SPARSE_MODEL)
     existing = _existing_hashes(client, collection) if resume else {}
 
-    return _index_chunks(client, sparse_model, collection, chunks, existing, resume, snapshot_version)
+    return _index_chunks(client, sparse_model, collection, chunks, existing, resume,
+                         snapshot_version, "manual")

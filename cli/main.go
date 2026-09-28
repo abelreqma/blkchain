@@ -52,6 +52,8 @@ func main() {
 		err = runOpen(args)
 	case "hermes":
 		err = runHermes(args)
+	case "gateway":
+		err = runGateway(args)
 	case "repl", "chat":
 		err = runREPL()
 	case "version", "--version", "-v":
@@ -96,6 +98,7 @@ var usageCmds = []usageCmd{
 	{"repl", "interactive REPL (bare blk too — search/ask without re-launching)", false},
 	{"open <path|N>", "open a source file in $PAGER/$EDITOR", false},
 	{"hermes <prompt...>", "run a Hermes agent turn (has the blkChain KB tools)", false},
+	{"gateway", "provision ~/.hermes/.env + start hermes gateway (richer agent mode)", false},
 	{"up|down|status", "start / stop / check the local services", false},
 	{"mcp", "run the Hermes MCP stdio server (for ~/.hermes/config.yaml)", false},
 	{"health", "check the API and its dependencies", false},

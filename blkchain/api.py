@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import requests
 
 from blkchain import config
-from blkchain.httputil import max_body_bytes, read_json_body, send_json
+from blkchain.httputil import max_body_bytes, read_json_body, send_error, send_json
 from blkchain.retrieve import kb_search
 
 # Retrieval requests are small (a query plus optional filters); cap the body at
@@ -97,17 +97,17 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return self._send(200, {"results": results})
             except Exception as e:
-                return self._send(500, {"error": f"search failed: {type(e).__name__}: {e}"})
+                return send_error(self, 500, "internal error during search", exc=e)
 
         if self.path == "/answer":
             try:
                 from blkchain.agent import kb_answer  # lazy: available once agent.py exists
             except Exception as e:
-                return self._send(503, {"error": f"answer unavailable: {type(e).__name__}: {e}"})
+                return send_error(self, 503, "answer unavailable", exc=e)
             try:
                 return self._send(200, kb_answer(query))
             except Exception as e:
-                return self._send(500, {"error": f"answer failed: {type(e).__name__}: {e}"})
+                return send_error(self, 500, "internal error during answer", exc=e)
 
         self._send(404, {"error": "not found"})
 

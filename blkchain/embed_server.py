@@ -1,8 +1,9 @@
 """blkChain embed + rerank server (localhost, single-user).
 
-Serves the dense embedder (Qwen3-Embedding-0.6B-8bit via mlx-embeddings) and the
-jina-reranker-v3 listwise reranker (blkchain/reranker.py). Kept resident on its
-own port so oMLX serves only the LLM (see RAG-BUILD-PLAN sections 9.2/9.4).
+Serves the dense embedder (Qwen3-Embedding-0.6B-4bit-DWQ via mlx-embeddings) and
+a pluggable reranker (blkchain/reranker.py; gte-reranker-modernbert-base by
+default, jina optional). Kept resident on its own port so oMLX serves only the
+LLM (see RAG-BUILD-PLAN sections 9.2/9.4).
 Inference is serialized (MLX is not thread-safe) and the Metal cache is released
 after large batches. Stdlib http.server only, so no extra web dependency.
 
@@ -20,7 +21,7 @@ import numpy as np
 import mlx.core as mx
 
 from blkchain import config
-from blkchain.httputil import max_body_bytes, read_json_body, send_json
+from blkchain.httputil import max_body_bytes, read_json_body, send_error, send_json
 
 # /embed legitimately posts many texts in one batch, so allow a larger body
 # than the retrieval API while still bounding it against a memory-DoS.
@@ -93,7 +94,7 @@ class Handler(BaseHTTPRequestHandler):
                 embs = _embed([str(t) for t in texts])
                 return self._send(200, {"embeddings": embs, "dim": len(embs[0]) if embs else 0})
             except Exception as e:
-                return self._send(500, {"error": f"embed failed: {type(e).__name__}: {e}"})
+                return send_error(self, 500, "internal error during embed", exc=e)
 
         if self.path == "/rerank":
             if not _RERANKER_OK:
@@ -107,7 +108,7 @@ class Handler(BaseHTTPRequestHandler):
                     scores = rerank_documents(query, [str(d) for d in docs])
                 return self._send(200, {"scores": list(scores)})
             except Exception as e:
-                return self._send(500, {"error": f"rerank failed: {type(e).__name__}: {e}"})
+                return send_error(self, 500, "internal error during rerank", exc=e)
 
         self._send(404, {"error": "not found"})
 

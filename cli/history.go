@@ -22,7 +22,11 @@ func historyPath() (string, error) {
 		}
 		base = filepath.Join(home, ".config")
 	}
-	return filepath.Join(base, "blkchain", "history"), nil
+	path := filepath.Join(base, "blkchain", "history")
+	if err := privateDir(filepath.Dir(path)); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // loadHistory returns the REPL's saved command history, oldest first,
@@ -38,6 +42,9 @@ func loadHistory() []string {
 		return nil
 	}
 	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		return nil
+	}
 
 	var lines []string
 	scanner := bufio.NewScanner(f)
@@ -54,8 +61,8 @@ func loadHistory() []string {
 	return lines
 }
 
-// appendHistory appends one line to the history file, creating its parent
-// directory (0755) and the file (0644) if needed. Empty lines and lines
+// appendHistory appends one line to the history file, creating private storage
+// for the file if needed. Empty lines and lines
 // identical to the last saved entry are skipped.
 func appendHistory(line string) error {
 	if strings.TrimSpace(line) == "" {
@@ -71,15 +78,18 @@ func appendHistory(line string) error {
 		return nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := privateDir(filepath.Dir(p)); err != nil {
 		return err
 	}
 
-	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
 
 	_, err = f.WriteString(line + "\n")
 	return err

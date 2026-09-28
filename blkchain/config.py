@@ -113,8 +113,8 @@ EMBED_SERVER_URL = f"http://{EMBED_SERVER_HOST}:{EMBED_SERVER_PORT}"
 # request is split into bounded forward passes (avoids multi-minute batches).
 EMBED_SUBBATCH = int(os.environ.get("BLKCHAIN_EMBED_SUBBATCH", "32"))
 # Release the MLX Metal cache after an embed request of at least this many texts
-# (i.e. index-time batches), so a big re-index does not bloat resident memory and
-# starve the LLM. Small interactive queries stay below it, keeping their speed.
+# (i.e. index-time batches), so a big re-index does not bloat resident memory.
+# Small interactive queries stay below it, keeping their speed.
 EMBED_CACHE_RELEASE_AFTER = int(os.environ.get("BLKCHAIN_EMBED_CACHE_RELEASE_AFTER", "64"))
 
 # --- Qdrant -----------------------------------------------------------------
@@ -137,9 +137,7 @@ CONTENT_FILE_MAX_BYTES = 256 * 1024
 CONTENT_FILE_MAX_LINES = 2000
 
 # --- Answer generation caps (agent.py) --------------------------------------
-# These bound the answer/grading prefill so it stays under oMLX's prefill memory
-# guard (the ~24 GB machine is tight with the ~13 GB LLM resident). They are
-# env-overridable: after raising the oMLX guard tier / freeing RAM, widen
+# These bound the answer/grading prefill size. They are env-overridable: widen
 # ANSWER_MAX_CHUNKS for richer synthesis without editing code.
 GRADE_MAX_TOKENS = int(os.environ.get("BLKCHAIN_GRADE_MAX_TOKENS", "200"))
 ANSWER_MAX_TOKENS = int(os.environ.get("BLKCHAIN_ANSWER_MAX_TOKENS", "700"))

@@ -4,9 +4,9 @@ Two independent layers:
 
 1. RETRIEVAL METRICS (primary gate, deterministic, no LLM). For each labeled
    case, kb_search is called once for a pool of max(top_k, 10) results. A case
-   is a HIT@k when any of the top-k results' payload text OR path (lowercased)
-   contains ANY expected_substring, AND (if expected_cwe is set) some top-k
-   result's cwe_class matches. We report hit_rate@5, hit_rate@10 and MRR.
+   is a HIT@k when one result in the top-k matches an expected substring, an
+   expected source (when labeled), and an expected CWE (when labeled). All
+   labels must match the same result. We report hit_rate@5, hit_rate@10 and MRR.
 
 2. ANSWER METRICS (best-effort, LLM-judged with the local oMLX model). Wraps
    deepeval Faithfulness / AnswerRelevancy against agent.kb_answer output. If
@@ -81,52 +81,55 @@ def _breakdown_by_difficulty(case_results: list["CaseResult"]) -> list[tuple[str
 class CaseResult:
     case: Case
     n_results: int
-    first_rank: int | None       # 1-based rank of first substring match in pool
+    first_rank: int | None       # 1-based rank of first complete labeled match
+    first_text_rank: int | None
+    first_source_rank: int | None
     matched_substring: str | None
-    cwe_ok_at5: bool
-    cwe_ok_at10: bool
+    matched_source: str | None
 
     def hit_at(self, k: int) -> bool:
-        if self.first_rank is None or self.first_rank > k:
-            return False
-        return self.cwe_ok_at5 if k <= 5 else self.cwe_ok_at10
+        return self.first_rank is not None and self.first_rank <= k
 
     @property
     def mrr(self) -> float:
-        # Reciprocal rank of the first hit within the pool, gated by cwe.
+        # Reciprocal rank of the first result satisfying every case label.
         if self.first_rank is None or self.first_rank > _METRIC_DEPTH:
-            return 0.0
-        if not self.cwe_ok_at10:
             return 0.0
         return 1.0 / self.first_rank
 
 
-def _cwe_ok(results: list[dict], expected_cwe: str | None) -> bool:
-    if not expected_cwe:
-        return True
-    return any((r["payload"].get("cwe_class") or "") == expected_cwe for r in results)
-
-
 def evaluate_retrieval(case: Case, results: list[dict]) -> CaseResult:
     first_rank: int | None = None
+    first_text_rank: int | None = None
+    first_source_rank: int | None = None
     matched: str | None = None
+    matched_source: str | None = None
     for i, r in enumerate(results, start=1):
         payload = r.get("payload", {})
         haystack = ((payload.get("text") or "") + " " + str(payload.get("path") or "")).lower()
-        for sub in case.expected_substrings:
-            if sub in haystack:
-                first_rank = i
-                matched = sub
-                break
-        if first_rank is not None:
+        source = str(payload.get("source") or "")
+        sub = next((s for s in case.expected_substrings if s in haystack), None)
+        if sub is None:
+            continue
+        if first_text_rank is None:
+            first_text_rank = i
+        source_ok = not case.expected_sources or source.casefold() in {s.casefold() for s in case.expected_sources}
+        if source_ok and first_source_rank is None:
+            first_source_rank = i
+        cwe_ok = not case.expected_cwe or (payload.get("cwe_class") or "").casefold() == case.expected_cwe.casefold()
+        if source_ok and cwe_ok:
+            first_rank = i
+            matched = sub
+            matched_source = source
             break
     return CaseResult(
         case=case,
         n_results=len(results),
         first_rank=first_rank,
+        first_text_rank=first_text_rank,
+        first_source_rank=first_source_rank,
         matched_substring=matched,
-        cwe_ok_at5=_cwe_ok(results[:5], case.expected_cwe),
-        cwe_ok_at10=_cwe_ok(results[:10], case.expected_cwe),
+        matched_source=matched_source,
     )
 
 
@@ -238,7 +241,7 @@ def run_judge(cases: list[Case], judge_limit: int) -> tuple[list[JudgeResult], s
         try:
             answer = kb_answer(case.query)
             # Cap judged context (count + chars per chunk) so the faithfulness
-            # prompt stays under oMLX's prefill memory guard on a tight-RAM box.
+            # prompt stays bounded.
             max_ctx = int(os.environ.get("BLKCHAIN_JUDGE_MAX_CONTEXTS", "4"))
             max_chars = int(os.environ.get("BLKCHAIN_JUDGE_CONTEXT_CHARS", "800"))
             context = [
@@ -300,16 +303,14 @@ def build_report(
     for label, h, t in _breakdown_by_difficulty(case_results):
         lines.append(f"- hit_rate@5 ({label}): {_fmt_pct(h / t)} ({h}/{t})")
     lines.append("")
-    lines.append("| # | query | hit@5 | rank | matched substring |")
-    lines.append("|---|-------|-------|------|-------------------|")
+    lines.append("| # | query | hit@5 | rank | matched source | matched substring |")
+    lines.append("|---|-------|-------|------|----------------|-------------------|")
     for i, c in enumerate(case_results, start=1):
         rank = str(c.first_rank) if c.first_rank is not None else "-"
         matched = c.matched_substring or ""
-        cwe_note = ""
-        if c.case.expected_cwe and not c.cwe_ok_at10:
-            cwe_note = f" (cwe {c.case.expected_cwe} absent)"
+        source = (c.matched_source or "").replace("|", "\\|")
         query = c.case.query.replace("|", "\\|")
-        lines.append(f"| {i} | {query} | {'Y' if c.hit_at(5) else 'N'} | {rank} | {matched}{cwe_note} |")
+        lines.append(f"| {i} | {query} | {'Y' if c.hit_at(5) else 'N'} | {rank} | {source} | {matched} |")
     lines.append("")
 
     misses = [c for c in case_results if not c.hit_at(5)]
@@ -318,10 +319,12 @@ def build_report(
         lines.append("")
         for c in misses:
             reason = "no expected substring in top-10 pool"
-            if c.first_rank is not None and c.first_rank > 5:
-                reason = f"substring '{c.matched_substring}' first appears at rank {c.first_rank} (below top-5)"
-            elif c.case.expected_cwe and not c.cwe_ok_at5 and c.first_rank is not None:
-                reason = f"substring matched but cwe_class '{c.case.expected_cwe}' absent in top-5"
+            if c.first_text_rank is not None and c.case.expected_sources and c.first_source_rank is None:
+                reason = "expected substring appears, but not from an expected source"
+            elif c.first_source_rank is not None and c.case.expected_cwe and c.first_rank is None:
+                reason = f"expected substring/source match appears, but not with CWE '{c.case.expected_cwe}'"
+            elif c.first_rank is not None and c.first_rank > 5:
+                reason = f"complete labeled match first appears at rank {c.first_rank} (below top-5)"
             lines.append(f"- {c.case.query}: {reason}")
         lines.append("")
 

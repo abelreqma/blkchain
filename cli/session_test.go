@@ -40,8 +40,18 @@ func TestNewSessionLazyFileAndAppend(t *testing.T) {
 
 	if fi, err := os.Stat(s.filePath()); err != nil {
 		t.Fatalf("transcript should exist after append: %v", err)
-	} else if fi.Mode().Perm() != 0o644 {
-		t.Errorf("transcript perm = %v, want 0644", fi.Mode().Perm())
+	} else if fi.Mode().Perm() != 0o600 {
+		t.Errorf("transcript perm = %v, want 0600", fi.Mode().Perm())
+	}
+	if fi, err := os.Stat(filepath.Join(s.dir, indexName)); err != nil {
+		t.Fatalf("session index should exist: %v", err)
+	} else if fi.Mode().Perm() != 0o600 {
+		t.Errorf("index perm = %v, want 0600", fi.Mode().Perm())
+	}
+	if fi, err := os.Stat(s.dir); err != nil {
+		t.Fatalf("sessions directory should exist: %v", err)
+	} else if fi.Mode().Perm() != 0o700 {
+		t.Errorf("sessions dir perm = %v, want 0700", fi.Mode().Perm())
 	}
 
 	// Title is the first user message, capped at titleMaxLen runes.
@@ -183,6 +193,19 @@ func TestApplyTombstonesUnbalanced(t *testing.T) {
 	// A leading tombstone with nothing before it is a no-op.
 	if got := applyTombstones([]turnRecord{{Role: roleTombstone}}); len(got) != 0 {
 		t.Errorf("leading tombstone left %d records", len(got))
+	}
+}
+
+func TestValidSessionID(t *testing.T) {
+	bad := []string{"../x", "a/b", "a\\b", "..", "", "foo/../bar"}
+	for _, id := range bad {
+		if validSessionID(id) {
+			t.Errorf("validSessionID(%q) = true, want false", id)
+		}
+	}
+	good := newSessionID()
+	if !validSessionID(good) {
+		t.Errorf("validSessionID(%q) = false, want true", good)
 	}
 }
 

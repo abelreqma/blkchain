@@ -161,8 +161,8 @@ func TestLoadAppendHistory(t *testing.T) {
 	p := filepath.Join(dir, "blkchain", "history")
 	if fi, err := os.Stat(p); err != nil {
 		t.Fatalf("history file not created: %v", err)
-	} else if fi.Mode().Perm() != 0o644 {
-		t.Fatalf("history file mode = %v, want 0644", fi.Mode().Perm())
+	} else if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("history file mode = %v, want 0600", fi.Mode().Perm())
 	}
 }
 

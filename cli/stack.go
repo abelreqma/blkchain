@@ -40,7 +40,7 @@ var (
 // RUN="$ROOT/.run"; mkdir -p "$RUN").
 func runDir(root string) (string, error) {
 	dir := filepath.Join(root, ".run")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := privateDir(dir); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -165,7 +165,7 @@ func dockerRunQdrantArgs(root string) []string {
 		"run", "-d", "--name", qdrantContainer, "--restart", "unless-stopped",
 		"-p", "127.0.0.1:6333:6333", "-p", "127.0.0.1:6334:6334",
 		"-v", filepath.Join(root, "data", "qdrant_storage") + ":/qdrant/storage",
-		"dhi.io/qdrant:1",
+		"dhi.io/qdrant@sha256:047fe742edb0c61908acca3fb726b14018f5361d2e0dbabb1a94e47a72448cba",
 	}
 }
 
@@ -228,12 +228,16 @@ func startPy(root string, svc pyService, tavily string) {
 
 	python := venvPython(root)
 	logPath := logFilePath(root, svc.name)
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		printSvcFail(svc.name, "could not open log "+logPath)
 		return
 	}
 	defer logFile.Close()
+	if err := logFile.Chmod(0o600); err != nil {
+		printSvcFail(svc.name, "could not secure log "+logPath)
+		return
+	}
 
 	cmd := exec.Command(python, "-m", svc.module)
 	cmd.Dir = root
@@ -247,7 +251,7 @@ func startPy(root string, svc pyService, tavily string) {
 		return
 	}
 	pid := cmd.Process.Pid
-	if err := os.WriteFile(pidFilePath(root, svc.name), []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(pidFilePath(root, svc.name), []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
 		printSvcFail(svc.name, fmt.Sprintf("started (pid %d) but failed to record pidfile", pid))
 	}
 	// Detach: blk neither waits on nor owns this process from here on.

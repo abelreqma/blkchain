@@ -12,6 +12,13 @@ import (
 // scripts/ is removed (the stack is now orchestrated natively in stack.go).
 const rootMarker = "pyproject.toml"
 
+func privateDir(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o700)
+}
+
 // validRoot reports whether dir looks like the blkChain project root.
 func validRoot(dir string) bool {
 	if dir == "" {
@@ -115,10 +122,13 @@ func saveRoot(root string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := privateDir(filepath.Dir(p)); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(p, []byte(root+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(root+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(p, 0o600); err != nil {
 		return "", err
 	}
 	return p, nil

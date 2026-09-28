@@ -45,7 +45,12 @@ class Chunk:
     blurb: str | None = None                  # optional situating context for sparse + rerank
     extra: dict[str, Any] = field(default_factory=dict)  # line_count, size_bytes, worked, date, program, ...
 
-    def payload(self, snapshot_version: str) -> dict[str, Any]:
+    def payload(
+        self,
+        snapshot_version: str,
+        index_scope: str | None = None,
+        index_generation: str | None = None,
+    ) -> dict[str, Any]:
         """Qdrant point payload (RAG-BUILD-PLAN section 6.2)."""
         p = {
             "source": self.source,
@@ -60,6 +65,10 @@ class Chunk:
             "content_hash": content_hash(self.text),
         }
         p.update(self.extra)
+        if index_scope is not None:
+            p["index_scope"] = index_scope
+        if index_generation is not None:
+            p["index_generation"] = index_generation
         return p
 
 
@@ -67,7 +76,7 @@ def chunk_from_payload(point_id: str, payload: dict[str, Any]) -> Chunk:
     """Reconstruct a Chunk from a Qdrant payload (for retrieval results)."""
     known = {"source", "path", "section", "type", "identifiers", "cwe_class", "blurb", "text"}
     extra = {k: v for k, v in payload.items()
-             if k not in known and k not in ("snapshot_version", "content_hash")}
+             if k not in known and k not in ("snapshot_version", "content_hash", "index_scope", "index_generation")}
     return Chunk(
         id=str(point_id),
         text=payload.get("text", ""),

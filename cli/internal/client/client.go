@@ -20,7 +20,7 @@ const defaultBaseURL = "http://127.0.0.1:8200"
 const maxResponseBytes = 10 << 20 // 10 MiB
 
 // defaultTimeout is generous because `ask` waits on local LLM synthesis, which
-// is slow on a memory-constrained machine. Override with BLKCHAIN_TIMEOUT_SECONDS.
+// can be slow for large local models. Override with BLKCHAIN_TIMEOUT_SECONDS.
 const defaultTimeout = 300 * time.Second
 
 // requestTimeout resolves the per-request timeout from BLKCHAIN_TIMEOUT_SECONDS

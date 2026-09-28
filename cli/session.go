@@ -90,7 +90,11 @@ func sessionsDir() (string, error) {
 		}
 		base = filepath.Join(home, ".local", "share")
 	}
-	return filepath.Join(base, "blk", "sessions"), nil
+	dir := filepath.Join(base, "blk", "sessions")
+	if err := privateDir(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 // newSessionID builds a sortable, collision-resistant id: a UTC timestamp
@@ -104,14 +108,14 @@ func newSessionID() string {
 	return ts + "-" + hex.EncodeToString(b)
 }
 
-// newSession creates the sessions dir (0755) and returns a fresh handle. The
+// newSession creates the private sessions dir and returns a fresh handle. The
 // transcript file is written lazily on the first appendTurn.
 func newSession() (*session, error) {
 	dir, err := sessionsDir()
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := privateDir(dir); err != nil {
 		return nil, err
 	}
 	return &session{id: newSessionID(), dir: dir}, nil
@@ -120,6 +124,9 @@ func newSession() (*session, error) {
 // openSession returns a handle to an existing session, hydrated from index.json.
 // It errors if the transcript file does not exist.
 func openSession(id string) (*session, error) {
+	if !validSessionID(id) {
+		return nil, fmt.Errorf("invalid session id %q", id)
+	}
 	dir, err := sessionsDir()
 	if err != nil {
 		return nil, err
@@ -135,10 +142,25 @@ func openSession(id string) (*session, error) {
 	if _, err := os.Stat(s.filePath()); err != nil {
 		return nil, fmt.Errorf("session %s not found", id)
 	}
+	if err := os.Chmod(s.filePath(), 0o600); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
 func (s *session) filePath() string { return filepath.Join(s.dir, s.id+sessionExt) }
+
+// validSessionID reports whether id is safe to use as the bare filename
+// component of a session transcript path. index.json is untrusted (it's a
+// file on disk, not something the program itself constrained at write time),
+// so any id read back from it must be rejected before it reaches
+// filepath.Join: no separators, and no "..".
+func validSessionID(id string) bool {
+	if id == "" || strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
+		return false
+	}
+	return id == filepath.Base(id)
+}
 
 // appendTurn appends one record to the transcript (creating the file 0644 on
 // first write) and updates the sidecar index. A user record with no title yet
@@ -152,15 +174,19 @@ func (s *session) appendTurn(rec turnRecord) error {
 	if fi, err := os.Stat(path); err == nil && fi.Size() >= maxSessionBytes {
 		return errSessionFull
 	}
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+	if err := privateDir(s.dir); err != nil {
 		return err
 	}
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
 		return err
 	}
 	if _, err := f.Write(append(line, '\n')); err != nil {
@@ -237,6 +263,13 @@ func listSessions() ([]sessionMeta, error) {
 	if err != nil {
 		return nil, err
 	}
+	out := metas[:0]
+	for _, m := range metas {
+		if validSessionID(m.ID) {
+			out = append(out, m)
+		}
+	}
+	metas = out
 	sort.SliceStable(metas, func(i, j int) bool { return metas[i].UpdatedAt > metas[j].UpdatedAt })
 	return metas, nil
 }
@@ -244,6 +277,9 @@ func listSessions() ([]sessionMeta, error) {
 // loadMessages reads a session transcript in order, with /undo tombstones
 // applied so replay shows only the surviving turns.
 func loadMessages(id string) ([]turnRecord, error) {
+	if !validSessionID(id) {
+		return nil, fmt.Errorf("invalid session id %q", id)
+	}
 	dir, err := sessionsDir()
 	if err != nil {
 		return nil, err
@@ -253,6 +289,9 @@ func loadMessages(id string) ([]turnRecord, error) {
 		return nil, err
 	}
 	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		return nil, err
+	}
 
 	var recs []turnRecord
 	sc := bufio.NewScanner(f)
@@ -302,6 +341,9 @@ func dropLastPair(recs []turnRecord) []turnRecord {
 
 // deleteSession removes a session's transcript and its index entry.
 func deleteSession(id string) error {
+	if !validSessionID(id) {
+		return fmt.Errorf("invalid session id %q", id)
+	}
 	dir, err := sessionsDir()
 	if err != nil {
 		return err
@@ -322,6 +364,9 @@ func deleteSession(id string) error {
 
 // renameSession overrides a session's title in the index.
 func renameSession(id, title string) error {
+	if !validSessionID(id) {
+		return fmt.Errorf("invalid session id %q", id)
+	}
 	dir, err := sessionsDir()
 	if err != nil {
 		return err
@@ -361,6 +406,9 @@ func readIndexRaw(dir string) ([]sessionMeta, error) {
 		}
 		return nil, err
 	}
+	if err := os.Chmod(filepath.Join(dir, indexName), 0o600); err != nil {
+		return nil, err
+	}
 	var metas []sessionMeta
 	if err := json.Unmarshal(data, &metas); err != nil {
 		return nil, err
@@ -370,7 +418,7 @@ func readIndexRaw(dir string) ([]sessionMeta, error) {
 
 // writeIndex writes index.json atomically (temp file + rename).
 func writeIndex(dir string, metas []sessionMeta) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := privateDir(dir); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(metas, "", "  ")
@@ -378,7 +426,10 @@ func writeIndex(dir string, metas []sessionMeta) error {
 		return err
 	}
 	tmp := filepath.Join(dir, indexName+".tmp")
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, filepath.Join(dir, indexName))
