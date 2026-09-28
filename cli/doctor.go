@@ -20,38 +20,38 @@ func runDoctor(args []string) error {
 		return err
 	}
 
-	fmt.Println(bold("blk doctor"))
+	fmt.Println(H1.Render("blk doctor"))
 	fmt.Println()
 
 	// 1. Project root + stack script.
 	root, rootErr := projectRoot()
 	if rootErr == nil {
-		fmt.Printf("%s project root %s\n", green("✓"), dim(root))
+		fmt.Printf("%s project root %s\n", check(true), Meta.Render(root))
 		if _, err := os.Stat(filepath.Join(root, rootMarker)); err == nil {
-			fmt.Printf("%s stack script %s\n", green("✓"), dim(rootMarker))
+			fmt.Printf("%s stack script %s\n", check(true), Meta.Render(rootMarker))
 		} else {
-			fmt.Printf("%s stack script missing (%s)\n", red("✗"), rootMarker)
+			fmt.Printf("%s stack script missing (%s)\n", check(false), rootMarker)
 		}
 	} else {
-		fmt.Printf("%s project root not found — run `blk install` from the project\n", red("✗"))
+		fmt.Printf("%s project root not found — run `blk install` from the project\n", check(false))
 	}
 
 	// 2. API + dependencies.
 	c := client.NewClient()
 	h, err := c.Health()
 	if err != nil {
-		fmt.Printf("%s blkChain API unreachable %s — try `blk up`\n", red("✗"), dim("("+c.BaseURL+")"))
+		fmt.Printf("%s blkChain API unreachable %s — try `blk up`\n", check(false), Meta.Render("("+c.BaseURL+")"))
 	} else {
-		fmt.Printf("%s blkChain API %s %s\n", check(h.Status == "ok"), h.Status, dim("("+c.BaseURL+")"))
+		fmt.Printf("%s blkChain API %s %s\n", check(h.Status == "ok"), h.Status, Meta.Render("("+c.BaseURL+")"))
 		fmt.Printf("  %s qdrant\n", check(h.Qdrant))
 		fmt.Printf("  %s embed_server\n", check(h.EmbedServer))
 	}
 
 	// 3. Hermes binary.
 	if _, err := exec.LookPath(hermesBin); err == nil {
-		fmt.Printf("%s hermes CLI on PATH\n", green("✓"))
+		fmt.Printf("%s hermes CLI on PATH\n", check(true))
 	} else {
-		fmt.Printf("%s hermes CLI not on PATH %s\n", red("✗"), dim("(blk hermes / ask --agent unavailable)"))
+		fmt.Printf("%s hermes CLI not on PATH %s\n", check(false), Meta.Render("(blk hermes / ask --agent unavailable)"))
 	}
 
 	// 4. Hermes MCP wiring: is the blkchain MCP server registered and enabled?
@@ -59,13 +59,13 @@ func runDoctor(args []string) error {
 	present, enabled, err := hermesMCPStatus(cfgPath, "blkchain")
 	switch {
 	case err != nil:
-		fmt.Printf("%s hermes config not read %s\n", dim("?"), dim("("+cfgPath+")"))
+		fmt.Printf("%s hermes config not read %s\n", Meta.Render("?"), Meta.Render("("+cfgPath+")"))
 	case !present:
-		fmt.Printf("%s blkchain MCP not registered in %s\n", red("✗"), dim(cfgPath))
+		fmt.Printf("%s blkchain MCP not registered in %s\n", check(false), Meta.Render(cfgPath))
 	case !enabled:
-		fmt.Printf("%s blkchain MCP present but disabled in %s\n", red("!"), dim(cfgPath))
+		fmt.Printf("%s blkchain MCP present but disabled in %s\n", Caut.Render(Glyph(GlyphWarn)), Meta.Render(cfgPath))
 	default:
-		fmt.Printf("%s blkchain MCP registered + enabled for Hermes\n", green("✓"))
+		fmt.Printf("%s blkchain MCP registered + enabled for Hermes\n", check(true))
 	}
 	return nil
 }

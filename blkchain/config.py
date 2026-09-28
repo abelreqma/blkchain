@@ -82,7 +82,7 @@ def omlx_api_key() -> str:
 def _embedder_path() -> Path:
     v = os.environ.get("BLKCHAIN_EMBEDDER_PATH", "").strip()
     if not v:
-        return MODELS_DIR / "Qwen3-Embedding-0.6B-8bit"
+        return MODELS_DIR / "Qwen3-Embedding-0.6B-4bit-DWQ"
     p = Path(v).expanduser()
     return p if p.is_absolute() else (MODELS_DIR / p)
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"blkchain/cli/internal/client"
 )
@@ -75,44 +76,106 @@ func main() {
 	}
 }
 
+// usageCmd is one row of the COMMANDS section: a command name (as typed
+// after "blk"), its description, and whether it's the primary/default verb
+// marked with the accent ❯ (DESIGN-SPEC.md §3's help mockup).
+type usageCmd struct {
+	name    string
+	desc    string
+	primary bool
+}
+
+var usageCmds = []usageCmd{
+	{"ask <query...>", "get a synthesized, cited answer", true},
+	{"search <query...>", "find ranked source chunks", false},
+	{"repl", "interactive REPL (bare blk too — search/ask without re-launching)", false},
+	{"open <path|N>", "open a source file in $PAGER/$EDITOR", false},
+	{"hermes <prompt...>", "run a Hermes agent turn (has the blkChain KB tools)", false},
+	{"up|down|status", "start / stop / check the local services", false},
+	{"health", "check the API and its dependencies", false},
+	{"doctor", "diagnose the whole stack (+ Hermes MCP wiring)", false},
+	{"logs [name]", "tail a service log (api, embed_server)", false},
+	{"install", "install blk onto your PATH (run once, from the project)", false},
+	{"version", "show version and build info", false},
+	{"completion bash|zsh", "print a shell-completion script", false},
+	{"help", "show this help", false},
+}
+
+// usageRow is a name/description pair, used for FLAGS and ENVIRONMENT.
+type usageRow struct{ name, desc string }
+
+var usageFlags = []usageRow{
+	{"--top-k N", "(search) how many results to return"},
+	{"--source S", "(search) only results from source S (repeatable)"},
+	{"--type T", "(search) only results of type T"},
+	{"--filter k=v", "(search) arbitrary payload filter (repeatable)"},
+	{"--sources", "(ask) also print the retrieved chunks"},
+	{"--agent", "(ask) answer via the Hermes agent instead of plain RAG"},
+	{"--json", "print raw JSON instead of formatted text"},
+}
+
+var usageEnv = []usageRow{
+	{"BLKCHAIN_API_URL", "API base URL (default http://127.0.0.1:8200)"},
+	{"BLKCHAIN_ROOT", "project root, if blk is run from outside it and not installed"},
+	{"NO_COLOR", "disable colored output"},
+}
+
+// usage prints the help menu per DESIGN-SPEC.md §3: an H1 banner + version,
+// a single rule, then H2 sections with Key-styled names and Body
+// descriptions. The primary command is marked with the accent ❯.
 func usage(w *os.File) {
-	fmt.Fprintf(w, `%s - command-line client for the blkChain RAG knowledge base
+	v, _, _, _ := versionInfo()
+	fmt.Fprintln(w, " "+headerLine(H1.Render("blk · knowledge-base client"), Meta.Render(v)))
+	fmt.Fprintln(w, " "+RuleS.Render(strings.Repeat("─", wrapWidth(terminalWidth(), 78))))
 
-%s
-  blk                       interactive REPL (search / ask without re-launching)
-  blk search <query...>     find ranked source chunks   %s
-  blk ask <query...>        get a synthesized, cited answer
-  blk open <path|N>         open a source file in $PAGER/$EDITOR
-  blk hermes <prompt...>    run a Hermes agent turn (has the blkChain KB tools)
-  blk up | down | status    start / stop / check the local services
-  blk health                check the API and its dependencies
-  blk doctor                diagnose the whole stack (+ Hermes MCP wiring)
-  blk logs [name]           tail a service log (api, embed_server)
-  blk install               install blk onto your PATH (run once, from the project)
-  blk version               show version and build info
-  blk completion bash|zsh   print a shell-completion script
-  blk help                  show this help
+	fmt.Fprintln(w, " "+H2.Render("USAGE"))
+	fmt.Fprintf(w, "   %s\n", Key.Render("blk <command> [flags]"))
 
-%s
-  --top-k N            (search) how many results to return
-  --source S           (search) only results from source S (repeatable)
-  --type T             (search) only results of type T
-  --filter k=v         (search) arbitrary payload filter (repeatable)
-  --sources            (ask) also print the retrieved chunks
-  --agent              (ask) answer via the Hermes agent instead of plain RAG
-  --json               print raw JSON instead of formatted text
-  Flags may appear anywhere, before or after the query.
+	fmt.Fprintln(w, " "+H2.Render("COMMANDS"))
+	nameWidth := 0
+	for _, c := range usageCmds {
+		if len(c.name) > nameWidth {
+			nameWidth = len(c.name)
+		}
+	}
+	for _, c := range usageCmds {
+		marker := "  "
+		if c.primary {
+			marker = Prompt.Render(Glyph(GlyphPrompt)) + " "
+		}
+		fmt.Fprintf(w, " %s%s  %s\n", marker, Key.Render(pad(c.name, nameWidth)), Body.Render(c.desc))
+	}
 
-%s
-  BLKCHAIN_API_URL   API base URL (default http://127.0.0.1:8200)
-  BLKCHAIN_ROOT      project root, if blk is run from outside it and not installed
-  NO_COLOR           disable colored output
-`,
-		bold("blk"),
-		bold("Commands:"),
-		dim("(fast)"),
-		bold("Flags:"),
-		bold("Environment:"))
+	fmt.Fprintln(w, " "+H2.Render("FLAGS"))
+	printUsageRows(w, usageFlags)
+	fmt.Fprintf(w, "   %s\n", Meta.Render("Flags may appear anywhere, before or after the query."))
+
+	fmt.Fprintln(w, " "+H2.Render("ENVIRONMENT"))
+	printUsageRows(w, usageEnv)
+
+	fmt.Fprintf(w, " %s\n", Meta.Render(`Run "blk <command> --help" for detail.`))
+}
+
+// printUsageRows renders a FLAGS/ENVIRONMENT-style two-column block: Key name
+// padded to align, Meta description.
+func printUsageRows(w *os.File, rows []usageRow) {
+	width := 0
+	for _, r := range rows {
+		if len(r.name) > width {
+			width = len(r.name)
+		}
+	}
+	for _, r := range rows {
+		fmt.Fprintf(w, "   %s   %s\n", Key.Render(pad(r.name, width)), Meta.Render(r.desc))
+	}
+}
+
+// pad right-pads s with spaces to width (a no-op if s is already that long).
+func pad(s string, width int) string {
+	if n := width - len(s); n > 0 {
+		return s + strings.Repeat(" ", n)
+	}
+	return s
 }
 
 // runStack drives the service stack (up/down/status) via scripts/stack.sh,
@@ -177,7 +240,9 @@ func runSearch(args []string) error {
 	}
 
 	c := client.NewClient()
+	start := time.Now()
 	resp, err := c.Search(query, *topK, filterMap)
+	elapsed := time.Since(start)
 	if err != nil {
 		return err
 	}
@@ -185,7 +250,7 @@ func runSearch(args []string) error {
 	if *jsonOut {
 		return printJSON(resp)
 	}
-	printResults(query, resp.Results)
+	printResults(query, resp.Results, elapsed)
 	return nil
 }
 
@@ -213,24 +278,47 @@ func buildFilters(sources multiFlag, typ string, kv multiFlag) (map[string]inter
 	return m, nil
 }
 
-// printResults renders ranked search results, or a friendly empty message.
-func printResults(query string, results []client.SearchResult) {
+// printResults renders ranked search results per DESIGN-SPEC.md §3's SEARCH
+// banner + ranked-row layout (rank Meta, title Body, path Meta, score
+// right-aligned and banded via scoreStyle), or a friendly empty message.
+// elapsed is omitted from the banner when zero (the --sources path under
+// runAsk has no separate timing to show).
+func printResults(query string, results []client.SearchResult, elapsed time.Duration) {
+	fmt.Print(formatResults(query, results, elapsed))
+}
+
+// formatResults builds the same rendering as printResults but returns it as a
+// string, so the TUI REPL can commit it to scrollback via tea.Println instead
+// of writing straight to stdout (which would corrupt the live region).
+func formatResults(query string, results []client.SearchResult, elapsed time.Duration) string {
+	var b strings.Builder
 	if len(results) == 0 {
-		fmt.Printf("No results for %q.\n", query)
-		return
+		fmt.Fprintf(&b, " %s\n", Body.Render(fmt.Sprintf("No results for %q.", query)))
+		return b.String()
 	}
-	fmt.Printf("%s\n\n", bold(fmt.Sprintf("%d result(s) for %q", len(results), query)))
+
+	banner := H1.Render("SEARCH") + "  " + H1.Render(fmt.Sprintf("%q", query))
+	count := fmt.Sprintf("%d result(s)", len(results))
+	if elapsed > 0 {
+		count = fmt.Sprintf("%s · %s", count, elapsed.Round(time.Millisecond))
+	}
+	fmt.Fprintln(&b, " "+headerLine(banner, Meta.Render(count)))
+	fmt.Fprintln(&b)
+
 	for i, r := range results {
-		meta := fmt.Sprintf("score %.4f", r.Score)
+		title := r.Payload.Source
 		if r.Payload.Section != "" {
-			meta += " · " + r.Payload.Section
+			title += " · " + r.Payload.Section
 		}
-		fmt.Printf("%s %s  %s\n", cyan(fmt.Sprintf("%d.", i+1)), bold(r.Payload.Source), dim(meta))
+		left := fmt.Sprintf(" %s  %s", Meta.Render(fmt.Sprintf("%2d", i+1)), Body.Render(title))
+		score := scoreStyle(r.Score).Render(fmt.Sprintf("%.4f", r.Score))
+		fmt.Fprintln(&b, headerLine(left, score))
 		if r.Payload.Path != "" {
-			fmt.Printf("   %s\n", dim(r.Payload.Path))
+			fmt.Fprintf(&b, "      %s\n", Meta.Render(r.Payload.Path))
 		}
-		fmt.Printf("   %s\n\n", truncate(r.Payload.Text, 240))
+		fmt.Fprintf(&b, "      %s\n\n", truncate(r.Payload.Text, 240))
 	}
+	return b.String()
 }
 
 func runAsk(args []string) error {
@@ -263,28 +351,37 @@ func runAsk(args []string) error {
 		return printJSON(resp)
 	}
 
-	fmt.Println(resp.Answer)
+	// Glow-format markdown output (BUILD-BRIEF.md): let glamour own the
+	// answer body's rendering instead of hand-formatting it.
+	fmt.Println(strings.TrimRight(glowRender(resp.Answer, terminalWidth()), "\n"))
 	if *showSources && len(resp.Results) > 0 {
-		fmt.Printf("\n%s\n\n", bold("Retrieved chunks:"))
-		printResults(query, resp.Results)
+		fmt.Println()
+		fmt.Println(H2.Render("RETRIEVED CHUNKS"))
+		fmt.Println()
+		printResults(query, resp.Results, 0)
 	}
 	fmt.Println()
-	fmt.Println(bold("Sources:"))
+	fmt.Println(H2.Render("SOURCES"))
 	if len(resp.Citations) == 0 {
-		fmt.Println("  (none)")
+		fmt.Println("  " + Meta.Render("(none)"))
 	}
-	for _, cit := range resp.Citations {
-		line := "  " + dim("-") + " " + cit.Source
-		if cit.Path != "" {
-			line += " " + dim("("+cit.Path+")")
-		}
+	for i, cit := range resp.Citations {
+		line := "  " + Key.Render(fmt.Sprintf("[%d]", i+1)) + "  " + Body.Render(cit.Source)
+		meta := cit.Path
 		if cit.Section != "" {
-			line += " " + dim(cit.Section)
+			if meta != "" {
+				meta += " · "
+			}
+			meta += cit.Section
+		}
+		if meta != "" {
+			line += "  " + Meta.Render(meta)
 		}
 		fmt.Println(line)
 	}
 	if resp.UsedWeb {
-		fmt.Println("\n" + dim("(this answer used a web search)"))
+		fmt.Println()
+		fmt.Println(Meta.Render("(this answer used a web search)"))
 	}
 	return nil
 }
@@ -300,22 +397,19 @@ func runHealth(args []string) error {
 	if err != nil {
 		return err
 	}
-	mark := green("✓")
-	if h.Status != "ok" {
-		mark = red("!")
-	}
-	fmt.Printf("%s blkChain API: %s  %s\n", mark, h.Status, dim("("+c.BaseURL+")"))
+	fmt.Printf("%s blkChain API: %s  %s\n", check(h.Status == "ok"), h.Status, Meta.Render("("+c.BaseURL+")"))
 	fmt.Printf("  %s qdrant\n", check(h.Qdrant))
 	fmt.Printf("  %s embed_server\n", check(h.EmbedServer))
 	return nil
 }
 
-// check renders a green ✓ or red ✗ for a boolean dependency state.
+// check renders the theme's OK/Fail glyph for a boolean dependency state
+// (DESIGN-SPEC.md §2, §4).
 func check(ok bool) string {
 	if ok {
-		return green("✓")
+		return OK.Render(Glyph(GlyphOK))
 	}
-	return red("✗")
+	return Fail.Render(Glyph(GlyphErr))
 }
 
 func printJSON(v interface{}) error {

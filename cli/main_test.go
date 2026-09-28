@@ -136,8 +136,8 @@ func TestRunAskRendersAnswerAndSources(t *testing.T) {
 	if !strings.Contains(out, "Finality is reached after two rounds of voting.") {
 		t.Errorf("output missing answer, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Sources:") {
-		t.Errorf("output missing Sources header, got:\n%s", out)
+	if !strings.Contains(out, "SOURCES") {
+		t.Errorf("output missing SOURCES header, got:\n%s", out)
 	}
 	if !strings.Contains(out, "ledger-spec") || !strings.Contains(out, "docs/ledger.md") || !strings.Contains(out, "Consensus") {
 		t.Errorf("output missing citation details, got:\n%s", out)

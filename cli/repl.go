@@ -8,12 +8,33 @@ import (
 	"strings"
 
 	"blkchain/cli/internal/client"
+	"golang.org/x/term"
 )
 
-// runREPL is the interactive loop entered by bare `blk` (or `blk repl`). Bare
-// input is treated as a search; prefixes switch modes. It keeps the last search
-// results so `open N` can open the N-th hit.
+// runREPL is the entry point for bare `blk` and `blk repl`/`chat`. On a real
+// interactive terminal it runs the Bubble Tea TUI (tui.go); otherwise (piped
+// stdin/stdout, or TERM=dumb) it falls back to the plain line loop so
+// `echo q | blk` and `blk < file` still work and print clean text.
 func runREPL() error {
+	if isInteractive() {
+		return runTUI()
+	}
+	return plainREPL()
+}
+
+// isInteractive reports whether both stdin and stdout are real terminals and
+// TERM is not "dumb" (CHARM-PATTERNS.md). Only then is the full TUI usable.
+func isInteractive() bool {
+	if os.Getenv("TERM") == "dumb" {
+		return false
+	}
+	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// plainREPL is the non-TTY fallback: a simple line loop. Bare input is treated
+// as a search; prefixes switch modes. It keeps the last search results so
+// `open N` can open the N-th hit.
+func plainREPL() error {
 	c := client.NewClient()
 	var last []client.SearchResult
 
@@ -69,7 +90,7 @@ func replSearch(c *client.Client, query string, prev []client.SearchResult) []cl
 		printErr(err)
 		return prev
 	}
-	printResults(query, resp.Results)
+	printResults(query, resp.Results, 0)
 	return resp.Results
 }
 

@@ -16,15 +16,15 @@ var version = ""
 // printVersion writes the version plus Go toolchain and VCS build info.
 func printVersion(w *os.File) {
 	v, rev, dirty, gover := versionInfo()
-	fmt.Fprintf(w, "%s %s\n", bold("blk"), v)
+	fmt.Fprintf(w, "%s %s\n", H1.Render("blk"), v)
 	if rev != "" {
 		state := ""
 		if dirty {
-			state = " " + dim("(dirty)")
+			state = " " + Caut.Render("(dirty)")
 		}
-		fmt.Fprintf(w, "  %s %s%s\n", dim("commit"), rev, state)
+		fmt.Fprintf(w, "  %s %s%s\n", Meta.Render("commit"), rev, state)
 	}
-	fmt.Fprintf(w, "  %s %s\n", dim("built with"), gover)
+	fmt.Fprintf(w, "  %s %s\n", Meta.Render("built with"), gover)
 }
 
 // versionInfo resolves the version string and build metadata from ldflags and
