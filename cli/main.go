@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -34,10 +33,14 @@ func main() {
 		err = runSearch(args)
 	case "ask":
 		err = runAsk(args)
+	case "add":
+		err = runAdd(args)
 	case "health":
 		err = runHealth(args)
 	case "up", "down", "status":
 		err = runStack(cmd)
+	case "mcp":
+		err = runMCP(args)
 	case "install":
 		err = runInstall(args)
 	case "doctor":
@@ -88,10 +91,12 @@ type usageCmd struct {
 var usageCmds = []usageCmd{
 	{"ask <query...>", "get a synthesized, cited answer", true},
 	{"search <query...>", "find ranked source chunks", false},
+	{"add <path|url>", "index your own docs into the KB", false},
 	{"repl", "interactive REPL (bare blk too — search/ask without re-launching)", false},
 	{"open <path|N>", "open a source file in $PAGER/$EDITOR", false},
 	{"hermes <prompt...>", "run a Hermes agent turn (has the blkChain KB tools)", false},
 	{"up|down|status", "start / stop / check the local services", false},
+	{"mcp", "run the Hermes MCP stdio server (for ~/.hermes/config.yaml)", false},
 	{"health", "check the API and its dependencies", false},
 	{"doctor", "diagnose the whole stack (+ Hermes MCP wiring)", false},
 	{"logs [name]", "tail a service log (api, embed_server)", false},
@@ -111,6 +116,8 @@ var usageFlags = []usageRow{
 	{"--filter k=v", "(search) arbitrary payload filter (repeatable)"},
 	{"--sources", "(ask) also print the retrieved chunks"},
 	{"--agent", "(ask) answer via the Hermes agent instead of plain RAG"},
+	{"--source S", "(add) source label (default: derived from the path)"},
+	{"--type T", "(add) force chunking as md, txt, or pdf"},
 	{"--json", "print raw JSON instead of formatted text"},
 }
 
@@ -176,18 +183,6 @@ func pad(s string, width int) string {
 		return s + strings.Repeat(" ", n)
 	}
 	return s
-}
-
-// runStack drives the service stack (up/down/status) via scripts/stack.sh,
-// located dynamically from the saved config, the binary, or the working dir.
-func runStack(cmd string) error {
-	script, err := findStackScript()
-	if err != nil {
-		return err
-	}
-	c := exec.Command(script, cmd)
-	c.Stdout, c.Stderr, c.Stdin = os.Stdout, os.Stderr, os.Stdin
-	return c.Run()
 }
 
 // reorder moves flag tokens ahead of positional args so flags may appear

@@ -8,15 +8,19 @@ optional dependency bundled by qdrant-client[fastembed].
 """
 from __future__ import annotations
 
+import html
+import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from fastembed import SparseTextEmbedding
 from qdrant_client import QdrantClient, models
 
 from blkchain import config
-from blkchain.schema import content_hash
+from blkchain.schema import Chunk, chunk_id, content_hash
 
 
 def _point_id(chunk_id: str) -> str:
@@ -97,29 +101,22 @@ def _existing_hashes(client: QdrantClient, collection: str) -> dict[str, str | N
     return out
 
 
-def build_index(
-    chunks=None,
-    snapshot_version: str | None = None,
-    resume: bool = True,
-    collection: str | None = None,
+def _index_chunks(
+    client: QdrantClient,
+    sparse_model: SparseTextEmbedding,
+    collection: str,
+    chunks,
+    existing: dict[str, str | None],
+    resume: bool,
+    snapshot_version: str,
 ) -> dict:
-    """Embed and upsert chunks into `collection` (default config.QDRANT_COLLECTION).
+    """Embed + upsert an iterable of chunks into `collection`, resumably.
 
-    Returns {"indexed": n, "updated": u, "skipped": m, "batches": b}, where
-    `updated` counts re-embedded chunks whose content changed (a subset of
-    `indexed`, since they overwrite their existing point).
+    Shared by build_index (full corpus re-ingest) and add_path (incremental
+    add of a single file/dir/URL) so the flush/embed/upsert/resume logic lives
+    in exactly one place. Returns {"indexed", "updated", "skipped", "batches"};
+    see build_index's docstring for field semantics.
     """
-    collection = collection or config.QDRANT_COLLECTION
-    if snapshot_version is None:
-        snapshot_version = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if chunks is None:
-        from blkchain import ingest  # lazy: ingest.py may not exist yet
-        chunks = ingest.iter_chunks()
-
-    client = QdrantClient(url=config.QDRANT_URL)
-    sparse_model = SparseTextEmbedding(model_name=config.SPARSE_MODEL)
-    existing = _existing_hashes(client, collection) if resume else {}
-
     indexed = 0
     updated = 0
     skipped = 0
@@ -169,3 +166,213 @@ def build_index(
     flush(pending)
 
     return {"indexed": indexed, "updated": updated, "skipped": skipped, "batches": batches}
+
+
+def build_index(
+    chunks=None,
+    snapshot_version: str | None = None,
+    resume: bool = True,
+    collection: str | None = None,
+) -> dict:
+    """Embed and upsert chunks into `collection` (default config.QDRANT_COLLECTION).
+
+    Returns {"indexed": n, "updated": u, "skipped": m, "batches": b}, where
+    `updated` counts re-embedded chunks whose content changed (a subset of
+    `indexed`, since they overwrite their existing point).
+    """
+    collection = collection or config.QDRANT_COLLECTION
+    if snapshot_version is None:
+        snapshot_version = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if chunks is None:
+        from blkchain import ingest  # lazy: ingest.py may not exist yet
+        chunks = ingest.iter_chunks()
+
+    client = QdrantClient(url=config.QDRANT_URL)
+    sparse_model = SparseTextEmbedding(model_name=config.SPARSE_MODEL)
+    existing = _existing_hashes(client, collection) if resume else {}
+
+    return _index_chunks(client, sparse_model, collection, chunks, existing, resume, snapshot_version)
+
+
+# --- blk add: load arbitrary content (file/dir/URL) into the live index ----
+
+# Extensions skipped when walking a directory: not text, and not one of the
+# kinds add_path knows how to chunk (markdown/pdf/plain).
+_ADD_SKIP_DIR_EXTS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg", ".webp",
+    ".zip", ".gz", ".tar", ".7z", ".rar", ".bz2",
+    ".mp3", ".mp4", ".mov", ".avi", ".wav", ".flac",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".exe", ".dll", ".so", ".dylib", ".bin", ".pyc", ".class", ".o",
+}
+
+_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+_MAX_URL_BYTES = 5 * 1024 * 1024  # bound a fetched body to 5 MiB (DoS guard)
+_URL_FETCH_TIMEOUT = 30
+
+_HTML_SKIP_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _infer_kind(ext: str) -> str:
+    """Map a file extension to an add_path chunking kind."""
+    ext = ext.lower()
+    if ext in (".md", ".markdown"):
+        return "markdown"
+    if ext == ".pdf":
+        return "pdf"
+    return "plain"
+
+
+def _chunk_file(file_path: Path, source: str, kind: str, base_dir: Path):
+    """Chunk one file using the SAME chunkers ingest.py uses for the corpus."""
+    from blkchain import ingest
+
+    if kind == "markdown":
+        yield from ingest._chunk_markdown_file(file_path, source, "doc")
+    elif kind == "pdf":
+        spec = config.SourceSpec(name=source, path=file_path, kind="pdf")
+        yield from ingest._chunk_pdf(spec)
+    else:
+        yield from ingest._chunk_plain_file(file_path, source, "doc", base_dir)
+
+
+def _chunk_dir(root: Path, source: str, kind: str | None):
+    """Walk a directory and chunk each supported file, inferring kind per file
+    from its extension unless `kind` forces one kind for everything."""
+    from blkchain import ingest
+
+    for file_path in ingest._iter_files(root, None, (".git",)):
+        if file_path.suffix.lower() in _ADD_SKIP_DIR_EXTS:
+            continue
+        file_kind = kind or _infer_kind(file_path.suffix)
+        yield from _chunk_file(file_path, source, file_kind, root)
+
+
+def _html_to_text(markup: str) -> str:
+    """Minimal HTML->text: drop script/style blocks, strip remaining tags,
+    unescape entities, and collapse blank lines. Good enough for indexing a
+    web page's prose; not a full HTML parser."""
+    text = _HTML_SKIP_RE.sub(" ", markup)
+    text = _HTML_TAG_RE.sub(" ", text)
+    text = html.unescape(text)
+    lines = (line.strip() for line in text.splitlines())
+    return "\n".join(line for line in lines if line)
+
+
+def _chunk_text(text: str, source: str, path_str: str, markdown: bool):
+    """Chunk in-memory text (a fetched URL's body) into Chunks, reusing the
+    same splitting primitives (_markdown_sections / _recursive_split /
+    _extract_identifiers) the file-based chunkers in ingest.py use — there is
+    no file on disk here, so the file-based chunkers themselves don't apply."""
+    from blkchain import ingest
+
+    if not text.strip():
+        return
+    cwe = ingest._cwe_class_from_path(path_str)
+    sections = ingest._markdown_sections(text) if markdown else [("", text)]
+    idx = 0
+    for breadcrumb, section_text in sections:
+        for piece in ingest._recursive_split(section_text):
+            piece = piece.strip()
+            if not piece:
+                continue
+            yield Chunk(
+                id=chunk_id(path_str, str(idx)),
+                text=piece,
+                source=source,
+                path=path_str,
+                section=breadcrumb,
+                type="doc",
+                identifiers=ingest._extract_identifiers(piece),
+                cwe_class=cwe,
+            )
+            idx += 1
+
+
+def _fetch_url(url: str) -> tuple[str, str]:
+    """GET url with a timeout and a bound on body size. Returns (text,
+    content_type). Reads at most _MAX_URL_BYTES of the body."""
+    resp = requests.get(url, timeout=_URL_FETCH_TIMEOUT, stream=True)
+    resp.raise_for_status()
+    content_type = resp.headers.get("content-type", "")
+    body = bytearray()
+    for piece in resp.iter_content(chunk_size=65536):
+        body.extend(piece)
+        if len(body) >= _MAX_URL_BYTES:
+            break
+    resp.close()
+    return bytes(body[:_MAX_URL_BYTES]).decode("utf-8", errors="ignore"), content_type
+
+
+def _chunk_url(url: str, source: str, kind: str | None):
+    if kind == "pdf":
+        raise ValueError("add: fetching a PDF over http(s) is not supported; download it first")
+    raw, content_type = _fetch_url(url)
+    if "html" in content_type.lower():
+        text = _html_to_text(raw)
+        markdown = False
+    else:
+        text = raw
+        markdown = True
+    if kind == "plain":
+        markdown = False
+    elif kind == "markdown":
+        markdown = True
+    yield from _chunk_text(text, source, url, markdown)
+
+
+def derive_source_label(path: str, source: str | None = None) -> str:
+    """Default `source` label for add_path: the explicit override if given,
+    else the URL host, or the file stem / directory name."""
+    if source:
+        return source
+    if _URL_RE.match(path):
+        return urlparse(path).netloc or path
+    p = Path(path).expanduser()
+    return p.name if p.is_dir() else p.stem
+
+
+def add_path(
+    path: str,
+    *,
+    source: str | None = None,
+    kind: str | None = None,
+    collection: str | None = None,
+    resume: bool = True,
+) -> dict:
+    """Load a file, directory, or http(s) URL into the live index.
+
+    Reuses the same chunkers build_index's corpus ingestion uses (see
+    ingest.py) and the same embed/upsert path (_index_chunks), so re-adding
+    unchanged content is a no-op under resume=True and only new/changed
+    chunks are (re-)embedded. Upserts into `collection` (default
+    config.QDRANT_COLLECTION), the same collection build_index writes to.
+
+    `kind` forces the chunking strategy ("markdown", "plain", or "pdf")
+    instead of inferring it from the file extension / URL content-type.
+    `source` defaults to a label derived from the path (file stem / dir name
+    / URL host). Returns the same stats dict as build_index.
+    """
+    collection = collection or config.QDRANT_COLLECTION
+    snapshot_version = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    label = derive_source_label(path, source)
+
+    if _URL_RE.match(path):
+        chunks = list(_chunk_url(path, label, kind))
+    else:
+        p = Path(path).expanduser().resolve()
+        if not p.exists():
+            raise FileNotFoundError(f"add: no such file or directory: {path}")
+        if p.is_dir():
+            chunks = list(_chunk_dir(p, label, kind))
+        else:
+            file_kind = kind or _infer_kind(p.suffix)
+            chunks = list(_chunk_file(p, label, file_kind, p.parent))
+
+    ensure_collection(collection)
+    client = QdrantClient(url=config.QDRANT_URL)
+    sparse_model = SparseTextEmbedding(model_name=config.SPARSE_MODEL)
+    existing = _existing_hashes(client, collection) if resume else {}
+
+    return _index_chunks(client, sparse_model, collection, chunks, existing, resume, snapshot_version)

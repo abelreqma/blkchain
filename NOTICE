@@ -1,0 +1,19 @@
+blkChain
+Copyright 2026 Abel Maldonado
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This software downloads and uses third-party models that are NOT included in
+this repository and are each governed by their own license:
+
+  - Qwen3-Embedding-0.6B (dense embedder) — Apache-2.0
+    https://huggingface.co/Qwen/Qwen3-Embedding-0.6B
+  - jina-reranker-v3 (default reranker) — CC-BY-NC-4.0 (NON-COMMERCIAL)
+    https://huggingface.co/jinaai/jina-reranker-v3
+    For commercial use, substitute an Apache-2.0 reranker such as
+    Qwen3-Reranker-0.6B (https://huggingface.co/Qwen/Qwen3-Reranker-0.6B).
+  - The synthesis LLM is served separately (e.g. via oMLX) and carries its own
+    license; it is referenced, not distributed here.
+
+The corpus indexed by blkChain (security documentation, wordlists, personal
+notes) is user-supplied and is not distributed with this software.

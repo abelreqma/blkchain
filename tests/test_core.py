@@ -173,6 +173,69 @@ class BuildIndexResumeTest(unittest.TestCase):
         self.assertEqual(len(upserted), 2)
 
 
+class AddPathTest(unittest.TestCase):
+    def test_add_path_chunks_markdown_file_and_upserts_into_given_collection(self):
+        import tempfile
+
+        upserted = []
+        collections_used = []
+
+        class FakeClient:
+            def __init__(self, *a, **k): pass
+            def collection_exists(self, name): return True
+            def upsert(self, collection_name, points):
+                collections_used.append(collection_name)
+                upserted.extend(points)
+
+        class FakeSparse:
+            def __init__(self, *a, **k): pass
+            def embed(self, texts):
+                return [types.SimpleNamespace(indices=np.array([0]), values=np.array([1.0]))
+                        for _ in texts]
+
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "notes.md"
+            f.write_text("# Title\n\nA distinctive phrase about purple widgets.\n")
+
+            with mock.patch.object(index, "QdrantClient", FakeClient), \
+                 mock.patch.object(index, "SparseTextEmbedding", FakeSparse), \
+                 mock.patch.object(index, "_existing_hashes", return_value={}), \
+                 mock.patch.object(index, "_embed_dense",
+                                    side_effect=lambda texts: [[0.0] * config_dim() for _ in texts]):
+                stats = index.add_path(str(f), source="mydocs", collection="testcol")
+
+        self.assertEqual(stats, {"indexed": 1, "updated": 0, "skipped": 0, "batches": 1})
+        self.assertEqual(collections_used, ["testcol"])
+        self.assertEqual(len(upserted), 1)
+        self.assertIn("purple widgets", upserted[0].payload["text"])
+        self.assertEqual(upserted[0].payload["source"], "mydocs")
+
+    def test_add_path_infers_kind_from_extension_and_labels_source_from_stem(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "myreport.txt"
+            f.write_text("Some plain-text findings about SSRF.\n")
+
+            with mock.patch.object(index, "ensure_collection"), \
+                 mock.patch.object(index, "QdrantClient"), \
+                 mock.patch.object(index, "SparseTextEmbedding"), \
+                 mock.patch.object(index, "_existing_hashes", return_value={}), \
+                 mock.patch.object(index, "_index_chunks") as fake_index_chunks:
+                fake_index_chunks.return_value = {"indexed": 0, "updated": 0, "skipped": 0, "batches": 0}
+                index.add_path(str(f))
+
+            (_, _, _, chunks_arg, *_rest), _ = fake_index_chunks.call_args
+            chunks = list(chunks_arg)
+        self.assertTrue(chunks)
+        self.assertEqual(chunks[0].source, "myreport")  # derived from the file stem
+        self.assertEqual(chunks[0].type, "doc")
+
+    def test_add_path_missing_file_raises(self):
+        with self.assertRaises(FileNotFoundError):
+            index.add_path("/nonexistent/path/does-not-exist.md")
+
+
 def config_dim():
     from blkchain import config
     return config.EMBED_DIM

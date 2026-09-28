@@ -7,7 +7,7 @@ import (
 
 // subcommands is the list offered by shell completion and help.
 var subcommands = []string{
-	"search", "ask", "open", "hermes", "up", "down", "status",
+	"search", "ask", "add", "open", "hermes", "up", "down", "status", "mcp",
 	"health", "doctor", "logs", "install", "version", "repl", "completion", "help",
 }
 
