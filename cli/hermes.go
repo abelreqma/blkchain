@@ -28,7 +28,7 @@ func runHermes(args []string) error {
 		return fmt.Errorf("hermes: %q not found on PATH — install Hermes Agent or add it to PATH", hermesBin)
 	}
 
-	fmt.Fprintf(os.Stderr, "%s %s\n", dim("→ hermes -z"), dim(truncate(prompt, 60)))
+	fmt.Fprintf(os.Stderr, "%s %s\n", Meta.Render(Glyph(GlyphArrow)+" hermes -z"), Meta.Render(truncate(prompt, 60)))
 	c := exec.Command(path, "-z", prompt)
 	c.Stdout, c.Stderr, c.Stdin = os.Stdout, os.Stderr, os.Stdin
 	if err := c.Run(); err != nil {

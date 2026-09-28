@@ -40,12 +40,12 @@ func plainREPL() error {
 	var last []client.SearchResult
 	mode := "rag"
 
-	fmt.Printf("%s  %s\n", bold("blkChain"), dim("type a question to ask · /mode · /search <q> · /help · Ctrl-D to quit"))
+	fmt.Printf("%s  %s\n", H1.Render("blkChain"), Meta.Render("type a question to ask · /mode · /search <q> · /help · Ctrl-D to quit"))
 
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for {
-		fmt.Print(cyan("blk› "))
+		fmt.Print(Prompt.Render("blk› "))
 		if !in.Scan() {
 			fmt.Println()
 			return in.Err()
@@ -74,20 +74,20 @@ func plainREPL() error {
 			}
 			printErr(runLogs(largs))
 		case "copy":
-			fmt.Println(dim("/copy is only available in the interactive TUI"))
+			fmt.Println(Meta.Render("/copy is only available in the interactive TUI"))
 		case "mode":
 			if mode == "agent" {
 				mode = "rag"
 			} else {
 				mode = "agent"
 			}
-			fmt.Println(dim("mode: " + mode))
+			fmt.Println(Meta.Render("mode: " + mode))
 		case "agent":
 			mode = "agent"
-			fmt.Println(dim("mode: agent"))
+			fmt.Println(Meta.Render("mode: agent"))
 		case "rag":
 			mode = "rag"
-			fmt.Println(dim("mode: rag"))
+			fmt.Println(Meta.Render("mode: rag"))
 		case "search", "s":
 			last = replSearch(c, rest, last)
 		case "ask", "a":
@@ -149,22 +149,45 @@ func replOpen(arg string, last []client.SearchResult) error {
 	return openFile(arg, false)
 }
 
+// replHelp renders the command reference grouped by commandGroups() (the same
+// registry that drives the TUI palette and helpBlock), so the plain-REPL help
+// can never drift from the TUI's. Each group prints as a header followed by
+// its command rows, "/name args" aligned against a description.
 func replHelp() {
-	fmt.Printf(`%s
-  <question>          ask (rag streams a cited answer; agent runs Hermes)
-  /mode              toggle rag / agent mode     (also /agent, /rag)
-  /search <q>        find ranked source chunks   (alias: s)
-  /ask <q>           ask explicitly              (alias: a)
-  /hermes <prompt>   one-shot Hermes agent turn
-  /open <N|path>     open result N from the last search, or a path (alias: o)
-  /health            API + dependency status
-  /up | /down | /status  manage the local services
-  /doctor            diagnose the whole stack
-  /logs [name]       tail a service log (api, embed_server)
-  /copy              (TUI only; not available here)
-  /help              this help                   (alias: ?)
-  /quit              leave                        (alias: exit, q, Ctrl-D)
-`, bold("Commands:"))
+	groups := commandGroups()
+	width := len("<question>")
+	for _, g := range groups {
+		for _, c := range g.cmds {
+			if n := len(commandInvocation(c)); n > width {
+				width = n
+			}
+		}
+	}
+	var b strings.Builder
+	for gi, g := range groups {
+		if gi > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(H2.Render(g.title) + "\n")
+		if gi == 0 {
+			fmt.Fprintf(&b, "  %s  %s\n", Key.Render(pad("<question>", width)),
+				Meta.Render("ask (rag streams a cited answer; agent runs Hermes)"))
+		}
+		for _, c := range g.cmds {
+			fmt.Fprintf(&b, "  %s  %s\n", Key.Render(pad(commandInvocation(c), width)), Meta.Render(c.desc))
+		}
+	}
+	fmt.Print(b.String())
+}
+
+// commandInvocation renders a command's registry entry as its REPL invocation,
+// e.g. "/search <q>".
+func commandInvocation(c command) string {
+	n := "/" + c.name
+	if c.args != "" {
+		n += " " + c.args
+	}
+	return n
 }
 
 // splitFirst splits s into its first whitespace-delimited word and the rest.
@@ -179,6 +202,6 @@ func splitFirst(s string) (first, rest string) {
 // printErr prints a non-nil error in the REPL without aborting the loop.
 func printErr(err error) {
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s %v\n", red("✗"), err)
+		fmt.Fprintf(os.Stderr, "%s %v\n", Fail.Render(Glyph(GlyphErr)), err)
 	}
 }

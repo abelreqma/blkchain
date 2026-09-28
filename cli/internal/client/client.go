@@ -99,21 +99,16 @@ type SearchResponse struct {
 	Results []SearchResult `json:"results"`
 }
 
-// Citation is a single source citation from POST /answer.
+// Citation is a single source citation for a RAG answer.
 type Citation struct {
 	Source  string `json:"source"`
 	Path    string `json:"path"`
 	Section string `json:"section"`
 }
 
-// AnswerRequest is the request body of POST /answer.
-type AnswerRequest struct {
-	Query string `json:"query"`
-}
-
-// AnswerResponse is the response body of POST /answer. Results carries the
-// retrieved chunks the answer was synthesized from, so callers can show the
-// evidence behind an answer, not just the citation list.
+// AnswerResponse mirrors the shape of a RAG answer loop's output. Results
+// carries the retrieved chunks the answer was synthesized from, so callers
+// can show the evidence behind an answer, not just the citation list.
 type AnswerResponse struct {
 	Answer    string         `json:"answer"`
 	Citations []Citation     `json:"citations"`
@@ -146,24 +141,6 @@ func (c *Client) Search(query string, topK int, filters map[string]interface{}) 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	var out SearchResponse
-	if err := c.do(req, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-// Answer calls POST /answer.
-func (c *Client) Answer(query string) (*AnswerResponse, error) {
-	body, err := json.Marshal(AnswerRequest{Query: query})
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequest(http.MethodPost, c.BaseURL+"/answer", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	var out AnswerResponse
 	if err := c.do(req, &out); err != nil {
 		return nil, err
 	}

@@ -10,11 +10,10 @@ import (
 	"golang.org/x/term"
 )
 
-// theme.go implements the terminal visual design system from DESIGN-SPEC.md
-// §1-2: the semantic color palette, the derived styles, glyph/ASCII fallback,
-// and small rendering helpers (scoreStyle, wrap). It coexists with ui.go's
-// older bold/dim/green/red/cyan helpers, which stay in place until their
-// callers are migrated in a later task.
+// theme.go is the terminal visual design system: the semantic color palette,
+// the derived styles, glyph/ASCII fallback, and small rendering helpers
+// (scoreStyle, wrap). It is the single styling source for the whole CLI; the
+// older raw-ANSI helpers were retired once every caller moved onto these styles.
 
 // c builds a CompleteAdaptiveColor from light/dark hex, ANSI256, and ANSI-16
 // values, per DESIGN-SPEC.md §1.
@@ -185,8 +184,8 @@ func isUTF8Locale(lcAll, lang string) bool {
 	return false
 }
 
-// isTerminalStdout matches ui.go's colorEnabled detection: stdout must be a
-// real character device (a TTY), not a pipe or file.
+// isTerminalStdout reports whether stdout is a real character device (a TTY),
+// not a pipe or file.
 func isTerminalStdout() bool {
 	fi, err := os.Stdout.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0

@@ -1,0 +1,20 @@
+{
+  "top_k": 5,
+  "pool_size": 50,
+  "max_loops": 2,
+  "answer_max_chunks": 4,
+  "context_chars_per_chunk": 1200,
+  "answer_max_tokens": 700,
+  "grade_max_tokens": 200,
+  "synth_temperature": 0.2,
+  "grade_temperature": 0.0,
+  "request_timeout_seconds": 300,
+  "default_model": "supergemma4-26b-uncensored-mlx-4bit-v2",
+  "dense_vector_name": "dense",
+  "sparse_vector_name": "sparse",
+  "sparse_model": "Qdrant/bm25",
+  "qdrant_grpc_url": "127.0.0.1:6334",
+  "embed_server_url": "http://127.0.0.1:8100",
+  "tavily_max_results": 5,
+  "reputable_domains": ["nvd.nist.gov", "cve.mitre.org", "cwe.mitre.org", "attack.mitre.org", "owasp.org", "exploit-db.com", "portswigger.net"]
+}

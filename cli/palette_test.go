@@ -33,10 +33,10 @@ func TestMatchCommand(t *testing.T) {
 
 func TestFilterCommandsPrefixFirst(t *testing.T) {
 	cmds := []command{
-		{"attach", "", "a"},
-		{"ask", "", "b"},
-		{"clear", "", "c"}, // contains 'a' (substring), not prefix
-		{"model", "", "d"}, // no 'a'
+		{name: "attach", desc: "a"},
+		{name: "ask", desc: "b"},
+		{name: "clear", desc: "c"}, // contains 'a' (substring), not prefix
+		{name: "model", desc: "d"}, // no 'a'
 	}
 	got := filterCommands(cmds, "a")
 	if len(got) != 3 {

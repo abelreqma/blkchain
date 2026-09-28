@@ -98,7 +98,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/rerank":
             if not _RERANKER_OK:
-                return self._send(503, {"error": f"reranker not available: {_RERANK_ERR}"})
+                # The import-failure detail was already logged to stderr at startup
+                # (see _RERANK_ERR above); never leak it to the client.
+                return send_error(self, 503, "reranker unavailable")
             query = req.get("query")
             docs = req.get("documents")
             if not isinstance(query, str) or not isinstance(docs, list) or not docs:

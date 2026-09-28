@@ -113,5 +113,57 @@ class AnswerErrorSanitizationTest(unittest.TestCase):
         self.assertEqual(json.loads(h.wfile.getvalue()), {"error": "answer unavailable"})
 
 
+class RerankImportFailureSanitizationTest(unittest.TestCase):
+    """embed_server's /rerank 503 (reranker import/startup failure) must return
+    only a generic public message, never the underlying import-failure detail.
+
+    embed_server loads MLX models at import time, so mlx / mlx_embeddings are
+    faked and the reranker import is forced to raise with a secret-bearing
+    message. The 503 body must not echo that message or the exception type."""
+
+    def test_rerank_503_is_sanitized(self):
+        secret = "reranker weights at /opt/secret/model.bin"
+
+        fake_mlx = types.ModuleType("mlx")
+        fake_mlx_core = types.ModuleType("mlx.core")
+        fake_mlx.core = fake_mlx_core
+
+        fake_mlx_embeddings = types.ModuleType("mlx_embeddings")
+        fake_mlx_embeddings.load = lambda *a, **kw: (object(), object())
+        fake_mlx_embeddings.generate = lambda *a, **kw: None
+
+        fake_reranker = types.ModuleType("blkchain.reranker")
+
+        def _raise(name):
+            raise RuntimeError(secret)
+
+        fake_reranker.__getattr__ = _raise
+
+        patched = {
+            "mlx": fake_mlx,
+            "mlx.core": fake_mlx_core,
+            "mlx_embeddings": fake_mlx_embeddings,
+            "blkchain.reranker": fake_reranker,
+            "blkchain.embed_server": None,  # force a fresh import under the fakes
+        }
+        with mock.patch.dict(sys.modules, patched):
+            import importlib
+
+            del sys.modules["blkchain.embed_server"]  # drop the None sentinel
+            embed_server = importlib.import_module("blkchain.embed_server")
+
+            self.assertFalse(embed_server._RERANKER_OK)
+
+            h = FakeHandler(b'{"query": "q", "documents": ["d"]}', "/rerank")
+            h._send = types.MethodType(embed_server.Handler._send, h)
+            embed_server.Handler.do_POST(h)
+
+        self.assertEqual(h.status, 503)
+        raw = h.wfile.getvalue().decode()
+        self.assertEqual(json.loads(raw), {"error": "reranker unavailable"})
+        self.assertNotIn(secret, raw)
+        self.assertNotIn("RuntimeError", raw)
+
+
 if __name__ == "__main__":
     unittest.main()

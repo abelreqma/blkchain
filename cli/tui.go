@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"blkchain/cli/internal/client"
+	"blkchain/cli/internal/modeleval"
+	"blkchain/cli/internal/ragconfig"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -93,10 +95,6 @@ const ctrlCWindow = time.Second
 
 // --- messages ---
 
-type answerMsg struct {
-	resp    *client.AnswerResponse
-	elapsed time.Duration
-}
 type searchMsg struct {
 	query   string
 	results []client.SearchResult
@@ -112,15 +110,17 @@ type canceledMsg struct{}
 type execDoneMsg struct{ err error }
 
 // chunkMsg is one streamed token slice from the RAG synthesizer, pushed into
-// the event loop by the StreamRAG callback via prog.Send.
+// the event loop by the AnswerLoop stream callback via prog.Send.
 type chunkMsg string
 
 // streamDoneMsg is the terminal message of a stream: the full answer, the
 // citations derived from the retrieved chunks (RAG only), and any error. agent
-// marks an agent-mode turn, which renders without a SOURCES block.
+// marks an agent-mode turn, which renders without a SOURCES block. usedWeb is
+// RAG-only (AnswerLoop's web-search fallback); agent turns leave it false.
 type streamDoneMsg struct {
 	full      string
 	citations []client.Citation
+	usedWeb   bool
 	err       error
 	agent     bool
 	tokens    int // completion tokens when the transport exposed usage, else 0
@@ -163,6 +163,9 @@ type model struct {
 	turnStart   time.Time
 	cancel      context.CancelFunc
 	live        string // in-progress streamed answer, committed to scrollback on done
+
+	liveTokens int       // streamed tokens counted this turn (for the live readout)
+	firstTokAt time.Time // first streamed token this turn
 
 	history   []string
 	histIdx   int
@@ -381,27 +384,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case answerMsg:
-		m.working = false
-		if m.cancel != nil {
-			m.cancel()
-			m.cancel = nil
-		}
-		m.lastAnswer = msg.resp.Answer
-		m.openTargets = citationPaths(msg.resp.Citations)
-		m.apiOK, m.apiChecked = true, true
-		m.recordTurn(msg.resp.Answer)
-		cost := turnCost{elapsed: msg.elapsed}
-		m.lastCost, m.lastCostSet = cost, true
-		out := formatAnswer(msg.resp, msg.elapsed, m.renderWidth()) + "\n" + costFooter(cost)
-		return m, m.finish(tea.Println(out))
-
 	case chunkMsg:
 		if !m.working {
 			return m, nil // stray token after cancel/done
 		}
 		m.live += string(msg)
 		m.workingVerb = "answering" + ellipsis()
+		if m.firstTokAt.IsZero() {
+			m.firstTokAt = time.Now()
+		}
+		m.liveTokens++
 		return m, nil
 
 	case streamDoneMsg:
@@ -450,13 +442,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.Is(msg.err, context.Canceled) {
 				return m, m.finishNoDequeue(tea.Println("   " + Meta.Render("canceled")))
 			}
-			// Errored after streaming partial output (an immediate failure is
-			// handled inside streamCmd by falling back to /answer). Commit what
-			// streamed, then note the early end.
+			// Errored after streaming partial output. Commit what streamed, then
+			// note the early end.
 			m.apiChecked = true
 			var b strings.Builder
 			if strings.TrimSpace(full) != "" {
-				resp := &client.AnswerResponse{Answer: full, Citations: msg.citations}
+				resp := &client.AnswerResponse{Answer: full, Citations: msg.citations, UsedWeb: msg.usedWeb}
 				b.WriteString(formatAnswer(resp, elapsed, m.renderWidth()))
 				b.WriteByte('\n')
 			}
@@ -468,7 +459,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.apiOK, m.apiChecked = true, true
 		m.recordTurn(full)
 		m.lastCost, m.lastCostSet = cost, true
-		resp := &client.AnswerResponse{Answer: full, Citations: msg.citations}
+		resp := &client.AnswerResponse{Answer: full, Citations: msg.citations, UsedWeb: msg.usedWeb}
 		out := formatAnswer(resp, elapsed, m.renderWidth()) + "\n" + costFooter(cost)
 		return m, m.finish(tea.Println(out))
 
@@ -864,6 +855,8 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.workingVerb = workingVerbLabel(verb)
 		m.live = ""
 		m.turnStart = time.Now()
+		m.liveTokens = 0
+		m.firstTokAt = time.Time{}
 		var ctx context.Context
 		var cancel context.CancelFunc
 		if verb == "ask" && m.mode == "agent" {
@@ -891,17 +884,8 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 				}
 				return m, tea.Batch(tea.Println(echo), m.sp.Tick, m.agentStreamCmd(ctx, message))
 			}
-			// RAG mode: stream the synthesis directly from oMLX when OMLX_API_KEY is
-			// set; otherwise fall back to the non-streaming /answer path so ask
-			// always works (V2-BRIEF.md fallback).
-			if streamingEnabled() {
-				return m, tea.Batch(tea.Println(echo), m.sp.Tick, m.streamCmd(ctx, arg, preface, m.turnStart))
-			}
-			askArg := arg
-			if preface != "" {
-				askArg = preface + "\n\n" + arg
-			}
-			return m, tea.Batch(tea.Println(echo), m.sp.Tick, dispatchCmd(ctx, m.client, verb, askArg, m.turnStart))
+			// RAG mode: stream the full AnswerLoop synthesis directly from oMLX.
+			return m, tea.Batch(tea.Println(echo), m.sp.Tick, m.streamCmd(ctx, arg, preface, m.turnStart))
 		}
 		return m, tea.Batch(tea.Println(echo), m.sp.Tick, dispatchCmd(ctx, m.client, verb, arg, m.turnStart))
 	}
@@ -1019,30 +1003,29 @@ func (m model) liveRegion() string {
 
 // --- async dispatch ---
 
-// dispatchCmd runs the network call for search/ask/health in a goroutine and
+// dispatchCmd runs the network call for search/health in a goroutine and
 // selects it against ctx, so a Ctrl+C (which calls cancel) surfaces a
 // canceledMsg immediately even though the underlying HTTP call keeps running
 // until the client's own timeout. A deadline exceeded is reported as a
-// one-line timeout error.
+// one-line timeout error. ask is handled separately by streamCmd (always the
+// full AnswerLoop, never this dispatcher).
 func dispatchCmd(ctx context.Context, c *client.Client, verb, arg string, start time.Time) tea.Cmd {
 	return func() tea.Msg {
 		ch := make(chan tea.Msg, 1)
 		go func() {
 			switch verb {
 			case "search":
-				resp, err := c.Search(arg, 0, nil)
+				rc, err := newRetrievalClient()
 				if err != nil {
 					ch <- errMsg{err}
 					return
 				}
-				ch <- searchMsg{query: arg, results: resp.Results, elapsed: time.Since(start)}
-			case "ask":
-				resp, err := c.Answer(arg)
+				results, err := rc.Search(ctx, arg, 0, nil)
 				if err != nil {
 					ch <- errMsg{err}
 					return
 				}
-				ch <- answerMsg{resp: resp, elapsed: time.Since(start)}
+				ch <- searchMsg{query: arg, results: toClientResults(results), elapsed: time.Since(start)}
 			case "health":
 				h, err := c.Health()
 				ch <- healthReportMsg{h: h, err: err}
@@ -1060,40 +1043,39 @@ func dispatchCmd(ctx context.Context, c *client.Client, verb, arg string, start 
 	}
 }
 
-// streamCmd runs StreamRAG in a goroutine (tea.Cmd), pushing each token back
-// as a chunkMsg via the stored *tea.Program. If the stream fails before any
-// token arrives, it falls back to the non-streaming /answer path so ask always
-// works (V2-BRIEF.md); a cancel returns a canceledMsg.
+// streamCmd runs AnswerLoop in a goroutine (tea.Cmd), pushing each token back
+// as a chunkMsg via the stored *tea.Program. AnswerLoop is the full bounded
+// loop (grade, optional web fallback or rewrite, then synthesis); a cancel
+// returns a canceledMsg.
 func (m model) streamCmd(ctx context.Context, question, preface string, start time.Time) tea.Cmd {
 	prog := m.prog
-	c := m.client
 	ragModel := m.ragModel
 	reasoning := m.reasoning
 	return func() tea.Msg {
+		rc, err := newRetrievalClient()
+		if err != nil {
+			return errMsg{err}
+		}
+		cfg := ragconfig.Load()
 		streamed := false
-		full, cits, tokens, err := StreamRAG(ctx, c, question, preface, ragModel, reasoning, func(b []byte) {
-			streamed = true
-			if prog != nil {
-				prog.Send(chunkMsg(string(b)))
-			}
+		full, cits, usedWeb, _, tokens, err := AnswerLoop(ctx, rc, cfg, question, AnswerOpts{
+			Model:     ragModel,
+			Preface:   preface,
+			Reasoning: reasoning,
+			Stream: func(b []byte) {
+				streamed = true
+				if prog != nil {
+					prog.Send(chunkMsg(string(b)))
+				}
+			},
 		})
 		if err != nil && !streamed {
 			if errors.Is(err, context.Canceled) {
 				return canceledMsg{}
 			}
-			// Immediate stream failure (no tokens): fall back to /answer, carrying
-			// along the same @file/ambient preface the streaming path got.
-			fallbackQ := question
-			if preface != "" {
-				fallbackQ = preface + "\n\n" + question
-			}
-			resp, aerr := c.Answer(fallbackQ)
-			if aerr != nil {
-				return errMsg{aerr}
-			}
-			return answerMsg{resp: resp, elapsed: time.Since(start)}
+			return errMsg{err}
 		}
-		return streamDoneMsg{full: full, citations: cits, err: err, tokens: tokens}
+		return streamDoneMsg{full: full, citations: cits, usedWeb: usedWeb, err: err, tokens: tokens}
 	}
 }
 
@@ -1510,12 +1492,12 @@ func (m model) agentStatusLine() string {
 }
 
 // ragModelLabel is the oMLX model shown in rag-mode status, without a network
-// call: OMLX_MODEL when set, else the built-in default.
+// call: OMLX_MODEL when set, else the rag.json contract's default_model.
 func ragModelLabel() string {
 	if v := strings.TrimSpace(os.Getenv("OMLX_MODEL")); v != "" {
 		return v
 	}
-	return defaultOMLXModel
+	return ragconfig.Load().DefaultModel
 }
 
 // modeNote is the one-line confirmation printed when the mode changes.
@@ -1541,7 +1523,25 @@ func (m model) spinnerLine() string {
 	if d := time.Since(m.turnStart); d > 2*time.Second {
 		el = " " + Meta.Render("("+d.Round(time.Second).String()+")")
 	}
-	return " " + m.sp.View() + " " + Meta.Render(m.workingVerb) + el
+	line := " " + m.sp.View() + " " + Meta.Render(m.workingVerb) + el
+	if !m.firstTokAt.IsZero() {
+		line += "  " + liveReadout(m.liveTokens, time.Since(m.firstTokAt), useUnicode)
+	}
+	return line
+}
+
+func liveReadout(tokens int, since time.Duration, unicode bool) string {
+	sep := " " + glyphFor(GlyphBullet, unicode) + " "
+	parts := []string{modeleval.FormatElapsed(since)}
+	if tokens > 0 {
+		tps := modeleval.TokensPerSec(tokens, since)
+		parts = []string{
+			fmt.Sprintf("%d tok", tokens),
+			fmt.Sprintf("%.0f tok/s", tps),
+			modeleval.FormatElapsed(since),
+		}
+	}
+	return Meta.Render(strings.Join(parts, sep))
 }
 
 func (m model) renderWidth() int {
@@ -1626,27 +1626,35 @@ func welcomeBanner() string {
 }
 
 func helpBlock() string {
-	cmds := slashCommands()
-	names := make([]string, len(cmds))
+	groups := commandGroups()
+	names := make([][]string, len(groups))
 	width := len("<question>")
-	for i, c := range cmds {
-		n := "/" + c.name
-		if c.args != "" {
-			n += " " + c.args
-		}
-		names[i] = n
-		if len(n) > width {
-			width = len(n)
+	for gi, g := range groups {
+		names[gi] = make([]string, len(g.cmds))
+		for ci, c := range g.cmds {
+			n := "/" + c.name
+			if c.args != "" {
+				n += " " + c.args
+			}
+			names[gi][ci] = n
+			if len(n) > width {
+				width = len(n)
+			}
 		}
 	}
 	var b strings.Builder
-	b.WriteString(" " + H2.Render("COMMANDS") + "\n")
-	fmt.Fprintf(&b, "   %s  %s\n", Key.Render(pad("<question>", width)),
+	fmt.Fprintf(&b, "   %s  %s\n\n", Key.Render(pad("<question>", width)),
 		Body.Render("ask (rag mode streams a cited answer; agent mode runs hermes)"))
-	for i, c := range cmds {
-		fmt.Fprintf(&b, "   %s  %s\n", Key.Render(pad(names[i], width)), Body.Render(c.desc))
+	for gi, g := range groups {
+		if gi > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(" " + H2.Render(strings.ToUpper(g.title)) + "\n")
+		for ci, c := range g.cmds {
+			fmt.Fprintf(&b, "   %s  %s\n", Key.Render(pad(names[gi][ci], width)), Body.Render(c.desc))
+		}
 	}
-	b.WriteString("   " + Meta.Render("Enter submits · ctrl+j newline · ↑/↓ history · ctrl+r search · ctrl+g editor · @ attach · ? keys"))
+	b.WriteString("\n   " + Meta.Render("Enter submits · ctrl+j newline · ↑/↓ history · ctrl+r search · ctrl+g editor · @ attach · ? keys"))
 	return b.String()
 }
 

@@ -2,24 +2,73 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/qdrant/go-client/qdrant"
+
 	"blkchain/cli/internal/client"
+	"blkchain/cli/internal/ragconfig"
+	"blkchain/cli/internal/retrieval"
 )
 
+// defaultCollection is the Qdrant collection used when BLKCHAIN_COLLECTION is
+// unset, matching the Python engine's code default (blkchain.config).
+const defaultCollection = "blkchain"
+
+// newRetrievalClient builds a Go-native retrieval client (Task 8): it reads
+// the shared RAG config plus BLKCHAIN_COLLECTION, replacing the Python
+// /search HTTP call for the search command and RAG streaming.
+func newRetrievalClient() (*retrieval.Client, error) {
+	cfg := ragconfig.Load()
+	collection := os.Getenv("BLKCHAIN_COLLECTION")
+	if collection == "" {
+		collection = defaultCollection
+	}
+	return retrieval.New(cfg, collection)
+}
+
+// toClientResults adapts retrieval.Result (the Go-native retrieval package's
+// output) to client.SearchResult (identical fields), so the existing
+// printResults/formatResults rendering and the --json output shape stay
+// unchanged.
+func toClientResults(rs []retrieval.Result) []client.SearchResult {
+	out := make([]client.SearchResult, len(rs))
+	for i, r := range rs {
+		out[i] = client.SearchResult{
+			ID:    r.ID,
+			Score: r.Score,
+			Payload: client.Payload{
+				Source:  r.Payload.Source,
+				Path:    r.Payload.Path,
+				Section: r.Payload.Section,
+				Type:    r.Payload.Type,
+				Text:    r.Payload.Text,
+			},
+		}
+	}
+	return out
+}
+
 func main() {
+	loadProjectEnv()
+
 	if len(os.Args) < 2 {
 		// Bare `blk` drops into the interactive REPL — the friendliest entry
 		// point for repeated search/ask without re-invoking the binary.
 		if err := runREPL(); err != nil {
-			fmt.Fprintf(os.Stderr, "%s %v\n", red("✗"), err)
+			fmt.Fprintf(os.Stderr, "%s %v\n", Fail.Render(Glyph(GlyphErr)), err)
 			os.Exit(1)
 		}
 		return
@@ -46,6 +95,8 @@ func main() {
 		err = runInstall(args)
 	case "doctor":
 		err = runDoctor(args)
+	case "models":
+		err = runModels(args)
 	case "logs":
 		err = runLogs(args)
 	case "open":
@@ -65,7 +116,7 @@ func main() {
 		usage(os.Stdout)
 		return
 	default:
-		fmt.Fprintf(os.Stderr, "%s unknown command %q\n\n", red("blk:"), cmd)
+		fmt.Fprintf(os.Stderr, "%s unknown command %q\n\n", Fail.Render("blk:"), cmd)
 		usage(os.Stderr)
 		os.Exit(2)
 	}
@@ -74,9 +125,9 @@ func main() {
 		var unreachable *client.UnreachableError
 		if errors.As(err, &unreachable) {
 			fmt.Fprintf(os.Stderr, "%s %v\n%s  %s\n",
-				red("✗"), err, dim("Start the services with:"), bold("blk up"))
+				Fail.Render(Glyph(GlyphErr)), err, Meta.Render("Start the services with:"), Key.Render("blk up"))
 		} else {
-			fmt.Fprintf(os.Stderr, "%s %v\n", red("✗"), err)
+			fmt.Fprintf(os.Stderr, "%s %v\n", Fail.Render(Glyph(GlyphErr)), err)
 		}
 		os.Exit(1)
 	}
@@ -103,6 +154,7 @@ var usageCmds = []usageCmd{
 	{"mcp", "run the Hermes MCP stdio server (for ~/.hermes/config.yaml)", false},
 	{"health", "check the API and its dependencies", false},
 	{"doctor", "diagnose the whole stack (+ Hermes MCP wiring)", false},
+	{"models", "readiness + live perf of the chat/embed/rerank models", false},
 	{"logs [name]", "tail a service log (api, embed_server)", false},
 	{"install", "install blk onto your PATH (run once, from the project)", false},
 	{"version", "show version and build info", false},
@@ -238,18 +290,22 @@ func runSearch(args []string) error {
 		return err
 	}
 
-	c := client.NewClient()
+	rc, err := newRetrievalClient()
+	if err != nil {
+		return err
+	}
 	start := time.Now()
-	resp, err := c.Search(query, *topK, filterMap)
+	results, err := rc.Search(context.Background(), query, *topK, filterMap)
 	elapsed := time.Since(start)
 	if err != nil {
 		return err
 	}
+	adapted := toClientResults(results)
 
 	if *jsonOut {
-		return printJSON(resp)
+		return printJSON(client.SearchResponse{Results: adapted})
 	}
-	printResults(query, resp.Results, elapsed)
+	printResults(query, adapted, elapsed)
 	return nil
 }
 
@@ -335,26 +391,50 @@ func runAsk(args []string) error {
 	}
 
 	// --agent hands the question to the Hermes agent (which has the blkChain KB
-	// tools plus web/tool access), rather than the API's single-shot RAG answer.
+	// tools plus web/tool access), rather than the Go answer loop.
 	if *agent {
 		return runHermes([]string{query})
 	}
 
-	// RAG streaming to stdout when OMLX_API_KEY is set (V2-BRIEF.md T2). Only the
-	// plain text path streams: --json needs the full struct and --sources needs
-	// the retrieved chunks, neither of which the token stream carries. If the
-	// stream produced no output it falls through to the non-streaming path below,
-	// so ask always works.
-	if !*jsonOut && !*showSources && streamingEnabled() {
-		if done, _ := streamAsk(query); done {
-			return nil
-		}
-	}
-
-	c := client.NewClient()
-	resp, err := c.Answer(query)
+	rc, err := newRetrievalClient()
 	if err != nil {
 		return err
+	}
+	cfg := ragconfig.Load()
+
+	// Only the plain text path streams: --json needs the full struct and
+	// --sources needs the retrieved chunks, neither of which the token stream
+	// carries.
+	if !*jsonOut && !*showSources {
+		var full strings.Builder
+		_, cits, usedWeb, _, _, err := AnswerLoop(context.Background(), rc, cfg, query, AnswerOpts{
+			Stream: func(b []byte) {
+				full.Write(b)
+				os.Stdout.Write(b)
+			},
+		})
+		if err != nil && full.Len() == 0 {
+			return err
+		}
+		if !strings.HasSuffix(full.String(), "\n") {
+			fmt.Println()
+		}
+		printSources(cits, usedWeb)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s stream ended early: %v\n", Fail.Render(Glyph(GlyphErr)), err)
+		}
+		return nil
+	}
+
+	answer, cits, usedWeb, results, _, err := AnswerLoop(context.Background(), rc, cfg, query, AnswerOpts{})
+	if err != nil {
+		return err
+	}
+	resp := &client.AnswerResponse{
+		Answer:    answer,
+		Citations: cits,
+		UsedWeb:   usedWeb,
+		Results:   toClientResults(results),
 	}
 
 	if *jsonOut {
@@ -402,46 +482,101 @@ func printSources(citations []client.Citation, usedWeb bool) {
 	}
 }
 
-// streamAsk streams a RAG answer straight to stdout token by token, then prints
-// the SOURCES block. It returns done=true when the stream produced output (the
-// caller is finished); done=false means it failed before any token, so the
-// caller should fall back to the non-streaming /answer path. Tokens are written
-// raw (no ANSI), so piping stays clean.
-func streamAsk(query string) (bool, error) {
-	c := client.NewClient()
-	streamed := false
-	full, cits, _, err := StreamRAG(context.Background(), c, query, "", "", "", func(b []byte) {
-		streamed = true
-		os.Stdout.Write(b)
-	})
-	if err != nil && !streamed {
-		return false, err // fall back to /answer
-	}
-	if !strings.HasSuffix(full, "\n") {
-		fmt.Println()
-	}
-	printSources(cits, false)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s stream ended early: %v\n", red("✗"), err)
-	}
-	return true, nil
-}
-
 func runHealth(args []string) error {
 	fs := flag.NewFlagSet("health", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	c := client.NewClient()
-	h, err := c.Health()
-	if err != nil {
-		return err
-	}
-	fmt.Printf("%s blkChain API: %s  %s\n", check(h.Status == "ok"), h.Status, Meta.Render("("+c.BaseURL+")"))
-	fmt.Printf("  %s qdrant\n", check(h.Qdrant))
-	fmt.Printf("  %s embed_server\n", check(h.EmbedServer))
+	cfg := ragconfig.Load()
+	qdrantOK, embedOK := probeHealth(cfg)
+	fmt.Println("blkChain services:")
+	fmt.Printf("  %s qdrant        %s\n", check(qdrantOK), Meta.Render("("+cfg.QdrantGRPCURL+")"))
+	fmt.Printf("  %s embed_server  %s\n", check(embedOK), Meta.Render("("+cfg.EmbedServerURL+")"))
 	return nil
+}
+
+// healthProbeTimeout bounds each liveness probe so `blk health` never hangs
+// on a dead dependency.
+const healthProbeTimeout = 4 * time.Second
+
+// probeHealth checks Qdrant and embed_server directly (Task 16), replacing
+// the old dependency on the Python API's GET /health. The two probes are
+// independent so one dead dependency never masks the state of the other.
+func probeHealth(cfg ragconfig.Config) (qdrantOK, embedOK bool) {
+	return probeQdrant(cfg), probeEmbedServer(cfg)
+}
+
+// probeQdrant dials Qdrant's gRPC endpoint and issues a real liveness RPC
+// (HealthCheck). qdrant.NewClient itself never dials eagerly, so failure can
+// only be observed by making a call.
+func probeQdrant(cfg ragconfig.Config) bool {
+	host, port := qdrantHostPort(cfg.QdrantGRPCURL)
+	qc, err := qdrant.NewClient(&qdrant.Config{
+		Host: host,
+		Port: port,
+		// Skip the server-version compatibility check: it performs its own
+		// RPC during NewClient, which we don't need since HealthCheck below
+		// already proves liveness.
+		SkipCompatibilityCheck: true,
+	})
+	if err != nil {
+		return false
+	}
+	defer qc.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), healthProbeTimeout)
+	defer cancel()
+	_, err = qc.HealthCheck(ctx)
+	return err == nil
+}
+
+// qdrantHostPort parses a "host:port" address, defaulting the port to 6334
+// (Qdrant's gRPC default) when absent. Mirrors
+// internal/retrieval.splitHostPort so the health probe dials the same target
+// `blk search` does.
+func qdrantHostPort(addr string) (string, int) {
+	const defaultPort = 6334
+	if addr == "" {
+		return "127.0.0.1", defaultPort
+	}
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr, defaultPort
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return host, defaultPort
+	}
+	return host, port
+}
+
+// probeEmbedServer proves embed_server can actually serve a request: a tiny
+// POST to /embed with one word, bounded by a short timeout and a capped
+// response read so a misbehaving endpoint cannot hang or exhaust memory.
+func probeEmbedServer(cfg ragconfig.Config) bool {
+	body, err := json.Marshal(map[string][]string{"texts": {"ping"}})
+	if err != nil {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), healthProbeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.EmbedServerURL+"/embed", bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{Timeout: healthProbeTimeout}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+
+	return resp.StatusCode == http.StatusOK
 }
 
 // check renders the theme's OK/Fail glyph for a boolean dependency state

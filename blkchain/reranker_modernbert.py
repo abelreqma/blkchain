@@ -22,6 +22,7 @@ from mlx_embeddings.models.modernbert import Model, ModelArgs
 from transformers import AutoTokenizer
 
 from blkchain import config as _config
+from blkchain.rerank_scores import SENTINEL_SCORE, partition_blank, sanitize_scores
 
 _MODEL_PATH = Path(_config.RERANKER_PATH)
 _MAX_LENGTH = 512   # gte-reranker-modernbert recommended max sequence length
@@ -71,10 +72,23 @@ def _score_batch(query: str, docs: list[str]) -> list[float]:
 
 
 def rerank_documents(query: str, documents: list[str]) -> list[float]:
-    """One relevance score per document (input order; higher = more relevant)."""
+    """One relevance score per document (input order; higher = more relevant).
+
+    Blank/whitespace documents are ranked last without scoring (a degenerate row
+    yields a meaningless mid-distribution score). Any non-finite score from the
+    model is mapped to the same sort-last sentinel rather than a masked 0.0.
+    """
     if not documents:
         return []
-    scores: list[float] = []
-    for i in range(0, len(documents), _SUBBATCH):
-        scores.extend(_score_batch(query, documents[i:i + _SUBBATCH]))
+    scorable, _blank = partition_blank(documents)
+    scores = [SENTINEL_SCORE] * len(documents)
+    if not scorable:
+        return scores
+    kept = [documents[i] for i in scorable]
+    raw: list[float] = []
+    for i in range(0, len(kept), _SUBBATCH):
+        raw.extend(_score_batch(query, kept[i:i + _SUBBATCH]))
+    raw = sanitize_scores(raw)
+    for pos, idx in enumerate(scorable):
+        scores[idx] = raw[pos]
     return scores

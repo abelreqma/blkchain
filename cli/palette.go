@@ -21,44 +21,84 @@ const maxPaletteRows = 7
 
 // command is one entry in the slash-command registry. name is the bare verb (no
 // leading slash), args is the argument hint shown in help, desc is the one-line
-// description. The registry is the single source of truth for both the palette
-// and helpBlock (tui.go).
+// description, group is the section label used by grouped help (the palette
+// ignores it). The registry is the single source of truth for the palette,
+// helpBlock (tui.go), and replHelp (repl.go).
 type command struct {
-	name string
-	args string
-	desc string
+	name  string
+	args  string
+	desc  string
+	group string
 }
 
-// slashCommands is the command registry shared by the palette and helpBlock. It
-// mirrors the verbs handled in submit/dispatchInput (tui.go).
+// Command group labels, in display order (see commandGroups). Kept as consts so
+// the registry and the group ordering cannot drift.
+const (
+	groupAsk      = "Ask & search"
+	groupModes    = "Modes"
+	groupSession  = "Session"
+	groupServices = "Services"
+	groupMeta     = "Meta"
+)
+
+// groupOrder is the order sections appear in grouped help.
+var groupOrder = []string{groupAsk, groupModes, groupSession, groupServices, groupMeta}
+
+// slashCommands is the command registry shared by the palette, helpBlock, and
+// replHelp. It mirrors the verbs handled in submit/dispatchInput (tui.go).
 func slashCommands() []command {
 	return []command{
-		{"ask", "<q>", "ask explicitly (rag streams a cited answer; agent runs hermes)"},
-		{"mode", "", "toggle rag / agent mode (also /agent, /rag)"},
-		{"agent", "", "switch to agent mode"},
-		{"rag", "", "switch to rag mode"},
-		{"search", "<q>", "find ranked source chunks (also: s <q>)"},
-		{"open", "<N|path>", "open source N from the last answer/search, or a path"},
-		{"resume", "", "reopen a saved session (1-9 quick-pick, d y deletes)"},
-		{"model", "", "pick model + reasoning (also ctrl+p)"},
-		{"title", "<name>", "rename the current session"},
-		{"attach", "", "attach a file's contents to the next prompt (also @)"},
-		{"editor", "", "compose the draft in $EDITOR (also ctrl+g)"},
-		{"init", "", "load ./.blk/context.md as session context"},
-		{"cost", "", "show the last turn's tokens + latency"},
-		{"undo", "", "drop the last exchange from this session"},
-		{"clear", "", "clear the working transcript (scrollback stays)"},
-		{"copy", "", "copy the last answer to the clipboard"},
-		{"hermes", "<prompt>", "run a Hermes agent turn"},
-		{"health", "", "API + dependency status"},
-		{"doctor", "", "diagnose the whole stack"},
-		{"logs", "[name]", "tail a service log (api, embed_server)"},
-		{"up", "", "start the local services"},
-		{"down", "", "stop the local services"},
-		{"status", "", "service status"},
-		{"help", "", "this help"},
-		{"quit", "", "leave (also ctrl+d)"},
+		{"ask", "<q>", "ask explicitly (rag streams a cited answer; agent runs hermes)", groupAsk},
+		{"search", "<q>", "find ranked source chunks (also: s <q>)", groupAsk},
+		{"open", "<N|path>", "open source N from the last answer/search, or a path", groupAsk},
+		{"mode", "", "toggle rag / agent mode (also /agent, /rag)", groupModes},
+		{"agent", "", "switch to agent mode", groupModes},
+		{"rag", "", "switch to rag mode", groupModes},
+		{"resume", "", "reopen a saved session (1-9 quick-pick, d y deletes)", groupSession},
+		{"model", "", "pick model + reasoning (also ctrl+p)", groupSession},
+		{"title", "<name>", "rename the current session", groupSession},
+		{"attach", "", "attach a file's contents to the next prompt (also @)", groupSession},
+		{"editor", "", "compose the draft in $EDITOR (also ctrl+g)", groupSession},
+		{"init", "", "load ./.blk/context.md as session context", groupSession},
+		{"cost", "", "show the last turn's tokens + latency", groupSession},
+		{"undo", "", "drop the last exchange from this session", groupSession},
+		{"clear", "", "clear the working transcript (scrollback stays)", groupSession},
+		{"copy", "", "copy the last answer to the clipboard", groupSession},
+		{"hermes", "<prompt>", "run a Hermes agent turn", groupServices},
+		{"health", "", "API + dependency status", groupServices},
+		{"doctor", "", "diagnose the whole stack", groupServices},
+		{"logs", "[name]", "tail a service log (api, embed_server)", groupServices},
+		{"up", "", "start the local services", groupServices},
+		{"down", "", "stop the local services", groupServices},
+		{"status", "", "service status", groupServices},
+		{"help", "", "this help", groupMeta},
+		{"quit", "", "leave (also ctrl+d)", groupMeta},
 	}
+}
+
+// commandGroup is an ordered section of the registry for grouped help.
+type commandGroup struct {
+	title string
+	cmds  []command
+}
+
+// commandGroups partitions slashCommands() into ordered sections (groupOrder)
+// for grouped help. The palette stays flat; only help renders grouped. Commands
+// keep their registry order within each group. A command whose group is unknown
+// is dropped rather than silently misfiled, so a registry typo is visible as a
+// missing row in help.
+func commandGroups() []commandGroup {
+	byGroup := map[string][]command{}
+	for _, c := range slashCommands() {
+		byGroup[c.group] = append(byGroup[c.group], c)
+	}
+	groups := make([]commandGroup, 0, len(groupOrder))
+	for _, title := range groupOrder {
+		if cmds := byGroup[title]; len(cmds) > 0 {
+			groups = append(groups, commandGroup{title: title, cmds: cmds})
+		}
+	}
+	return groups
 }
 
 // isExactCommand reports whether name (lowercased, without the leading slash)

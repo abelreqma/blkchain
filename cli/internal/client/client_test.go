@@ -98,46 +98,6 @@ func TestSearch(t *testing.T) {
 	}
 }
 
-func TestAnswer(t *testing.T) {
-	canned := AnswerResponse{
-		Answer: "Finality is reached after two rounds of voting.",
-		Citations: []Citation{
-			{Source: "ledger-spec", Path: "docs/ledger.md", Section: "Consensus"},
-		},
-		UsedWeb: true,
-	}
-
-	var gotReq AnswerRequest
-	c, closeSrv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/answer" {
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
-			t.Fatalf("decoding request body: %v", err)
-		}
-		json.NewEncoder(w).Encode(canned)
-	})
-	defer closeSrv()
-
-	resp, err := c.Answer("how does consensus work")
-	if err != nil {
-		t.Fatalf("Answer() error = %v", err)
-	}
-
-	if gotReq.Query != "how does consensus work" {
-		t.Errorf("request Query = %q, want %q", gotReq.Query, "how does consensus work")
-	}
-	if resp.Answer != canned.Answer {
-		t.Errorf("Answer = %q, want %q", resp.Answer, canned.Answer)
-	}
-	if !resp.UsedWeb {
-		t.Errorf("UsedWeb = false, want true")
-	}
-	if len(resp.Citations) != 1 || resp.Citations[0].Source != "ledger-spec" {
-		t.Errorf("Citations = %+v, unexpected", resp.Citations)
-	}
-}
-
 func TestUnreachable(t *testing.T) {
 	// Point at a port nothing is listening on.
 	c := &Client{BaseURL: "http://127.0.0.1:1", HTTPClient: http.DefaultClient}

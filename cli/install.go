@@ -44,14 +44,14 @@ func runInstall(args []string) error {
 		return fmt.Errorf("install: saving project root: %w", err)
 	}
 
-	fmt.Printf("%s installed %s\n", green("✓"), bold(dest))
-	fmt.Printf("%s project root %s\n", green("✓"), root)
-	fmt.Printf("  %s\n", dim("(saved to "+saved+")"))
+	fmt.Printf("%s installed %s\n", OK.Render(Glyph(GlyphOK)), Key.Render(dest))
+	fmt.Printf("%s project root %s\n", OK.Render(Glyph(GlyphOK)), root)
+	fmt.Printf("  %s\n", Meta.Render("(saved to "+saved+")"))
 	if !onPath(destDir) {
 		fmt.Printf("\n%s %s is not on your PATH. Add it:\n    %s\n",
-			red("!"), destDir, bold(`export PATH="`+destDir+`:$PATH"`))
+			Caut.Render(Glyph(GlyphWarn)), destDir, Key.Render(`export PATH="`+destDir+`:$PATH"`))
 	} else {
-		fmt.Printf("\nRun %s from anywhere.\n", bold("blk help"))
+		fmt.Printf("\nRun %s from anywhere.\n", Key.Render("blk help"))
 	}
 	return nil
 }

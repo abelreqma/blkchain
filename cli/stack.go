@@ -393,28 +393,3 @@ func runStack(cmd string) error {
 		return fmt.Errorf("stack: unknown command %q", cmd)
 	}
 }
-
-// runMCP execs the Hermes MCP stdio server for the blkChain RAG (kb_search /
-// kb_answer), replacing scripts/start_mcp.sh. It runs from the project root
-// so `-m blkchain.mcp_server` resolves regardless of the caller's working
-// directory, with stdin/stdout/stderr wired straight through for the MCP
-// JSON-RPC transport.
-func runMCP(args []string) error {
-	root, err := projectRoot()
-	if err != nil {
-		return err
-	}
-	python := venvPython(root)
-	if _, err := os.Stat(python); err != nil {
-		return fmt.Errorf("mcp: venv python not found at %s — set up the project venv first", python)
-	}
-
-	c := exec.Command(python, "-m", "blkchain.mcp_server")
-	c.Dir = root
-	c.Env = buildChildEnv(root, tavilyToken())
-	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := c.Run(); err != nil {
-		return fmt.Errorf("mcp: %w", err)
-	}
-	return nil
-}

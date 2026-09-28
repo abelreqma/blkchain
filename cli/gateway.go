@@ -74,7 +74,7 @@ func runGateway(args []string) error {
 		return fmt.Errorf("gateway: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "%s %s\n", dim("gateway:"), dim(envPath))
+	fmt.Fprintf(os.Stderr, "%s %s\n", Meta.Render("gateway:"), Meta.Render(envPath))
 	for _, line := range summarizeUpdates(updates) {
 		fmt.Fprintf(os.Stderr, "  %s %s\n", OK.Render(Glyph(GlyphOK)), line)
 	}
@@ -84,7 +84,7 @@ func runGateway(args []string) error {
 	}
 
 	if *setupOnly {
-		fmt.Fprintf(os.Stderr, "%s run %s to start it\n", dim("→"), bold("hermes gateway"))
+		fmt.Fprintf(os.Stderr, "%s run %s to start it\n", Meta.Render(Glyph(GlyphArrow)), Key.Render("hermes gateway"))
 		return nil
 	}
 
@@ -92,7 +92,7 @@ func runGateway(args []string) error {
 	if err != nil {
 		return fmt.Errorf("gateway: %q not found on PATH — install Hermes Agent or run %q yourself", hermesBin, "hermes gateway")
 	}
-	fmt.Fprintf(os.Stderr, "%s %s\n", dim("→"), dim("hermes gateway"))
+	fmt.Fprintf(os.Stderr, "%s %s\n", Meta.Render(Glyph(GlyphArrow)), Meta.Render("hermes gateway"))
 	c := exec.Command(path, "gateway")
 	c.Stdout, c.Stderr, c.Stdin = os.Stdout, os.Stderr, os.Stdin
 	if err := c.Run(); err != nil {
