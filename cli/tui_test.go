@@ -1597,14 +1597,14 @@ func TestHelpBlockLayout(t *testing.T) {
 	}
 	for _, want := range []string{
 		"reopen a saved session; press 1-9 to pick, d then y to delete",
-		"answer a question from the knowledge base, with cited sources",
+		"answer a question, with cited sources",
 		"find the most relevant source passages for a query",
 		"start the local services",
 		"stop the local services",
 		"show whether each local service is running",
 		"check qdrant, embed_server, and the LLM",
 		"check the whole setup and say what to fix",
-		"run one Hermes agent turn with the knowledge-base tools",
+		"run one Hermes agent turn with the knowledge base",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help lacks the shared wording %q", want)

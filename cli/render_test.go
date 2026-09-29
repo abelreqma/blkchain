@@ -150,6 +150,10 @@ func TestFormatResultsNeverOverflows(t *testing.T) {
 		for _, text := range texts {
 			out := formatResults("query "+strings.Repeat("q", 300), resultsFixture(text), 5*time.Millisecond, w)
 			for _, ln := range strings.Split(out, "\n") {
+				// The path line is intentionally unwrapped (see TestFormatResultsPathIsOneLine).
+				if strings.Contains(ln, "corpus/") {
+					continue
+				}
 				if lipgloss.Width(ln) > w {
 					t.Errorf("width %d: line is %d columns: %q", w, lipgloss.Width(ln), ln)
 				}
@@ -179,6 +183,9 @@ func TestFormatResultsNeverOverflowsWithColor(t *testing.T) {
 	for _, w := range []int{40, 60, 80, 120} {
 		out := formatResults("query "+strings.Repeat("q", 300), resultsFixture(strings.Repeat("Q", 500)), 5*time.Millisecond, w)
 		for _, ln := range strings.Split(out, "\n") {
+			if strings.Contains(ln, "corpus/") {
+				continue
+			}
 			if lipgloss.Width(ln) > w {
 				t.Errorf("width %d: line is %d columns: %q", w, lipgloss.Width(ln), ln)
 			}
@@ -192,5 +199,31 @@ func TestFormatResultsNeverOverflowsWithColor(t *testing.T) {
 func TestFormatResultsTinyWidthDoesNotPanic(t *testing.T) {
 	for _, w := range []int{-5, 0, 1, 2, 3, 8, 15} {
 		_ = formatResults("q", resultsFixture("some text"), time.Second, w)
+	}
+}
+
+// The path is a copy target for "blk open" and notes, so it must print as one
+// logical line: a hard wrap would put a newline inside the pasted path.
+func TestFormatResultsPathIsOneLine(t *testing.T) {
+	r := resultsFixture("preview text")
+	r[0].Payload.Path = "corpus/" + strings.Repeat("p", 300) + "/a\tb\n.md"
+	want := "corpus/" + strings.Repeat("p", 300) + "/a b .md"
+	for _, w := range []int{60, 100} {
+		out := formatResults("q", r, 0, w)
+		var hits []string
+		for _, ln := range strings.Split(out, "\n") {
+			if strings.Contains(ln, "corpus/") {
+				hits = append(hits, ln)
+			}
+		}
+		if len(hits) != 1 {
+			t.Fatalf("width %d: path spans %d lines, want 1:\n%s", w, len(hits), out)
+		}
+		if got := strings.TrimLeft(hits[0], " "); got != want {
+			t.Errorf("width %d: path line = %q, want %q", w, got, want)
+		}
+		if strings.Count(out, "pppp") != strings.Count(hits[0], "pppp") {
+			t.Errorf("width %d: path characters leaked to other lines", w)
+		}
 	}
 }

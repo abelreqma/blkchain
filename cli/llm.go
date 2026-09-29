@@ -163,9 +163,10 @@ func dedupCitations(chunks []retrieval.Result) []citation {
 		}
 		seen[key] = true
 		cits = append(cits, citation{
-			Source:  r.Payload.Source,
-			Path:    r.Payload.Path,
-			Section: r.Payload.Section,
+			Source:    r.Payload.Source,
+			Path:      r.Payload.Path,
+			Section:   r.Payload.Section,
+			Untrusted: r.Payload.Source == webSource,
 		})
 	}
 	return cits

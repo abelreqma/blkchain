@@ -149,7 +149,7 @@ func TestCitationsFallbackDedupesPreservesOrder(t *testing.T) {
 	want := []citation{
 		{Source: "kb", Path: "a.md", Section: "S1"},
 		{Source: "kb", Path: "b.md", Section: "S2"},
-		{Source: "web", Path: "http://x", Section: "T"},
+		{Source: "web", Path: "http://x", Section: "T", Untrusted: true},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d citations, want %d: %+v", len(got), len(want), got)

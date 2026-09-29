@@ -91,7 +91,7 @@ EMBEDDER_PATH = _embedder_path()
 EMBED_DIM = 1024  # Qwen3-Embedding-0.6B native dim (MRL-truncatable later)
 
 # Reranker models are selected through configuration.
-RERANKER_KIND = os.environ.get("BLKCHAIN_RERANKER_KIND", "modernbert").strip().lower()
+RERANKER_KIND = os.environ.get("BLKCHAIN_RERANKER_KIND", "qwen3").strip().lower()
 
 
 def _reranker_path() -> Path:
@@ -99,8 +99,12 @@ def _reranker_path() -> Path:
     if v:
         p = Path(v).expanduser()
         return p if p.is_absolute() else (MODELS_DIR / p)
-    default = ("gte-reranker-modernbert-base-mlx" if RERANKER_KIND == "modernbert"
-               else "jina-reranker-v3-4bit-mxfp4")
+    if RERANKER_KIND == "modernbert":
+        default = "gte-reranker-modernbert-base-mlx"
+    elif RERANKER_KIND == "qwen3":
+        default = "Qwen3-Reranker-0.6B-4bit"
+    else:
+        default = "jina-reranker-v3-4bit-mxfp4"
     return MODELS_DIR / default
 
 

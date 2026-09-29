@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"os"
 	"os/exec"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -16,23 +17,26 @@ import (
 	"unicode/utf8"
 
 	"blkchain/cli/internal/ragconfig"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 // wordingDescs is the shared wording table (one line per command). The CLI
 // usage, per-command help, and shell completion must use these lines verbatim.
 var wordingDescs = map[string]string{
-	"ask":        "answer a question from the knowledge base, with cited sources",
+	"ask":        "answer a question, with cited sources",
 	"search":     "find the most relevant source passages for a query",
 	"open":       "open a cited source in your pager or editor",
-	"add":        "add your own files, folders, or a web page to the knowledge base",
+	"add":        "add your own files, folders, or a web page",
 	"up":         "start the local services",
 	"down":       "stop the local services",
 	"status":     "show whether each local service is running",
 	"health":     "check qdrant, embed_server, and the LLM",
 	"doctor":     "check the whole setup and say what to fix",
-	"models":     "check the chat, embedding, and rerank models and their speed",
+	"models":     "check each model's readiness and speed",
 	"logs":       "show the embed_server log; -f follows it",
-	"hermes":     "run one Hermes agent turn with the knowledge-base tools",
+	"hermes":     "run one Hermes agent turn with the knowledge base",
 	"gateway":    "set up and start the Hermes gateway for agent mode",
 	"mcp":        "serve the knowledge base to Hermes over MCP (stdio)",
 	"install":    "put blk on your PATH (run once, from the project)",
@@ -189,27 +193,31 @@ func TestUsageLayout(t *testing.T) {
 	assertMaxWidth(t, "usage", out, 80)
 	assertASCII(t, "usage", out)
 
-	// Sections appear in order.
-	order := []string{" USAGE", " COMMANDS", " EXAMPLES", " ENVIRONMENT"}
+	// One heading level: the groups are top-level sections, in order, and
+	// there is no COMMANDS wrapper or global FLAGS section.
+	order := append(append([]string{"USAGE"}, wordingGroupTitles...), "EXAMPLES", "ENVIRONMENT")
 	prev := -1
 	for _, h := range order {
-		i := strings.Index(out, "\n"+h+"\n")
+		i := strings.Index(out, "\n "+h+"\n")
 		if i < 0 {
-			t.Fatalf("usage lacks the %q section:\n%s", strings.TrimSpace(h), out)
+			t.Fatalf("usage lacks the %q section:\n%s", h, out)
 		}
 		if i < prev {
-			t.Errorf("section %q is out of order", strings.TrimSpace(h))
+			t.Errorf("section %q is out of order", h)
 		}
 		prev = i
 	}
-	if strings.Contains(out, "\n FLAGS\n") {
-		t.Error("usage must not have a global FLAGS section")
+	for _, gone := range []string{"COMMANDS", "\n FLAGS\n", "knowledge-base client"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("usage still has %q", gone)
+		}
 	}
 	for _, want := range []string{
 		"start the interactive session",
-		"blk <command> [flags]",
-		"--json",
-		`Run "blk help <command>" for flags and examples.`,
+		"   blk <command> [flags]  run one command",
+		"Add --json to ask, search, or models for machine-readable output.",
+		"flags go before or after the query",
+		`Run "blk help <command>" for its flags`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("usage lacks %q", want)
@@ -219,81 +227,295 @@ func TestUsageLayout(t *testing.T) {
 		t.Error("usage must never print a secret value")
 	}
 
-	// Groups in order, each command on one row with its verbatim description.
-	last := 0
-	for gi, title := range wordingGroupTitles {
-		i := strings.Index(out, title)
-		if i < last {
-			t.Errorf("group %q is missing or out of order", title)
-		}
-		last = i
-		for _, name := range wordingGroups[gi] {
-			row := lineWith(out, wordingDescs[name])
-			if row == "" {
-				t.Errorf("usage lacks the row for %q with its verbatim description", name)
+	// The synopsis rows share the description column with the command rows.
+	usageCol := strings.Index(lineWith(out, "run one command"), "run one command")
+
+	// The title names the tool with the README's own description.
+	title := strings.Split(out, "\n")[0]
+	if !strings.HasPrefix(title, " blk  "+usageTagline) || len(usageTagline) >= 45 {
+		t.Errorf("title line = %q, tagline %q", title, usageTagline)
+	}
+
+	// Each command row shows its argument signature, and every description
+	// starts at the same column, whatever the group.
+	descCol := -1
+	for gi, names := range wordingGroups {
+		sec := section(out, wordingGroupTitles[gi], "")
+		for _, name := range names {
+			c, _ := lookupCommand(name)
+			sig := strings.TrimSpace(name + " " + c.args)
+			row := lineWith(sec, sig+" ")
+			if !strings.HasPrefix(row, "   "+sig+" ") {
+				t.Errorf("row for %q is %q, want it to start with its signature %q", name, row, sig)
 				continue
 			}
-			if !regexp.MustCompile(`^\s+` + regexp.QuoteMeta(name) + `\s`).MatchString(row) {
-				t.Errorf("row for %q is %q", name, row)
+			first := strings.Fields(c.desc)[0]
+			col := strings.Index(row[len(sig)+3:], first) + len(sig) + 3
+			if descCol < 0 {
+				descCol = col
+			}
+			if col != descCol {
+				t.Errorf("%s description starts at column %d, want %d", name, col, descCol)
+			}
+			if !strings.Contains(collapse(sec), c.desc) {
+				t.Errorf("%s description is not verbatim: %q", name, row)
 			}
 		}
 	}
-	for _, name := range []string{"models", "health", "doctor", "mcp", "gateway", "logs", "help"} {
-		if lineWith(out, wordingDescs[name]) == "" {
-			t.Errorf("usage lacks %q", name)
+	if usageCol != descCol {
+		t.Errorf("USAGE descriptions start at column %d, commands at %d", usageCol, descCol)
+	}
+	// A wrapped description (the ask row at 60 columns) continues under the
+	// description column, which does not depend on the width.
+	lines := strings.Split(section(renderUsage(60), "ASK AND SEARCH", ""), "\n")
+	wrapped := false
+	for i, ln := range lines {
+		if strings.HasPrefix(ln, "   ask ") && i+1 < len(lines) {
+			cont := lines[i+1]
+			wrapped = strings.HasPrefix(cont, strings.Repeat(" ", descCol))
+			if !wrapped || cont[descCol] == ' ' {
+				t.Errorf("ask continuation at 60 %q does not start at column %d", cont, descCol)
+			}
 		}
 	}
-
-	// Every environment variable is named, on one row with a meaning.
-	for _, env := range wordingEnv {
-		row := lineWith(out, env)
-		if row == "" {
-			t.Errorf("usage lacks %s", env)
-			continue
-		}
-		if len(strings.Fields(row)) < 3 {
-			t.Errorf("%s row has no meaning: %q", env, row)
-		}
+	if !wrapped {
+		t.Error("the ask row no longer wraps at 60 columns; pick another wrapped row")
 	}
 
-	// Examples: four to six, covering ask, search with a flag, add, up, and a check.
-	ex := section(out, " EXAMPLES", " ENVIRONMENT")
+	// Examples: three or four prompted lines covering start-up, ask, and search with a flag.
 	var cmds []string
-	for _, ln := range strings.Split(ex, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(ln), "blk ") {
-			cmds = append(cmds, strings.TrimSpace(ln))
+	for _, ln := range strings.Split(section(out, "EXAMPLES", "ENVIRONMENT"), "\n") {
+		if strings.HasPrefix(ln, "   $ blk ") {
+			cmds = append(cmds, strings.TrimPrefix(ln, "   $ "))
 		}
 	}
-	if len(cmds) < 4 || len(cmds) > 6 {
-		t.Errorf("usage has %d examples, want 4 to 6: %v", len(cmds), cmds)
+	if len(cmds) != len(usageExamples) || len(cmds) < 3 || len(cmds) > 4 {
+		t.Errorf("usage has %d prompted examples, want all of %v", len(cmds), usageExamples)
 	}
 	joined := strings.Join(cmds, "\n")
-	for _, want := range []string{"blk ask ", "blk search ", "--", "blk add ", "blk up", "blk status"} {
+	for _, want := range []string{"blk ask ", "blk search ", "--top-k", "blk up"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("examples lack %q:\n%s", want, joined)
 		}
 	}
+
+	// The short environment list names its variables and points to the full list.
+	env := section(out, "ENVIRONMENT", "")
+	for _, name := range usageEnvShort {
+		if row := lineWith(env, name); len(strings.Fields(row)) < 3 {
+			t.Errorf("ENVIRONMENT row for %s has no meaning: %q", name, row)
+		}
+	}
+	if n := len(usageEnvShort); n < 4 || n > 5 {
+		t.Errorf("short environment list has %d names, want 4 or 5", n)
+	}
+	total := 0
+	for _, g := range usageEnv() {
+		total += len(g.rows)
+	}
+	if want := `"blk help env" for all ` + strconv.Itoa(total) + " variables"; !strings.Contains(out, want) {
+		t.Errorf("usage lacks %q", want)
+	}
 }
 
-// section returns the text from the heading line start up to the next heading.
+// section returns the text from the heading line start up to the next heading
+// (end, or any top-level heading when end is empty).
 func section(s, start, end string) string {
-	i := strings.Index(s, "\n"+start+"\n")
+	i := strings.Index(s, "\n "+start+"\n")
 	if i < 0 {
 		return ""
 	}
 	rest := s[i+1:]
-	if j := strings.Index(rest, "\n"+end+"\n"); j >= 0 {
+	if end != "" {
+		if j := strings.Index(rest, "\n "+end+"\n"); j >= 0 {
+			return rest[:j]
+		}
+		return rest
+	}
+	if j := strings.Index(rest, "\n\n "); j >= 0 {
 		return rest[:j]
 	}
 	return rest
 }
 
-func TestUsageEnvironmentDefaultsMatchCode(t *testing.T) {
+func TestUsageIsAtMost50Lines(t *testing.T) {
+	out := renderUsage(80)
+	if n := strings.Count(out, "\n"); n > 50 {
+		t.Errorf("usage is %d lines at 80 columns, want at most 50:\n%s", n, out)
+	}
+}
+
+// At 60, 80, and 100 columns nothing runs past the width and everything the
+// page names is present: each command signature and example unbroken on one
+// line, and each short-list variable.
+func TestUsageContentAtEveryWidth(t *testing.T) {
+	for _, w := range []int{60, 80, 100} {
+		out := renderUsage(w)
+		assertMaxWidth(t, "usage", out, w)
+		for _, c := range commandSpecs() {
+			if c.group == "" {
+				continue
+			}
+			sig := strings.TrimSpace(c.name + " " + c.args)
+			if !strings.HasPrefix(lineWith(out, "   "+sig+" "), "   "+sig+" ") {
+				t.Errorf("width %d: no row starts with %q", w, sig)
+			}
+			if !strings.Contains(collapse(out), c.desc) {
+				t.Errorf("width %d: %s description is missing", w, c.name)
+			}
+		}
+		for _, ex := range usageExamples {
+			if lineWith(out, "   $ "+ex) == "" {
+				t.Errorf("width %d: example %q is not on one line", w, ex)
+			}
+		}
+		for _, name := range usageEnvShort {
+			if lineWith(out, "   "+name+" ") == "" {
+				t.Errorf("width %d: usage lacks %s", w, name)
+			}
+		}
+	}
+}
+
+// At 80 columns every listed command row is one line: its whole description
+// sits on the row and no continuation line follows it.
+func TestUsageCommandRowsAreOneLineAt80(t *testing.T) {
+	out := renderUsage(80)
+	lines := strings.Split(out, "\n")
+	for _, c := range commandSpecs() {
+		if c.group == "" {
+			continue
+		}
+		sig := strings.TrimSpace(c.name + " " + c.args)
+		for i, ln := range lines {
+			if !strings.HasPrefix(ln, "   "+sig+" ") {
+				continue
+			}
+			if !strings.HasSuffix(ln, c.desc) {
+				t.Errorf("%s row does not hold its whole description: %q", c.name, ln)
+			}
+			if next := lines[i+1]; strings.HasPrefix(next, "    ") {
+				t.Errorf("%s row wraps onto %q", c.name, next)
+			}
+		}
+	}
+}
+
+// The closing lines highlight the command text in them the way the examples
+// do, and the rest stays muted.
+func TestUsageClosingLinesHighlightCommands(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+	out := renderUsage(80)
+	for _, want := range []string{
+		Meta.Render("Add ") + Flag.Render("--json") + Meta.Render(" to ask, search, or models for machine-readable output."),
+		Meta.Render(`Run "`) + styleWords("blk help <command>") + Meta.Render(`" for its flags, or "`) + styleWords("blk help env"),
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("usage closing lines lack %q", want)
+		}
+	}
+}
+
+func TestUsageFitsNarrowTerminals(t *testing.T) {
+	out := renderUsage(40)
+	assertMaxWidth(t, "usage", out, 40)
+	for _, name := range []string{"ask", "models", "OMLX_BASE_URL", "help"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("width 40: usage lost %q", name)
+		}
+	}
+}
+
+// With color off (NO_COLOR, TERM=dumb, or a pipe) no help surface carries an
+// escape sequence, and the layout is the same text.
+func TestHelpHasNoEscapesWithColorOff(t *testing.T) {
+	noColor(t)
+	got := map[string]string{"usage": renderUsage(80), "env": renderEnvHelp(80)}
+	for _, c := range commandSpecs() {
+		got[c.name] = renderCommandHelp(c, 80)
+	}
+	for name, s := range got {
+		if strings.ContainsRune(s, 0x1b) {
+			t.Errorf("%s help holds an escape sequence with color off", name)
+		}
+	}
+}
+
+// blk help env (and blk help environment) is a help topic: it lists every
+// variable in its group, but it is not a command, so dispatch, the command
+// list, and shell completion of commands do not know it.
+func TestHelpEnvTopic(t *testing.T) {
+	t.Setenv("OMLX_API_KEY", "sekret-llm-key")
+	want := renderEnvHelp(terminalWidth())
+	for _, arg := range []string{"env", "environment"} {
+		var err error
+		out := captureStdout(t, func() { err = runHelp([]string{arg}) })
+		if err != nil || exitCode(err) != 0 || out != want {
+			t.Errorf("blk help %s: err = %v, output differs from the env topic", arg, err)
+		}
+	}
+	for _, w := range []int{60, 80, 100} {
+		out := renderEnvHelp(w)
+		assertMaxWidth(t, "env help", out, w)
+		assertASCII(t, "env help", out)
+		if strings.Contains(out, "sekret") {
+			t.Error("env help must never print a secret value")
+		}
+		prev := -1
+		for _, g := range usageEnv() {
+			i := strings.Index(out, "\n "+g.title+"\n")
+			if i < prev {
+				t.Errorf("width %d: env help lacks the %q section or has it out of order", w, g.title)
+			}
+			prev = i
+			for _, r := range g.rows {
+				if row := lineWith(out, "   "+r.name+" "); row == "" {
+					t.Errorf("width %d: env help lacks %s", w, r.name)
+				}
+			}
+		}
+		for _, env := range wordingEnv {
+			if lineWith(out, env) == "" {
+				t.Errorf("width %d: env help lacks %s", w, env)
+			}
+		}
+	}
+	out := renderEnvHelp(80)
+	if last := strings.TrimSpace(lastLine(out)); last != `Run "blk help" to see all commands.` {
+		t.Errorf("env help closing line = %q", last)
+	}
+	for _, name := range []string{"env", "environment"} {
+		if _, ok := lookupCommand(name); ok {
+			t.Errorf("%q must be a help topic, not a command", name)
+		}
+		if containsStr(commandNames(), name) {
+			t.Errorf("%q is in the command list", name)
+		}
+		re := regexp.MustCompile(`\b` + name + `\b`)
+		if re.MatchString(bashCompletion()) || re.MatchString(zshCompletion()) {
+			t.Errorf("shell completion offers %q", name)
+		}
+		var err error
+		captureBoth(t, func() { err = dispatch(name, nil) })
+		if exitCode(err) != 2 {
+			t.Errorf("blk %s: exit %d, want the unknown-command 2", name, exitCode(err))
+		}
+	}
+}
+
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	return lines[len(lines)-1]
+}
+
+func TestEnvHelpDefaultsMatchCode(t *testing.T) {
 	for _, k := range []string{"QDRANT_GRPC_URL", "BLKCHAIN_TIMEOUT_SECONDS"} {
 		t.Setenv(k, "")
 	}
 	cfg := ragconfig.Load()
-	out := renderUsage(80)
+	out := renderEnvHelp(80)
 	for _, want := range []string{
 		defaultOMLXBaseURL,
 		defaultCollection,
@@ -301,18 +523,54 @@ func TestUsageEnvironmentDefaultsMatchCode(t *testing.T) {
 		"default " + strconv.Itoa(cfg.RequestTimeoutSeconds),
 	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("ENVIRONMENT lacks the code default %q", want)
+			t.Errorf("env help lacks the code default %q", want)
 		}
 	}
 }
 
-func TestUsageFitsNarrowTerminals(t *testing.T) {
-	for _, w := range []int{60, 40} {
-		out := renderUsage(w)
-		assertMaxWidth(t, "usage", out, w)
-		for _, name := range []string{"ask", "models", "OMLX_BASE_URL", "BLKCHAIN_TIMEOUT_SECONDS", "help"} {
-			if !strings.Contains(out, name) {
-				t.Errorf("width %d: usage lost %q", w, name)
+func TestTokenizeExample(t *testing.T) {
+	type tk = exTok
+	cases := []struct {
+		in   string
+		want []exTok
+	}{
+		{`blk search "JWT none algorithm" --top-k 10`, []exTok{
+			tk{"blk", exBlk}, tk{"search", exSub}, tk{`"JWT none algorithm"`, exStr},
+			tk{"--top-k", exFlag}, tk{"10", exValue}}},
+		{`blk ask --json "what is IDOR?"`, []exTok{
+			tk{"blk", exBlk}, tk{"ask", exSub}, tk{"--json", exFlag}, tk{`"what is IDOR?"`, exStr}}},
+		{"blk logs embed_server -n 100", []exTok{
+			tk{"blk", exBlk}, tk{"logs", exSub}, tk{"embed_server", exOther}, tk{"-n", exFlag}, tk{"100", exValue}}},
+		{"blk logs -f", []exTok{tk{"blk", exBlk}, tk{"logs", exSub}, tk{"-f", exFlag}}},
+		{"blk search --help", []exTok{tk{"blk", exBlk}, tk{"search", exSub}, tk{"--help", exFlag}}},
+		{"blk up && blk doctor", []exTok{
+			tk{"blk", exBlk}, tk{"up", exSub}, tk{"&&", exOther}, tk{"blk", exBlk}, tk{"doctor", exSub}}},
+		{"blk <command> [flags]", []exTok{tk{"blk", exBlk}, tk{"<command>", exPlace}, tk{"[flags]", exPlace}}},
+		{"echo 'source <(blk completion bash)' >> ~/.bashrc", []exTok{
+			tk{"echo", exOther}, tk{"'source <(blk completion bash)'", exStr}, tk{">>", exOther}, tk{"~/.bashrc", exOther}}},
+		{`blk ask "unterminated`, []exTok{tk{"blk", exBlk}, tk{"ask", exSub}, tk{`"unterminated`, exStr}}},
+		{"  blk   up  ", []exTok{tk{"blk", exBlk}, tk{"up", exSub}}},
+		{"", nil},
+	}
+	for _, tc := range cases {
+		if got := tokenizeExample(tc.in); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("tokenizeExample(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// An example laid out at any width keeps its text: joined back, the lines give
+// the prompt and the example, and none runs past the width.
+func TestExampleLinesKeepTheText(t *testing.T) {
+	noColor(t)
+	for _, c := range commandSpecs() {
+		for _, ex := range c.examples {
+			for _, w := range []int{30, 40, 80} {
+				lines := exampleLines(ex, 3, w)
+				assertMaxWidth(t, "example", strings.Join(lines, "\n"), w)
+				if got := collapse(strings.Join(lines, " ")); got != collapse("$ "+ex) && w >= 40 {
+					t.Errorf("width %d: example %q laid out as %q", w, ex, got)
+				}
 			}
 		}
 	}
@@ -347,8 +605,8 @@ func TestCommandHelpLayout(t *testing.T) {
 			t.Errorf("%s FLAGS is out of order", c.name)
 		}
 		for _, ex := range c.examples {
-			if !strings.Contains(out, ex) {
-				t.Errorf("%s help lacks example %q", c.name, ex)
+			if lineWith(out, "   $ "+ex) == "" {
+				t.Errorf("%s help lacks the prompted example %q", c.name, ex)
 			}
 		}
 	}
@@ -761,9 +1019,9 @@ func TestLogsArgumentIsAService(t *testing.T) {
 	}
 }
 
-// The ENVIRONMENT section lists the answer sampling variables, each on one row
-// with the code default, and no row runs past 80 columns.
-func TestUsageListsTheSamplingVariables(t *testing.T) {
+// blk help env lists the answer sampling variables, each on one row with the
+// code default, and no row runs past 80 columns.
+func TestEnvHelpListsTheSamplingVariables(t *testing.T) {
 	f := func(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
 	rows := map[string]string{
 		"BLKCHAIN_SYNTH_TEMPERATURE": "", "BLKCHAIN_SYNTH_TOP_P": "",
@@ -777,8 +1035,8 @@ func TestUsageListsTheSamplingVariables(t *testing.T) {
 	rows["BLKCHAIN_SYNTH_TOP_P"] = f(cfg.SynthTopP)
 	rows["BLKCHAIN_SYNTH_TOP_K"] = strconv.Itoa(cfg.SynthTopK)
 	rows["BLKCHAIN_SYNTH_PRESENCE_PENALTY"] = f(cfg.SynthPresencePenalty)
-	out := renderUsage(80)
-	assertMaxWidth(t, "usage", out, 80)
+	out := renderEnvHelp(80)
+	assertMaxWidth(t, "env help", out, 80)
 	for name, def := range rows {
 		if l := lineWith(out, name); !strings.Contains(l, "(default "+def+")") {
 			t.Errorf("ENVIRONMENT row for %s = %q, want it on one row with (default %s)", name, l, def)

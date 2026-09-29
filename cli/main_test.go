@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -125,14 +126,14 @@ func TestRunAskJSONShape(t *testing.T) {
 }
 
 // TestRunHealth is hermetic: Qdrant points at a dead port, so both rows print
-// as down without any live service, and runHealth still returns nil.
+// as down without any live service, and runHealth returns errDegraded.
 func TestRunHealth(t *testing.T) {
 	useDeadServices(t)
 	t.Setenv("QDRANT_GRPC_URL", "127.0.0.1:1")
 
 	out := captureStdout(t, func() {
-		if err := runHealth(nil); err != nil {
-			t.Fatalf("runHealth() error = %v", err)
+		if err := runHealth(nil); !errors.Is(err, errDegraded) {
+			t.Fatalf("runHealth() error = %v, want errDegraded", err)
 		}
 	})
 
@@ -144,13 +145,14 @@ func TestRunHealth(t *testing.T) {
 }
 
 // TestRunHealthUnreachable: `blk health` probes Qdrant and embed_server
-// directly, so a dead dependency is reported as a down row, not a hard error.
+// directly, so a dead dependency is a down row plus the degraded status, not a
+// hard error.
 func TestRunHealthUnreachable(t *testing.T) {
 	useDeadServices(t)
 	t.Setenv("QDRANT_GRPC_URL", "127.0.0.1:1")
 
-	if err := runHealth(nil); err != nil {
-		t.Fatalf("runHealth should never error on an unreachable dependency, got %v", err)
+	if err := runHealth(nil); !errors.Is(err, errDegraded) {
+		t.Fatalf("runHealth on an unreachable dependency = %v, want errDegraded", err)
 	}
 }
 
@@ -218,7 +220,7 @@ func TestReportNoResultsTextIsWarningWithNextSteps(t *testing.T) {
 
 	var stderr bytes.Buffer
 	stdout := captureStdout(t, func() {
-		if err := reportNoResults(&stderr, false); err != nil {
+		if err := reportNoResults(&stderr, false, ""); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -248,7 +250,7 @@ func TestReportNoResultsUsesStderrCapabilities(t *testing.T) {
 	var stderr bytes.Buffer
 	stderrRenderer = newStderrRenderer(&stderr, capabilities{}, true)
 	captureStdout(t, func() {
-		if err := reportNoResults(&stderr, false); err != nil {
+		if err := reportNoResults(&stderr, false, ""); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -270,7 +272,7 @@ func TestReportNoResultsUsesStderrCapabilities(t *testing.T) {
 func TestReportNoResultsJSONKeepsWireShape(t *testing.T) {
 	var stderr bytes.Buffer
 	out := captureStdout(t, func() {
-		if err := reportNoResults(&stderr, true); err != nil {
+		if err := reportNoResults(&stderr, true, "m"); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -278,7 +280,7 @@ func TestReportNoResultsJSONKeepsWireShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		t.Fatalf("not valid AnswerResponse JSON: %v\n%s", err, out)
 	}
-	if resp.Answer != noResultsAnswer || len(resp.Citations) != 0 || resp.UsedWeb {
+	if resp.Answer != noResultsAnswer || len(resp.Citations) != 0 || resp.UsedWeb || resp.Model != "m" {
 		t.Errorf("resp = %+v", resp)
 	}
 	if !strings.Contains(out, `"citations": []`) {

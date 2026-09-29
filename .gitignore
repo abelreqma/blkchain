@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 *.pyo
 data/
+models/
+corpus/
 *.log
 .env
 .DS_Store

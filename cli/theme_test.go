@@ -115,6 +115,41 @@ func TestPaletteContrast(t *testing.T) {
 	}
 }
 
+// TestHelpStylesContrast checks the help styles by name: each one's foreground
+// must be a palette token that reaches 4.5:1 on every dark and light background
+// TestPaletteContrast uses, in truecolor and in the 256-color fallback.
+func TestHelpStylesContrast(t *testing.T) {
+	styles := map[string]lipgloss.Style{
+		"Title": Title, "Section": Section, "Cmd": Cmd, "Arg": Arg, "Flag": Flag, "Str": Str,
+	}
+	darkBGs := []string{"#000000", "#1E1E1E", "#282C34", Surface.Dark.TrueColor, xterm256Hex(t, Surface.Dark.ANSI256)}
+	lightBGs := []string{"#FFFFFF", "#FDF6E3", Surface.Light.TrueColor, xterm256Hex(t, Surface.Light.ANSI256)}
+	for name, st := range styles {
+		tok, ok := st.GetForeground().(lipgloss.CompleteAdaptiveColor)
+		if !ok {
+			t.Errorf("%s has no palette foreground", name)
+			continue
+		}
+		for _, bg := range darkBGs {
+			for _, fg := range []string{tok.Dark.TrueColor, xterm256Hex(t, tok.Dark.ANSI256)} {
+				if r := contrastRatio(t, fg, bg); r < 4.5 {
+					t.Errorf("%s dark %s on %s = %.2f:1, want >= 4.5", name, fg, bg, r)
+				}
+			}
+		}
+		for _, bg := range lightBGs {
+			for _, fg := range []string{tok.Light.TrueColor, xterm256Hex(t, tok.Light.ANSI256)} {
+				if r := contrastRatio(t, fg, bg); r < 4.5 {
+					t.Errorf("%s light %s on %s = %.2f:1, want >= 4.5", name, fg, bg, r)
+				}
+			}
+		}
+	}
+	if !Title.GetBold() || !Section.GetBold() || !Cmd.GetBold() || Arg.GetBold() || Flag.GetBold() || Str.GetBold() {
+		t.Error("Title, Section, and Cmd are bold; Arg, Flag, and Str are not")
+	}
+}
+
 // TestSuccessLight256Contrast pins the 256-color light Success index (it was
 // index 65, 4.10:1 on cream) to one that clears 4.5:1 on the light backgrounds.
 func TestSuccessLight256Contrast(t *testing.T) {

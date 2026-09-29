@@ -68,3 +68,32 @@ func TestKBAnswerReturnsAnswerAndCitations(t *testing.T) {
 		t.Errorf("answer = %v", out["answer"])
 	}
 }
+
+// kb_answer serializes the shared citation type, so a web citation carries
+// untrusted and a local one omits it.
+func TestKBAnswerMarksWebCitationsUntrusted(t *testing.T) {
+	srv := fakeLLM(t, []string{`{"sufficient":true}`}, "see [1] and [2]")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+
+	rc := fakeSearcher{[]retrieval.Result{
+		chunk("wstg", "a.md", "s", "text"),
+		chunk(webSource, "https://example.test/x", "Page", "web text"),
+	}}
+	out, err := kbAnswer(context.Background(), rc, answerCfg(1), "q", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(out["citations"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(data, &got); err != nil || len(got) != 2 {
+		t.Fatalf("citations = %s (%v)", data, err)
+	}
+	if _, present := got[0]["untrusted"]; present || got[1]["untrusted"] != true {
+		t.Errorf("citations = %s, want untrusted only on the web one", data)
+	}
+}

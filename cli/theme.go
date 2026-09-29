@@ -61,6 +61,19 @@ var (
 	Prompt = lipgloss.NewStyle().Foreground(Accent).Bold(true)
 )
 
+// Help styles, one per level of the help pages' type hierarchy: the tool name,
+// section headings, command names, argument placeholders (and the $ prompt),
+// flags, and quoted strings in examples. Descriptions use Body, the version
+// and notes Meta.
+var (
+	Title   = lipgloss.NewStyle().Foreground(Accent).Bold(true)
+	Section = lipgloss.NewStyle().Foreground(slateAccent).Bold(true)
+	Cmd     = lipgloss.NewStyle().Foreground(Heading).Bold(true)
+	Arg     = lipgloss.NewStyle().Foreground(Muted)
+	Flag    = lipgloss.NewStyle().Foreground(slateAccent)
+	Str     = lipgloss.NewStyle().Foreground(Success)
+)
+
 // scoreStyle bands a relevance score: Success >= 0.85, Warn 0.65-0.84,
 // Muted < 0.65.
 func scoreStyle(score float64) lipgloss.Style {
@@ -353,13 +366,14 @@ func init() {
 	stderrRenderer = newStderrRenderer(os.Stderr, errCaps, dark)
 
 	// BLK_ACCENT=slate opts into a low-chroma blue accent instead of the
-	// off-white default. Prompt is
-	// recomputed here because it's a package-level var initialized before
-	// init() runs, so it would otherwise bake in the pre-switch Accent value.
+	// off-white default. Prompt and Title are
+	// recomputed here because they are package-level vars initialized before
+	// init() runs, so they would otherwise bake in the pre-switch Accent value.
 	if os.Getenv("BLK_ACCENT") == "slate" {
 		Accent = slateAccent
 	}
 	Prompt = lipgloss.NewStyle().Foreground(Accent).Bold(true)
+	Title = lipgloss.NewStyle().Foreground(Accent).Bold(true)
 
 	// lipgloss v1.1's default renderer already auto-detects NO_COLOR (via
 	// termenv's EnvColorProfile), but it does NOT honor our CLICOLOR_FORCE

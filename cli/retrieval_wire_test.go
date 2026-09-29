@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -54,15 +55,24 @@ func (l *countingListener) Accept() (net.Conn, error) {
 // fake embed_server, and returns a count of Qdrant connections.
 func useFakeRetrieval(t *testing.T, payload map[string]*qdrant.Value) *atomic.Int32 {
 	t.Helper()
+	return useFakeRetrievalPoints(t, payload)
+}
+
+// useFakeRetrievalPoints is useFakeRetrieval with one fake point per payload,
+// ranked in the order given.
+func useFakeRetrievalPoints(t *testing.T, payloads ...map[string]*qdrant.Value) *atomic.Int32 {
+	t.Helper()
+	points := make([]*qdrant.ScoredPoint, len(payloads))
+	for i, pl := range payloads {
+		points[i] = &qdrant.ScoredPoint{Id: qdrant.NewIDNum(uint64(i + 1)), Score: 0.5, Payload: pl}
+	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	cl := &countingListener{Listener: l}
 	gs := grpc.NewServer()
-	qdrant.RegisterPointsServer(gs, &fakeQdrantPoints{points: []*qdrant.ScoredPoint{
-		{Id: qdrant.NewIDNum(1), Score: 0.5, Payload: payload},
-	}})
+	qdrant.RegisterPointsServer(gs, &fakeQdrantPoints{points: points})
 	qdrant.RegisterQdrantServer(gs, fakeQdrantService{})
 	go gs.Serve(cl)
 	t.Cleanup(gs.Stop)
@@ -248,6 +258,7 @@ func TestAskJSONGolden(t *testing.T) {
     }
   ],
   "used_web": false,
+  "model": "m",
   "results": [
     {
       "id": "1",
@@ -269,12 +280,106 @@ func TestAskJSONGolden(t *testing.T) {
 	}
 
 	none := captureStdout(t, func() {
-		if err := reportNoResults(io.Discard, true); err != nil {
+		if err := reportNoResults(io.Discard, true, "m"); err != nil {
 			t.Fatal(err)
 		}
 	})
-	wantNone := "{\n  \"answer\": " + strconv.Quote(noResultsAnswer) + ",\n  \"citations\": [],\n  \"used_web\": false\n}\n"
+	wantNone := "{\n  \"answer\": " + strconv.Quote(noResultsAnswer) + ",\n  \"citations\": [],\n  \"used_web\": false,\n  \"model\": \"m\"\n}\n"
 	if none != wantNone {
 		t.Errorf("no-results JSON =\n%s\nwant\n%s", none, wantNone)
+	}
+}
+
+// citedLLM answers every call: a sufficient grade, then a streamed answer that
+// cites sources 1 and 2.
+func citedLLM(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Stream bool `json:"stream"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"see [1] and [2]\"}}]}\n\ndata: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"{\"sufficient\":true,\"rewrite\":\"\",\"use_web\":false}"},"finish_reason":"stop"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// ask --json reports the model blk requested and marks only the web citation
+// untrusted. The existing fields keep their names and values.
+func TestAskJSONReportsModelAndUntrustedWebCitation(t *testing.T) {
+	isolateUserDirs(t)
+	web := map[string]*qdrant.Value{
+		"source": qdrant.NewValueString(webSource), "path": qdrant.NewValueString("https://example.test/x"),
+		"section": qdrant.NewValueString("Page"), "type": qdrant.NewValueString("web"),
+		"text": qdrant.NewValueString("web body"),
+	}
+	useFakeRetrievalPoints(t, goldenPayload(), web)
+	t.Setenv("OMLX_BASE_URL", citedLLM(t).URL)
+	t.Setenv("OMLX_MODEL", "test-model")
+	t.Setenv("OMLX_API_KEY", "")
+	t.Setenv("TAVILY_SETUP_TOKEN", "")
+	out := captureStdout(t, func() {
+		if err := runAsk([]string{"--json", "q"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	var raw struct {
+		Answer    string           `json:"answer"`
+		Citations []map[string]any `json:"citations"`
+		UsedWeb   bool             `json:"used_web"`
+		Model     string           `json:"model"`
+		Results   []any            `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		t.Fatalf("bad JSON: %v\n%s", err, out)
+	}
+	if raw.Model != "test-model" {
+		t.Errorf("model = %q, want test-model", raw.Model)
+	}
+	if raw.Answer != "see [1] and [2]" || raw.UsedWeb || len(raw.Results) != 2 {
+		t.Errorf("existing fields changed: %+v", raw)
+	}
+	if len(raw.Citations) != 2 {
+		t.Fatalf("citations = %v, want 2", raw.Citations)
+	}
+	local, webCit := raw.Citations[0], raw.Citations[1]
+	if local["source"] != "wstg" || local["path"] != "a.md" || local["section"] != "intro" {
+		t.Errorf("local citation fields changed: %v", local)
+	}
+	if _, present := local["untrusted"]; present {
+		t.Errorf("local citation carries untrusted: %v", local)
+	}
+	if webCit["source"] != webSource || webCit["untrusted"] != true {
+		t.Errorf("web citation = %v, want untrusted true", webCit)
+	}
+}
+
+// The new fields survive a marshal and unmarshal round trip, and a local
+// citation omits untrusted.
+func TestAnswerResponseNewFieldsRoundTrip(t *testing.T) {
+	in := answerResponse{
+		Answer: "a", Model: "m1",
+		Citations: []citation{{Source: "kb", Path: "p"}, {Source: webSource, Path: "u", Untrusted: true}},
+	}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out answerResponse
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Model != "m1" || out.Citations[0].Untrusted || !out.Citations[1].Untrusted {
+		t.Errorf("round trip = %+v", out)
+	}
+	if strings.Count(string(data), `"untrusted"`) != 1 {
+		t.Errorf("untrusted must appear only on the web citation: %s", data)
 	}
 }

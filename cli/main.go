@@ -24,15 +24,20 @@ import (
 // unset, matching the indexer's code default (blkchain.config).
 const defaultCollection = "blkchain"
 
+// collectionName is the Qdrant collection blk reads: BLKCHAIN_COLLECTION, or
+// defaultCollection when it is unset.
+func collectionName() string {
+	if c := os.Getenv("BLKCHAIN_COLLECTION"); c != "" {
+		return c
+	}
+	return defaultCollection
+}
+
 // newRetrievalClient builds a retrieval client from cfg plus
 // BLKCHAIN_COLLECTION. It follows the saved reranker switch (/models). The
 // caller closes it.
 func newRetrievalClient(cfg ragconfig.Config) (*retrieval.Client, error) {
-	collection := os.Getenv("BLKCHAIN_COLLECTION")
-	if collection == "" {
-		collection = defaultCollection
-	}
-	rc, err := retrieval.New(cfg, collection)
+	rc, err := retrieval.New(cfg, collectionName())
 	if err != nil {
 		return nil, err
 	}
@@ -59,16 +64,22 @@ type citation struct {
 	Source  string `json:"source"`
 	Path    string `json:"path"`
 	Section string `json:"section"`
+	// Untrusted is true for a web citation, whose text came from the open web
+	// and not the local corpus. Local citations omit it.
+	Untrusted bool `json:"untrusted,omitempty"`
 }
 
 // answerResponse is what blk ask --json prints. Results carries the retrieved
 // chunks the answer was synthesized from, so callers can show the evidence
 // behind an answer, not just the citation list.
 type answerResponse struct {
-	Answer    string             `json:"answer"`
-	Citations []citation         `json:"citations"`
-	UsedWeb   bool               `json:"used_web"`
-	Results   []retrieval.Result `json:"results,omitempty"`
+	Answer    string     `json:"answer"`
+	Citations []citation `json:"citations"`
+	UsedWeb   bool       `json:"used_web"`
+	// Model is the model blk requested for this answer. It is the id blk sent,
+	// not one the server reported back.
+	Model   string             `json:"model"`
+	Results []retrieval.Result `json:"results,omitempty"`
 }
 
 // serviceHealth is one probe of the services an answer needs.
@@ -241,7 +252,8 @@ func printResults(query string, results []retrieval.Result, elapsed time.Duratio
 // string, so the TUI REPL can commit it to scrollback via tea.Println instead
 // of writing straight to stdout (which would corrupt the live region). width
 // is the terminal or model width: no line exceeds it, and long unbroken
-// tokens are hard-broken rather than overflowing.
+// tokens are hard-broken rather than overflowing. The one exception is the
+// source path, which stays a single line so it can be copied intact.
 func formatResults(query string, results []retrieval.Result, elapsed time.Duration, width int) string {
 	var b strings.Builder
 	if len(results) == 0 {
@@ -277,9 +289,10 @@ func formatResults(query string, results []retrieval.Result, elapsed time.Durati
 		left := fmt.Sprintf(" %s  %s", Meta.Render(rank), Body.Render(title))
 		fmt.Fprintln(&b, headerLine(left, scoreStyle(r.Score).Render(scoreText), width))
 		if r.Payload.Path != "" {
-			for _, ln := range strings.Split(wrapIndent(sanitizeTerminal(r.Payload.Path), indent, hw), "\n") {
-				fmt.Fprintln(&b, Meta.Render(ln))
-			}
+			// One logical line, never hard-wrapped: the path is a copy target for
+			// blk open, and the terminal soft-wraps it without inserting a newline.
+			path := strings.Join(strings.Fields(sanitizeTerminal(r.Payload.Path)), " ")
+			fmt.Fprintln(&b, Meta.Render(strings.Repeat(" ", indent)+path))
 		}
 		// Chunk text carries newlines and tabs; collapse them so the preview
 		// keeps the row indent.
@@ -362,7 +375,7 @@ func askWith(rc *retrieval.Client, args []string) error {
 			NoWeb:  !loadPrefs().Web,
 		})
 		if errors.Is(err, ErrNoResults) {
-			return reportNoResults(os.Stderr, false)
+			return reportNoResults(os.Stderr, false, "")
 		}
 		err = timeoutOrErr(err)
 		if err != nil && full.Len() == 0 {
@@ -378,9 +391,12 @@ func askWith(rc *retrieval.Client, args []string) error {
 		return nil
 	}
 
-	answer, cits, usedWeb, results, _, err := AnswerLoop(context.Background(), rc, cfg, query, AnswerOpts{NoWeb: !loadPrefs().Web})
+	// Resolve the model once, up front, so the id in the JSON is the id the
+	// answer loop was asked to use.
+	model := resolveModel(cfg)
+	answer, cits, usedWeb, results, _, err := AnswerLoop(context.Background(), rc, cfg, query, AnswerOpts{Model: model, NoWeb: !loadPrefs().Web})
 	if errors.Is(err, ErrNoResults) {
-		return reportNoResults(os.Stderr, *jsonOut)
+		return reportNoResults(os.Stderr, *jsonOut, model)
 	}
 	if err != nil {
 		return timeoutOrErr(err)
@@ -389,6 +405,7 @@ func askWith(rc *retrieval.Client, args []string) error {
 		Answer:    answer,
 		Citations: cits,
 		UsedWeb:   usedWeb,
+		Model:     model,
 		Results:   results,
 	}
 
@@ -412,10 +429,10 @@ func askWith(rc *retrieval.Client, args []string) error {
 // reportNoResults handles AnswerLoop's ErrNoResults for the non-interactive ask
 // paths. Text mode prints the warning and next steps to stderr and leaves
 // stdout empty. JSON mode keeps the AnswerResponse wire shape, with the plain
-// no-results statement as the answer and no citations.
-func reportNoResults(stderr io.Writer, jsonOut bool) error {
+// no-results statement as the answer, no citations, and the requested model.
+func reportNoResults(stderr io.Writer, jsonOut bool, model string) error {
 	if jsonOut {
-		return printJSON(&answerResponse{Answer: noResultsAnswer, Citations: []citation{}})
+		return printJSON(&answerResponse{Answer: noResultsAnswer, Citations: []citation{}, Model: model})
 	}
 	fmt.Fprintln(stderr, formatNoResultsErr())
 	return nil
@@ -475,8 +492,33 @@ func printSources(citations []citation, usedWeb, rerankOff bool) {
 	}
 }
 
+// healthResponse is what blk health --json prints. ok is true only when every
+// probed service is up.
+type healthResponse struct {
+	OK          bool `json:"ok"`
+	Qdrant      bool `json:"qdrant"`
+	EmbedServer bool `json:"embed_server"`
+	LLM         bool `json:"llm"`
+}
+
+func newHealthResponse(h *serviceHealth) healthResponse {
+	return healthResponse{OK: h.ok(), Qdrant: h.Qdrant, EmbedServer: h.EmbedServer, LLM: h.LLM}
+}
+
+// healthOpts holds the flags of `blk health`.
+type healthOpts struct{ json bool }
+
+func defineHealthFlags(fs *flag.FlagSet, o *healthOpts) {
+	fs.BoolVar(&o.json, "json", false, "print the status as JSON instead of formatted text")
+}
+
+// runHealth prints the service table (or, with --json, one JSON object) and
+// returns errDegraded when any service is down, so scripts can gate on exit
+// status.
 func runHealth(args []string) error {
+	var o healthOpts
 	fs := newFlagSet("health")
+	defineHealthFlags(fs, &o)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -487,12 +529,21 @@ func runHealth(args []string) error {
 		defer rc.Close()
 	}
 	h := nativeHealth(cfg, rc)
-	fmt.Println("blkChain services:")
-	fmt.Printf("  %s qdrant        %s\n", check(h.Qdrant), Meta.Render("("+cfg.QdrantGRPCURL+")"))
-	fmt.Printf("  %s embed_server  %s\n", check(h.EmbedServer), Meta.Render("("+cfg.EmbedServerURL+")"))
-	fmt.Printf("  %s llm           %s\n", check(h.LLM), Meta.Render("("+redactedURL(omlxBaseURL())+")"))
-	if h.LLMRedirect {
-		fmt.Printf("    %s\n", Meta.Render(errLLMRedirect.Error()))
+	if o.json {
+		if err := printJSON(newHealthResponse(h)); err != nil {
+			return err
+		}
+	} else {
+		fmt.Println("blkChain services:")
+		fmt.Printf("  %s qdrant        %s\n", check(h.Qdrant), Meta.Render("("+cfg.QdrantGRPCURL+")"))
+		fmt.Printf("  %s embed_server  %s\n", check(h.EmbedServer), Meta.Render("("+cfg.EmbedServerURL+")"))
+		fmt.Printf("  %s llm           %s\n", check(h.LLM), Meta.Render("("+redactedURL(omlxBaseURL())+")"))
+		if h.LLMRedirect {
+			fmt.Printf("    %s\n", Meta.Render(errLLMRedirect.Error()))
+		}
+	}
+	if !h.ok() {
+		return errDegraded
 	}
 	return nil
 }

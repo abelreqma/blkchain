@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -390,5 +392,113 @@ func TestDoctorHintsFollowTheirRows(t *testing.T) {
 				t.Errorf("output has %q:\n%s", c.without, out)
 			}
 		})
+	}
+}
+
+// upLLM points OMLX_BASE_URL at a loopback server whose /models answers 200.
+func upLLM(t *testing.T) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+}
+
+// A degraded stack still prints the human table, then returns the silent
+// degraded sentinel, which maps to exit 1 and prints no second error line.
+func TestRunHealthDegradedPrintsTableAndExitsOne(t *testing.T) {
+	useDeadServices(t)
+	t.Setenv("QDRANT_GRPC_URL", "127.0.0.1:1")
+	var err error
+	out := captureStdout(t, func() { err = runHealth(nil) })
+	if !errors.Is(err, errDegraded) {
+		t.Fatalf("runHealth err = %v, want errDegraded", err)
+	}
+	for _, want := range []string{"blkChain services:", "qdrant", "embed_server", "llm"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+	if got := exitCode(err); got != 1 {
+		t.Errorf("exitCode = %d, want 1", got)
+	}
+	if got := exitCode(fmt.Errorf("wrapped: %w", errDegraded)); got != 1 {
+		t.Errorf("exitCode(wrapped) = %d, want 1", got)
+	}
+	var stderr strings.Builder
+	reportError(&stderr, err)
+	if stderr.Len() != 0 {
+		t.Errorf("reportError printed %q for the degraded sentinel, want nothing", stderr.String())
+	}
+}
+
+// --json prints one object with the three booleans and no table.
+func TestRunHealthJSONDegraded(t *testing.T) {
+	useDeadServices(t)
+	t.Setenv("QDRANT_GRPC_URL", "127.0.0.1:1")
+	var err error
+	out := captureStdout(t, func() { err = runHealth([]string{"--json"}) })
+	if !errors.Is(err, errDegraded) {
+		t.Fatalf("runHealth --json err = %v, want errDegraded", err)
+	}
+	if strings.Contains(out, "blkChain services:") {
+		t.Errorf("--json printed the human table:\n%s", out)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		t.Fatalf("output is not one JSON object: %v\n%s", err, out)
+	}
+	for _, k := range []string{"ok", "qdrant", "embed_server", "llm"} {
+		v, present := raw[k]
+		if !present {
+			t.Errorf("JSON missing %q: %s", k, out)
+		} else if b, isBool := v.(bool); !isBool || b {
+			t.Errorf("JSON %q = %v, want false", k, v)
+		}
+	}
+}
+
+// With every service answering, the table prints and the exit status is 0; with
+// --json, ok is true.
+func TestRunHealthAllUp(t *testing.T) {
+	useFakeRetrieval(t, goldenPayload())
+	upLLM(t)
+	var err error
+	out := captureStdout(t, func() { err = runHealth(nil) })
+	if err != nil {
+		t.Fatalf("runHealth err = %v, want nil when all services are up\n%s", err, out)
+	}
+	if !strings.Contains(out, "blkChain services:") {
+		t.Errorf("table missing:\n%s", out)
+	}
+	out = captureStdout(t, func() { err = runHealth([]string{"--json"}) })
+	if err != nil {
+		t.Fatalf("runHealth --json err = %v, want nil\n%s", err, out)
+	}
+	var got healthResponse
+	if e := json.Unmarshal([]byte(out), &got); e != nil {
+		t.Fatalf("bad JSON: %v\n%s", e, out)
+	}
+	if !got.OK || !got.Qdrant || !got.EmbedServer || !got.LLM {
+		t.Errorf("health JSON = %+v, want all true", got)
+	}
+}
+
+// ok is true only when all three services are up.
+func TestHealthResponseOKNeedsAllThree(t *testing.T) {
+	cases := []struct {
+		h    serviceHealth
+		want bool
+	}{
+		{serviceHealth{Qdrant: true, EmbedServer: true, LLM: true}, true},
+		{serviceHealth{Qdrant: true, EmbedServer: true}, false},
+		{serviceHealth{EmbedServer: true, LLM: true}, false},
+		{serviceHealth{Qdrant: true, LLM: true}, false},
+	}
+	for _, c := range cases {
+		if got := newHealthResponse(&c.h).OK; got != c.want {
+			t.Errorf("ok for %+v = %v, want %v", c.h, got, c.want)
+		}
 	}
 }
