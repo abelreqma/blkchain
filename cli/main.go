@@ -1,4 +1,5 @@
-// Command blk is a command-line client for the blkChain RAG API.
+// Command blk is the blkChain client: search, cited answers, the MCP server,
+// and the local service stack.
 package main
 
 import (
@@ -9,31 +10,24 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
-	"github.com/qdrant/go-client/qdrant"
-
-	"blkchain/cli/internal/client"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 )
 
 // defaultCollection is the Qdrant collection used when BLKCHAIN_COLLECTION is
-// unset, matching the Python engine's code default (blkchain.config).
+// unset, matching the indexer's code default (blkchain.config).
 const defaultCollection = "blkchain"
 
-// newRetrievalClient builds a Go-native retrieval client (Task 8): it reads
-// the shared RAG config plus BLKCHAIN_COLLECTION, replacing the Python
-// /search HTTP call for the search command and RAG streaming. It follows the
-// saved reranker switch (/models).
-func newRetrievalClient() (*retrieval.Client, error) {
-	cfg := loadConfig()
+// newRetrievalClient builds a retrieval client from cfg plus
+// BLKCHAIN_COLLECTION. It follows the saved reranker switch (/models). The
+// caller closes it.
+func newRetrievalClient(cfg ragconfig.Config) (*retrieval.Client, error) {
 	collection := os.Getenv("BLKCHAIN_COLLECTION")
 	if collection == "" {
 		collection = defaultCollection
@@ -54,27 +48,36 @@ func followPrefs(rc *retrieval.Client, p modelPrefs) *retrieval.Client {
 	return &c
 }
 
-// toClientResults adapts retrieval.Result (the Go-native retrieval package's
-// output) to client.SearchResult (identical fields), so the existing
-// printResults/formatResults rendering and the --json output shape stay
-// unchanged.
-func toClientResults(rs []retrieval.Result) []client.SearchResult {
-	out := make([]client.SearchResult, len(rs))
-	for i, r := range rs {
-		out[i] = client.SearchResult{
-			ID:    r.ID,
-			Score: r.Score,
-			Payload: client.Payload{
-				Source:  r.Payload.Source,
-				Path:    r.Payload.Path,
-				Section: r.Payload.Section,
-				Type:    r.Payload.Type,
-				Text:    r.Payload.Text,
-			},
-		}
-	}
-	return out
+// searchResponse is what blk search --json prints.
+type searchResponse struct {
+	Results []retrieval.Result `json:"results"`
 }
+
+// citation is one source of an answer, as blk ask --json and kb_answer
+// report it.
+type citation struct {
+	Source  string `json:"source"`
+	Path    string `json:"path"`
+	Section string `json:"section"`
+}
+
+// answerResponse is what blk ask --json prints. Results carries the retrieved
+// chunks the answer was synthesized from, so callers can show the evidence
+// behind an answer, not just the citation list.
+type answerResponse struct {
+	Answer    string             `json:"answer"`
+	Citations []citation         `json:"citations"`
+	UsedWeb   bool               `json:"used_web"`
+	Results   []retrieval.Result `json:"results,omitempty"`
+}
+
+// serviceHealth is one probe of the services an answer needs.
+type serviceHealth struct {
+	Qdrant, EmbedServer, LLM bool
+}
+
+// ok reports whether every service answered.
+func (h serviceHealth) ok() bool { return h.Qdrant && h.EmbedServer && h.LLM }
 
 func main() {
 	loadProjectEnv()
@@ -151,8 +154,8 @@ type searchOpts struct {
 
 // defineSearchFlags declares `blk search`'s flags. Placeholders are the
 // backquoted words, which the FLAGS help section shows after each flag name.
-func defineSearchFlags(fs *flag.FlagSet, o *searchOpts) {
-	fs.IntVar(&o.topK, "top-k", 0, fmt.Sprintf("return `N` results (default %d)", loadConfig().TopK))
+func defineSearchFlags(fs *flag.FlagSet, o *searchOpts, defaultTopK int) {
+	fs.IntVar(&o.topK, "top-k", 0, fmt.Sprintf("return `N` results (default %d)", defaultTopK))
 	fs.BoolVar(&o.json, "json", false, "print JSON instead of formatted text")
 	fs.Var(&o.sources, "source", "only results from source `NAME` (the last one wins)")
 	fs.StringVar(&o.typ, "type", "", "only results of this `TYPE`, such as doc, note, or payload")
@@ -161,8 +164,9 @@ func defineSearchFlags(fs *flag.FlagSet, o *searchOpts) {
 
 func runSearch(args []string) error {
 	var o searchOpts
+	cfg := loadConfig()
 	fs := newFlagSet("search")
-	defineSearchFlags(fs, &o)
+	defineSearchFlags(fs, &o, cfg.TopK)
 	valueFlags := map[string]bool{"top-k": true, "source": true, "type": true, "filter": true}
 	if err := parseFlags(fs, reorder(args, valueFlags)); err != nil {
 		return err
@@ -179,32 +183,31 @@ func runSearch(args []string) error {
 		return err
 	}
 
-	rc, err := newRetrievalClient()
+	rc, err := newRetrievalClient(cfg)
 	if err != nil {
 		return err
 	}
+	defer rc.Close()
 	start := time.Now()
 	results, err := rc.Search(context.Background(), query, *topK, filterMap)
 	elapsed := time.Since(start)
 	if err != nil {
 		return err
 	}
-	adapted := toClientResults(results)
-
 	if *jsonOut {
-		return printJSON(client.SearchResponse{Results: adapted})
+		return printJSON(searchResponse{results})
 	}
-	printResults(query, adapted, elapsed)
+	printResults(query, results, elapsed)
 	return nil
 }
 
-// buildFilters folds --source/--type/--filter into the API's {field: value}
+// buildFilters folds --source/--type/--filter into the {field: value} payload
 // filter map. Later values win on key collision; an empty result is nil (no
-// filtering), which the API treats as "match everything".
+// filtering), which matches everything.
 func buildFilters(sources multiFlag, typ string, kv multiFlag) (map[string]interface{}, error) {
 	m := map[string]interface{}{}
 	for _, s := range sources {
-		m["source"] = s // last --source wins; the API filter is single-valued per field
+		m["source"] = s // last --source wins; the filter is single-valued per field
 	}
 	if typ != "" {
 		m["type"] = typ
@@ -222,12 +225,12 @@ func buildFilters(sources multiFlag, typ string, kv multiFlag) (map[string]inter
 	return m, nil
 }
 
-// printResults renders ranked search results per DESIGN-SPEC.md section 3's SEARCH
-// banner + ranked-row layout (rank Meta, title Body, path Meta, score
-// right-aligned and banded via scoreStyle), or a friendly empty message.
+// printResults renders ranked search results as a SEARCH banner and ranked
+// rows (rank Meta, title Body, path Meta, score right-aligned and banded via
+// scoreStyle), or a friendly empty message.
 // elapsed is omitted from the banner when zero (the --sources path under
 // runAsk has no separate timing to show).
-func printResults(query string, results []client.SearchResult, elapsed time.Duration) {
+func printResults(query string, results []retrieval.Result, elapsed time.Duration) {
 	fmt.Print(formatResults(query, results, elapsed, terminalWidth()))
 }
 
@@ -236,7 +239,7 @@ func printResults(query string, results []client.SearchResult, elapsed time.Dura
 // of writing straight to stdout (which would corrupt the live region). width
 // is the terminal or model width: no line exceeds it, and long unbroken
 // tokens are hard-broken rather than overflowing.
-func formatResults(query string, results []client.SearchResult, elapsed time.Duration, width int) string {
+func formatResults(query string, results []retrieval.Result, elapsed time.Duration, width int) string {
 	var b strings.Builder
 	if len(results) == 0 {
 		fmt.Fprintf(&b, " %s\n", Body.Render(fmt.Sprintf("No results for %q.", query)))
@@ -278,7 +281,7 @@ func formatResults(query string, results []client.SearchResult, elapsed time.Dur
 		// Chunk text carries newlines and tabs; collapse them so the preview
 		// keeps the row indent.
 		preview := strings.Join(strings.Fields(sanitizeTerminal(r.Payload.Text)), " ")
-		fmt.Fprintf(&b, "%s\n\n", wrapIndent(truncate(preview, 240), indent, hw))
+		fmt.Fprintf(&b, "%s\n\n", wrapIndent(ellipsize(preview, 240), indent, hw))
 	}
 	return b.String()
 }
@@ -308,7 +311,11 @@ func defineAskFlags(fs *flag.FlagSet, o *askOpts) {
 	fs.BoolVar(&o.agent, "agent", false, "answer with the Hermes agent instead of the knowledge base alone")
 }
 
-func runAsk(args []string) error {
+func runAsk(args []string) error { return askWith(nil, args) }
+
+// askWith runs `blk ask` with args. rc is a long-lived retrieval client to
+// reuse, such as the plain REPL's; nil makes one for this call and closes it.
+func askWith(rc *retrieval.Client, args []string) error {
 	var o askOpts
 	fs := newFlagSet("ask")
 	defineAskFlags(fs, &o)
@@ -328,11 +335,17 @@ func runAsk(args []string) error {
 		return runHermes([]string{query})
 	}
 
-	rc, err := newRetrievalClient()
-	if err != nil {
-		return err
+	cfg := loadConfig()
+	if rc == nil {
+		c, err := newRetrievalClient(cfg)
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		rc = c
+	} else {
+		rc = followPrefs(rc, loadPrefs())
 	}
-	cfg := ragconfig.Load()
 
 	// Only the plain text path streams: --json needs the full struct and
 	// --sources needs the retrieved chunks, neither of which the token stream
@@ -369,18 +382,18 @@ func runAsk(args []string) error {
 	if err != nil {
 		return timeoutOrErr(err)
 	}
-	resp := &client.AnswerResponse{
+	resp := &answerResponse{
 		Answer:    answer,
 		Citations: cits,
 		UsedWeb:   usedWeb,
-		Results:   toClientResults(results),
+		Results:   results,
 	}
 
 	if *jsonOut {
 		return printJSON(resp)
 	}
 
-	// Glow-format markdown output (BUILD-BRIEF.md): let glamour own the
+	// Glow-format markdown output: let glamour own the
 	// answer body's rendering instead of hand-formatting it.
 	fmt.Println(strings.TrimRight(glowRender(resp.Answer, terminalWidth()), "\n"))
 	if *showSources && len(resp.Results) > 0 {
@@ -399,16 +412,15 @@ func runAsk(args []string) error {
 // no-results statement as the answer and no citations.
 func reportNoResults(stderr io.Writer, jsonOut bool) error {
 	if jsonOut {
-		return printJSON(&client.AnswerResponse{Answer: noResultsAnswer, Citations: []client.Citation{}})
+		return printJSON(&answerResponse{Answer: noResultsAnswer, Citations: []citation{}})
 	}
 	fmt.Fprintln(stderr, formatNoResultsErr())
 	return nil
 }
 
 // isWebCitation reports whether a citation came from the live web search
-// fallback. tavilySearchAt tags every web hit with Source "web", and
-// buildContext treats that value as untrusted external evidence.
-func isWebCitation(cit client.Citation) bool { return cit.Source == "web" }
+// fallback.
+func isWebCitation(cit citation) bool { return cit.Source == webSource }
 
 // webTag is the plain-text marker shown next to web citations. It is text so it
 // survives without color.
@@ -416,7 +428,7 @@ const webTag = "[web, untrusted]"
 
 // citationLine renders one numbered SOURCES row: index, source, path and
 // section (all sanitized, they come from the corpus or the web), and the web tag.
-func citationLine(indent string, i int, cit client.Citation) string {
+func citationLine(indent string, i int, cit citation) string {
 	line := indent + Key.Render(fmt.Sprintf("[%d]", i+1)) + "  " + Body.Render(sanitizeTerminal(cit.Source))
 	meta := sanitizeTerminal(cit.Path)
 	if cit.Section != "" {
@@ -440,7 +452,7 @@ const rerankOffNote = "(the reranker was off for this answer, so sources are in 
 
 // printSources renders the SOURCES block to stdout, shared by the streaming and
 // non-streaming ask paths. rerankOff adds rerankOffNote.
-func printSources(citations []client.Citation, usedWeb, rerankOff bool) {
+func printSources(citations []citation, usedWeb, rerankOff bool) {
 	fmt.Println()
 	fmt.Println(H2.Render("SOURCES"))
 	if len(citations) == 0 {
@@ -467,7 +479,11 @@ func runHealth(args []string) error {
 	}
 
 	cfg := loadConfig()
-	h := nativeHealth(cfg)
+	rc, err := newRetrievalClient(cfg)
+	if err == nil {
+		defer rc.Close()
+	}
+	h := nativeHealth(cfg, rc)
 	fmt.Println("blkChain services:")
 	fmt.Printf("  %s qdrant        %s\n", check(h.Qdrant), Meta.Render("("+cfg.QdrantGRPCURL+")"))
 	fmt.Printf("  %s embed_server  %s\n", check(h.EmbedServer), Meta.Render("("+cfg.EmbedServerURL+")"))
@@ -484,55 +500,27 @@ var loadConfig = ragconfig.Load
 // on a dead dependency.
 const healthProbeTimeout = 4 * time.Second
 
-// probeHealth checks Qdrant and embed_server directly (Task 16), replacing
-// the old dependency on the Python API's GET /health. The two probes are
-// independent so one dead dependency never masks the state of the other.
-func probeHealth(cfg ragconfig.Config) (qdrantOK, embedOK bool) {
-	return probeQdrant(cfg), probeEmbedServer(cfg)
+// nativeHealth probes Qdrant (on rc's connection; a nil rc is down),
+// embed_server, and the LLM server directly, the same probes search and ask
+// depend on. The LLM probe runs alongside the retrieval probes so a dead
+// service does not add its timeout to the others.
+func nativeHealth(cfg ragconfig.Config, rc *retrieval.Client) *serviceHealth {
+	llmOK := make(chan bool, 1)
+	go func() { llmOK <- probeLLM(omlxBaseURL(), omlxAPIKey(), healthProbeTimeout) }()
+	h := &serviceHealth{Qdrant: probeQdrant(rc), EmbedServer: probeEmbedServer(cfg)}
+	h.LLM = <-llmOK
+	return h
 }
 
-// probeQdrant dials Qdrant's gRPC endpoint and issues a real liveness RPC
-// (HealthCheck). qdrant.NewClient itself never dials eagerly, so failure can
-// only be observed by making a call.
-func probeQdrant(cfg ragconfig.Config) bool {
-	host, port := qdrantHostPort(cfg.QdrantGRPCURL)
-	qc, err := qdrant.NewClient(&qdrant.Config{
-		Host: host,
-		Port: port,
-		// Skip the server-version compatibility check: it performs its own
-		// RPC during NewClient, which we don't need since HealthCheck below
-		// already proves liveness.
-		SkipCompatibilityCheck: true,
-	})
-	if err != nil {
+// probeQdrant issues a real liveness RPC (HealthCheck), since the client never
+// dials until a call is made.
+func probeQdrant(rc *retrieval.Client) bool {
+	if rc == nil {
 		return false
 	}
-	defer qc.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), healthProbeTimeout)
 	defer cancel()
-	_, err = qc.HealthCheck(ctx)
-	return err == nil
-}
-
-// qdrantHostPort parses a "host:port" address, defaulting the port to 6334
-// (Qdrant's gRPC default) when absent. Mirrors
-// internal/retrieval.splitHostPort so the health probe dials the same target
-// `blk search` does.
-func qdrantHostPort(addr string) (string, int) {
-	const defaultPort = 6334
-	if addr == "" {
-		return "127.0.0.1", defaultPort
-	}
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return addr, defaultPort
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return host, defaultPort
-	}
-	return host, port
+	return rc.Health(ctx) == nil
 }
 
 // probeEmbedServer proves embed_server can actually serve a request: a tiny
@@ -552,8 +540,7 @@ func probeEmbedServer(cfg ragconfig.Config) bool {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	httpClient := &http.Client{Timeout: healthProbeTimeout}
-	resp, err := httpClient.Do(req)
+	resp, err := localHTTP.Do(req)
 	if err != nil {
 		return false
 	}
@@ -580,7 +567,7 @@ func probeEmbedHealth(cfg ragconfig.Config) (h embedHealth, ok bool) {
 	if err != nil {
 		return h, false
 	}
-	resp, err := modelsHTTP.Do(req)
+	resp, err := localHTTP.Do(req)
 	if err != nil {
 		return h, false
 	}
@@ -595,13 +582,9 @@ func probeEmbedHealth(cfg ragconfig.Config) (h embedHealth, ok bool) {
 }
 
 // probeLLM reports whether the LLM server at baseURL answers GET /models with a
-// 2xx status. The API key, when set, goes in the Authorization header and is
-// never printed. The body read is capped at 1 MiB and discarded.
-func probeLLM(baseURL, apiKey string) bool {
-	return probeLLMWithTimeout(baseURL, apiKey, healthProbeTimeout)
-}
-
-func probeLLMWithTimeout(baseURL, apiKey string, timeout time.Duration) bool {
+// 2xx status within timeout. The API key, when set, goes in the Authorization
+// header and is never printed. The body read is capped at 1 MiB and discarded.
+func probeLLM(baseURL, apiKey string, timeout time.Duration) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
@@ -611,7 +594,7 @@ func probeLLMWithTimeout(baseURL, apiKey string, timeout time.Duration) bool {
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	resp, err := localHTTP.Do(req)
 	if err != nil {
 		return false
 	}
@@ -621,7 +604,7 @@ func probeLLMWithTimeout(baseURL, apiKey string, timeout time.Duration) bool {
 }
 
 // downServices names the services h reports as down, in status-line order.
-func downServices(h *client.HealthResponse) []string {
+func downServices(h *serviceHealth) []string {
 	var down []string
 	if !h.Qdrant {
 		down = append(down, "qdrant")
@@ -635,8 +618,7 @@ func downServices(h *client.HealthResponse) []string {
 	return down
 }
 
-// check renders the theme's OK/Fail glyph for a boolean dependency state
-// (DESIGN-SPEC.md sections 2 and 4).
+// check renders the theme's OK/Fail glyph for a boolean dependency state.
 func check(ok bool) string {
 	if ok {
 		return OK.Render(Glyph(GlyphOK))
@@ -677,15 +659,6 @@ func escapeJSONControls(data []byte) []byte {
 		return data
 	}
 	return append(out, data[last:]...)
-}
-
-// truncate shortens s to at most n runes, appending "..." if it was cut.
-func truncate(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "..."
 }
 
 // multiFlag is a flag.Value that accumulates repeated occurrences, so a flag

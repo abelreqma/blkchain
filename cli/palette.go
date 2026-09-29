@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// palette.go is the slash-command autocomplete palette (V2-BRIEF.md T5): a small
+// palette.go is the slash-command autocomplete palette: a small
 // custom panel that floats ABOVE the input while the draft is a slash command in
 // progress ("/foo" with no space yet). It is intentionally NOT a bubbles/list so
 // it can anchor above the input rather than replace it. The matching and filter
@@ -51,17 +51,22 @@ const (
 var groupOrder = []string{groupAsk, groupModes, groupSession, groupServices, groupAgent, groupSetup}
 
 // slashCommands is the command registry shared by the palette, helpBlock, and
-// replHelp. It mirrors the verbs handled in submit/dispatchInput (tui.go).
-// Descriptions for commands that also exist on the command line are the shared
-// wording from the UX vocabulary, word for word.
+// replHelp. It mirrors the verbs handled in submit/dispatchInput (tui.go). A
+// command that also exists on the command line takes its description from
+// commandSpecs, so the two cannot drift; /models keeps its own, because the
+// slash command does more than blk models.
 func slashCommands() []command {
+	spec := map[string]string{}
+	for _, c := range commandSpecs() {
+		spec[c.name] = c.desc
+	}
 	return []command{
-		{"ask", "<q>", "answer a question from the knowledge base, with cited sources", groupAsk},
-		{"search", "<q>", "find the most relevant source passages for a query", groupAsk},
-		{"open", "<N|path>", "open a cited source in your pager or editor", groupAsk},
-		{"mode", "", "switch between rag and agent mode (also /agent, /rag)", groupModes},
-		{"agent", "", "switch to agent mode", groupHidden},
-		{"rag", "", "switch to rag mode", groupHidden},
+		{"ask", "<q>", spec["ask"], groupAsk},
+		{"search", "<q>", spec["search"], groupAsk},
+		{"open", "<N|path>", spec["open"], groupAsk},
+		{"mode", "", "switch between knowledge-base answers and the Hermes agent (also /agent, /rag)", groupModes},
+		{"agent", "", "use the Hermes agent for questions", groupHidden},
+		{"rag", "", "answer from the knowledge base", groupHidden},
 		{"resume", "", "reopen a saved session; press 1-9 to pick, d then y to delete", groupSession},
 		{"model", "", "pick the model and reasoning level (also ctrl+p)", groupSession},
 		{"title", "<name>", "rename the current session", groupSession},
@@ -72,14 +77,14 @@ func slashCommands() []command {
 		{"undo", "", "drop the last question and answer from this session", groupSession},
 		{"clear", "", "start fresh; earlier output stays in your scrollback", groupSession},
 		{"copy", "", "copy the last answer to the clipboard", groupSession},
-		{"up", "", "start the local services", groupServices},
-		{"down", "", "stop the local services", groupServices},
-		{"status", "", "show whether each local service is running", groupServices},
-		{"health", "", "check qdrant, embed_server, and the LLM", groupServices},
-		{"doctor", "", "check the whole setup and say what to fix", groupServices},
+		{"up", "", spec["up"], groupServices},
+		{"down", "", spec["down"], groupServices},
+		{"status", "", spec["status"], groupServices},
+		{"health", "", spec["health"], groupServices},
+		{"doctor", "", spec["doctor"], groupServices},
 		{"models", "[verb <name>]", "see all models; turn them on or off, load or unload", groupServices},
-		{"logs", "[name]", "show a service log (api or embed_server); -f follows it", groupServices},
-		{"hermes", "<prompt>", "run one Hermes agent turn with the knowledge-base tools", groupAgent},
+		{"logs", "[service]", spec["logs"], groupServices},
+		{"hermes", "<prompt>", spec["hermes"], groupAgent},
 		{"help", "", "show this list of commands", groupSetup},
 		{"quit", "", "leave blk (also ctrl+d)", groupSetup},
 	}

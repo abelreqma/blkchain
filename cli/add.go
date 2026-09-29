@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -78,7 +77,7 @@ func runAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	python := filepath.Join(root, ".venv", "bin", "python")
+	python := venvPython(root)
 	if _, err := os.Stat(python); err != nil {
 		return fmt.Errorf("add: venv python not found at %s, set up the project venv first", python)
 	}
@@ -95,8 +94,7 @@ func runAdd(args []string) error {
 
 	c := exec.Command(python, pyArgs...)
 	c.Dir = root
-	c.Env = stripEnv(os.Environ(), "PYTHONPATH")
-	c.Env = append(c.Env, "PYTHONPATH="+root)
+	c.Env = buildChildEnv(root)
 	stderrBuf := &tailBuffer{max: stderrTailBytes}
 	// Stream to the operator through the sanitizer, keep a raw tail to inspect.
 	stderrTerm := newSanitizingWriter(os.Stderr)

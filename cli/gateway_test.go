@@ -7,35 +7,6 @@ import (
 	"testing"
 )
 
-func TestParseDotenvValue(t *testing.T) {
-	data := []byte(strings.Join([]string{
-		"# a comment",
-		"",
-		"  OMLX_API = \"sek-ret\"  ",
-		"OTHER=plain",
-		"OMLX_API_KEY='single'",
-		"export EXPORTED=val",
-	}, "\n"))
-
-	cases := []struct {
-		key      string
-		want     string
-		wantFind bool
-	}{
-		{"OMLX_API", "sek-ret", true},    // quotes and surrounding space stripped
-		{"OTHER", "plain", true},         // plain value
-		{"OMLX_API_KEY", "single", true}, // single quotes stripped
-		{"EXPORTED", "val", true},        // leading `export ` tolerated
-		{"MISSING", "", false},
-	}
-	for _, c := range cases {
-		got, ok := parseDotenvValue(data, c.key)
-		if ok != c.wantFind || got != c.want {
-			t.Errorf("parseDotenvValue(%q) = (%q, %v), want (%q, %v)", c.key, got, ok, c.want, c.wantFind)
-		}
-	}
-}
-
 func TestUpsertEnvLines_ReplaceInPlace(t *testing.T) {
 	existing := []byte(strings.Join([]string{
 		"# header comment",
@@ -177,20 +148,23 @@ func TestResolveGatewaySecret_EnvBeatsFile(t *testing.T) {
 	}
 }
 
-func TestResolveGatewaySecret_FileFallback(t *testing.T) {
+// The project .env reaches the gateway through the environment blk loads it
+// into at startup.
+func TestResolveGatewaySecret_ProjectEnvFile(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("OMLX_API_KEY=filekey\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("OMLX_API", "")
 	t.Setenv("OMLX_API_KEY", "")
+	applyEnvFile(root)
 
 	val, src, err := resolveGatewaySecret(root)
 	if err != nil {
 		t.Fatalf("resolveGatewaySecret: %v", err)
 	}
-	if val != "filekey" || src != "OMLX_API_KEY (.env)" {
-		t.Errorf("got (%q, %q), want (filekey, \"OMLX_API_KEY (.env)\")", val, src)
+	if val != "filekey" || src != "OMLX_API_KEY" {
+		t.Errorf("got (%q, %q), want (filekey, OMLX_API_KEY)", val, src)
 	}
 }
 

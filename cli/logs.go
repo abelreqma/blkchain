@@ -11,7 +11,7 @@ import (
 )
 
 // knownLogs are the service log basenames written under <root>/.run.
-var knownLogs = []string{"api", "embed_server"}
+var knownLogs = []string{"embed_server"}
 
 // logsOpts holds the flags of `blk logs`.
 type logsOpts struct {
@@ -27,9 +27,9 @@ func defineLogsFlags(fs *flag.FlagSet, o *logsOpts) {
 
 // runLogs prints (or follows) a service log from <root>/.run/<name>.log.
 //
-//	blk logs            tail the api log
+//	blk logs                     tail the embed_server log
 //	blk logs embed_server -n 100
-//	blk logs api -f      follow (like tail -f)
+//	blk logs -f                  follow (like tail -f)
 func runLogs(args []string) error {
 	var o logsOpts
 	fs := newFlagSet("logs")
@@ -39,12 +39,12 @@ func runLogs(args []string) error {
 	}
 	follow, n := &o.follow, &o.n
 
-	name := "api"
+	name := "embed_server"
 	if fs.NArg() > 0 {
 		name = fs.Arg(0)
 	}
 	if !validLogName(name) {
-		return usageErr(`logs: unknown service %q (known: %s). Example: blk logs api. See "blk help logs".`, name, strings.Join(knownLogs, ", "))
+		return usageErr(`logs: unknown service %q (known: %s). Example: blk logs embed_server. See "blk help logs".`, name, strings.Join(knownLogs, ", "))
 	}
 
 	root, err := projectRoot()

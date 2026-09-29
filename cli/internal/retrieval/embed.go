@@ -11,8 +11,11 @@ import (
 )
 
 // maxResponseBytes bounds how much of an embed_server response body we will
-// read, mirroring the Python-side 32 MiB request cap.
+// read, the same as the server's default 32 MiB body cap.
 const maxResponseBytes = 32 << 20 // 32 MiB
+
+// maxErrorBodyBytes is how much of a failed response's body an error quotes.
+const maxErrorBodyBytes = 512
 
 // httpClientTimeout is a sensible default; callers needing a tighter bound
 // should set a deadline on the context they pass in instead.
@@ -96,7 +99,7 @@ func postJSON(ctx context.Context, url string, body []byte, out interface{}) err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s returned %s: %s", url, resp.Status, string(data))
+		return fmt.Errorf("%s returned %s: %s", url, resp.Status, string(data[:min(len(data), maxErrorBodyBytes)]))
 	}
 
 	if err := json.Unmarshal(data, out); err != nil {

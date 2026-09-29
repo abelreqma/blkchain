@@ -11,7 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// overlay.go holds the focused overlay pickers (V2-BRIEF.md T4): the /resume
+// overlay.go holds the focused overlay pickers: the /resume
 // session picker and the /model reasoning picker. An overlay captures keys while
 // open; the base Update passes through only quit (tui.go). Each overlay renders
 // over the live region, replacing the input area, inside one rounded single-line
@@ -167,17 +167,6 @@ func overlayBox(s overlaySpec, width, height int) string {
 	return box.Render(content)
 }
 
-// clampHeight bounds a list's visible height to [1, cap].
-func clampHeight(n, cap int) int {
-	if n < 1 {
-		return 1
-	}
-	if n > cap {
-		return cap
-	}
-	return n
-}
-
 // relTime renders a compact "n ago" for a unix timestamp.
 func relTime(ts int64) string {
 	if ts == 0 {
@@ -216,8 +205,8 @@ type resumePicker struct {
 // current session if present.
 func newResumePicker(metas []sessionMeta, currentID string, width int) resumePicker {
 	items := resumeItems(metas)
-	w := clampWidth(width-6, 30, 72)
-	h := clampHeight(len(items), 9)
+	w := clamp(width-6, 30, 72)
+	h := clamp(len(items), 1, 9)
 	l := newCompactList(items, w, h, resumeRow)
 	for i, m := range metas {
 		if m.ID == currentID {
@@ -311,7 +300,7 @@ func (p resumePicker) reload() resumePicker {
 	metas, _ := listSessions()
 	p.metas = metas
 	p.list.SetItems(resumeItems(metas))
-	p.list.SetHeight(clampHeight(len(metas), 9))
+	p.list.SetHeight(clamp(len(metas), 1, 9))
 	return p
 }
 
@@ -327,7 +316,7 @@ func (p resumePicker) View(width, height int) string {
 	}
 	return overlayBox(overlaySpec{
 		title: "RESUME SESSION",
-		wantW: 72, wantRows: clampHeight(len(p.metas), 9), body: body,
+		wantW: 72, wantRows: clamp(len(p.metas), 1, 9), body: body,
 	}, width, height)
 }
 
@@ -360,7 +349,7 @@ func newModelPicker(models []string, current, reasoning string, width int) model
 		rItems[i] = strItem(r)
 	}
 
-	ml := newCompactList(mItems, 30, clampHeight(len(mItems), 8), strRow)
+	ml := newCompactList(mItems, 30, clamp(len(mItems), 1, 8), strRow)
 	rl := newCompactList(rItems, 14, len(reasoningLevels), strRow)
 
 	for i, m := range models {
@@ -461,14 +450,3 @@ func modelColumn(title, body string, focused bool) string {
 
 // closeOverlayCmd emits the overlay-cancel message.
 func closeOverlayCmd() tea.Msg { return overlayCloseMsg{} }
-
-// clampWidth bounds a width to [lo, hi].
-func clampWidth(v, lo, hi int) int {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
-}

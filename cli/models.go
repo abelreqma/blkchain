@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"blkchain/cli/internal/modeleval"
-	"blkchain/cli/internal/ragconfig"
 )
 
 // defineModelsFlags declares `blk models`'s flags.
@@ -49,25 +48,53 @@ func runModels(args []string) error {
 	}
 	wg.Wait()
 
+	prefs, webSet := loadPrefs(), tavilyKey() != ""
 	if jsonOut {
-		return emitReportsJSON(os.Stdout, reports)
+		return emitReportsJSON(os.Stdout, reports, prefs, webSet)
 	}
 
 	fmt.Println(H1.Render("blk models"))
 	fmt.Println()
-	for _, r := range reports {
-		fmt.Println(renderReport(r))
-	}
+	fmt.Print(renderModelsText(reports, prefs, webSet))
 	return nil
 }
 
-// modelsConfig resolves probe config from the env, reusing llm.go's oMLX
-// resolution and the stack's embed_server port (8100).
+// renderModelsText is the text report: one line per model, the reranker marked
+// when /models turned it off, then web search and any hidden chat models.
+func renderModelsText(reports []modeleval.ModelReport, p modelPrefs, webSet bool) string {
+	var b strings.Builder
+	for _, r := range reports {
+		line := renderReport(r)
+		if r.Kind == modeleval.KindRerank && !p.Rerank {
+			line += "   " + Caut.Render("off: answers skip the reranker")
+		}
+		b.WriteString(line + "\n")
+	}
+	web := "not configured (set TAVILY_SETUP_TOKEN)"
+	if webSet {
+		web = "off"
+		if p.Web {
+			web = "on"
+		}
+	}
+	fmt.Fprintf(&b, " %s %s\n", Key.Render(fmt.Sprintf("%-7s", "web")), Meta.Render(web))
+	if len(p.Hidden) > 0 {
+		hidden := make([]string, len(p.Hidden))
+		for i, id := range p.Hidden {
+			hidden[i] = oneLine(sanitizeTerminal(id))
+		}
+		fmt.Fprintf(&b, " %s %s\n", Key.Render(fmt.Sprintf("%-7s", "hidden")), Meta.Render(strings.Join(hidden, ", ")))
+	}
+	return b.String()
+}
+
+// modelsConfig resolves probe config from the env and the RAG config, reusing
+// llm.go's oMLX resolution.
 func modelsConfig() modeleval.Config {
-	embedBase := strings.TrimRight(ragconfig.Load().EmbedServerURL, "/")
+	embedBase := strings.TrimRight(loadConfig().EmbedServerURL, "/")
 	return modeleval.Config{
 		ChatBaseURL:    omlxBaseURL(),
-		ChatAPIKey:     strings.TrimSpace(os.Getenv("OMLX_API_KEY")),
+		ChatAPIKey:     omlxAPIKey(),
 		ChatModel:      strings.TrimSpace(os.Getenv("OMLX_MODEL")),
 		EmbedHealthURL: embedBase + "/health",
 		EmbedURL:       embedBase + "/embed",
@@ -128,25 +155,40 @@ func renderReport(r modeleval.ModelReport) string {
 	return strings.TrimRight(line, " ")
 }
 
-// emitReportsJSON writes the reports as strict JSON for scripting. Errors are
-// rendered as their message string.
-func emitReportsJSON(w io.Writer, reports []modeleval.ModelReport) error {
+// emitReportsJSON writes the reports as strict JSON for scripting, with DEL and
+// the C1 controls escaped like printJSON. Errors are rendered as their message
+// string. enabled is the /models switch (always true
+// for chat and embed), the chat entry lists the hidden chat models, and a web
+// entry reports web search: ready when it is configured.
+func emitReportsJSON(w io.Writer, reports []modeleval.ModelReport, p modelPrefs, webSet bool) error {
 	type jsonReport struct {
 		Model   string                `json:"model"`
 		Ready   bool                  `json:"ready"`
 		ReadyMs int64                 `json:"ready_ms"`
+		Enabled bool                  `json:"enabled"`
+		Hidden  []string              `json:"hidden,omitempty"`
 		Error   string                `json:"error,omitempty"`
 		Perf    *modeleval.PerfResult `json:"perf,omitempty"`
 	}
-	out := make([]jsonReport, 0, len(reports))
+	out := make([]jsonReport, 0, len(reports)+1)
 	for _, r := range reports {
-		jr := jsonReport{Model: r.Kind.String(), Ready: r.Ready, ReadyMs: r.ReadyElapsed.Milliseconds(), Perf: r.Perf}
+		jr := jsonReport{Model: r.Kind.String(), Ready: r.Ready, ReadyMs: r.ReadyElapsed.Milliseconds(), Enabled: true, Perf: r.Perf}
+		switch r.Kind {
+		case modeleval.KindRerank:
+			jr.Enabled = p.Rerank
+		case modeleval.KindChat:
+			jr.Hidden = p.Hidden
+		}
 		if r.Err != nil {
 			jr.Error = r.Err.Error()
 		}
 		out = append(out, jr)
 	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(out)
+	out = append(out, jsonReport{Model: "web", Ready: webSet, Enabled: p.Web})
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(append(escapeJSONControls(data), '\n'))
+	return err
 }

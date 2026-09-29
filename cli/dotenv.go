@@ -14,8 +14,7 @@ import (
 // parseDotenvPairs parses every KEY=value line from a .env byte slice: it
 // skips blank lines and comments, tolerates a leading `export `, trims
 // surrounding whitespace, and strips one layer of matching single or double
-// quotes. The last occurrence of a key wins. This mirrors the single-key
-// parser parseDotenvValue in gateway.go.
+// quotes. The last occurrence of a key wins.
 func parseDotenvPairs(data []byte) map[string]string {
 	pairs := map[string]string{}
 	for _, raw := range strings.Split(string(data), "\n") {

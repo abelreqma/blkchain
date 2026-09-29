@@ -15,8 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"blkchain/cli/internal/client"
-	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -589,9 +587,9 @@ func TestNoResultsMsgEndsTurnAsWarning(t *testing.T) {
 
 func TestFormatAnswerTagsWebCitations(t *testing.T) {
 	noColor(t)
-	resp := &client.AnswerResponse{
+	resp := &answerResponse{
 		Answer: "x [1] [2]",
-		Citations: []client.Citation{
+		Citations: []citation{
 			{Source: "wstg", Path: "docs/a.md", Section: "Intro"},
 			{Source: "web", Path: "https://example.com/post", Section: "A post"},
 		},
@@ -627,21 +625,21 @@ func TestOpenWebTargetPrintsURLAndDoesNotOpen(t *testing.T) {
 
 func TestStatusLineNamesWhichServiceIsDown(t *testing.T) {
 	noColor(t)
-	base := model{mode: "rag", width: 200, apiChecked: true}
+	base := model{mode: "rag", width: 200, servicesChecked: true}
 	cases := []struct {
-		h    client.HealthResponse
+		h    serviceHealth
 		want string
 	}{
-		{client.HealthResponse{Status: "ok", Qdrant: true, EmbedServer: true, LLM: true}, "services ok"},
-		{client.HealthResponse{Status: "degraded", Qdrant: true, EmbedServer: true}, "llm down"},
-		{client.HealthResponse{Status: "degraded", EmbedServer: true, LLM: true}, "qdrant down"},
-		{client.HealthResponse{Status: "degraded", Qdrant: true}, "embed_server, llm down"},
+		{serviceHealth{Qdrant: true, EmbedServer: true, LLM: true}, "services ok"},
+		{serviceHealth{Qdrant: true, EmbedServer: true}, "llm down"},
+		{serviceHealth{EmbedServer: true, LLM: true}, "qdrant down"},
+		{serviceHealth{Qdrant: true}, "embed_server, llm down"},
 	}
 	for _, c := range cases {
 		h := c.h
 		m := base
 		m.health = &h
-		m.apiOK = h.Status == "ok"
+		m.servicesOK = h.ok()
 		line := m.statusLine()
 		if !strings.Contains(line, c.want) {
 			t.Errorf("%+v: %q lacks %q", c.h, line, c.want)
@@ -651,20 +649,20 @@ func TestStatusLineNamesWhichServiceIsDown(t *testing.T) {
 		}
 	}
 	// Unknown cause (for example a search error) keeps the generic label.
-	if line := (model{mode: "rag", width: 200, apiChecked: true}).statusLine(); !strings.Contains(line, "services down") {
+	if line := (model{mode: "rag", width: 200, servicesChecked: true}).statusLine(); !strings.Contains(line, "services down") {
 		t.Errorf("fallback label lost: %q", line)
 	}
 }
 
 func TestLLMDownErrorMarksLLMDownInStatus(t *testing.T) {
 	noColor(t)
-	okHealth := func() *client.HealthResponse {
-		return &client.HealthResponse{Status: "ok", Qdrant: true, EmbedServer: true, LLM: true}
+	okHealth := func() *serviceHealth {
+		return &serviceHealth{Qdrant: true, EmbedServer: true, LLM: true}
 	}
-	newM := func(h *client.HealthResponse) model {
+	newM := func(h *serviceHealth) model {
 		m := layoutModel(t, 200, 30)
 		m.working = true
-		m.health, m.apiOK, m.apiChecked = h, true, true
+		m.health, m.servicesOK, m.servicesChecked = h, true, true
 		return m
 	}
 	const base = "http://127.0.0.1:8000/v1"
@@ -673,8 +671,8 @@ func TestLLMDownErrorMarksLLMDownInStatus(t *testing.T) {
 	m := newM(okHealth())
 	nm, _ := m.Update(errMsg{mapLLMError(syscall.ECONNREFUSED, base)})
 	got := nm.(model)
-	if got.apiOK || got.health == nil || got.health.LLM || !got.health.Qdrant || !got.health.EmbedServer {
-		t.Errorf("after refused: ok=%v health=%+v", got.apiOK, got.health)
+	if got.servicesOK || got.health == nil || got.health.LLM || !got.health.Qdrant || !got.health.EmbedServer {
+		t.Errorf("after refused: ok=%v health=%+v", got.servicesOK, got.health)
 	}
 	if line := got.statusLine(); !strings.Contains(line, "llm down") || strings.Contains(line, "services ok") {
 		t.Errorf("status = %q, want it to name llm as down", line)
@@ -692,8 +690,8 @@ func TestLLMDownErrorMarksLLMDownInStatus(t *testing.T) {
 
 	// A timeout is a slow model, not a dead one: the dot stays as it was.
 	nm, _ = newM(okHealth()).Update(errMsg{mapLLMError(context.DeadlineExceeded, base)})
-	if got := nm.(model); !got.apiOK || !got.health.LLM {
-		t.Errorf("a timeout must not mark the LLM down: ok=%v health=%+v", got.apiOK, got.health)
+	if got := nm.(model); !got.servicesOK || !got.health.LLM {
+		t.Errorf("a timeout must not mark the LLM down: ok=%v health=%+v", got.servicesOK, got.health)
 	}
 }
 
@@ -701,44 +699,44 @@ func TestSearchSuccessDoesNotClearKnownLLMDown(t *testing.T) {
 	noColor(t)
 	m := layoutModel(t, 200, 30)
 	m.working = true
-	m.health = &client.HealthResponse{Status: "degraded", Qdrant: false, EmbedServer: false, LLM: false}
-	m.apiChecked = true
+	m.health = &serviceHealth{Qdrant: false, EmbedServer: false, LLM: false}
+	m.servicesChecked = true
 	nm, _ := m.Update(searchMsg{query: "q"})
 	got := nm.(model)
-	if got.apiOK || got.health.LLM || !got.health.Qdrant || !got.health.EmbedServer {
-		t.Errorf("search must only update qdrant and embed_server: ok=%v health=%+v", got.apiOK, got.health)
+	if got.servicesOK || got.health.LLM || !got.health.Qdrant || !got.health.EmbedServer {
+		t.Errorf("search must only update qdrant and embed_server: ok=%v health=%+v", got.servicesOK, got.health)
 	}
 	if line := got.statusLine(); !strings.Contains(line, "llm down") {
 		t.Errorf("status = %q, want llm down", line)
 	}
 
 	// With the LLM up, a successful search restores the ok dot.
-	m.health = &client.HealthResponse{Status: "degraded", LLM: true}
+	m.health = &serviceHealth{LLM: true}
 	m.working = true
 	nm, _ = m.Update(searchMsg{query: "q"})
-	if got := nm.(model); !got.apiOK || got.health.Status != "ok" {
-		t.Errorf("search with a healthy LLM: ok=%v health=%+v", got.apiOK, got.health)
+	if got := nm.(model); !got.servicesOK || !got.health.ok() {
+		t.Errorf("search with a healthy LLM: ok=%v health=%+v", got.servicesOK, got.health)
 	}
 
 	// With nothing known about the LLM, search still reports ok as before.
 	m = layoutModel(t, 200, 30)
 	m.working = true
 	nm, _ = m.Update(searchMsg{query: "q"})
-	if got := nm.(model); !got.apiOK || !got.apiChecked {
-		t.Errorf("search without a probe: ok=%v checked=%v", got.apiOK, got.apiChecked)
+	if got := nm.(model); !got.servicesOK || !got.servicesChecked {
+		t.Errorf("search without a probe: ok=%v checked=%v", got.servicesOK, got.servicesChecked)
 	}
 }
 
 func TestHealthMsgStoresPerServiceState(t *testing.T) {
 	m := model{ta: textarea.New()}
-	h := &client.HealthResponse{Status: "degraded", Qdrant: true, EmbedServer: true}
+	h := &serviceHealth{Qdrant: true, EmbedServer: true}
 	nm, _ := m.Update(healthMsg{h: h})
 	got := nm.(model)
-	if got.apiOK || !got.apiChecked || got.health != h {
-		t.Errorf("state = ok:%v checked:%v health:%v", got.apiOK, got.apiChecked, got.health)
+	if got.servicesOK || !got.servicesChecked || got.health != h {
+		t.Errorf("state = ok:%v checked:%v health:%v", got.servicesOK, got.servicesChecked, got.health)
 	}
-	nm, _ = got.Update(healthMsg{h: &client.HealthResponse{Status: "ok", Qdrant: true, EmbedServer: true, LLM: true}})
-	if !nm.(model).apiOK {
+	nm, _ = got.Update(healthMsg{h: &serviceHealth{Qdrant: true, EmbedServer: true, LLM: true}})
+	if !nm.(model).servicesOK {
 		t.Error("all three up must set the dot ok")
 	}
 }
@@ -748,13 +746,13 @@ func TestHealthMsgStoresPerServiceState(t *testing.T) {
 func TestStaleHealthProbeDoesNotClearLLMDown(t *testing.T) {
 	noColor(t)
 	const base = "http://127.0.0.1:8000/v1"
-	up := func() *client.HealthResponse {
-		return &client.HealthResponse{Status: "ok", Qdrant: true, EmbedServer: true, LLM: true}
+	up := func() *serviceHealth {
+		return &serviceHealth{Qdrant: true, EmbedServer: true, LLM: true}
 	}
 	newM := func() model {
 		m := layoutModel(t, 200, 30)
 		m.working = true
-		m.health, m.apiOK, m.apiChecked = up(), true, true
+		m.health, m.servicesOK, m.servicesChecked = up(), true, true
 		return m
 	}
 	probeStart := time.Now().Add(-time.Minute)
@@ -764,8 +762,8 @@ func TestStaleHealthProbeDoesNotClearLLMDown(t *testing.T) {
 	m := nm.(model)
 	nm, _ = m.Update(healthMsg{h: up(), started: probeStart})
 	got := nm.(model)
-	if got.apiOK || got.health == nil || got.health.LLM || got.health.Status == "ok" {
-		t.Errorf("stale probe overwrote the LLM-down state: ok=%v health=%+v", got.apiOK, got.health)
+	if got.servicesOK || got.health == nil || got.health.LLM || got.health.ok() {
+		t.Errorf("stale probe overwrote the LLM-down state: ok=%v health=%+v", got.servicesOK, got.health)
 	}
 	if line := got.statusLine(); !strings.Contains(line, "llm down") {
 		t.Errorf("status = %q, want llm down", line)
@@ -778,21 +776,21 @@ func TestStaleHealthProbeDoesNotClearLLMDown(t *testing.T) {
 	m = newM()
 	nm, _ = m.Update(healthMsg{h: up(), started: probeStart})
 	nm, _ = nm.(model).Update(errMsg{mapLLMError(syscall.ECONNREFUSED, base)})
-	if got := nm.(model); got.apiOK || got.health.LLM {
-		t.Errorf("failure after the probe must mark the LLM down: ok=%v health=%+v", got.apiOK, got.health)
+	if got := nm.(model); got.servicesOK || got.health.LLM {
+		t.Errorf("failure after the probe must mark the LLM down: ok=%v health=%+v", got.servicesOK, got.health)
 	}
 
 	// A probe that started after the mark is current, so it may bring the LLM back.
 	down := nm.(model)
 	nm, _ = down.Update(healthMsg{h: up(), started: down.llmDownAt.Add(time.Second)})
-	if got := nm.(model); !got.apiOK || !got.health.LLM {
-		t.Errorf("a fresh probe should restore the LLM: ok=%v health=%+v", got.apiOK, got.health)
+	if got := nm.(model); !got.servicesOK || !got.health.LLM {
+		t.Errorf("a fresh probe should restore the LLM: ok=%v health=%+v", got.servicesOK, got.health)
 	}
 
 	// A stale probe that reports the LLM down is taken as is.
-	nm, _ = down.Update(healthMsg{h: &client.HealthResponse{Status: "degraded", Qdrant: true}, started: probeStart})
-	if got := nm.(model); got.apiOK || got.health.LLM || got.health.EmbedServer {
-		t.Errorf("a stale down result should still be stored: ok=%v health=%+v", got.apiOK, got.health)
+	nm, _ = down.Update(healthMsg{h: &serviceHealth{Qdrant: true}, started: probeStart})
+	if got := nm.(model); got.servicesOK || got.health.LLM || got.health.EmbedServer {
+		t.Errorf("a stale down result should still be stored: ok=%v health=%+v", got.servicesOK, got.health)
 	}
 }
 
@@ -800,7 +798,7 @@ func TestHealthCmdStampsProbeStart(t *testing.T) {
 	useDeadServices(t)
 	t.Setenv("QDRANT_GRPC_URL", "127.0.0.1:1")
 	before := time.Now()
-	msg, ok := healthCmd()().(healthMsg)
+	msg, ok := newKeyModel(t).healthCmd()().(healthMsg)
 	if !ok || msg.started.Before(before) || msg.started.After(time.Now()) {
 		t.Errorf("healthCmd() = %#v, want started between %v and now", msg, before)
 	}
@@ -813,7 +811,7 @@ func TestHealthCmdProbesLLM(t *testing.T) {
 	useDeadServices(t)
 	t.Setenv("OMLX_BASE_URL", up.URL)
 	t.Setenv("QDRANT_GRPC_URL", "127.0.0.1:1")
-	msg, ok := healthCmd()().(healthMsg)
+	msg, ok := newKeyModel(t).healthCmd()().(healthMsg)
 	if !ok || msg.h == nil {
 		t.Fatalf("healthCmd() = %#v", msg)
 	}
@@ -1006,7 +1004,7 @@ func TestViewNeverExceedsShortTerminals(t *testing.T) {
 		},
 		"services down with a queue": func(m model) model {
 			m.working, m.live = true, longStream(50)
-			m.health, m.apiChecked = &client.HealthResponse{}, true
+			m.health, m.servicesChecked = &serviceHealth{}, true
 			m.queue, m.sessTitle = []string{"a", "b"}, "a long session title"
 			return m
 		},
@@ -1275,44 +1273,6 @@ func TestResumeConfirmFooterKeysDoWhatTheyList(t *testing.T) {
 }
 
 // --- runtime config seam, timeout wording, clipboard sanitizing ---
-
-// tui.go reads the RAG config through the loadConfig seam, not ragconfig.Load.
-func TestTUIReadsConfigThroughSeam(t *testing.T) {
-	isolateUserDirs(t)
-	useDeadServices(t)
-	t.Setenv("OMLX_MODEL", "")
-	t.Setenv("OMLX_BASE_URL", "http://127.0.0.1:1/v1")
-	prev := loadConfig
-	calls := 0
-	loadConfig = func() ragconfig.Config {
-		calls++
-		cfg := prev()
-		cfg.DefaultModel = "seam-model"
-		return cfg
-	}
-	t.Cleanup(func() { loadConfig = prev })
-
-	if got := ragModelLabel(); got != "seam-model" || calls != 1 {
-		t.Errorf("ragModelLabel() = %q after %d loadConfig calls, want seam-model after 1", got, calls)
-	}
-
-	calls = 0
-	m := newKeyModel(t)
-	nm, cmd := m.dispatchInput("/search ssrf")
-	if cmd == nil || calls != 1 {
-		t.Errorf("dispatching a turn read the config %d times, want 1 (the request timeout)", calls)
-	}
-	nm.(model).cancel()
-
-	// newRetrievalClient reads it once and streamCmd once more for the loop.
-	calls = 0
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_ = m.streamCmd(ctx, "q", "", time.Now())()
-	if calls != 2 {
-		t.Errorf("streamCmd read the config %d times, want 2 (client + loop)", calls)
-	}
-}
 
 func TestDeadlineExceededMapsToTimeoutWording(t *testing.T) {
 	const want = "request timed out (raise BLKCHAIN_TIMEOUT_SECONDS)"
@@ -1679,7 +1639,7 @@ func TestStatusLineLabelsEveryValue(t *testing.T) {
 			t.Errorf("status %q lacks %q", line, want)
 		}
 	}
-	m.apiChecked, m.apiOK = true, true
+	m.servicesChecked, m.servicesOK = true, true
 	if line := m.statusLine(); !strings.Contains(line, "services ok") {
 		t.Errorf("status %q lacks the services label", line)
 	}
@@ -1696,8 +1656,8 @@ func TestStatusLineGivesTheModelPriority(t *testing.T) {
 	noColor(t)
 	long := "supergemma4-26b-uncensored-mlx-4bit-v2"
 	base := layoutModel(t, 80, 24)
-	base.ragModel, base.sessTitle, base.apiChecked, base.apiOK = long, "new session", true, true
-	base.health = &client.HealthResponse{Status: "ok", Qdrant: true, EmbedServer: true, LLM: true}
+	base.ragModel, base.sessTitle, base.servicesChecked, base.servicesOK = long, "new session", true, true
+	base.health = &serviceHealth{Qdrant: true, EmbedServer: true, LLM: true}
 	base.prefs = defaultPrefs()
 
 	for _, rerankUp := range []bool{true, false} {
@@ -1751,12 +1711,12 @@ func TestStatusLineShowsTheRetrievalModels(t *testing.T) {
 	if line := m.statusLine(); strings.Contains(line, "embed") || strings.Contains(line, "rerank") {
 		t.Errorf("before the first probe there is nothing to show: %q", line)
 	}
-	nm, _ := m.Update(healthMsg{h: &client.HealthResponse{Status: "ok", Qdrant: true, EmbedServer: true, LLM: true}, rerank: true})
+	nm, _ := m.Update(healthMsg{h: &serviceHealth{Qdrant: true, EmbedServer: true, LLM: true}, rerank: true})
 	m = nm.(model)
 	if line := m.statusLine(); !strings.Contains(line, "embed ok") || !strings.Contains(line, "rerank ok") {
 		t.Errorf("both up: %q", line)
 	}
-	nm, _ = m.Update(healthMsg{h: &client.HealthResponse{Status: "ok", Qdrant: true, EmbedServer: true, LLM: true}})
+	nm, _ = m.Update(healthMsg{h: &serviceHealth{Qdrant: true, EmbedServer: true, LLM: true}})
 	m = nm.(model)
 	if line := m.statusLine(); !strings.Contains(line, "rerank down") {
 		t.Errorf("reranker unavailable: %q", line)
@@ -1765,7 +1725,7 @@ func TestStatusLineShowsTheRetrievalModels(t *testing.T) {
 	if line := m.statusLine(); !strings.Contains(line, "rerank off") {
 		t.Errorf("reranker turned off: %q", line)
 	}
-	nm, _ = m.Update(healthMsg{h: &client.HealthResponse{Status: "degraded", Qdrant: true, LLM: true}})
+	nm, _ = m.Update(healthMsg{h: &serviceHealth{Qdrant: true, LLM: true}})
 	if line := nm.(model).statusLine(); !strings.Contains(line, "embed down") || !strings.Contains(line, "rerank off") {
 		t.Errorf("embed_server down: %q", line)
 	}
@@ -1784,8 +1744,8 @@ func TestFirstDownProbePrintsOneHint(t *testing.T) {
 	t.Setenv("OMLX_BASE_URL", "http://user:hunter2@127.0.0.1:8000/v1?token=abc")
 	m := layoutModel(t, 100, 24)
 
-	probe := func(h client.HealthResponse) tea.Msg { return healthMsg{h: &h} }
-	nm, cmd := m.Update(probe(client.HealthResponse{Status: "degraded", LLM: true}))
+	probe := func(h serviceHealth) tea.Msg { return healthMsg{h: &h} }
+	nm, cmd := m.Update(probe(serviceHealth{LLM: true}))
 	got := nm.(model)
 	out := printed(t, cmd)
 	if !strings.Contains(out, "qdrant and embed_server are down. Run /up to start them.") {
@@ -1795,28 +1755,28 @@ func TestFirstDownProbePrintsOneHint(t *testing.T) {
 		t.Errorf("the hint must be one line: %q", out)
 	}
 	// Once per session: a second probe stays quiet.
-	if _, cmd := got.Update(probe(client.HealthResponse{Status: "degraded", LLM: true})); cmd != nil {
+	if _, cmd := got.Update(probe(serviceHealth{LLM: true})); cmd != nil {
 		t.Error("a later probe must not print the hint again")
 	}
 
 	// A healthy first probe prints nothing, and spends the hint: a service that
 	// drops later is shown in the status line, not announced again.
-	nm, cmd = m.Update(probe(client.HealthResponse{Status: "ok", Qdrant: true, EmbedServer: true, LLM: true}))
+	nm, cmd = m.Update(probe(serviceHealth{Qdrant: true, EmbedServer: true, LLM: true}))
 	if cmd != nil {
 		t.Error("a healthy probe must not print a hint")
 	}
-	if _, cmd := nm.(model).Update(probe(client.HealthResponse{Status: "degraded", LLM: true})); cmd != nil {
+	if _, cmd := nm.(model).Update(probe(serviceHealth{LLM: true})); cmd != nil {
 		t.Error("only the first probe of a session prints the hint")
 	}
 
 	// One local service down uses the singular.
-	_, cmd = m.Update(probe(client.HealthResponse{Status: "degraded", Qdrant: true, LLM: true}))
+	_, cmd = m.Update(probe(serviceHealth{Qdrant: true, LLM: true}))
 	if out := printed(t, cmd); !strings.Contains(out, "embed_server is down. Run /up to start it.") {
 		t.Errorf("singular hint = %q", out)
 	}
 
 	// The LLM alone: say where to start it, without credentials.
-	_, cmd = m.Update(probe(client.HealthResponse{Status: "degraded", Qdrant: true, EmbedServer: true}))
+	_, cmd = m.Update(probe(serviceHealth{Qdrant: true, EmbedServer: true}))
 	out = printed(t, cmd)
 	if !strings.Contains(out, "start the LLM server at http://127.0.0.1:8000/v1") {
 		t.Errorf("LLM hint = %q", out)
@@ -1831,12 +1791,12 @@ func TestFirstDownProbePrintsOneHint(t *testing.T) {
 	}
 
 	// Both: name both fixes, and wrap inside a narrow terminal.
-	_, cmd = m.Update(probe(client.HealthResponse{Status: "degraded"}))
+	_, cmd = m.Update(probe(serviceHealth{}))
 	if out := printed(t, cmd); !strings.Contains(out, "/up") || !strings.Contains(out, "LLM server") {
 		t.Errorf("combined hint = %q", out)
 	}
 	for _, w := range []int{40, 80} {
-		hint := downHint(&client.HealthResponse{}, w)
+		hint := downHint(&serviceHealth{}, w)
 		if got := widestLine(hint); got > w {
 			t.Errorf("width %d: hint has a %d column line:\n%s", w, got, hint)
 		}
@@ -1858,7 +1818,7 @@ func TestKeyPanelFooterOffersScrollOnlyWhenCut(t *testing.T) {
 // in both the TUI and blk ask; one made with it on does not.
 func TestAnswerSaysWhenTheRerankerWasOff(t *testing.T) {
 	noColor(t)
-	resp := &client.AnswerResponse{Answer: "x [1]", Citations: []client.Citation{{Source: "wstg", Path: "a.md"}}}
+	resp := &answerResponse{Answer: "x [1]", Citations: []citation{{Source: "wstg", Path: "a.md"}}}
 	if out := formatAnswer(resp, time.Second, 80, true); !strings.Contains(out, "reranker was off") {
 		t.Errorf("TUI answer lacks the reranker note:\n%s", out)
 	}
@@ -1868,5 +1828,92 @@ func TestAnswerSaysWhenTheRerankerWasOff(t *testing.T) {
 	out := captureStdout(t, func() { printSources(resp.Citations, false, true) })
 	if !strings.Contains(out, "reranker was off") {
 		t.Errorf("blk ask sources lack the reranker note:\n%s", out)
+	}
+}
+
+// The in-memory history keeps at most historyMaxEntries, the newest.
+func TestTUIHistoryInMemoryIsCapped(t *testing.T) {
+	m := newKeyModel(t)
+	m.history = nil
+	for i := 0; i < historyMaxEntries+5; i++ {
+		m.history = append(m.history, fmt.Sprint("old ", i))
+	}
+	m.ta.SetValue("/help")
+	nm, _ := m.submit()
+	m = nm.(model)
+	if len(m.history) != historyMaxEntries || m.history[len(m.history)-1] != "/help" || m.histIdx != len(m.history) {
+		t.Errorf("history has %d entries ending %q (idx %d), want %d ending /help", len(m.history), m.history[len(m.history)-1], m.histIdx, historyMaxEntries)
+	}
+}
+
+// Every footer keeps its way out: at 24 columns or more the close, quit, or
+// cancel hint is there, dropped last when other hints do not fit. The welcome
+// banner keeps its quit hint too.
+func TestEveryFooterKeepsItsWayOut(t *testing.T) {
+	noColor(t)
+	for _, w := range []int{24, 32, 40, 80} {
+		sized := func(m model) model {
+			nm, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: 30})
+			return nm.(model)
+		}
+		with := func(ov overlayModel) model {
+			m := sized(newKeyModel(t))
+			m.overlay = ov
+			return m
+		}
+		confirm := newResumePicker(manySessions(2), "", w)
+		confirm.confirm = true
+		working := sized(newKeyModel(t))
+		working.working = true
+		queued := working
+		queued.queue = []string{"next"}
+		rsearch := sized(newKeyModel(t))
+		rsearch.rsearch.open = true
+		pal := sized(newKeyModel(t))
+		pal.pal = palette{open: true, items: filterCommands(slashCommands(), "")}
+		armed := panelModel(t, w, 30)
+		armed, _ = step(t, armed, keyRunes("u"))
+		cases := []struct {
+			name string
+			m    model
+			want string
+		}{
+			{"idle", sized(newKeyModel(t)), "ctrl+d quit"},
+			{"working", working, "ctrl+d quit"},
+			{"working with a queue", queued, "ctrl+d quit"},
+			{"key panel", openKeyPanel(t, sized(newKeyModel(t))), "esc close"},
+			{"reverse search", rsearch, "esc/ctrl+c cancel"},
+			{"palette", pal, "esc/ctrl+c close"},
+			{"resume", with(newResumePicker(manySessions(2), "", w)), "esc/ctrl+c close"},
+			{"resume confirm", with(confirm), "ctrl+d quit"},
+			{"model picker", with(newModelPicker(manyModels(2), "model-00", "low", w)), "esc/ctrl+c close"},
+			{"file picker", with(newFilePicker(t.TempDir(), w)), "esc/ctrl+c close"},
+			{"models panel", panelModel(t, w, 30), "esc/ctrl+c close"},
+			{"models panel, unload armed", armed, "ctrl+d quit"},
+		}
+		for _, c := range cases {
+			f := c.m.footer()
+			if !strings.Contains(f, c.want) {
+				t.Errorf("%d columns, %s: footer %q lacks %q", w, c.name, f, c.want)
+			}
+			if lipgloss.Width(f) > w || strings.Contains(f, "\n") {
+				t.Errorf("%d columns, %s: footer %q does not fit one row", w, c.name, f)
+			}
+		}
+		if w == 80 {
+			// With room for everything, nothing is dropped.
+			if f := sized(newKeyModel(t)).footer(); !strings.Contains(f, "enter ask") || !strings.Contains(f, "? keys") {
+				t.Errorf("80 columns: idle footer %q lost hints", f)
+			}
+		}
+	}
+	for w := 24; w <= 120; w++ {
+		lines := strings.Split(welcomeBanner(w), "\n")
+		if len(lines) != 2 || !strings.Contains(lines[1], "ctrl+d") || !strings.Contains(lines[1], "quit") {
+			t.Errorf("%d columns: banner %q lacks the quit hint", w, lines)
+		}
+	}
+	if b := welcomeBanner(32); !strings.Contains(b, "/ cmds") || !strings.Contains(b, "ctrl+d quit") {
+		t.Errorf("32 columns: banner %q should shorten the other hints before dropping them", b)
 	}
 }

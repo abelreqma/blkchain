@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"blkchain/cli/internal/client"
 	"blkchain/cli/internal/modeleval"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
@@ -28,8 +28,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// tui.go is the interactive Bubble Tea REPL (BUILD-BRIEF.md Task 3). Its
-// architecture is deliberately constrained (CHARM-PATTERNS.md):
+// tui.go is the interactive Bubble Tea REPL. Its
+// architecture is deliberately constrained:
 //   - inline program: NO WithAltScreen, so terminal scrollback is preserved
 //     and tea.Println works.
 //   - NO mouse capture: native click-drag selection and OS copy/paste keep
@@ -53,7 +53,11 @@ func runTUI() error {
 	m := initialModel()
 	p := tea.NewProgram(&m)
 	m.prog = p
+	llmWarn = func(line string) { p.Send(tea.Println(line)()) }
 	_, err := p.Run()
+	if m.rc != nil {
+		m.rc.Close()
+	}
 	return err
 }
 
@@ -152,12 +156,42 @@ func (m model) footerKeys() help.KeyMap {
 }
 
 // footer renders the one-line help footer. The full key list is the key panel
-// (keyPanelView), not a footer, so this line is always one row.
+// (keyPanelView), not a footer, so this line is always one row. When the hints
+// do not fit, they are dropped from the end, except the way out (see
+// exitHint), which is dropped last. A line that still does not fit is cut to
+// the width.
 func (m model) footer() string {
-	// help only truncates a line when its ellipsis fits, so a narrow terminal can
-	// still get an overlong line that wraps and costs rows. Cut it to the width.
 	w, _ := m.termSize()
-	return lipgloss.NewStyle().MaxWidth(w).Render(m.help.View(m.footerKeys()))
+	h := m.help
+	h.Width = 0 // render every hint given; the fitting happens here
+	keys := m.footerKeys().ShortHelp()
+	exit := exitHint(keys)
+	line := h.ShortHelpView(keys)
+	for lipgloss.Width(line) > w && len(keys) > 1 {
+		drop := len(keys) - 1
+		if drop == exit {
+			drop--
+		}
+		keys = slices.Delete(slices.Clone(keys), drop, drop+1)
+		if drop < exit {
+			exit--
+		}
+		line = h.ShortHelpView(keys)
+	}
+	return lipgloss.NewStyle().MaxWidth(w).Render(line)
+}
+
+// exitHint is the index of the footer hint that leaves the current state: the
+// first close or quit hint, else the first cancel hint, else -1.
+func exitHint(keys []key.Binding) int {
+	for _, desc := range []string{"close", "quit", "cancel"} {
+		for i, k := range keys {
+			if k.Help().Desc == desc {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // inputCharLimit is the draft cap in characters (64 KiB): large enough for a
@@ -202,15 +236,12 @@ const ctrlCWindow = time.Second
 
 type searchMsg struct {
 	query   string
-	results []client.SearchResult
+	results []retrieval.Result
 	elapsed time.Duration
 }
-type healthReportMsg struct {
-	h   *client.HealthResponse
-	err error
-}
+type healthReportMsg struct{ h *serviceHealth }
 type healthMsg struct { // status-dot check: qdrant, embed_server, llm
-	h       *client.HealthResponse
+	h       *serviceHealth
 	rerank  bool      // embed_server's /health says the reranker loaded
 	started time.Time // when the probe began, to tell a stale result from a current one
 }
@@ -236,7 +267,7 @@ type chunkMsg string
 // RAG-only (AnswerLoop's web-search fallback); agent turns leave it false.
 type streamDoneMsg struct {
 	full      string
-	citations []client.Citation
+	citations []citation
 	usedWeb   bool
 	rerankOff bool // the reranker was turned off for this answer
 	err       error
@@ -246,10 +277,10 @@ type streamDoneMsg struct {
 
 // dequeueMsg drives the queue-while-busy auto-submit: after a turn completes with
 // items queued, the completion handler schedules this so the next queued prompt
-// runs (V2-BRIEF.md T5).
+// runs.
 type dequeueMsg struct{}
 
-// Agent-mode streaming messages (V2-BRIEF.md T3), pushed into the event loop by
+// Agent-mode streaming messages, pushed into the event loop by
 // the StreamAgent/StreamAgentSubprocess callback via prog.Send. Answer deltas
 // reuse chunkMsg; these carry the non-answer signals.
 type agentToolMsg struct{ verb, tool string } // muted "- running <tool>..." line
@@ -288,7 +319,7 @@ type model struct {
 	histIdx   int
 	histDraft string
 
-	// T5 input UX (V2-BRIEF.md). pal is the slash-command autocomplete palette;
+	// Input UX. pal is the slash-command autocomplete palette;
 	// queue is the FIFO of prompts typed while a turn runs; lastCtrlC times the
 	// Ctrl-C double-press; rsearch is the Ctrl-R reverse history search;
 	// attachments are @file contents to inject into the next prompt; ambient is the
@@ -305,7 +336,7 @@ type model struct {
 	lastCost     turnCost
 	lastCostSet  bool
 
-	// Session persistence (V2-BRIEF.md T4). sess is the current transcript
+	// Session persistence. sess is the current transcript
 	// handle (nil if persistence is unavailable); sessTitle mirrors its title for
 	// the status line. pendingQ holds the in-flight question so a completed turn
 	// can record both the operator message and the answer.
@@ -314,7 +345,7 @@ type model struct {
 	pendingQ  string
 
 	// overlay is the open picker (/resume, /model) or nil. While set it captures
-	// keys; the base Update passes through only quit (V2-BRIEF.md T4).
+	// keys; the base Update passes through only quit.
 	overlay overlayModel
 
 	// Model/reasoning selection from the /model picker. ragModel overrides the
@@ -323,6 +354,10 @@ type model struct {
 	ragModel  string
 	reasoning string
 
+	// resolvedModel is the model a rag turn uses when none is picked, resolved
+	// once per session when the model list first loads; "" until then.
+	resolvedModel string
+
 	// prefs is the saved /models settings: hidden chat models and the reranker
 	// and web switches. Changes are kept here at once and saved in a command.
 	prefs modelPrefs
@@ -330,19 +365,32 @@ type model struct {
 	lastAnswer  string
 	openTargets []string // paths for /open N (from the last answer or search)
 
-	apiOK      bool
-	apiChecked bool
-	health     *client.HealthResponse // last qdrant/embed_server/llm probe; names what is down
-	rerankUp   bool                   // the last probe found the reranker loaded
-	llmDownAt  time.Time              // when a turn last found the LLM refusing connections
-	probeSeen  bool                   // the first health probe has arrived, so the down-service hint is spent
+	// cfg is the RAG config, read once when the session starts. rc is the
+	// session's one retrieval client, closed when the session ends; rcErr is why
+	// it could not be made.
+	cfg   ragconfig.Config
+	rc    *retrieval.Client
+	rcErr error
+
+	// liveCache holds live's incremental wrap, so a frame never re-wraps the
+	// whole stream. nil works too, rendering from scratch.
+	liveCache *liveCache
+
+	// servicesOK is whether qdrant, embed_server, and the LLM all answered;
+	// servicesChecked is whether anything has said so either way yet.
+	servicesOK      bool
+	servicesChecked bool
+	health          *serviceHealth // last qdrant/embed_server/llm probe; names what is down
+	rerankUp        bool           // the last probe found the reranker loaded
+	llmDownAt       time.Time      // when a turn last found the LLM refusing connections
+	probeSeen       bool           // the first health probe has arrived, so the down-service hint is spent
 
 	// keyPanel is the "?" key reference, drawn above the input; keyScroll is how
 	// many of its rows are scrolled off the top on a short terminal.
 	keyPanel  bool
 	keyScroll int
 
-	// Agent mode (V2-BRIEF.md T3). mode is "rag" (default) or "agent"; the agent
+	// Agent mode. mode is "rag" (default) or "agent"; the agent
 	// fields track the gateway session handle and the health/transport shown in
 	// the status line.
 	mode         string
@@ -373,6 +421,8 @@ func initialModel() model {
 	sp.Style = lipgloss.NewStyle().Foreground(Muted)
 
 	hist := loadHistory()
+	cfg := loadConfig()
+	rc, rcErr := newRetrievalClient(cfg)
 
 	// Create a fresh session for this run. The transcript file is written lazily
 	// on the first turn (session.go), so an unused launch leaves nothing on disk.
@@ -382,8 +432,8 @@ func initialModel() model {
 		title = "new session"
 	}
 
-	// /init: load ./.blk/context.md as ambient session context if present
-	// (V2-BRIEF.md T5). The muted "loaded" note is printed from Init.
+	// /init: load ./.blk/context.md as ambient session context if present. The
+	// muted "loaded" note is printed from Init.
 	ambient, _ := loadInitContext()
 
 	// The bubbles help defaults use dim grays and a unicode bullet and
@@ -408,6 +458,10 @@ func initialModel() model {
 		reasoning: "medium",
 		ambient:   ambient,
 		prefs:     loadPrefs(),
+		cfg:       cfg,
+		rc:        rc,
+		liveCache: &liveCache{},
+		rcErr:     rcErr,
 
 		reduceMotion: reduceMotion(),
 	}
@@ -421,8 +475,20 @@ func (m model) Init() tea.Cmd {
 	if strings.TrimSpace(m.ambient) != "" {
 		start = append(start, tea.Println("   "+Meta.Render("loaded .blk/context.md")))
 	}
-	start = append(start, healthCmd())
-	return tea.Batch(textarea.Blink, tea.Sequence(start...))
+	start = append(start, m.healthCmd())
+	return tea.Batch(textarea.Blink, tea.Sequence(start...), resolveModelCmd)
+}
+
+// modelResolvedMsg carries the model a rag turn uses when none is picked.
+type modelResolvedMsg string
+
+// resolveModelCmd lists the LLM server's models to learn the model a turn will
+// use (see listedModel). It reports nothing when the list does not load.
+func resolveModelCmd() tea.Msg {
+	if id := listedModel(); id != "" {
+		return modelResolvedMsg(id)
+	}
+	return nil
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -435,11 +501,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		// One mode-capture at a time (V2-BRIEF.md T5): an open overlay (picker /
+		// One mode-capture at a time: an open overlay (picker /
 		// @file) first, then Ctrl-R reverse search, then the slash palette. Each
 		// leaves the others closed.
 		//
-		// An open overlay captures every key except quit (V2-BRIEF.md T4). Esc is
+		// An open overlay captures every key except quit. Esc is
 		// handled inside the overlay (it cancels). The draft in the textarea is
 		// left untouched, so it survives the overlay.
 		// Any key other than ctrl+d disarms a pending quit confirmation.
@@ -549,7 +615,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.recallNext(), nil
 		}
 
-		// @ at an empty draft opens the file picker (V2-BRIEF.md T5). The "@" is not
+		// @ at an empty draft opens the file picker. The "@" is not
 		// inserted; the picker replaces it.
 		if msg.String() == "@" && strings.TrimSpace(m.ta.Value()) == "" {
 			return m.openFilePicker()
@@ -582,7 +648,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.working {
 			return m, nil // stray token after cancel/done
 		}
-		m.live += string(msg)
+		m.appendLive(string(msg))
 		m.workingVerb = "answering" + ellipsis()
 		if m.firstTokAt.IsZero() {
 			m.firstTokAt = time.Now()
@@ -622,14 +688,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(full) == "" {
 			full = live
 		}
-		cost := turnCost{elapsed: elapsed}
-		if msg.tokens > 0 {
-			cost.completionTokens = msg.tokens
-			cost.hasTokens = true
-		}
+		cost := turnCost{completionTokens: msg.tokens, elapsed: elapsed}
 		if msg.agent {
 			if msg.err != nil && errors.Is(msg.err, context.Canceled) {
-				return m, m.finishNoDequeue(tea.Println(canceledOutput(full, m.renderWidth())))
+				return m, tea.Println(canceledOutput(full, m.renderWidth()))
 			}
 			m.lastAnswer = full
 			m.openTargets = nil
@@ -640,7 +702,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					b.WriteByte('\n')
 				}
 				b.WriteString(styleErr(fmt.Errorf("agent turn ended early: %w", msg.err)))
-				return m, m.finishNoDequeue(tea.Println(b.String()))
+				return m, tea.Println(b.String())
 			}
 			if strings.TrimSpace(full) == "" {
 				return m, m.finish(tea.Println("   " + Meta.Render("(agent returned no output)")))
@@ -652,26 +714,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if errors.Is(msg.err, context.Canceled) {
-				return m, m.finishNoDequeue(tea.Println(canceledOutput(full, m.renderWidth())))
+				return m, tea.Println(canceledOutput(full, m.renderWidth()))
 			}
 			// Errored after streaming partial output. Commit what streamed, then
 			// note the early end.
-			m.apiChecked = true
+			m.servicesChecked = true
 			var b strings.Builder
 			if strings.TrimSpace(full) != "" {
-				resp := &client.AnswerResponse{Answer: full, Citations: msg.citations, UsedWeb: msg.usedWeb}
+				resp := &answerResponse{Answer: full, Citations: msg.citations, UsedWeb: msg.usedWeb}
 				b.WriteString(formatAnswer(resp, elapsed, m.renderWidth(), msg.rerankOff))
 				b.WriteByte('\n')
 			}
 			b.WriteString(styleErr(fmt.Errorf("stream ended early: %w", timeoutOrErr(msg.err))))
-			return m, m.finishNoDequeue(tea.Println(b.String()))
+			return m, tea.Println(b.String())
 		}
 		m.lastAnswer = full
 		m.openTargets = citationPaths(msg.citations)
-		m.apiOK, m.apiChecked = true, true
+		m.servicesOK, m.servicesChecked = true, true
 		m.recordTurn(full)
 		m.lastCost, m.lastCostSet = cost, true
-		resp := &client.AnswerResponse{Answer: full, Citations: msg.citations, UsedWeb: msg.usedWeb}
+		resp := &answerResponse{Answer: full, Citations: msg.citations, UsedWeb: msg.usedWeb}
 		out := formatAnswer(resp, elapsed, m.renderWidth(), msg.rerankOff) + "\n" + costFooter(cost)
 		return m, m.finish(tea.Println(out))
 
@@ -691,10 +753,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel()
 			m.cancel = nil
 		}
-		m.apiChecked = true
-		m.apiOK = msg.err == nil && msg.h != nil && msg.h.Status == "ok"
+		m.servicesChecked = true
+		m.servicesOK = msg.h.ok()
 		m.health = msg.h
-		return m, m.finish(tea.Println(formatHealth(msg.h, msg.err, loadConfig())))
+		return m, m.finish(tea.Println(formatHealth(msg.h, m.cfg)))
 
 	case errMsg:
 		m.working = false
@@ -703,14 +765,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel = nil
 		}
 		if isUnreachable(msg.err) {
-			m.apiOK, m.apiChecked = false, true
+			m.servicesOK, m.servicesChecked = false, true
 			m.health = nil // the last probe is stale, so do not name a service from it
 		}
 		var llmErr *llmUnreachableError
 		if errors.As(msg.err, &llmErr) && llmErr.refused() {
 			m.markLLMDown()
 		}
-		return m, m.finishNoDequeue(tea.Println(styleErr(timeoutOrErr(msg.err))))
+		return m, tea.Println(styleErr(timeoutOrErr(msg.err)))
 
 	case canceledMsg:
 		m.working = false
@@ -721,7 +783,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		partial := strings.TrimRight(m.live, "\n")
 		m.live = ""
 		m.workingVerb = ""
-		return m, m.finishNoDequeue(tea.Println(canceledOutput(partial, m.renderWidth())))
+		return m, tea.Println(canceledOutput(partial, m.renderWidth()))
 
 	case execDoneMsg:
 		if msg.err != nil {
@@ -735,11 +797,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The probe began before a turn found the LLM refusing connections, so
 			// its LLM-up result is stale. Keep the rest of what it found.
 			c := *h
-			c.LLM, c.Status = false, "degraded"
+			c.LLM = false
 			h = &c
 		}
-		m.apiOK = h != nil && h.Status == "ok"
-		m.apiChecked = true
+		m.servicesOK = h != nil && h.ok()
+		m.servicesChecked = true
 		m.health = h
 		m.rerankUp = msg.rerank
 		// Only the first probe of a session says what is down and how to fix it,
@@ -805,6 +867,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.overlay = p
 		return m, nil
 
+	case modelResolvedMsg:
+		// The first resolution holds for the session.
+		if m.resolvedModel == "" {
+			m.resolvedModel = string(msg)
+			if p, ok := m.overlay.(modelsPanel); ok && m.mode == "rag" {
+				p.active = m.activeModel()
+				m.overlay = p
+			}
+		}
+		return m, nil
+
 	case modelsDataMsg:
 		if p, ok := m.overlay.(modelsPanel); ok {
 			var cmd tea.Cmd
@@ -823,7 +896,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, tea.Println(styleErr(fmt.Errorf("%s %s: %w", msg.action, msg.id, msg.err)))
 		}
-		return m, tea.Println("   " + Meta.Render(sanitizeTerminal(modelActionNote(msg.id, msg.action, msg.id == m.currentModel()))))
+		return m, tea.Println("   " + Meta.Render(sanitizeTerminal(modelActionNote(msg.id, msg.action, msg.id == m.activeModel()))))
 
 	case prefsChangedMsg:
 		m.prefs = msg.prefs
@@ -844,8 +917,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, tea.Println(styleErr(msg.err))
 		}
-		m.prefs = msg.prefs
-		return m, tea.Println("   " + Meta.Render(oneLine(sanitizeTerminal(msg.note))))
+		if msg.sw == nil {
+			return m, tea.Println("   " + Meta.Render(oneLine(sanitizeTerminal(msg.note))))
+		}
+		// Apply the switch to the settings as they are now, which may hold a
+		// panel change made while the command ran, and keep an open panel in step.
+		sw := msg.sw
+		np, note, err := setModelSwitch(m.prefs, sw.kind, sw.id, sw.on, m.activeModel(), sw.webSet)
+		if err != nil {
+			return m, tea.Println(styleErr(err))
+		}
+		m.prefs = np
+		if p, ok := m.overlay.(modelsPanel); ok {
+			p.prefs = np
+			m.overlay = p
+		}
+		return m, tea.Batch(tea.Println("   "+Meta.Render(oneLine(sanitizeTerminal(note)))), savePrefsCmd(np))
 
 	case overlayCloseMsg:
 		m.overlay = nil
@@ -888,19 +975,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // answered. It never touches the LLM field, so a known-down LLM keeps the dot
 // down. With no probe result yet there is nothing to keep, and the dot is ok.
 func (m *model) markRetrievalOK() {
-	m.apiChecked = true
+	m.servicesChecked = true
 	if m.health == nil {
-		m.apiOK = true
+		m.servicesOK = true
 		return
 	}
 	h := *m.health
 	h.Qdrant, h.EmbedServer = true, true
-	h.Status = "degraded"
-	if len(downServices(&h)) == 0 {
-		h.Status = "ok"
-	}
 	m.health = &h
-	m.apiOK = h.Status == "ok"
+	m.servicesOK = h.ok()
 }
 
 // markLLMDown records that a turn found the LLM server refusing connections, so
@@ -908,20 +991,21 @@ func (m *model) markRetrievalOK() {
 // the LLM stage means retrieval worked, so an unknown probe result starts from
 // qdrant and embed_server up.
 func (m *model) markLLMDown() {
-	h := client.HealthResponse{Qdrant: true, EmbedServer: true}
+	h := serviceHealth{Qdrant: true, EmbedServer: true}
 	if m.health != nil {
 		h = *m.health
 	}
 	h.LLM = false
-	h.Status = "degraded"
 	m.health = &h
-	m.apiOK, m.apiChecked = false, true
+	m.servicesOK, m.servicesChecked = false, true
 	m.llmDownAt = time.Now()
 }
 
 // finish wraps a turn-completion command: when prompts are queued, it schedules
 // the next one to auto-submit after the completion output is printed
-// (queue-while-busy, V2-BRIEF.md T5).
+// (queue-while-busy). A turn that ends by cancel or error returns its output
+// without finish, so a Ctrl-C or a failed turn never auto-submits the next
+// queued prompt; the queue is left intact either way.
 func (m model) finish(cmd tea.Cmd) tea.Cmd {
 	if len(m.queue) == 0 {
 		return cmd
@@ -929,14 +1013,7 @@ func (m model) finish(cmd tea.Cmd) tea.Cmd {
 	return tea.Batch(cmd, func() tea.Msg { return dequeueMsg{} })
 }
 
-// finishNoDequeue is like finish but never schedules a dequeueMsg: used when a
-// turn ends via cancel or error, so a Ctrl-C or a failed turn doesn't
-// auto-submit the next queued prompt. The queue is left intact either way.
-func (m model) finishNoDequeue(cmd tea.Cmd) tea.Cmd {
-	return cmd
-}
-
-// clearQueue drops all queued prompts with a muted note (Ctrl-U, V2-BRIEF.md T5).
+// clearQueue drops all queued prompts with a muted note (Ctrl-U).
 func (m model) clearQueue() (tea.Model, tea.Cmd) {
 	n := len(m.queue)
 	m.queue = nil
@@ -945,7 +1022,7 @@ func (m model) clearQueue() (tea.Model, tea.Cmd) {
 
 // handleCancel implements Ctrl-C: cancel a running turn, or clear a non-empty
 // idle draft, with a second press within ctrlCWindow quitting. An empty idle
-// draft gets the hint on the first press (V2-BRIEF.md T5).
+// draft gets the hint on the first press.
 func (m model) handleCancel() (tea.Model, tea.Cmd) {
 	now := time.Now()
 	action := decideCtrlC(now, m.lastCtrlC, m.working, strings.TrimSpace(m.ta.Value()) == "")
@@ -1023,18 +1100,30 @@ func decideCtrlC(now, last time.Time, working, draftEmpty bool) ctrlCAction {
 	return ccHint
 }
 
-// currentModel is the model id shown/recorded for the active mode.
-func (m model) currentModel() string {
+// activeModel is the model a turn really uses. In rag mode that is the model
+// picked with /model, else the one resolved when the model list first loaded,
+// and "" until one of those is known, so nothing is marked or protected as
+// active by guesswork. In agent mode it is the agent's model.
+func (m model) activeModel() string {
 	if m.mode == "agent" {
 		if m.agentModel != "" {
 			return m.agentModel
 		}
 		return "unknown"
 	}
-	if strings.TrimSpace(m.ragModel) != "" {
-		return m.ragModel
+	if s := strings.TrimSpace(m.ragModel); s != "" {
+		return s
 	}
-	return ragModelLabel()
+	return m.resolvedModel
+}
+
+// currentModel is the model id shown and recorded for the active mode: the
+// active model, or the configured default until the model list has loaded.
+func (m model) currentModel() string {
+	if id := m.activeModel(); id != "" {
+		return id
+	}
+	return m.cfg.DefaultModel
 }
 
 // recordTurn appends the completed user question and answer to the current
@@ -1071,7 +1160,7 @@ func (m model) applyModel(modelID, reasoning string) (tea.Model, tea.Cmd) {
 }
 
 // openSessionInto loads a saved session's transcript, replays it into scrollback
-// (styled like live turns), and makes it the current session (V2-BRIEF.md T4).
+// (styled like live turns), and makes it the current session.
 func (m model) openSessionInto(id string) (tea.Model, tea.Cmd) {
 	recs, err := loadMessages(id)
 	if err != nil {
@@ -1111,22 +1200,22 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	m.pal = palette{}
 	_ = appendHistory(q)
 	m.history = append(m.history, q)
+	if len(m.history) > historyMaxEntries {
+		m.history = m.history[len(m.history)-historyMaxEntries:]
+	}
 	m.histIdx = len(m.history)
 	m.histDraft = ""
 
-	// Queue-while-busy (V2-BRIEF.md T5): while a turn runs, a plain question (or a
+	// Queue-while-busy: while a turn runs, a plain question (or a
 	// turn-starting slash command) is queued FIFO instead of erroring; other slash
 	// commands run immediately (mode switch, pickers, /help, /clear, ...).
-	if m.working && isTurnVerb(firstVerb(q)) {
+	if verb, _ := parseInput(q); m.working && isTurnVerb(verb) {
 		m.queue = append(m.queue, q)
 		note := "   " + Meta.Render(fmt.Sprintf("%s queued (%d in queue)", Glyph(GlyphBullet), len(m.queue)))
 		return m, tea.Println(note)
 	}
 	return m.dispatchInput(q)
 }
-
-// firstVerb returns the parsed verb of an input line.
-func firstVerb(q string) string { v, _ := parseInput(q); return v }
 
 // isTurnVerb reports whether a verb starts a network turn (and so must queue
 // rather than run concurrently while another turn is in flight).
@@ -1171,7 +1260,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tea.Println(echo), m.openModelPickerCmd())
 	case "models":
 		if strings.TrimSpace(arg) == "" {
-			m.overlay = newModelsPanel(m.prefs, m.currentModel())
+			m.overlay = newModelsPanel(m.prefs, m.activeModel())
 			return m, tea.Batch(tea.Println(echo), fetchModelsCmd)
 		}
 		verb, name, err := parseModelsArgs(arg)
@@ -1182,7 +1271,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		if verb == "load" {
 			cmds = append(cmds, tea.Println("   "+Meta.Render("loading can take a few minutes; the result prints here")))
 		}
-		return m, tea.Sequence(append(cmds, modelsArgsCmd(verb, name, m.currentModel(), m.prefs))...)
+		return m, tea.Sequence(append(cmds, modelsArgsCmd(verb, name, m.activeModel()))...)
 	case "attach":
 		return m.openFilePickerEcho(echo)
 	case "editor":
@@ -1235,7 +1324,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		} else {
 			// ask can be slow on a large local model, so bound the turn by the
 			// configured request timeout (BLKCHAIN_TIMEOUT_SECONDS).
-			ctx, cancel = context.WithTimeout(context.Background(), time.Duration(loadConfig().RequestTimeoutSeconds)*time.Second)
+			ctx, cancel = context.WithTimeout(context.Background(), m.cfg.RequestTimeout())
 		}
 		m.cancel = cancel
 		if verb == "ask" {
@@ -1255,7 +1344,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			// RAG mode: stream the full AnswerLoop synthesis directly from oMLX.
 			return m, tea.Batch(tea.Println(echo), m.workTick(), m.streamCmd(ctx, arg, preface, m.turnStart))
 		}
-		return m, tea.Batch(tea.Println(echo), m.workTick(), dispatchCmd(ctx, verb, arg, m.turnStart))
+		return m, tea.Batch(tea.Println(echo), m.workTick(), m.dispatchCmd(ctx, verb, arg, m.turnStart))
 	}
 	// Unknown /verb.
 	return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("unknown command /%s, try /help", verb))))
@@ -1341,7 +1430,7 @@ func (m model) View() string {
 		}
 		input := m.inputView(w, budget)
 		// While a turn runs, show the spinner + live region ABOVE the input, so a
-		// prompt can still be typed and queued (queue-while-busy, V2-BRIEF.md T5).
+		// prompt can still be typed and queued (queue-while-busy).
 		// A long stream never pushes the status line and spinner off screen.
 		if m.working {
 			b.WriteString(spin)
@@ -1412,23 +1501,28 @@ func (m model) liveRegion(maxRows int) string {
 	}
 	termW, _ := m.termSize()
 	bar := Meta.Render(Glyph(GlyphBar))
-	// m.live is the raw accumulated stream (untrusted). Sanitizing the whole
-	// buffer on each render, not each chunk, means an escape sequence split
-	// across chunks is still recognized and dropped. The buffer is wrapped once
-	// per render, at the width left after the " | " prefix, hard-breaking any
-	// token longer than that; only the visible tail is styled.
+	// The text is wrapped at the width left after the " | " prefix, hard-breaking
+	// any token longer than that; only the visible tail is styled.
 	wrapW := clamp(termW-3, 1, 100)
-	wrapped := lipgloss.NewStyle().Width(wrapW).Render(strings.TrimRight(sanitizeTerminal(m.live), "\n"))
-	lines := strings.Split(wrapped, "\n")
-	hidden := 0
-	if maxRows > 0 {
-		if len(lines) > maxRows {
-			if maxRows == 1 {
-				lines = lines[len(lines)-1:]
-			} else {
-				hidden = len(lines) - (maxRows - 1)
-				lines = lines[hidden:]
-			}
+	c := m.liveCache
+	if c == nil {
+		c = &liveCache{}
+	}
+	done, tail := c.wrapped(m.live, wrapW)
+	total := len(done) + len(tail)
+	line := func(i int) string {
+		if i < len(done) {
+			return done[i]
+		}
+		return tail[i-len(done)]
+	}
+	first, hidden := 0, 0
+	if maxRows > 0 && total > maxRows {
+		if maxRows == 1 {
+			first = total - 1
+		} else {
+			hidden = total - (maxRows - 1)
+			first = hidden
 		}
 	}
 	var b strings.Builder
@@ -1440,17 +1534,87 @@ func (m model) liveRegion(maxRows int) string {
 		note := ellipsize(fmt.Sprintf("... %d earlier %s hidden", hidden, noun), wrapW)
 		b.WriteString(" " + bar + " " + Meta.Render(note))
 	}
-	for i, ln := range lines {
-		if i > 0 || hidden > 0 {
+	for i := first; i < total; i++ {
+		if i > first || hidden > 0 {
 			b.WriteByte('\n')
 		}
-		b.WriteString(" " + bar + " " + Body.Render(strings.TrimRight(ln, " ")))
+		b.WriteString(" " + bar + " " + Body.Render(strings.TrimRight(line(i), " ")))
 	}
 	// Guard for terminals narrower than the prefix itself.
 	if termW < 4 {
 		return lipgloss.NewStyle().MaxWidth(termW).Render(b.String())
 	}
 	return b.String()
+}
+
+// liveCache is the streamed answer's incremental state, shared by the copies
+// of one session's model. Update appends each chunk to raw, so the stream
+// grows without copying (m.live is raw.String()). The live region sanitizes
+// and wraps only what arrived since the last frame: complete lines are wrapped
+// once and kept, and only the unfinished last line is wrapped per frame.
+type liveCache struct {
+	raw strings.Builder
+
+	src   string     // the prefix of the stream consumed so far
+	ts    termStream // sanitizes across chunks, holding back a split sequence
+	clean []byte     // the sanitized text consumed so far
+	width int        // the wrap width of lines
+	lines []string   // the wrapped lines of clean[:done]
+	done  int        // clean[:done] ends at a line break
+	blank int        // how many of lines' last source lines were empty
+}
+
+// appendLive adds a streamed chunk to m.live.
+func (m *model) appendLive(chunk string) {
+	c := m.liveCache
+	if c == nil {
+		m.live += chunk
+		return
+	}
+	// The builder follows m.live unless something else set m.live.
+	if c.raw.Len() != len(m.live) || c.raw.String() != m.live {
+		c.raw.Reset()
+		c.raw.WriteString(m.live)
+	}
+	c.raw.WriteString(chunk)
+	m.live = c.raw.String()
+}
+
+// wrapped returns live sanitized and wrapped at width: the lines of the text up
+// to its last line break, then the lines of the rest. Trailing empty lines are
+// left out, as they carry nothing to show yet. A live that does not extend the
+// last one starts over, and a new width re-wraps the kept text.
+func (c *liveCache) wrapped(live string, width int) (done, tail []string) {
+	if !strings.HasPrefix(live, c.src) {
+		*c = liveCache{}
+	}
+	if width != c.width {
+		c.width, c.lines, c.done, c.blank = width, nil, 0, 0
+	}
+	c.clean = append(c.clean, c.ts.Write(live[len(c.src):])...)
+	c.src = live
+
+	if end := bytes.LastIndexByte(c.clean, '\n'); end >= c.done {
+		for _, src := range strings.Split(string(c.clean[c.done:end]), "\n") {
+			if src == "" {
+				c.blank++
+				c.lines = append(c.lines, "")
+				continue
+			}
+			c.blank = 0
+			c.lines = append(c.lines, wrapLive(src, width)...)
+		}
+		c.done = end + 1
+	}
+	if rest := string(c.clean[c.done:]); rest != "" {
+		return c.lines, wrapLive(rest, width)
+	}
+	return c.lines[:len(c.lines)-c.blank], nil
+}
+
+// wrapLive wraps one line of text at width, hard-breaking a longer token.
+func wrapLive(s string, width int) []string {
+	return strings.Split(lipgloss.NewStyle().Width(width).Render(s), "\n")
 }
 
 // --- async dispatch ---
@@ -1461,13 +1625,13 @@ func (m model) liveRegion(maxRows int) string {
 // probe keeps running until its own timeout. A deadline exceeded is reported as a
 // one-line timeout error. ask is handled separately by streamCmd (always the
 // full AnswerLoop, never this dispatcher).
-func dispatchCmd(ctx context.Context, verb, arg string, start time.Time) tea.Cmd {
+func (m model) dispatchCmd(ctx context.Context, verb, arg string, start time.Time) tea.Cmd {
 	return func() tea.Msg {
 		ch := make(chan tea.Msg, 1)
 		go func() {
 			switch verb {
 			case "search":
-				rc, err := newRetrievalClient()
+				rc, err := m.retrievalClient()
 				if err != nil {
 					ch <- errMsg{err}
 					return
@@ -1477,9 +1641,9 @@ func dispatchCmd(ctx context.Context, verb, arg string, start time.Time) tea.Cmd
 					ch <- errMsg{err}
 					return
 				}
-				ch <- searchMsg{query: arg, results: toClientResults(results), elapsed: time.Since(start)}
+				ch <- searchMsg{query: arg, results: results, elapsed: time.Since(start)}
 			case "health":
-				ch <- healthReportMsg{h: nativeHealth(loadConfig())}
+				ch <- healthReportMsg{h: nativeHealth(m.cfg, m.rc)}
 			}
 		}()
 		select {
@@ -1500,20 +1664,25 @@ func dispatchCmd(ctx context.Context, verb, arg string, start time.Time) tea.Cmd
 // returns a canceledMsg.
 func (m model) streamCmd(ctx context.Context, question, preface string, start time.Time) tea.Cmd {
 	prog := m.prog
-	ragModel := m.ragModel
-	reasoning := m.reasoning
+	turnModel := m.activeModel()
 	return func() tea.Msg {
-		rc, err := newRetrievalClient()
+		if turnModel == "" {
+			// The list has not loaded yet: resolve the model here, and keep it
+			// for the session.
+			if turnModel = listedModel(); turnModel != "" && prog != nil {
+				prog.Send(modelResolvedMsg(turnModel))
+			}
+		}
+		rc, err := m.retrievalClient()
 		if err != nil {
 			return errMsg{err}
 		}
-		cfg := loadConfig()
+		cfg := m.cfg
 		streamed := false
 		full, cits, usedWeb, _, tokens, err := AnswerLoop(ctx, rc, cfg, question, AnswerOpts{
-			Model:     ragModel,
-			Preface:   preface,
-			Reasoning: reasoning,
-			NoWeb:     !loadPrefs().Web,
+			Model:   turnModel,
+			Preface: preface,
+			NoWeb:   !loadPrefs().Web,
 			Stream: func(b []byte) {
 				streamed = true
 				if prog != nil {
@@ -1539,35 +1708,30 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 	}
 }
 
+// retrievalClient returns the session's retrieval client with the saved
+// /models switches applied. It reads the settings file, so it runs in a
+// command, never in Update.
+func (m model) retrievalClient() (*retrieval.Client, error) {
+	if m.rcErr != nil {
+		return nil, m.rcErr
+	}
+	return followPrefs(m.rc, loadPrefs()), nil
+}
+
 // healthCmd runs the status-line probe: the three services, and alongside
 // them embed_server's /health for whether the reranker loaded.
-func healthCmd() tea.Cmd {
+func (m model) healthCmd() tea.Cmd {
+	rc, cfg := m.rc, m.cfg
 	return func() tea.Msg {
 		started := time.Now()
-		cfg := loadConfig()
 		rerank := make(chan bool, 1)
 		go func() {
 			eh, ok := probeEmbedHealth(cfg)
 			rerank <- ok && eh.Reranker
 		}()
-		h := nativeHealth(cfg)
+		h := nativeHealth(cfg, rc)
 		return healthMsg{h: h, rerank: <-rerank, started: started}
 	}
-}
-
-// nativeHealth probes Qdrant, embed_server, and the LLM server directly (the
-// same probes `blk health` uses) and folds them into a HealthResponse: "ok"
-// only when all three answer, else "degraded". The LLM probe runs alongside the
-// retrieval probes so a dead service does not add its timeout to the others.
-func nativeHealth(cfg ragconfig.Config) *client.HealthResponse {
-	llmOK := make(chan bool, 1)
-	go func() { llmOK <- probeLLM(omlxBaseURL(), strings.TrimSpace(os.Getenv("OMLX_API_KEY"))) }()
-	qdrantOK, embedOK := probeHealth(cfg)
-	h := &client.HealthResponse{Status: "degraded", Qdrant: qdrantOK, EmbedServer: embedOK, LLM: <-llmOK}
-	if len(downServices(h)) == 0 {
-		h.Status = "ok"
-	}
-	return h
 }
 
 // agentStreamCmd runs one AGENT-mode turn in a goroutine (tea.Cmd). It decides
@@ -1664,7 +1828,7 @@ func (m model) modeSwitchCmd() tea.Cmd {
 	if m.mode == "agent" {
 		return agentHealthCmd()
 	}
-	return healthCmd()
+	return m.healthCmd()
 }
 
 // agentHealthCmd probes the hermes gateway and the hermes binary so the status
@@ -1692,7 +1856,7 @@ func (m model) sessID() string {
 
 // openModelPickerCmd discovers the available models for the active mode in a
 // command (network IO) and opens the model picker on completion, so the event
-// loop stays responsive and the input draft is preserved (V2-BRIEF.md T4). When
+// loop stays responsive and the input draft is preserved. When
 // discovery fails it still opens with the current model plus the reasoning
 // levels, so the picker always works.
 //
@@ -1711,7 +1875,7 @@ func (m model) openModelPickerCmd() tea.Cmd {
 			defer cancel()
 			models, _ = modelOptions(ctx)
 		} else {
-			all := omlxModels()
+			all, _ := llmModels()
 			models = slices.DeleteFunc(slices.Clone(all), prefs.isHidden)
 			allHidden = len(models) < len(all) && len(ensureFirst(models, current)) <= 1
 		}
@@ -1895,7 +2059,7 @@ func (m model) doCopy() string {
 
 // parseInput classifies a submitted line. A leading "/" selects an explicit
 // command; bare "s"/"search" is a search shorthand; anything else is an ask
-// (the headline verb for a Q&A KB, per BUILD-BRIEF.md).
+// (the headline verb for a Q&A KB).
 func parseInput(line string) (verb, arg string) {
 	line = strings.TrimSpace(line)
 	if line == "" {
@@ -1916,7 +2080,7 @@ func parseInput(line string) (verb, arg string) {
 // --- rendering helpers (all return strings for tea.Println) ---
 
 // statusLine shows the active mode, the model, and a services-health dot on one
-// muted line (V2-BRIEF.md T3). In rag mode the dot reflects qdrant, embed_server, and the LLM; in
+// muted line. In rag mode the dot reflects qdrant, embed_server, and the LLM; in
 // agent mode it reflects the hermes gateway (or "subprocess" on fallback). Rag
 // mode also shows the embedder and reranker once the probe has run, and the
 // reranker switch.
@@ -1927,8 +2091,8 @@ func (m model) statusLine() string {
 	dot := Glyph(GlyphDot)
 	style := Caut
 	label := "checking services"
-	if m.apiChecked {
-		if m.apiOK {
+	if m.servicesChecked {
+		if m.servicesOK {
 			style, label = OK, "services ok"
 		} else {
 			style, label = Fail, "services down"
@@ -2028,7 +2192,7 @@ func (m model) composeStatus(dot, mode, modelID, health string, retrieval []stri
 }
 
 // queuedIndicator is the muted "N queued" status marker, empty when the queue is
-// empty. Uses a boxed-copy glyph when unicode is available (V2-BRIEF.md T5).
+// empty. Uses a boxed-copy glyph when unicode is available.
 func (m model) queuedIndicator() string {
 	n := len(m.queue)
 	if n == 0 {
@@ -2073,12 +2237,10 @@ func (m model) agentStatusLine() string {
 	return m.composeStatus(style.Render(dot), "agent", m.currentModel(), label, nil)
 }
 
-// ragModelLabel is the oMLX model shown in rag-mode status, without a network
-// call: OMLX_MODEL when set, else the rag.json contract's default_model.
+// ragModelLabel is the oMLX model the plain REPL's /models marks active,
+// without a network call: the config's default_model, which OMLX_MODEL
+// overrides. The TUI keeps its config and reads m.cfg.DefaultModel instead.
 func ragModelLabel() string {
-	if v := strings.TrimSpace(os.Getenv("OMLX_MODEL")); v != "" {
-		return v
-	}
 	return loadConfig().DefaultModel
 }
 
@@ -2173,7 +2335,7 @@ func (m model) renderWidth() int {
 
 // formatAnswer renders a finished RAG answer with its SOURCES block. rerankOff
 // adds the note that the reranker was off for it.
-func formatAnswer(resp *client.AnswerResponse, elapsed time.Duration, width int, rerankOff bool) string {
+func formatAnswer(resp *answerResponse, elapsed time.Duration, width int, rerankOff bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, " %s %s\n", OK.Render(Glyph(GlyphOK)),
 		Meta.Render("Answered in "+elapsed.Round(100*time.Millisecond).String()))
@@ -2222,13 +2384,14 @@ func renderNoResults(style func(lipgloss.Style, string) string, warn, bullet str
 	return b.String()
 }
 
-func formatHealth(h *client.HealthResponse, err error, cfg ragconfig.Config) string {
-	if err != nil {
-		return styleErr(err)
-	}
+func formatHealth(h *serviceHealth, cfg ragconfig.Config) string {
 	llmBase := redactedURL(omlxBaseURL())
+	status := "degraded"
+	if h.ok() {
+		status = "ok"
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, " %s blkChain services: %s\n", check(h.Status == "ok"), h.Status)
+	fmt.Fprintf(&b, " %s blkChain services: %s\n", check(h.ok()), status)
 	fmt.Fprintf(&b, "   %s qdrant        %s\n", check(h.Qdrant), Meta.Render("("+cfg.QdrantGRPCURL+")"))
 	fmt.Fprintf(&b, "   %s embed_server  %s\n", check(h.EmbedServer), Meta.Render("("+cfg.EmbedServerURL+")"))
 	fmt.Fprintf(&b, "   %s llm           %s", check(h.LLM), Meta.Render("("+llmBase+")"))
@@ -2270,15 +2433,19 @@ func welcomeBanner(width int) string {
 			break
 		}
 	}
-	full := []string{"/ for commands", "? for keys", "ctrl+d to quit"}
-	terse := []string{"/ commands", "? keys", "ctrl+d quit"}
-	for _, indent := range []int{lead, 1} {
-		for n := len(full); n >= 1; n-- {
-			for _, hints := range [][]string{full[:n], terse[:n]} {
-				if line := joinSep(hints...); indent+lipgloss.Width(line) <= width {
-					return lipgloss.NewStyle().MaxWidth(width).Render(head) + "\n" +
-						strings.Repeat(" ", indent) + Meta.Render(line)
-				}
+	// The hints get shorter, then drop from the end, but the quit hint stays.
+	tiers := [][]string{
+		{"/ for commands", "? for keys", "ctrl+d to quit"},
+		{"/ commands", "? keys", "ctrl+d quit"},
+		{"/ cmds", "? keys", "ctrl+d quit"},
+		{"/ cmds", "ctrl+d quit"},
+		{"ctrl+d quit"},
+	}
+	for _, hints := range tiers {
+		for _, indent := range []int{lead, 1} {
+			if line := joinSep(hints...); indent+lipgloss.Width(line) <= width {
+				return lipgloss.NewStyle().MaxWidth(width).Render(head) + "\n" +
+					strings.Repeat(" ", indent) + Meta.Render(line)
 			}
 		}
 	}
@@ -2504,7 +2671,7 @@ func (m model) keyPanelView(w, rows int) string {
 // probe finds a service down: what is down and how to fix it, wrapped to width.
 // The LLM server is started separately from /up, so it gets its own advice with
 // the configured URL, credentials removed.
-func downHint(h *client.HealthResponse, width int) string {
+func downHint(h *serviceHealth, width int) string {
 	var local []string
 	for _, s := range downServices(h) {
 		if s != "llm" {
@@ -2548,7 +2715,7 @@ func ellipsis() string {
 	return "..."
 }
 
-func citationPaths(cits []client.Citation) []string {
+func citationPaths(cits []citation) []string {
 	paths := make([]string, len(cits))
 	for i, c := range cits {
 		paths[i] = c.Path
@@ -2556,7 +2723,7 @@ func citationPaths(cits []client.Citation) []string {
 	return paths
 }
 
-func resultPaths(results []client.SearchResult) []string {
+func resultPaths(results []retrieval.Result) []string {
 	paths := make([]string, len(results))
 	for i, r := range results {
 		paths[i] = r.Payload.Path

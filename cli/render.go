@@ -7,11 +7,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// render.go implements the "Glow-format markdown output" requirement from
-// BUILD-BRIEF.md: a single glowRender used everywhere blk shows an answer or
-// other long-form markdown, so it looks like the `glow` binary's output. It
-// also holds headerLine, a small layout helper for the banner-style rows in
-// DESIGN-SPEC.md's mockups (title/version, SEARCH banner, ranked rows).
+// render.go holds glowRender, used everywhere blk shows an answer or other
+// long-form markdown, so it looks like the `glow` binary's output. It also
+// holds headerLine, a small layout helper for banner-style rows (title/version,
+// SEARCH banner, ranked rows).
 
 // glowRender renders md the way the `glow` binary does: glamour's
 // auto-selected dark/light style, word-wrapped to width (capped at 100
@@ -44,8 +43,8 @@ func glowRender(md string, width int) string {
 }
 
 // headerLine right-aligns right against left within the wrap width derived
-// from width (the caller's terminal or model width; capped at 78 columns,
-// matching DESIGN-SPEC.md's mockups), for banner-style rows like "blk ...
+// from width (the caller's terminal or model width; capped at 78 columns),
+// for banner-style rows like "blk ...
 // knowledge-base client ... v0.4.1" or a search result's "title ... score".
 // Widths are measured with lipgloss.Width so ANSI styling already applied to
 // left or right doesn't throw off the padding. The result never exceeds the

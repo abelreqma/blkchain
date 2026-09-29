@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"blkchain/cli/internal/client"
 	"blkchain/cli/internal/retrieval"
 )
 
@@ -49,7 +48,7 @@ func TestKBAnswerNoResultsIsNormalResult(t *testing.T) {
 	if out["answer"] != noResultsAnswer {
 		t.Errorf("answer = %v, want the no-results statement", out["answer"])
 	}
-	if cits, _ := out["citations"].([]client.Citation); len(cits) != 0 {
+	if cits, _ := out["citations"].([]citation); len(cits) != 0 {
 		t.Errorf("citations = %v, want none", out["citations"])
 	}
 }

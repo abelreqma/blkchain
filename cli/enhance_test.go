@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -67,7 +68,7 @@ providers:
   omlx:
     name: oMLX
 `)
-		present, enabled, err := hermesMCPStatus(p, "blkchain")
+		present, enabled, _, err := hermesMCPStatus(p, "blkchain")
 		if err != nil || !present || !enabled {
 			t.Fatalf("present=%v enabled=%v err=%v", present, enabled, err)
 		}
@@ -79,7 +80,7 @@ providers:
     command: /path
     enabled: false
 `)
-		present, enabled, _ := hermesMCPStatus(p, "blkchain")
+		present, enabled, _, _ := hermesMCPStatus(p, "blkchain")
 		if !present || enabled {
 			t.Fatalf("want present && !enabled, got present=%v enabled=%v", present, enabled)
 		}
@@ -90,7 +91,7 @@ providers:
   blkchain:
     command: /path
 `)
-		present, enabled, _ := hermesMCPStatus(p, "blkchain")
+		present, enabled, _, _ := hermesMCPStatus(p, "blkchain")
 		if !present || !enabled {
 			t.Fatalf("want present && enabled-by-default, got present=%v enabled=%v", present, enabled)
 		}
@@ -101,15 +102,60 @@ providers:
   zap:
     enabled: true
 `)
-		present, _, _ := hermesMCPStatus(p, "blkchain")
+		present, _, _, _ := hermesMCPStatus(p, "blkchain")
 		if present {
 			t.Fatal("want absent")
 		}
 	})
 
+	t.Run("retired python server", func(t *testing.T) {
+		for _, body := range []string{
+			"mcp_servers:\n  blkchain:\n    command: /repo/.venv/bin/python\n    args: [\"-m\", \"blkchain.mcp_server\"]\n",
+			"mcp_servers:\n  blkchain:\n    command: python\n    args:\n      - -m\n      - blkchain.mcp_server\n  other:\n    command: blk\n",
+			"mcp_servers:\n  blkchain:\n    command: /path/start_mcp.sh\n",
+		} {
+			if _, _, python, _ := hermesMCPStatus(write(t, body), "blkchain"); !python {
+				t.Errorf("not flagged as the retired Python server:\n%s", body)
+			}
+		}
+		p := write(t, "mcp_servers:\n  blkchain:\n    command: blk\n    args: [mcp]\n  other:\n    args: [\"-m\", \"blkchain.mcp_server\"]\n")
+		if _, _, python, _ := hermesMCPStatus(p, "blkchain"); python {
+			t.Error("blk mcp flagged as the Python server")
+		}
+	})
+
 	t.Run("missing file errors", func(t *testing.T) {
-		if _, _, err := hermesMCPStatus(filepath.Join(t.TempDir(), "nope.yaml"), "blkchain"); err == nil {
+		if _, _, _, err := hermesMCPStatus(filepath.Join(t.TempDir(), "nope.yaml"), "blkchain"); err == nil {
 			t.Fatal("want error for missing file")
+		}
+	})
+
+	// The read is capped at 1 MiB: a larger file, directly or through a
+	// symlink, is refused rather than read whole, and so is a path that is not
+	// a regular file.
+	t.Run("oversize and non-regular paths are refused", func(t *testing.T) {
+		big := write(t, "mcp_servers:\n  blkchain:\n    command: blk\n# "+strings.Repeat("x", hermesConfigMaxBytes)+"\n")
+		if present, _, _, err := hermesMCPStatus(big, "blkchain"); err == nil || present {
+			t.Errorf("a file over the cap: present=%v err=%v, want an error", present, err)
+		}
+		huge := filepath.Join(t.TempDir(), "huge")
+		f, err := os.Create(huge)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(64 << 20); err != nil { // sparse: large, but no disk use
+			t.Fatal(err)
+		}
+		f.Close()
+		link := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.Symlink(huge, link); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := hermesMCPStatus(link, "blkchain"); err == nil {
+			t.Error("a symlink to a large source: want an error")
+		}
+		if _, _, _, err := hermesMCPStatus(t.TempDir(), "blkchain"); err == nil {
+			t.Error("a directory: want an error")
 		}
 	})
 }

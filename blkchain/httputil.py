@@ -1,6 +1,6 @@
-"""Shared HTTP helpers for the localhost stdlib servers (api + embed_server).
+"""Shared HTTP helpers for the localhost stdlib server (embed_server).
 
-Both servers subclass http.server.BaseHTTPRequestHandler and read a JSON POST
+The server subclasses http.server.BaseHTTPRequestHandler and reads a JSON POST
 body. This module centralizes the two things that must not go wrong on that
 path: a JSON response writer, and a body reader that treats Content-Length as
 untrusted input (never raising, always bounded) instead of the naive

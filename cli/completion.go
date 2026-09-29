@@ -67,7 +67,7 @@ _blk_complete() {
   case "$prev" in
     help)       COMPREPLY=( $(compgen -W "` + cmds + `" -- "$cur") ); return;;
     completion) COMPREPLY=( $(compgen -W "bash zsh" -- "$cur") ); return;;
-    logs)       COMPREPLY=( $(compgen -W "api embed_server" -- "$cur") ); return;;
+    logs)       COMPREPLY=( $(compgen -W "embed_server" -- "$cur") ); return;;
   esac
   COMPREPLY=( $(compgen -f -- "$cur") )
 }
@@ -106,7 +106,7 @@ _blk() {
   case "${words[2]}" in
     help)       _describe -t commands 'blk command' cmds;;
     completion) compadd bash zsh;;
-    logs)       compadd api embed_server;;
+    logs)       compadd embed_server;;
     *)          _files;;
   esac
 }

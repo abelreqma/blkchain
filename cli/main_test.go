@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"blkchain/cli/internal/client"
-
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+
+	"blkchain/cli/internal/retrieval"
 )
 
 // captureStdout runs fn with os.Stdout redirected, returning everything it printed.
@@ -36,18 +36,15 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(out)
 }
 
-// TestRunSearchRendersResults exercises the rendering surface runSearch calls
-// after Task 8 rewired retrieval through the Go retrieval package (direct
-// Qdrant + embed_server access, not an HTTP mock): it drives formatResults
-// directly with hand-built results, rather than running the full retrieval
-// path, which needs live services (see the `blk search` live smoke check in
-// the Task 8 plan instead).
+// TestRunSearchRendersResults exercises the rendering surface runSearch calls:
+// it drives formatResults directly with hand-built results. The golden JSON
+// tests run the full retrieval path against fake services.
 func TestRunSearchRendersResults(t *testing.T) {
-	results := []client.SearchResult{
+	results := []retrieval.Result{
 		{
 			ID:    "doc-1",
 			Score: 0.8765,
-			Payload: client.Payload{
+			Payload: retrieval.Payload{
 				Source:  "ledger-spec",
 				Path:    "docs/ledger.md",
 				Section: "Consensus",
@@ -73,41 +70,11 @@ func TestRunSearchRendersResults(t *testing.T) {
 	}
 }
 
-// TestRunSearchJSON verifies the --json output shape runSearch prints (a
-// client.SearchResponse envelope, same as before Task 8's rewiring) round-trips,
-// using printJSON directly rather than the full retrieval path (see
-// TestRunSearchRendersResults).
-func TestRunSearchJSON(t *testing.T) {
-	canned := client.SearchResponse{
-		Results: []client.SearchResult{
-			{ID: "doc-1", Score: 0.5, Payload: client.Payload{Source: "src", Path: "p", Section: "s", Type: "t", Text: "hello"}},
-		},
-	}
-
-	out := captureStdout(t, func() {
-		if err := printJSON(canned); err != nil {
-			t.Fatalf("printJSON() error = %v", err)
-		}
-	})
-
-	var parsed client.SearchResponse
-	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-		t.Fatalf("output is not valid JSON: %v\noutput:\n%s", err, out)
-	}
-	if len(parsed.Results) != 1 || parsed.Results[0].ID != "doc-1" {
-		t.Errorf("parsed = %+v, unexpected", parsed)
-	}
-}
-
 // TestPrintSourcesRendersCitationsAndWebNote exercises the SOURCES block
-// runAsk prints after both the streaming and non-streaming AnswerLoop paths
-// (Task 13 routed ask through the Go-native AnswerLoop, direct Qdrant +
-// embed_server + oMLX access, not an HTTP mock): it drives printSources
-// directly with hand-built citations, rather than running the full answer
-// loop, which needs live services (see the `blk ask` live smoke check in the
-// task plan instead).
+// runAsk prints after both the streaming and non-streaming AnswerLoop paths:
+// it drives printSources directly with hand-built citations.
 func TestPrintSourcesRendersCitationsAndWebNote(t *testing.T) {
-	citations := []client.Citation{
+	citations := []citation{
 		{Source: "ledger-spec", Path: "docs/ledger.md", Section: "Consensus"},
 	}
 
@@ -127,18 +94,18 @@ func TestPrintSourcesRendersCitationsAndWebNote(t *testing.T) {
 }
 
 // TestRunAskJSONShape verifies the --json envelope runAsk's non-streaming
-// path marshals (a client.AnswerResponse, per the cross-language JSON
+// path marshals (a answerResponse, per the cross-language JSON
 // contract) round-trips, using printJSON directly rather than the full
 // AnswerLoop path (see TestPrintSourcesRendersCitationsAndWebNote).
 func TestRunAskJSONShape(t *testing.T) {
-	canned := &client.AnswerResponse{
+	canned := &answerResponse{
 		Answer: "Finality is reached after two rounds of voting.",
-		Citations: []client.Citation{
+		Citations: []citation{
 			{Source: "ledger-spec", Path: "docs/ledger.md", Section: "Consensus"},
 		},
 		UsedWeb: true,
-		Results: []client.SearchResult{
-			{ID: "doc-1", Score: 0.5, Payload: client.Payload{Source: "src", Path: "p", Section: "s", Type: "t", Text: "hello"}},
+		Results: []retrieval.Result{
+			{ID: "doc-1", Score: 0.5, Payload: retrieval.Payload{Source: "src", Path: "p", Section: "s", Type: "t", Text: "hello"}},
 		},
 	}
 
@@ -148,7 +115,7 @@ func TestRunAskJSONShape(t *testing.T) {
 		}
 	})
 
-	var parsed client.AnswerResponse
+	var parsed answerResponse
 	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
 		t.Fatalf("output is not valid JSON: %v\noutput:\n%s", err, out)
 	}
@@ -176,9 +143,8 @@ func TestRunHealth(t *testing.T) {
 	}
 }
 
-// TestRunHealthUnreachable covers the Task 16 contract change: `blk health`
-// probes Qdrant and embed_server directly and never depends on the Python
-// API, so a dead dependency is reported as a down row, not a hard error.
+// TestRunHealthUnreachable: `blk health` probes Qdrant and embed_server
+// directly, so a dead dependency is reported as a down row, not a hard error.
 func TestRunHealthUnreachable(t *testing.T) {
 	useDeadServices(t)
 	t.Setenv("QDRANT_GRPC_URL", "127.0.0.1:1")
@@ -227,7 +193,7 @@ func TestPrintSourcesTagsWebCitations(t *testing.T) {
 	defer func() { useColor = old }()
 
 	out := captureStdout(t, func() {
-		printSources([]client.Citation{
+		printSources([]citation{
 			{Source: "wstg", Path: "docs/a.md", Section: "Intro"},
 			{Source: "web", Path: "https://example.com/post", Section: "A post"},
 		}, true, false)
@@ -308,7 +274,7 @@ func TestReportNoResultsJSONKeepsWireShape(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	var resp client.AnswerResponse
+	var resp answerResponse
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		t.Fatalf("not valid AnswerResponse JSON: %v\n%s", err, out)
 	}
@@ -328,7 +294,7 @@ func TestOpenWebURLPrintsNoticeAndNeverLaunches(t *testing.T) {
 	cases := map[string]func() error{
 		"blk open":          func() error { return runOpen([]string{url}) },
 		"repl open url":     func() error { return replOpen(url, nil) },
-		"repl open by rank": func() error { return replOpen("1", []client.SearchResult{{Payload: client.Payload{Path: url}}}) },
+		"repl open by rank": func() error { return replOpen("1", []retrieval.Result{{Payload: retrieval.Payload{Path: url}}}) },
 	}
 	for name, run := range cases {
 		var err error

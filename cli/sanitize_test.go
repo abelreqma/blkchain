@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"blkchain/cli/internal/client"
+	"blkchain/cli/internal/retrieval"
 )
 
 func TestSanitizeTerminal(t *testing.T) {
@@ -225,11 +225,11 @@ func TestTermStreamBoundsHeldEscIntermediates(t *testing.T) {
 	}
 }
 
-func poisonedResults() []client.SearchResult {
-	return []client.SearchResult{{
+func poisonedResults() []retrieval.Result {
+	return []retrieval.Result{{
 		ID:    "p1",
 		Score: 0.9,
-		Payload: client.Payload{
+		Payload: retrieval.Payload{
 			Source:  "src\x1b]0;retitled\x07name",
 			Section: "sec\x1b[2Jtion",
 			Path:    "corpus/\x1b]52;c;cHduZWQ=\x1b\\file.md",
@@ -266,9 +266,9 @@ func TestFormatAnswerStripsControlSequences(t *testing.T) {
 	useColor = false
 	defer func() { useColor = old }()
 
-	resp := &client.AnswerResponse{
+	resp := &answerResponse{
 		Answer: "# Title\n\nanswer \x1b]0;retitled\x07text \x1b[2J done",
-		Citations: []client.Citation{{
+		Citations: []citation{{
 			Source:  "web\x1b]0;x\x07src",
 			Path:    "https://evil.example/\x1b[31m",
 			Section: "sec\x1b[2J",
@@ -309,7 +309,7 @@ func TestPrintSourcesStripsControlSequences(t *testing.T) {
 	defer func() { useColor = old }()
 
 	out := captureStdout(t, func() {
-		printSources([]client.Citation{{Source: "a\x1b]0;x\x07b", Path: "p\x1b[2J", Section: "s\x1b[31m"}}, false, false)
+		printSources([]citation{{Source: "a\x1b]0;x\x07b", Path: "p\x1b[2J", Section: "s\x1b[31m"}}, false, false)
 	})
 	if strings.ContainsRune(out, 0x1b) || strings.ContainsRune(out, 0x07) {
 		t.Fatalf("printSources output holds a control character:\n%q", out)
@@ -390,7 +390,7 @@ func (e *testErr) Error() string { return e.s }
 // controls as \u00XX, and printJSON escapes DEL and the C1 runes (which
 // encoding/json emits raw), so no control byte reaches the terminal.
 func TestJSONOutputKeepsPayloadBytes(t *testing.T) {
-	resp := client.SearchResponse{Results: poisonedResults()}
+	resp := searchResponse{Results: poisonedResults()}
 	out := captureStdout(t, func() {
 		if err := printJSON(resp); err != nil {
 			t.Errorf("printJSON: %v", err)
@@ -412,8 +412,8 @@ func TestJSONOutputKeepsPayloadBytes(t *testing.T) {
 
 func TestJSONOutputEscapesC1AndDEL(t *testing.T) {
 	text := "a\u009bb\u009dc\x7fd\u0085e\u009f \u65e5\u672c caf\u00e9 \u00a0 \x1b"
-	resp := client.SearchResponse{Results: []client.SearchResult{{
-		ID: "c1", Payload: client.Payload{Text: text, Source: "\u009d0;x\x07"},
+	resp := searchResponse{Results: []retrieval.Result{{
+		ID: "c1", Payload: retrieval.Payload{Text: text, Source: "\u009d0;x\x07"},
 	}}}
 	out := captureStdout(t, func() {
 		if err := printJSON(resp); err != nil {
@@ -428,7 +428,7 @@ func TestJSONOutputEscapesC1AndDEL(t *testing.T) {
 	if !strings.Contains(out, "\u65e5\u672c caf\u00e9") {
 		t.Errorf("other UTF-8 was altered:\n%q", out)
 	}
-	var back client.SearchResponse
+	var back searchResponse
 	if err := json.Unmarshal([]byte(out), &back); err != nil {
 		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
 	}

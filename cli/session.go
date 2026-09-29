@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// session.go implements per-session transcript persistence (V2-BRIEF.md T4).
+// session.go implements per-session transcript persistence.
 // Each session is one append-only JSONL file, `<id>.jsonl`, under the blk data
 // dir; a sidecar index.json holds one lightweight sessionMeta per session so the
 // /resume picker can list sessions without reading every transcript. All IO is

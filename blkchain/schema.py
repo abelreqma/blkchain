@@ -1,8 +1,8 @@
-"""Shared data contract for ingest -> index -> retrieve.
+"""Shared data contract for ingest and index.
 
 The Chunk is the single unit passed from chunking to indexing; its Qdrant
-payload is what retrieval reads back. Keep this stable: ingest.py, index.py,
-and retrieve.py all depend on it.
+payload is what the Go `blk` retrieval client reads back. Keep this stable:
+ingest.py and index.py depend on it, and so does the Go client.
 """
 from __future__ import annotations
 

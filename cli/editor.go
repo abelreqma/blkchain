@@ -10,7 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// editor.go is the $EDITOR handoff (V2-BRIEF.md T5): Ctrl-G (or /editor) writes
+// editor.go is the $EDITOR handoff: Ctrl-G (or /editor) writes
 // the current draft to a temp .md, suspends the TUI via tea.ExecProcess, runs the
 // operator's editor, then reads the file back into the input. It never auto-submits.
 

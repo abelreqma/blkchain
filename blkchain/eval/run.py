@@ -3,15 +3,20 @@
 Two independent layers:
 
 1. RETRIEVAL METRICS (primary gate, deterministic, no LLM). For each labeled
-   case, kb_search is called once for a pool of max(top_k, 10) results. A case
+   case, `blk search --json` is called once for a pool of max(top_k, 10) results. A case
    is a HIT@k when one result in the top-k matches an expected substring, an
    expected source (when labeled), and an expected CWE (when labeled). All
    labels must match the same result. We report hit_rate@5, hit_rate@10 and MRR.
 
 2. ANSWER METRICS (best-effort, LLM-judged with the local oMLX model). Wraps
-   deepeval Faithfulness / AnswerRelevancy against agent.kb_answer output. If
+   deepeval Faithfulness / AnswerRelevancy against `blk ask --json` output. If
    the local judge is unavailable or unreliable it is reported as
    judge_unavailable and the process still exits 0.
+
+Both layers drive the Go `blk` binary through a subprocess: BLK_BIN, else `blk`
+on PATH. Build it with `cd cli && go build -o blk .`. A failed call (non-zero
+exit, timeout, invalid or oversized output) is recorded against its case and
+reported; it never aborts the run.
 """
 from __future__ import annotations
 
@@ -20,18 +25,160 @@ import blkchain.eval  # noqa: F401  -- sets telemetry opt-out before deepeval im
 import argparse
 import json
 import os
+import shutil
+import subprocess
+import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from blkchain import config
-from blkchain.retrieve import kb_search
 
 DATASET_PATH = Path(__file__).resolve().parent / "dataset.jsonl"
 REPORT_PATH = config.ROOT / ".reports" / "eval-report.md"
 
 # Retrieval is pooled to at least this depth so hit@5, hit@10 and MRR all come
-# from a single kb_search call per case.
+# from a single blk search call per case.
 _METRIC_DEPTH = 10
+
+# Bounds on every blk subprocess call.
+_OUTPUT_CAP = 16 * 1024 * 1024   # max stdout bytes read from blk
+_STDERR_KEEP = 2048              # stderr bytes kept for the error message
+_SEARCH_TIMEOUT = 60.0           # seconds per blk search call
+_ANSWER_TIMEOUT = 300.0          # seconds per blk ask call (local LLM is slow)
+_BUILD_HINT = "build it with: cd cli && go build -o blk ."
+
+
+# --- blk subprocess client --------------------------------------------------
+class BlkError(Exception):
+    """A blk call failed: missing binary, non-zero exit, timeout, or bad output."""
+
+
+def find_blk() -> str:
+    """Path of the blk binary: env BLK_BIN, else `blk` on PATH, else BlkError."""
+    override = os.environ.get("BLK_BIN", "").strip()
+    if override:
+        path = Path(override).expanduser()
+        if not (path.is_file() and os.access(path, os.X_OK)):
+            raise BlkError(f"BLK_BIN is not an executable file: {override} ({_BUILD_HINT})")
+        return str(path)
+    found = shutil.which("blk")
+    if found:
+        return found
+    raise BlkError(f"blk binary not found: set BLK_BIN or put blk on PATH ({_BUILD_HINT})")
+
+
+def _drain(stream, keep: int, sink: bytearray, on_over=None) -> None:
+    """Read `stream` to EOF, keeping at most `keep` bytes in `sink`. Calls
+    `on_over` once when more than `keep` bytes arrive."""
+    fired = False
+    while True:
+        chunk = stream.read1(65536)
+        if not chunk:
+            return
+        room = keep - len(sink)
+        if room > 0:
+            sink += chunk[:room]
+        if len(chunk) > max(room, 0) and not fired:
+            fired = True
+            if on_over is not None:
+                on_over()
+
+
+def _run_blk(args: list[str], timeout: float, collection: str | None = None) -> bytes:
+    """Run `blk *args` without a shell and return its stdout bytes.
+
+    Raises BlkError on a missing binary, non-zero exit, timeout, or stdout larger
+    than _OUTPUT_CAP. Arguments go through argv only.
+    """
+    binary = find_blk()
+    env = dict(os.environ)
+    if collection:
+        env["BLKCHAIN_COLLECTION"] = collection
+    try:
+        proc = subprocess.Popen(
+            [binary, *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+    except OSError as exc:
+        raise BlkError(f"could not start blk: {type(exc).__name__}") from exc
+
+    out, err = bytearray(), bytearray()
+    over = threading.Event()
+
+    def _oversize() -> None:
+        over.set()
+        proc.kill()
+
+    readers = [
+        threading.Thread(target=_drain, args=(proc.stdout, _OUTPUT_CAP + 1, out, _oversize), daemon=True),
+        threading.Thread(target=_drain, args=(proc.stderr, _STDERR_KEEP, err), daemon=True),
+    ]
+    for t in readers:
+        t.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise BlkError(f"blk timed out after {timeout:g}s") from None
+    finally:
+        for t in readers:
+            t.join(timeout=5)
+        if not any(t.is_alive() for t in readers):
+            proc.stdout.close()
+            proc.stderr.close()
+
+    if over.is_set() or len(out) > _OUTPUT_CAP:
+        raise BlkError(f"blk output exceeded {_OUTPUT_CAP} bytes")
+    if proc.returncode != 0:
+        text = err.decode("utf-8", "replace")
+        detail = "".join(ch if ch.isprintable() else " " for ch in text).strip()[:200]
+        raise BlkError(f"blk exited with status {proc.returncode}: {detail}" if detail
+                       else f"blk exited with status {proc.returncode}")
+    return bytes(out)
+
+
+def _run_blk_json(args: list[str], timeout: float, collection: str | None = None) -> dict:
+    raw = _run_blk(args, timeout, collection)
+    try:
+        obj = json.loads(raw)
+    except (ValueError, RecursionError):
+        raise BlkError("blk returned invalid JSON") from None
+    if not isinstance(obj, dict):
+        raise BlkError("blk returned unexpected JSON shape")
+    return obj
+
+
+def _dict_list(value) -> list[dict]:
+    return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+
+
+def blk_search(query: str, top_k: int, collection: str | None = None,
+               timeout: float = _SEARCH_TIMEOUT) -> list[dict]:
+    """`blk search --json`: the list of result dicts ({id, score, payload})."""
+    obj = _run_blk_json(["search", "--json", "--top-k", str(top_k), "--", query], timeout, collection)
+    return _dict_list(obj.get("results"))
+
+
+def blk_answer(query: str, collection: str | None = None, timeout: float = _ANSWER_TIMEOUT) -> dict:
+    """`blk ask --json`: {answer, citations, used_web, results}, fields normalized."""
+    obj = _run_blk_json(["ask", "--json", "--", query], timeout, collection)
+    answer = obj.get("answer")
+    return {
+        "answer": answer if isinstance(answer, str) else "",
+        "citations": _dict_list(obj.get("citations")),
+        "used_web": bool(obj.get("used_web")),
+        "results": _dict_list(obj.get("results")),
+    }
+
+
+def _payload(result) -> dict:
+    payload = result.get("payload") if isinstance(result, dict) else None
+    return payload if isinstance(payload, dict) else {}
 
 
 # --- Dataset ---------------------------------------------------------------
@@ -86,6 +233,8 @@ class CaseResult:
     first_source_rank: int | None
     matched_substring: str | None
     matched_source: str | None
+    error: str | None = None     # set when the blk call for this case failed
+    cwe_field_seen: bool = False  # some result carried a cwe_class field
 
     def hit_at(self, k: int) -> bool:
         return self.first_rank is not None and self.first_rank <= k
@@ -104,9 +253,11 @@ def evaluate_retrieval(case: Case, results: list[dict]) -> CaseResult:
     first_source_rank: int | None = None
     matched: str | None = None
     matched_source: str | None = None
+    cwe_field_seen = False
     for i, r in enumerate(results, start=1):
-        payload = r.get("payload", {})
-        haystack = ((payload.get("text") or "") + " " + str(payload.get("path") or "")).lower()
+        payload = _payload(r)
+        cwe_field_seen = cwe_field_seen or "cwe_class" in payload
+        haystack = (str(payload.get("text") or "") + " " + str(payload.get("path") or "")).lower()
         source = str(payload.get("source") or "")
         sub = next((s for s in case.expected_substrings if s in haystack), None)
         if sub is None:
@@ -116,7 +267,7 @@ def evaluate_retrieval(case: Case, results: list[dict]) -> CaseResult:
         source_ok = not case.expected_sources or source.casefold() in {s.casefold() for s in case.expected_sources}
         if source_ok and first_source_rank is None:
             first_source_rank = i
-        cwe_ok = not case.expected_cwe or (payload.get("cwe_class") or "").casefold() == case.expected_cwe.casefold()
+        cwe_ok = not case.expected_cwe or str(payload.get("cwe_class") or "").casefold() == case.expected_cwe.casefold()
         if source_ok and cwe_ok:
             first_rank = i
             matched = sub
@@ -130,6 +281,7 @@ def evaluate_retrieval(case: Case, results: list[dict]) -> CaseResult:
         first_source_rank=first_source_rank,
         matched_substring=matched,
         matched_source=matched_source,
+        cwe_field_seen=cwe_field_seen,
     )
 
 
@@ -137,9 +289,25 @@ def run_retrieval(cases: list[Case], top_k: int, collection: str | None = None) 
     depth = max(top_k, _METRIC_DEPTH)
     out: list[CaseResult] = []
     for case in cases:
-        results = kb_search(case.query, top_k=depth, collection=collection)
+        try:
+            results = blk_search(case.query, depth, collection=collection)
+        except BlkError as exc:
+            # A failed call is a miss with a recorded reason, never a crash.
+            failed = evaluate_retrieval(case, [])
+            failed.error = str(exc)
+            out.append(failed)
+            continue
         out.append(evaluate_retrieval(case, results))
     return out
+
+
+def _cwe_unverifiable(case_results: list[CaseResult]) -> list[CaseResult]:
+    """Cases that require a CWE label but got results with no cwe_class field, so
+    the label cannot be checked. blk emits the field in every payload, so this
+    applies only to results that lack it, as from a blk binary built before it
+    carried the field."""
+    return [c for c in case_results
+            if c.case.expected_cwe and c.error is None and c.n_results and not c.cwe_field_seen]
 
 
 # --- Local oMLX judge (deepeval custom model) ------------------------------
@@ -158,7 +326,7 @@ def _build_judge():
     _THINKING_OFF = {"chat_template_kwargs": {"enable_thinking": False}}
 
     class OMLXJudge(DeepEvalBaseLLM):
-        """Wraps oMLX exactly like agent._chat (temperature 0, thinking off)."""
+        """Wraps the local oMLX endpoint (temperature 0, thinking off)."""
 
         def __init__(self) -> None:
             self._client = OpenAI(base_url=config.LLM_BASE_URL, api_key=config.omlx_api_key())
@@ -219,13 +387,14 @@ class JudgeResult:
     error: str | None = None
 
 
-def run_judge(cases: list[Case], judge_limit: int) -> tuple[list[JudgeResult], str | None]:
+def run_judge(cases: list[Case], judge_limit: int,
+              collection: str | None = None) -> tuple[list[JudgeResult], str | None]:
     """Best-effort LLM-judged answer metrics. Returns (results, unavailable_reason)."""
     subset = cases[:judge_limit]
     if not subset:
         return [], None
     try:
-        from blkchain.agent import kb_answer
+        find_blk()
         from deepeval.metrics import AnswerRelevancyMetric, FaithfulnessMetric
         from deepeval.test_case import LLMTestCase
 
@@ -239,19 +408,19 @@ def run_judge(cases: list[Case], judge_limit: int) -> tuple[list[JudgeResult], s
     for case in subset:
         jr = JudgeResult(query=case.query)
         try:
-            answer = kb_answer(case.query)
+            answer = blk_answer(case.query, collection=collection)
             # Cap judged context (count + chars per chunk) so the faithfulness
             # prompt stays bounded.
             max_ctx = int(os.environ.get("BLKCHAIN_JUDGE_MAX_CONTEXTS", "4"))
             max_chars = int(os.environ.get("BLKCHAIN_JUDGE_CONTEXT_CHARS", "800"))
             context = [
-                (r.get("payload", {}).get("text") or "")[:max_chars]
-                for r in answer.get("results", [])[:max_ctx]
-                if (r.get("payload", {}).get("text") or "").strip()
+                str(_payload(r).get("text") or "")[:max_chars]
+                for r in answer["results"][:max_ctx]
+                if str(_payload(r).get("text") or "").strip()
             ]
             test_case = LLMTestCase(
                 input=case.query,
-                actual_output=answer.get("answer", ""),
+                actual_output=answer["answer"],
                 retrieval_context=context or ["(no retrieval context)"],
             )
             faith = FaithfulnessMetric(model=judge, async_mode=False, include_reason=False)
@@ -319,13 +488,22 @@ def build_report(
         lines.append("")
         for c in misses:
             reason = "no expected substring in top-10 pool"
-            if c.first_text_rank is not None and c.case.expected_sources and c.first_source_rank is None:
+            if c.error is not None:
+                reason = f"blk call failed: {c.error}"
+            elif c.first_text_rank is not None and c.case.expected_sources and c.first_source_rank is None:
                 reason = "expected substring appears, but not from an expected source"
             elif c.first_source_rank is not None and c.case.expected_cwe and c.first_rank is None:
                 reason = f"expected substring/source match appears, but not with CWE '{c.case.expected_cwe}'"
             elif c.first_rank is not None and c.first_rank > 5:
                 reason = f"complete labeled match first appears at rank {c.first_rank} (below top-5)"
             lines.append(f"- {c.case.query}: {reason}")
+        lines.append("")
+
+    unverifiable = _cwe_unverifiable(case_results)
+    if unverifiable:
+        lines.append(f"Note: {len(unverifiable)} case(s) with an expected CWE got results with no "
+                     "cwe_class field, so they cannot match. This applies only to results that lack "
+                     "the field, as from a blk binary built before it carried the field.")
         lines.append("")
 
     lines.append("## Answer metrics (best-effort, local LLM judge)")
@@ -361,6 +539,12 @@ def main() -> int:
                         help="Qdrant collection to evaluate (default config.QDRANT_COLLECTION); "
                              "use to A/B an alternate-embedder index")
     args = parser.parse_args()
+
+    try:
+        find_blk()
+    except BlkError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     cases = load_dataset()
     if args.limit is not None:
@@ -398,12 +582,23 @@ def main() -> int:
             rank = c.first_rank if c.first_rank is not None else "none"
             print(f"  - {c.case.query} (first substring rank: {rank})")
 
+    failed = [c for c in case_results if c.error is not None]
+    if failed:
+        print(f"\nFailed blk calls ({len(failed)}), counted as misses:")
+        for c in failed:
+            print(f"  - {c.case.query}: {c.error}")
+    unverifiable = _cwe_unverifiable(case_results)
+    if unverifiable:
+        print(f"\nNote: {len(unverifiable)} case(s) with an expected CWE got no cwe_class field "
+              "from blk, so they cannot match. This applies only to results that lack the field, "
+              "as from a blk binary built before it carried the field.")
+
     judge_results: list[JudgeResult] = []
     judge_unavailable: str | None = None
     if not args.no_judge:
         print(f"\nRunning LLM judge on first {min(args.judge_limit, len(cases))} case(s) "
               f"(local generation is slow) ...")
-        judge_results, judge_unavailable = run_judge(cases, args.judge_limit)
+        judge_results, judge_unavailable = run_judge(cases, args.judge_limit, collection=args.collection)
         if judge_unavailable:
             print(f"judge_unavailable: {judge_unavailable}")
         else:

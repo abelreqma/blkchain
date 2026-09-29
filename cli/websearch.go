@@ -13,9 +13,12 @@ import (
 	"blkchain/cli/internal/retrieval"
 )
 
-// tavilyAPIKeyEnv is the environment variable holding the Tavily API key,
-// matching the Python side's config.TAVILY_API_KEY_ENV / tavily_api_key().
+// tavilyAPIKeyEnv is the environment variable holding the Tavily API key.
 const tavilyAPIKeyEnv = "TAVILY_SETUP_TOKEN"
+
+// webSource is the Source of every web result. buildContext marks it untrusted
+// external evidence, and citations from it carry the web tag.
+const webSource = "web"
 
 // tavilyMaxResponseBytes bounds how much of a Tavily response body is read,
 // to avoid unbounded memory use on a misbehaving or malicious endpoint.
@@ -49,9 +52,8 @@ type tavilySearchResponse struct {
 	} `json:"results"`
 }
 
-// tavilyKey reads the Tavily API key from the same environment variable the
-// Python engine uses (config.tavily_api_key()). It returns "" when unset so
-// callers can skip web search entirely.
+// tavilyKey reads the Tavily API key. It returns "" when unset so callers can
+// skip web search entirely.
 func tavilyKey() string {
 	return os.Getenv(tavilyAPIKeyEnv)
 }
@@ -63,7 +65,7 @@ func tavilySearch(ctx context.Context, apiKey, query string, maxResults int, inc
 
 // tavilySearchAt POSTs a search request to baseURL+"/search" and maps the
 // Tavily hits to retrieval.Result, so the answer loop's web fallback can
-// treat them like any other retrieval result (tagged Source: "web").
+// treat them like any other retrieval result (tagged Source webSource).
 func tavilySearchAt(ctx context.Context, baseURL, apiKey, query string, maxResults int, includeDomains []string) ([]retrieval.Result, error) {
 	reqBody := tavilySearchRequest{
 		APIKey:     apiKey,
@@ -109,7 +111,7 @@ func tavilySearchAt(ctx context.Context, baseURL, apiKey, query string, maxResul
 			ID:    hit.URL,
 			Score: hit.Score,
 			Payload: retrieval.Payload{
-				Source:  "web",
+				Source:  webSource,
 				Path:    hit.URL,
 				Section: hit.Title,
 				Type:    "doc",

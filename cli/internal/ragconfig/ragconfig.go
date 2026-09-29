@@ -1,5 +1,5 @@
-// Package ragconfig loads the shared RAG configuration contract (rag.json)
-// that Python and Go both read, with environment overrides on top.
+// Package ragconfig loads the shared RAG configuration contract (rag.json),
+// with environment overrides on top.
 //
 // Precedence: environment > blkchain/contract/rag.json (if found) > built-in
 // fallback. The built-in fallback must always match rag.json byte-for-byte
@@ -13,13 +13,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
-// Config holds the tunables shared between the Python RAG engine and the Go
-// client. Field order and types mirror blkchain/contract/rag.json; the json
-// tags let loadFromFile unmarshal rag.json directly onto a Config value (see
-// loadFromFile), so keys absent from the file keep whatever the value
-// already held (the built-in default) instead of zeroing out.
+// Config holds the RAG tunables. Field order and types mirror
+// blkchain/contract/rag.json; the json tags let loadFromFile unmarshal rag.json
+// directly onto a Config value, so keys absent from the file keep whatever the
+// value already held (the built-in default) instead of zeroing out.
 type Config struct {
 	TopK                  int      `json:"top_k"`
 	PoolSize              int      `json:"pool_size"`
@@ -182,4 +182,14 @@ func Load() Config {
 	}
 	envOverrides(&cfg)
 	return cfg
+}
+
+// RequestTimeout is the bound on one search or answer turn. A value that is
+// not positive falls back to the built-in default, so a turn is never
+// unbounded.
+func (c Config) RequestTimeout() time.Duration {
+	if c.RequestTimeoutSeconds > 0 {
+		return time.Duration(c.RequestTimeoutSeconds) * time.Second
+	}
+	return time.Duration(builtinDefaults().RequestTimeoutSeconds) * time.Second
 }

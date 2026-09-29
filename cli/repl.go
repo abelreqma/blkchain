@@ -7,11 +7,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
-	"blkchain/cli/internal/client"
-	"blkchain/cli/internal/ragconfig"
-	"golang.org/x/term"
+	"blkchain/cli/internal/retrieval"
 )
 
 // runREPL is the entry point for bare `blk` and `blk repl`/`chat`. On a real
@@ -26,12 +23,12 @@ func runREPL() error {
 }
 
 // isInteractive reports whether both stdin and stdout are real terminals and
-// TERM is not "dumb" (CHARM-PATTERNS.md). Only then is the full TUI usable.
+// TERM is not "dumb". Only then is the full TUI usable.
 func isInteractive() bool {
 	if os.Getenv("TERM") == "dumb" {
 		return false
 	}
-	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	return isTerminalFile(os.Stdin) && isTerminalFile(os.Stdout)
 }
 
 // replBanner is the muted hint line printed when the plain REPL starts.
@@ -49,8 +46,10 @@ func replPrompt() string {
 // (the headline verb for a Q&A KB); a leading "/" (or the bare verb) switches
 // modes. It keeps the last search results so `open N` can open the N-th hit.
 func plainREPL() error {
-	var last []client.SearchResult
+	var last []retrieval.Result
 	mode := "rag"
+	var rc replClient
+	defer rc.close()
 
 	fmt.Printf("%s  %s\n", H1.Render("blkChain"), Meta.Render(replBanner()))
 
@@ -103,9 +102,9 @@ func plainREPL() error {
 			mode = "rag"
 			fmt.Println(Meta.Render("mode: rag"))
 		case "search", "s":
-			last = replSearch(rest, last)
+			last = replSearch(rest, last, &rc)
 		case "ask", "a":
-			printErr(replAsk(mode, rest))
+			printErr(replAsk(mode, rest, &rc))
 		case "hermes":
 			printErr(runHermes([]string{rest}))
 		case "open", "o":
@@ -113,47 +112,72 @@ func plainREPL() error {
 		default:
 			// Bare input with no recognized verb is an ask (matches the TUI); in
 			// agent mode it runs the hermes agent instead.
-			printErr(replAsk(mode, line))
+			printErr(replAsk(mode, line, &rc))
 		}
 	}
 }
 
+// replClient is the plain REPL's one retrieval client, made on first use and
+// closed when the loop ends.
+type replClient struct{ rc *retrieval.Client }
+
+func (c *replClient) get() (*retrieval.Client, error) {
+	if c.rc == nil {
+		rc, err := newRetrievalClient(loadConfig())
+		if err != nil {
+			return nil, err
+		}
+		c.rc = rc
+	}
+	return c.rc, nil
+}
+
+func (c *replClient) close() {
+	if c.rc != nil {
+		c.rc.Close()
+	}
+}
+
 // replAsk routes a question by mode: rag mode uses the RAG answer path
-// (runAsk); agent mode runs the hermes agent (subprocess one-shot). It mirrors
+// (askWith); agent mode runs the hermes agent (subprocess one-shot). It mirrors
 // the TUI's dual-mode dispatch for the non-TTY fallback.
-func replAsk(mode, query string) error {
+func replAsk(mode, query string, c *replClient) error {
 	if mode == "agent" {
 		return runHermes([]string{query})
 	}
-	return runAsk([]string{query})
+	rc, err := c.get()
+	if err != nil {
+		return err
+	}
+	return askWith(rc, []string{query})
 }
 
 // replSearch runs a search, prints it, and returns the new results (or the
 // previous ones on error/empty query, so `open N` keeps working).
-func replSearch(query string, prev []client.SearchResult) []client.SearchResult {
+func replSearch(query string, prev []retrieval.Result, c *replClient) []retrieval.Result {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return prev
 	}
-	rc, err := newRetrievalClient()
+	base, err := c.get()
 	if err != nil {
 		printErr(err)
 		return prev
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(ragconfig.Load().RequestTimeoutSeconds)*time.Second)
+	rc := followPrefs(base, loadPrefs())
+	ctx, cancel := context.WithTimeout(context.Background(), loadConfig().RequestTimeout())
 	defer cancel()
 	results, err := rc.Search(ctx, query, 0, nil)
 	if err != nil {
 		printErr(err)
 		return prev
 	}
-	adapted := toClientResults(results)
-	printResults(query, adapted, 0)
-	return adapted
+	printResults(query, results, 0)
+	return results
 }
 
 // replOpen opens the N-th result from the last search, or a literal path.
-func replOpen(arg string, last []client.SearchResult) error {
+func replOpen(arg string, last []retrieval.Result) error {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
 		return fmt.Errorf("open: give a result number (e.g. `open 2`) or a path")
@@ -177,16 +201,17 @@ func replSpecDesc(name string) string {
 	return c.desc
 }
 
-// replModelsDesc is /models' description from the slash-command registry: the
-// plain REPL's /models is the TUI's, not the `blk models` report.
-func replModelsDesc() string {
-	c, _ := slashCommand("models")
+// replSlashDesc is a command's description from the slash-command registry,
+// for the lines the plain REPL shares with the TUI rather than the command
+// line: /models (the TUI's /models, not the blk models report) and the modes.
+func replSlashDesc(name string) string {
+	c, _ := slashCommand(name)
 	return c.desc
 }
 
 // replGroups lists the commands the plain REPL supports, in the same groups and
-// with the same descriptions as the usage. Lines that exist only in the REPL
-// (bare text, /mode, /quit) have their own wording.
+// with the same descriptions as the usage and the TUI. Lines that exist only in
+// the REPL (bare text, /help, /quit) have their own wording.
 func replGroups() []rowGroup {
 	return []rowGroup{
 		{hgAsk, []helpRow{
@@ -202,13 +227,13 @@ func replGroups() []rowGroup {
 			{"/health", replSpecDesc("health")},
 			{"/doctor", replSpecDesc("doctor")},
 			{"/logs [service]", replSpecDesc("logs")},
-			{"/models [verb <name>]", replModelsDesc()},
+			{"/models [verb <name>]", replSlashDesc("models")},
 		}},
 		{hgAgent, []helpRow{
 			{"/hermes <prompt>", replSpecDesc("hermes")},
-			{"/mode", "toggle ask between the knowledge base and Hermes"},
-			{"/agent", "use Hermes for questions from now on"},
-			{"/rag", "answer from the knowledge base again"},
+			{"/mode", replSlashDesc("mode")},
+			{"/agent", replSlashDesc("agent")},
+			{"/rag", replSlashDesc("rag")},
 		}},
 		{hgSetup, []helpRow{
 			{"/help", "show this list"},

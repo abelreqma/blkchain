@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"blkchain/cli/internal/client"
 	"blkchain/cli/internal/retrieval"
 
 	"github.com/charmbracelet/lipgloss"
@@ -439,16 +438,6 @@ func TestWrapWidth(t *testing.T) {
 	}
 }
 
-func TestWrap(t *testing.T) {
-	// go test's stdout is not a TTY, so terminalWidth() falls back to 80.
-	s := wrap(strings.Repeat("word ", 40), 20)
-	for _, line := range strings.Split(s, "\n") {
-		if len(line) > 20 {
-			t.Errorf("wrap line exceeds max width 20: %q (%d chars)", line, len(line))
-		}
-	}
-}
-
 func TestLoadAppendHistory(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
@@ -488,21 +477,6 @@ func TestLoadAppendHistory(t *testing.T) {
 	}
 }
 
-func TestLoadHistoryCapsAt500(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-
-	for i := 0; i < 510; i++ {
-		if err := appendHistory(fmt.Sprintf("line %d", i)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got := loadHistory()
-	if len(got) != historyMaxLines {
-		t.Fatalf("loadHistory len = %d, want %d", len(got), historyMaxLines)
-	}
-}
-
 func TestFixedCLITextIsASCIIWhenUnicodeOff(t *testing.T) {
 	prev := useUnicode
 	useUnicode = false
@@ -519,11 +493,11 @@ func TestFixedCLITextIsASCIIWhenUnicodeOff(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results := []client.SearchResult{{Score: 0.9, Payload: client.Payload{Source: "wstg", Path: "a.md", Section: "Intro", Text: "body"}}}
+	results := []retrieval.Result{{Score: 0.9, Payload: retrieval.Payload{Source: "wstg", Path: "a.md", Section: "Intro", Text: "body"}}}
 	got := map[string]string{
 		"usage":   string(usageText),
 		"results": formatResults("q", results, 120*time.Millisecond, 80),
-		"cost":    costFooter(turnCost{elapsed: time.Second, hasTokens: true, completionTokens: 5, totalTokens: 9}),
+		"cost":    costFooter(turnCost{elapsed: time.Second, completionTokens: 5}),
 		"noroot":  errNoRoot.Error(),
 		"noreach": retrieval.ErrUnreachable.Error(),
 		"open":    fmt.Sprintf("open: %q not found, set $%s", "less", pagerOrEditor(false)),

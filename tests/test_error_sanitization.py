@@ -1,14 +1,15 @@
-"""Unit tests for 500-response error sanitization.
+"""Unit tests for 500-response error sanitization on the embed server.
 
-Confirms unexpected exceptions no longer leak their class name or message to
-the client on /search and /answer. The real detail must still reach stderr
-(via httputil.send_error's traceback log), but the HTTP body must contain
-only the generic public message.
+Confirms unexpected exceptions and startup failures no longer leak their class
+name or message to the client on /embed and /rerank. The real detail must still
+reach stderr (via httputil.send_error's traceback log), but the HTTP body must
+contain only the generic public message.
 
-Stdlib unittest only. This module imports blkchain.api, which is light (only
-config/httputil/retrieve, no model load) -- it must NOT import
-blkchain.embed_server, which loads MLX models at import time.
+Stdlib unittest only. embed_server loads MLX models at import time, so the
+tests import it fresh under fake mlx / mlx_embeddings / reranker modules.
 """
+import contextlib
+import importlib
 import io
 import json
 import sys
@@ -16,16 +17,16 @@ import types
 import unittest
 from unittest import mock
 
-from blkchain import api, httputil
+from blkchain import httputil
 
 
 class FakeHandler:
     """Stand-in for BaseHTTPRequestHandler: captures the response instead of
     writing to a real socket. Same pattern as tests/test_httputil.py."""
 
-    def __init__(self, body: bytes, path: str = "/x"):
+    def __init__(self, body: bytes, path: str = "/x", content_length=None):
         self.rfile = io.BytesIO(body)
-        self.headers = {"Content-Length": str(len(body))}
+        self.headers = {"Content-Length": str(len(body) if content_length is None else content_length)}
         self.path = path
         self.wfile = io.BytesIO()
         self.status = None
@@ -63,106 +64,122 @@ class SendErrorTest(unittest.TestCase):
         self.assertEqual(json.loads(h.wfile.getvalue()), {"error": "answer unavailable"})
 
 
-def _drive_post(body: bytes, path: str) -> FakeHandler:
-    h = FakeHandler(body, path)
-    h._send = types.MethodType(api.Handler._send, h)
-    api.Handler.do_POST(h)
+@contextlib.contextmanager
+def _embed_server(reranker, generate=None):
+    """Yield a fresh blkchain.embed_server imported under fake MLX modules.
+
+    `reranker` stands in for blkchain.reranker. `generate` stands in for
+    mlx_embeddings.generate."""
+    fake_mlx = types.ModuleType("mlx")
+    fake_mlx_core = types.ModuleType("mlx.core")
+    fake_mlx.core = fake_mlx_core
+
+    fake_mlx_embeddings = types.ModuleType("mlx_embeddings")
+    fake_mlx_embeddings.load = lambda *a, **kw: (object(), object())
+    fake_mlx_embeddings.generate = generate or (lambda *a, **kw: None)
+
+    patched = {
+        "mlx": fake_mlx,
+        "mlx.core": fake_mlx_core,
+        "mlx_embeddings": fake_mlx_embeddings,
+        "blkchain.reranker": reranker,
+        "blkchain.embed_server": None,  # force a fresh import under the fakes
+    }
+    with mock.patch.dict(sys.modules, patched):
+        del sys.modules["blkchain.embed_server"]  # drop the None sentinel
+        yield importlib.import_module("blkchain.embed_server")
+
+
+def _post(embed_server, path: str, body: bytes, content_length=None) -> FakeHandler:
+    h = FakeHandler(body, path, content_length)
+    h._send = types.MethodType(embed_server.Handler._send, h)
+    embed_server.Handler.do_POST(h)
     return h
 
 
-class SearchErrorSanitizationTest(unittest.TestCase):
-    def test_search_500_is_sanitized(self):
-        def boom(*a, **kw):
-            raise RuntimeError("qdrant api key sk-secret123")
+def _raising_reranker(exc):
+    """A blkchain.reranker stand-in whose import fails with `exc`."""
+    module = types.ModuleType("blkchain.reranker")
 
-        with mock.patch.object(api, "kb_search", side_effect=boom):
-            h = _drive_post(b'{"query": "test"}', "/search")
+    def _raise(name):
+        raise exc
 
-        self.assertEqual(h.status, 500)
-        raw = h.wfile.getvalue().decode()
-        self.assertEqual(json.loads(raw), {"error": "internal error during search"})
-        self.assertNotIn("sk-secret123", raw)
-        self.assertNotIn("RuntimeError", raw)
+    module.__getattr__ = _raise
+    return module
 
 
-class AnswerErrorSanitizationTest(unittest.TestCase):
-    def test_answer_500_is_sanitized(self):
-        fake_agent = types.ModuleType("blkchain.agent")
-
-        def boom(query):
-            raise RuntimeError("internal token abc123secret")
-
-        fake_agent.kb_answer = boom
-
-        with mock.patch.dict(sys.modules, {"blkchain.agent": fake_agent}):
-            h = _drive_post(b'{"query": "test"}', "/answer")
-
-        self.assertEqual(h.status, 500)
-        raw = h.wfile.getvalue().decode()
-        self.assertEqual(json.loads(raw), {"error": "internal error during answer"})
-        self.assertNotIn("abc123secret", raw)
-        self.assertNotIn("RuntimeError", raw)
-
-    def test_answer_503_is_sanitized(self):
-        # None in sys.modules makes the lazy `from blkchain.agent import
-        # kb_answer` raise ImportError, exercising the import-failure branch.
-        with mock.patch.dict(sys.modules, {"blkchain.agent": None}):
-            h = _drive_post(b'{"query": "test"}', "/answer")
-
-        self.assertEqual(h.status, 503)
-        self.assertEqual(json.loads(h.wfile.getvalue()), {"error": "answer unavailable"})
+def _working_reranker(fn):
+    module = types.ModuleType("blkchain.reranker")
+    module.rerank_documents = fn
+    return module
 
 
 class RerankImportFailureSanitizationTest(unittest.TestCase):
     """embed_server's /rerank 503 (reranker import/startup failure) must return
-    only a generic public message, never the underlying import-failure detail.
-
-    embed_server loads MLX models at import time, so mlx / mlx_embeddings are
-    faked and the reranker import is forced to raise with a secret-bearing
-    message. The 503 body must not echo that message or the exception type."""
+    only a generic public message, never the underlying import-failure detail."""
 
     def test_rerank_503_is_sanitized(self):
         secret = "reranker weights at /opt/secret/model.bin"
 
-        fake_mlx = types.ModuleType("mlx")
-        fake_mlx_core = types.ModuleType("mlx.core")
-        fake_mlx.core = fake_mlx_core
-
-        fake_mlx_embeddings = types.ModuleType("mlx_embeddings")
-        fake_mlx_embeddings.load = lambda *a, **kw: (object(), object())
-        fake_mlx_embeddings.generate = lambda *a, **kw: None
-
-        fake_reranker = types.ModuleType("blkchain.reranker")
-
-        def _raise(name):
-            raise RuntimeError(secret)
-
-        fake_reranker.__getattr__ = _raise
-
-        patched = {
-            "mlx": fake_mlx,
-            "mlx.core": fake_mlx_core,
-            "mlx_embeddings": fake_mlx_embeddings,
-            "blkchain.reranker": fake_reranker,
-            "blkchain.embed_server": None,  # force a fresh import under the fakes
-        }
-        with mock.patch.dict(sys.modules, patched):
-            import importlib
-
-            del sys.modules["blkchain.embed_server"]  # drop the None sentinel
-            embed_server = importlib.import_module("blkchain.embed_server")
-
+        with _embed_server(_raising_reranker(RuntimeError(secret))) as embed_server:
             self.assertFalse(embed_server._RERANKER_OK)
-
-            h = FakeHandler(b'{"query": "q", "documents": ["d"]}', "/rerank")
-            h._send = types.MethodType(embed_server.Handler._send, h)
-            embed_server.Handler.do_POST(h)
+            h = _post(embed_server, "/rerank", b'{"query": "q", "documents": ["d"]}')
 
         self.assertEqual(h.status, 503)
         raw = h.wfile.getvalue().decode()
         self.assertEqual(json.loads(raw), {"error": "reranker unavailable"})
         self.assertNotIn(secret, raw)
         self.assertNotIn("RuntimeError", raw)
+
+
+class EmbedServerErrorSanitizationTest(unittest.TestCase):
+    def test_embed_500_is_sanitized(self):
+        def boom(*a, **kw):
+            raise RuntimeError("internal token abc123secret")
+
+        with _embed_server(_working_reranker(lambda q, d: [0.0]), generate=boom) as embed_server:
+            h = _post(embed_server, "/embed", b'{"texts": ["hello"]}')
+
+        self.assertEqual(h.status, 500)
+        raw = h.wfile.getvalue().decode()
+        self.assertEqual(json.loads(raw), {"error": "internal error during embed"})
+        self.assertNotIn("abc123secret", raw)
+        self.assertNotIn("RuntimeError", raw)
+
+    def test_rerank_500_is_sanitized(self):
+        def boom(query, docs):
+            raise RuntimeError("qdrant api key sk-secret123")
+
+        with _embed_server(_working_reranker(boom)) as embed_server:
+            h = _post(embed_server, "/rerank", b'{"query": "q", "documents": ["d"]}')
+
+        self.assertEqual(h.status, 500)
+        raw = h.wfile.getvalue().decode()
+        self.assertEqual(json.loads(raw), {"error": "internal error during rerank"})
+        self.assertNotIn("sk-secret123", raw)
+        self.assertNotIn("RuntimeError", raw)
+
+
+class EmbedServerWireTest(unittest.TestCase):
+    """Strict JSON and bounded bodies on the embed server endpoints."""
+
+    def test_rerank_nan_score_is_strict_json(self):
+        def reject(token):
+            raise ValueError(f"non-strict JSON constant {token}")
+
+        with _embed_server(_working_reranker(lambda q, d: [float("nan"), 0.5])) as embed_server:
+            h = _post(embed_server, "/rerank", b'{"query": "q", "documents": ["a", "b"]}')
+
+        self.assertEqual(h.status, 200)
+        self.assertEqual(json.loads(h.wfile.getvalue(), parse_constant=reject), {"scores": [None, 0.5]})
+
+    def test_oversized_body_is_rejected_with_413(self):
+        with _embed_server(_working_reranker(lambda q, d: [0.0])) as embed_server:
+            too_big = embed_server._MAX_BODY_BYTES + 1
+            h = _post(embed_server, "/embed", b"", content_length=too_big)
+
+        self.assertEqual(h.status, 413)
+        self.assertEqual(json.loads(h.wfile.getvalue()), {"error": "request body too large"})
 
 
 if __name__ == "__main__":

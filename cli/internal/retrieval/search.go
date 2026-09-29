@@ -7,7 +7,6 @@ import (
 	"net"
 	"sort"
 	"strconv"
-	"time"
 
 	"github.com/qdrant/go-client/qdrant"
 
@@ -18,14 +17,12 @@ import (
 const defaultQdrantPort = 6334
 
 // ErrUnreachable indicates the retrieval backend (embed_server or Qdrant)
-// could not be reached at all. It mirrors cli/internal/client.UnreachableError's
-// hint so callers get the same actionable guidance regardless of which
-// engine path served them.
+// could not be reached at all. Its text says how to fix that.
 var ErrUnreachable = errors.New("blkChain retrieval services are not reachable, start them with `blk up`")
 
-// Client is a Go-native hybrid retrieval client: it talks to embed_server
-// (dense embeddings and cross-encoder rerank) and Qdrant (hybrid dense+sparse
-// search) directly, replacing the Python /search HTTP call.
+// Client is the hybrid retrieval client: it talks to embed_server (dense
+// embeddings and cross-encoder rerank) and Qdrant (hybrid dense+sparse search)
+// directly.
 type Client struct {
 	cfg        ragconfig.Config
 	qc         *qdrant.Client
@@ -49,11 +46,23 @@ func New(cfg ragconfig.Config, collection string) (*Client, error) {
 		// perform an RPC during NewClient and defeat the "no eager dial"
 		// contract when the server is down or slow.
 		SkipCompatibilityCheck: true,
+		// One user issues one query at a time, so one connection is enough.
+		PoolSize: 1,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating qdrant client: %w", err)
 	}
 	return &Client{cfg: cfg, qc: qc, collection: collection}, nil
+}
+
+// Close releases the Qdrant connection. Copies made by the caller share it, so
+// Close once, when the process or session that owns the client ends.
+func (c *Client) Close() error { return c.qc.Close() }
+
+// Health issues Qdrant's liveness RPC on the client's connection.
+func (c *Client) Health(ctx context.Context) error {
+	_, err := c.qc.HealthCheck(ctx)
+	return err
 }
 
 // splitHostPort parses a "host:port" address, defaulting the port to 6334
@@ -84,9 +93,9 @@ func (c *Client) Search(ctx context.Context, query string, topK int, filter map[
 	if topK <= 0 {
 		topK = c.cfg.TopK
 	}
-	if _, ok := ctx.Deadline(); !ok && c.cfg.RequestTimeoutSeconds > 0 {
+	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(c.cfg.RequestTimeoutSeconds)*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, c.cfg.RequestTimeout())
 		defer cancel()
 	}
 
@@ -114,11 +123,12 @@ func (c *Client) Search(ctx context.Context, query string, topK int, filter map[
 			ID:    pointIDString(p.GetId()),
 			Score: float64(p.GetScore()),
 			Payload: Payload{
-				Source:  payloadString(payload, "source"),
-				Path:    payloadString(payload, "path"),
-				Section: payloadString(payload, "section"),
-				Type:    payloadString(payload, "type"),
-				Text:    text,
+				Source:   payloadString(payload, "source"),
+				Path:     payloadString(payload, "path"),
+				Section:  payloadString(payload, "section"),
+				Type:     payloadString(payload, "type"),
+				Text:     text,
+				CWEClass: payloadString(payload, "cwe_class"),
 			},
 		}
 		texts[i] = text

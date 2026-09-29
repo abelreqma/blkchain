@@ -264,7 +264,7 @@ func TestCostFooter(t *testing.T) {
 	if strings.Contains(elapsedOnly, "tokens") {
 		t.Errorf("cost footer without tokens should omit 'tokens': %q", elapsedOnly)
 	}
-	withTokens := costFooter(turnCost{elapsed: time.Second, completionTokens: 42, hasTokens: true})
+	withTokens := costFooter(turnCost{elapsed: time.Second, completionTokens: 42})
 	if !strings.Contains(withTokens, "42 tokens") {
 		t.Errorf("cost footer should show token count: %q", withTokens)
 	}

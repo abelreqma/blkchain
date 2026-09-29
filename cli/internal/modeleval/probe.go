@@ -13,12 +13,11 @@ import (
 	"time"
 )
 
-// errUnreachable is the shared "the stack is down" error, in the existing CLI
-// voice (see client.UnreachableError / `blk up`).
-var errUnreachable = errors.New("unreachable — try `blk up`")
+// errUnreachable is the probes' "the stack is down" error, with the fix.
+var errUnreachable = errors.New("unreachable, try `blk up`")
 
-// ErrUnreachable returns the shared unreachable error for callers that render it.
-func ErrUnreachable() error { return errUnreachable }
+// maxBodyBytes caps how much of a readiness reply is read.
+const maxBodyBytes = 1 << 20
 
 // waitReady polls GET url until it returns a 2xx or the timeout elapses,
 // returning the elapsed time to ready. It returns errUnreachable if the timeout
@@ -27,11 +26,14 @@ func ErrUnreachable() error { return errUnreachable }
 func waitReady(ctx context.Context, client *http.Client, url string, timeout time.Duration) (time.Duration, error) {
 	start := time.Now()
 	deadline := start.Add(timeout)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, err
+	}
 	for {
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		resp, err := client.Do(req)
 		if err == nil {
-			io.Copy(io.Discard, resp.Body)
+			io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
 			resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 				return time.Since(start), nil
@@ -108,7 +110,7 @@ func ProbeEmbed(ctx context.Context, cfg Config) ModelReport {
 
 // ProbeRerank runs the rerank model's readiness then perf phase. Perf: one timed
 // rerank of a fixed small pool; runs the score-sanity check (non-finite /
-// out-of-range) so the SP-1 defect is visible.
+// out-of-range) so a bad score from the reranker is visible.
 func ProbeRerank(ctx context.Context, cfg Config) ModelReport {
 	rep := ModelReport{Kind: KindRerank}
 	client := cfg.httpClient()
@@ -144,35 +146,6 @@ func ProbeRerank(ctx context.Context, cfg Config) ModelReport {
 	return rep
 }
 
-// discoverChatModel returns the first model id from GET {baseURL}/models, or ""
-// on any failure (the caller then uses cfg.ChatModel or a default label).
-func discoverChatModel(ctx context.Context, client *http.Client, baseURL, apiKey string) string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
-	if err != nil {
-		return ""
-	}
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return ""
-	}
-	var out struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out) == nil && len(out.Data) > 0 {
-		return out.Data[0].ID
-	}
-	return ""
-}
-
 // ProbeChat runs the chat model's readiness (GET /models) then a streamed perf
 // probe. tokens/sec is computed from actual generated tokens: the server's
 // reported usage.completion_tokens when present, else a count of streamed
@@ -193,7 +166,9 @@ func ProbeChat(ctx context.Context, cfg Config) ModelReport {
 
 	model := cfg.ChatModel
 	if model == "" {
-		model = discoverChatModel(ctx, client, cfg.ChatBaseURL, cfg.ChatAPIKey)
+		if ids, err := ListModels(ctx, client, cfg.ChatBaseURL, cfg.ChatAPIKey); err == nil && len(ids) > 0 {
+			model = ids[0]
+		}
 	}
 
 	pctx, cancel := context.WithTimeout(ctx, cfg.ProbeTimeout)
@@ -210,7 +185,11 @@ func ProbeChat(ctx context.Context, cfg Config) ModelReport {
 		"chat_template_kwargs": map[string]any{"enable_thinking": false},
 	}
 	b, _ := json.Marshal(body)
-	req, _ := http.NewRequestWithContext(pctx, http.MethodPost, strings.TrimRight(cfg.ChatBaseURL, "/")+"/chat/completions", bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(pctx, http.MethodPost, strings.TrimRight(cfg.ChatBaseURL, "/")+"/chat/completions", bytes.NewReader(b))
+	if err != nil {
+		rep.Err = fmt.Errorf("probe: %w", err)
+		return rep
+	}
 	req.Header.Set("Content-Type", "application/json")
 	if cfg.ChatAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.ChatAPIKey)
@@ -284,4 +263,39 @@ func ProbeChat(ctx context.Context, cfg Config) ModelReport {
 	perf.TokensPerSec = TokensPerSec(perf.GenTokens, perf.GenDuration)
 	rep.Perf = perf
 	return rep
+}
+
+// ListModels returns the model ids from an OpenAI-style GET {baseURL}/models.
+// The key, when set, is sent as a Bearer token. The body read is capped.
+func ListModels(ctx context.Context, client *http.Client, baseURL, apiKey string) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&out); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(out.Data))
+	for _, d := range out.Data {
+		if d.ID != "" {
+			ids = append(ids, d.ID)
+		}
+	}
+	return ids, nil
 }

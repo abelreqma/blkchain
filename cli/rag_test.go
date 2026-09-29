@@ -342,3 +342,179 @@ func TestRedactedURLDropsCredentialsQueryAndFragment(t *testing.T) {
 		t.Errorf("error message leaks: %s", s)
 	}
 }
+
+// llmRequest is what recordingLLM saw of one chat call.
+type llmRequest struct {
+	stream    bool
+	maxTokens int
+	auth      string
+}
+
+// recordingLLM is fakeLLM that also records each chat call's body and
+// Authorization header. It answers the grade as sufficient.
+func recordingLLM(t *testing.T) (*httptest.Server, func() []llmRequest) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []llmRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Stream              bool `json:"stream"`
+			MaxCompletionTokens int  `json:"max_completion_tokens"`
+			MaxTokens           int  `json:"max_tokens"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		seen = append(seen, llmRequest{stream: body.Stream, maxTokens: max(body.MaxCompletionTokens, body.MaxTokens), auth: r.Header.Get("Authorization")})
+		mu.Unlock()
+		if body.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok [1]\"}}]}\n\ndata: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"{\"sufficient\":true,\"rewrite\":\"\",\"use_web\":false}"},"finish_reason":"stop"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []llmRequest {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]llmRequest(nil), seen...)
+	}
+}
+
+// The answer cap and the grade cap each reach the call they belong to.
+func TestAnswerLoopSendsTheTokenCaps(t *testing.T) {
+	srv, seen := recordingLLM(t)
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	cfg := answerCfg(1)
+	cfg.AnswerMaxTokens, cfg.GradeMaxTokens = 321, 45
+	rc := fakeSearcher{[]retrieval.Result{chunk("wstg", "a.md", "s", "text")}}
+	if _, _, _, _, _, err := AnswerLoop(context.Background(), rc, cfg, "q", AnswerOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	var graded, answered bool
+	for _, r := range seen() {
+		if r.stream {
+			answered = true
+			if r.maxTokens != 321 {
+				t.Errorf("answer call max tokens = %d, want 321", r.maxTokens)
+			}
+		} else {
+			graded = true
+			if r.maxTokens != 45 {
+				t.Errorf("grade call max tokens = %d, want 45", r.maxTokens)
+			}
+		}
+	}
+	if !graded || !answered {
+		t.Fatalf("calls seen: %+v, want a grade and an answer", seen())
+	}
+}
+
+// An LLM server that needs no key works with no key set anywhere, and gets no
+// Authorization header.
+func TestAnswerLoopWorksWithoutAnAPIKey(t *testing.T) {
+	srv, seen := recordingLLM(t)
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	rc := fakeSearcher{[]retrieval.Result{chunk("wstg", "a.md", "s", "text")}}
+	answer, _, _, _, _, err := AnswerLoop(context.Background(), rc, answerCfg(1), "q", AnswerOpts{})
+	if err != nil {
+		t.Fatalf("keyless ask failed: %v", err)
+	}
+	if answer != "ok [1]" {
+		t.Errorf("answer = %q", answer)
+	}
+	for _, r := range seen() {
+		if r.auth != "" {
+			t.Errorf("keyless call sent Authorization %q", r.auth)
+		}
+	}
+}
+
+// With a key set, it is sent as a Bearer token.
+func TestAnswerLoopSendsTheAPIKey(t *testing.T) {
+	srv, seen := recordingLLM(t)
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	rc := fakeSearcher{[]retrieval.Result{chunk("wstg", "a.md", "s", "text")}}
+	if _, _, _, _, _, err := AnswerLoop(context.Background(), rc, answerCfg(1), "q", AnswerOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range seen() {
+		if r.auth != "Bearer test-key" {
+			t.Errorf("Authorization = %q, want the key", r.auth)
+		}
+	}
+}
+
+// An LLM error body is read only up to a cap, so a huge error message never
+// reaches the terminal whole.
+func TestAnswerLoopBoundsTheLLMErrorBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, `{"error":{"message":%q}}`, strings.Repeat("e", 1<<20))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	rc := fakeSearcher{[]retrieval.Result{chunk("wstg", "a.md", "s", "text")}}
+	_, _, _, _, _, err := AnswerLoop(context.Background(), rc, answerCfg(1), "q", AnswerOpts{})
+	if err == nil {
+		t.Fatal("want an error from a failing LLM")
+	}
+	if n := len(err.Error()); n > 1024 {
+		t.Errorf("error is %d bytes, want the body cut short", n)
+	}
+}
+
+// A model named by the caller (the /model picker) is used for the grade and the
+// answer, and no model list is fetched to find one.
+func TestAnswerLoopUsesTheNamedModelWithoutListing(t *testing.T) {
+	var mu sync.Mutex
+	var listed int
+	var models []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			mu.Lock()
+			listed++
+			mu.Unlock()
+			w.Write([]byte(`{"data":[{"id":"listed"}]}`))
+			return
+		}
+		var body struct {
+			Model  string `json:"model"`
+			Stream bool   `json:"stream"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		models = append(models, body.Model)
+		mu.Unlock()
+		if body.Stream {
+			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"{\"sufficient\":true}"},"finish_reason":"stop"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	rc := fakeSearcher{[]retrieval.Result{chunk("wstg", "a.md", "s", "text")}}
+	if _, _, _, _, _, err := AnswerLoop(context.Background(), rc, answerCfg(1), "q", AnswerOpts{Model: "picked"}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if listed != 0 {
+		t.Errorf("listed the models %d times with a model named", listed)
+	}
+	if len(models) != 2 || models[0] != "picked" || models[1] != "picked" {
+		t.Errorf("models used = %v, want picked for the grade and the answer", models)
+	}
+}

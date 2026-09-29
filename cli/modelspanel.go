@@ -7,6 +7,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -51,12 +52,14 @@ const (
 	rowWeb
 )
 
-// modelRow is one /models row: its group heading, name, state word, and
-// detail. id is the chat model id (chat rows only).
+// modelRow is one /models row: its group heading, name, state words, and
+// detail parts (size, context length, and so on). id is the chat model id (chat
+// rows only).
 type modelRow struct {
 	kind            rowKind
 	group, name, id string
-	state, detail   string
+	state           string
+	detail          []string
 }
 
 // modelRows builds the rows: the chat models, then the embedder and reranker,
@@ -100,7 +103,7 @@ func modelRows(d modelsData, p modelPrefs, active string, loading map[string]boo
 			detail = append(detail, "default")
 		}
 		rows = append(rows, modelRow{kind: rowChat, group: "CHAT", name: c.ID, id: c.ID,
-			state: strings.Join(states, ", "), detail: joinSep(detail...)})
+			state: strings.Join(states, ", "), detail: detail})
 	}
 
 	embed, rerank := "down", "down"
@@ -113,10 +116,10 @@ func modelRows(d modelsData, p modelPrefs, active string, loading map[string]boo
 	if !p.Rerank {
 		rerank = "off"
 	}
-	web, webDetail := "off", ""
+	web, webDetail := "off", []string(nil)
 	switch {
 	case !d.webSet:
-		web, webDetail = "not configured", "set TAVILY_SETUP_TOKEN"
+		web, webDetail = "not configured", []string{"set TAVILY_SETUP_TOKEN"}
 	case p.Web:
 		web = "on"
 	}
@@ -145,7 +148,7 @@ func stateStyle(state string) lipgloss.Style {
 // modelLines renders rows under their group headings in columns (marker, name,
 // state, detail) at most w wide. sel is the selected row (-1 for none); it
 // returns the lines and the index of the selected row's line. The name gives
-// way before the state; the detail is dropped when there is no room for it.
+// way before the state; detail parts that do not fit are dropped from the end.
 func modelLines(rows []modelRow, sel, w int) ([]string, int) {
 	names := make([]string, len(rows))
 	nameMax, stateW := 0, 0
@@ -169,16 +172,34 @@ func modelLines(rows []modelRow, sel, w int) ([]string, int) {
 		if i == sel {
 			marker, nameStyle, selLine = Prompt.Render(Glyph(GlyphPrompt))+" ", Key, len(lines)
 		}
-		detail := oneLine(sanitizeTerminal(r.detail))
+		detail := fitDetail(r.detail, detailW)
 		line := marker + nameStyle.Render(padCols(ellipsize(names[i], nameW), nameW)) + "  "
-		if detail == "" || detailW < 6 {
+		if detail == "" {
 			line += stateStyle(r.state).Render(r.state)
 		} else {
-			line += stateStyle(r.state).Render(padCols(r.state, stateW)) + "  " + Meta.Render(ellipsize(detail, detailW))
+			line += stateStyle(r.state).Render(padCols(r.state, stateW)) + "  " + Meta.Render(detail)
 		}
 		lines = append(lines, line)
 	}
 	return lines, selLine
+}
+
+// fitDetail joins as many sanitized detail parts as fit in w columns. A first
+// part too long on its own is cut; under 6 columns there is no detail.
+func fitDetail(parts []string, w int) string {
+	if len(parts) == 0 || w < 6 {
+		return ""
+	}
+	clean := make([]string, len(parts))
+	for i, p := range parts {
+		clean[i] = oneLine(sanitizeTerminal(p))
+	}
+	for n := len(clean); n > 0; n-- {
+		if s := joinSep(clean[:n]...); lipgloss.Width(s) <= w {
+			return s
+		}
+	}
+	return ellipsize(clean[0], w)
 }
 
 // setModelSwitch turns one model on or off in p: a chat model shown or hidden
@@ -281,12 +302,23 @@ func resolveChatModel(name string, models []chatModel) (string, error) {
 	return "", fmt.Errorf("%q matches %s; type more of the name", name, strings.Join(hits, ", "))
 }
 
+// modelSwitch is the one switch a "/models on|off <name>" turns: a chat model
+// shown or hidden in the model picker, or the reranker or web search on or off.
+// webSet is whether web search was configured when the command ran.
+type modelSwitch struct {
+	kind   rowKind
+	id     string
+	on     bool
+	webSet bool
+}
+
 // runModelsArgs carries out one "/models on|off|load|unload <name>". name is a
-// chat model id or a unique prefix of one, or reranker or web; on and off show
-// or hide a chat model in the model picker. It saves a changed switch and may
-// call the LLM server, so the TUI runs it in a command. It returns what
-// happened and the settings after the change.
-func runModelsArgs(verb, name, active string, p modelPrefs) (string, modelPrefs, error) {
+// chat model id or a unique prefix of one, or reranker or web. It may call the
+// LLM server, so the TUI runs it in a command. A load or unload returns what
+// happened. On and off return only the switch to turn: the caller applies it
+// to the settings it holds now (see setModelSwitch) and saves them, so a
+// change made while this ran is kept.
+func runModelsArgs(verb, name, active string) (string, *modelSwitch, error) {
 	kind := rowChat
 	switch strings.ToLower(name) {
 	case "embedder":
@@ -303,41 +335,35 @@ func runModelsArgs(verb, name, active string, p modelPrefs) (string, modelPrefs,
 		defer cancel()
 		models, adm, err := fetchChatModels(ctx)
 		if err != nil {
-			return "", p, err
+			return "", nil, err
 		}
 		if id, err = resolveChatModel(name, models); err != nil {
-			return "", p, err
+			return "", nil, err
 		}
 		admin = adm
 	}
 	if verb == "load" || verb == "unload" {
 		if kind != rowChat {
-			return "", p, errors.New("only chat models can be loaded or unloaded")
+			return "", nil, errors.New("only chat models can be loaded or unloaded")
 		}
 		if !admin {
-			return "", p, fmt.Errorf("%s: %w", verb, errLLMUnsupported)
+			return "", nil, fmt.Errorf("%s: %w", verb, errLLMUnsupported)
 		}
 		if err := runModelAction(id, verb); err != nil {
-			return "", p, fmt.Errorf("%s %s: %w", verb, id, err)
+			return "", nil, fmt.Errorf("%s %s: %w", verb, id, err)
 		}
-		return modelActionNote(id, verb, id == active), p, nil
+		return modelActionNote(id, verb, id == active), nil, nil
 	}
-	np, note, err := setModelSwitch(p, kind, id, verb == "on", active, tavilyKey() != "")
-	if err != nil {
-		return "", p, err
-	}
-	if err := savePrefs(np); err != nil {
-		return "", p, fmt.Errorf("saving the model settings: %w", err)
-	}
-	return note, np, nil
+	return "", &modelSwitch{kind: kind, id: id, on: verb == "on", webSet: tavilyKey() != ""}, nil
 }
 
 // replModels is /models in the plain REPL: with no arguments it prints every
-// model and its state; otherwise it runs runModelsArgs.
+// model and its state; otherwise it runs runModelsArgs and saves a switch.
 func replModels(arg string) error {
+	active := ragModelLabel()
 	if strings.TrimSpace(arg) == "" {
 		d := fetchModelsData()
-		lines, _ := modelLines(modelRows(d, loadPrefs(), ragModelLabel(), nil), -1, terminalWidth()-1)
+		lines, _ := modelLines(modelRows(d, loadPrefs(), active, nil), -1, terminalWidth()-1)
 		for _, ln := range lines {
 			fmt.Println(" " + ln)
 		}
@@ -350,9 +376,18 @@ func replModels(arg string) error {
 	if err != nil {
 		return err
 	}
-	note, _, err := runModelsArgs(verb, name, ragModelLabel(), loadPrefs())
+	note, sw, err := runModelsArgs(verb, name, active)
 	if err != nil {
 		return err
+	}
+	if sw != nil {
+		var np modelPrefs
+		if np, note, err = setModelSwitch(loadPrefs(), sw.kind, sw.id, sw.on, active, sw.webSet); err != nil {
+			return err
+		}
+		if err := savePrefs(np); err != nil {
+			return fmt.Errorf("saving the model settings: %w", err)
+		}
 	}
 	fmt.Println(Meta.Render(oneLine(sanitizeTerminal(note))))
 	return nil
@@ -376,11 +411,12 @@ type prefsChangedMsg struct{ prefs modelPrefs }
 // prefsSavedMsg reports the save of the model settings.
 type prefsSavedMsg struct{ err error }
 
-// modelsArgsDoneMsg ends a "/models <verb> <name>" run in the TUI.
+// modelsArgsDoneMsg ends a "/models <verb> <name>" run in the TUI: a note, or
+// the switch the base Update applies to its settings and saves.
 type modelsArgsDoneMsg struct {
-	note  string
-	prefs modelPrefs
-	err   error
+	note string
+	sw   *modelSwitch
+	err  error
 }
 
 func fetchModelsCmd() tea.Msg { return modelsDataMsg{data: fetchModelsData()} }
@@ -391,14 +427,36 @@ func modelActionCmd(id, action string) tea.Cmd {
 	}
 }
 
-func savePrefsCmd(p modelPrefs) tea.Cmd {
-	return func() tea.Msg { return prefsSavedMsg{err: savePrefs(p)} }
+// prefsSaves orders the panel's saves. savePrefsCmd numbers each save when the
+// base Update asks for it, so in the order of the toggles; a save whose number
+// is older than one already written is dropped, so the file always ends with
+// the newest settings however the commands are scheduled.
+var prefsSaves struct {
+	mu      sync.Mutex
+	next    uint64
+	written uint64
 }
 
-func modelsArgsCmd(verb, name, active string, p modelPrefs) tea.Cmd {
+func savePrefsCmd(p modelPrefs) tea.Cmd {
+	prefsSaves.mu.Lock()
+	prefsSaves.next++
+	seq := prefsSaves.next
+	prefsSaves.mu.Unlock()
 	return func() tea.Msg {
-		note, np, err := runModelsArgs(verb, name, active, p)
-		return modelsArgsDoneMsg{note: note, prefs: np, err: err}
+		prefsSaves.mu.Lock()
+		defer prefsSaves.mu.Unlock()
+		if seq < prefsSaves.written {
+			return prefsSavedMsg{}
+		}
+		prefsSaves.written = seq
+		return prefsSavedMsg{err: savePrefs(p)}
+	}
+}
+
+func modelsArgsCmd(verb, name, active string) tea.Cmd {
+	return func() tea.Msg {
+		note, sw, err := runModelsArgs(verb, name, active)
+		return modelsArgsDoneMsg{note: note, sw: sw, err: err}
 	}
 }
 
@@ -611,6 +669,9 @@ func (p modelsPanel) View(width, height int) string {
 		out := lines[start:min(start+listRows, len(lines))]
 		if n > 1 {
 			note := oneLine(sanitizeTerminal(p.note))
+			if hidden := len(lines) - len(out); note == "" && hidden > 0 {
+				note = fmt.Sprintf("+%d more lines, up/down to scroll", hidden)
+			}
 			if p.noteErr {
 				mark := Glyph(GlyphErr) + " "
 				note = Fail.Render(mark) + Body.Render(ellipsize(note, w-lipgloss.Width(mark)))
@@ -621,8 +682,9 @@ func (p modelsPanel) View(width, height int) string {
 		}
 		return strings.Join(out, "\n")
 	}
+	// minRows is every line: a short terminal drops the title before a row.
 	return overlayBox(overlaySpec{
 		title: "MODELS",
-		wantW: 76, wantRows: len(all) + 1, minRows: 3, body: body,
+		wantW: 76, wantRows: len(all) + 1, minRows: len(all) + 1, body: body,
 	}, width, height)
 }

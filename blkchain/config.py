@@ -129,30 +129,10 @@ UPSERT_BATCH = 256                       # sub-batched, resumable (PROSE lesson 
 # --- Chunking + retrieval params --------------------------------------------
 CHUNK_TARGET_TOKENS = 400
 CHUNK_OVERLAP_TOKENS = 60
-POOL_SIZE = 50                           # deep pool before rerank (PROSE lesson 4)
-TOP_K = 5                                # final results after rerank
 RRF_K = 60                               # Qdrant native RRF fusion constant
 # Payload/code files are indexed as content; wordlist-scale files are catalog-only.
 CONTENT_FILE_MAX_BYTES = 256 * 1024
 CONTENT_FILE_MAX_LINES = 2000
-
-# --- Answer generation caps (agent.py) --------------------------------------
-# These bound the answer/grading prefill size. They are env-overridable: widen
-# ANSWER_MAX_CHUNKS for richer synthesis without editing code.
-GRADE_MAX_TOKENS = int(os.environ.get("BLKCHAIN_GRADE_MAX_TOKENS", "200"))
-ANSWER_MAX_TOKENS = int(os.environ.get("BLKCHAIN_ANSWER_MAX_TOKENS", "700"))
-CONTEXT_CHARS_PER_CHUNK = int(os.environ.get("BLKCHAIN_CONTEXT_CHARS_PER_CHUNK", "1200"))
-ANSWER_MAX_CHUNKS = int(os.environ.get("BLKCHAIN_ANSWER_MAX_CHUNKS", "4"))
-
-# --- Web search (Tavily); key lives in ~/.zshrc as TAVILY_SETUP_TOKEN -------
-TAVILY_API_KEY_ENV = "TAVILY_SETUP_TOKEN"
-def tavily_api_key() -> str:
-    return os.environ.get(TAVILY_API_KEY_ENV, "")
-
-# --- API server (retrieval HTTP API the Go CLI + MCP call) ------------------
-API_HOST = os.environ.get("BLKCHAIN_API_HOST", "127.0.0.1")
-API_PORT = int(os.environ.get("BLKCHAIN_API_PORT", "8200"))
-API_URL = f"http://{API_HOST}:{API_PORT}"
 
 # --- Corpus manifest --------------------------------------------------------
 # Single source of truth for WHAT to ingest. No module hardcodes a document

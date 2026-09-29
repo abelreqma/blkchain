@@ -4,21 +4,17 @@ import (
 	"context"
 	"errors"
 
-	"blkchain/cli/internal/client"
 	"blkchain/cli/internal/ragconfig"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// mcp.go is the native Go MCP stdio server for blkChain (Task 15),
-// replacing the old `blk mcp` behavior of exec'ing the Python
-// blkchain.mcp_server. It exposes the same two tools, kb_search and
-// kb_answer, over the official modelcontextprotocol/go-sdk, using the
-// in-process retrieval.Client and AnswerLoop instead of an HTTP round trip.
+// mcp.go is blkChain's MCP stdio server (`blk mcp`). It exposes two tools,
+// kb_search and kb_answer, over the official modelcontextprotocol/go-sdk, using
+// the in-process retrieval.Client and AnswerLoop.
 
 // mcpSearchIn is kb_search's tool input. TopK is a pointer so "not provided"
-// (nil) is distinguishable from an explicit 0, matching the Python MCP
-// server's optional top_k.
+// (nil) is distinguishable from an explicit 0.
 type mcpSearchIn struct {
 	Query   string         `json:"query" jsonschema:"the search query"`
 	TopK    *int           `json:"top_k,omitempty" jsonschema:"number of results to return (default: server config)"`
@@ -30,16 +26,16 @@ type mcpAnswerIn struct {
 	Query string `json:"query" jsonschema:"the question to answer"`
 }
 
-// runMCP starts a native MCP stdio server exposing kb_search and kb_answer,
-// replacing the previous exec of `python -m blkchain.mcp_server`. It runs
-// in-process against the Go retrieval client and answer loop, so it needs no
-// running api service (embed_server and Qdrant still must be up).
+// runMCP starts the MCP stdio server exposing kb_search and kb_answer. It runs
+// in-process against the Go retrieval client and answer loop, so embed_server
+// and Qdrant must be up.
 func runMCP(_ []string) error {
-	cfg := ragconfig.Load()
-	rc, err := newRetrievalClient()
+	cfg := loadConfig()
+	rc, err := newRetrievalClient(cfg)
 	if err != nil {
 		return err
 	}
+	defer rc.Close()
 
 	v, _, _, _ := versionInfo()
 	s := mcp.NewServer(&mcp.Implementation{Name: "blkchain", Version: v}, nil)
@@ -80,7 +76,7 @@ func runMCP(_ []string) error {
 func kbAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, query string, noWeb bool) (map[string]any, error) {
 	answer, cits, usedWeb, results, _, err := AnswerLoop(ctx, rc, cfg, query, AnswerOpts{NoWeb: noWeb})
 	if errors.Is(err, ErrNoResults) {
-		answer, cits, err = noResultsAnswer, []client.Citation{}, nil
+		answer, cits, err = noResultsAnswer, []citation{}, nil
 	}
 	if err != nil {
 		return nil, err

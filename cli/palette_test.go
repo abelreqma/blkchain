@@ -260,10 +260,12 @@ func TestPaletteAlignsDescriptionsInOneColumn(t *testing.T) {
 	rows := 0
 	for _, ln := range strings.Split(view, "\n") {
 		for _, it := range m.pal.items {
-			if it.desc == "" || !strings.Contains(ln, it.desc) {
+			// The start of the description is enough to find it; a long one is cut.
+			start := it.desc[:min(len(it.desc), 20)]
+			if it.desc == "" || !strings.Contains(ln, start) {
 				continue
 			}
-			col := lipgloss.Width(ln[:strings.Index(ln, it.desc)])
+			col := lipgloss.Width(ln[:strings.Index(ln, start)])
 			if want < 0 {
 				want = col
 			}

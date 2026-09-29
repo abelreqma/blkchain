@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
-	"blkchain/cli/internal/client"
+	"blkchain/cli/internal/retrieval"
 )
 
 func TestGlowRenderNonEmpty(t *testing.T) {
@@ -111,11 +111,11 @@ func TestWrapIndentHardBreaksLongToken(t *testing.T) {
 	}
 }
 
-func resultsFixture(text string) []client.SearchResult {
-	return []client.SearchResult{{
+func resultsFixture(text string) []retrieval.Result {
+	return []retrieval.Result{{
 		ID:    "p1",
 		Score: 0.9123,
-		Payload: client.Payload{
+		Payload: retrieval.Payload{
 			Source:  "source-" + strings.Repeat("s", 120),
 			Section: "section " + strings.Repeat("x", 120),
 			Path:    "corpus/" + strings.Repeat("p", 300) + ".md",

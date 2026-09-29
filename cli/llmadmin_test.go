@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -172,5 +173,121 @@ func TestFetchChatModelsHonorsTheDeadline(t *testing.T) {
 	_, _, err := fetchChatModels(ctx)
 	if err == nil || time.Since(start) > 2*time.Second {
 		t.Errorf("err = %v after %v, want a prompt timeout", err, time.Since(start))
+	}
+}
+
+// An admin call never follows a redirect: the second server sees no request
+// and so never the key, and the error says the redirect was not followed.
+func TestLLMAdminNeverFollowsRedirects(t *testing.T) {
+	var hits int
+	var gotAuth string
+	var mu sync.Mutex
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		fmt.Fprint(w, `{"models":[{"id":"x"}]}`)
+	}))
+	defer second.Close()
+	for _, code := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		for _, target := range []string{second.URL, ""} {
+			adminServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if target == "" {
+					// A same-host redirect, which net/http would send the key along to.
+					if !strings.HasPrefix(r.URL.Path, "/elsewhere") {
+						http.Redirect(w, r, "/elsewhere"+r.URL.Path, code)
+						return
+					}
+					mu.Lock()
+					hits++
+					gotAuth = r.Header.Get("Authorization")
+					mu.Unlock()
+					return
+				}
+				http.Redirect(w, r, target+r.URL.Path, code)
+			})
+			t.Setenv("OMLX_API_KEY", "redirect-key")
+			_, _, listErr := fetchChatModels(context.Background())
+			actErr := llmModelAction(context.Background(), "m", "load")
+			for _, err := range []error{listErr, actErr} {
+				if err == nil || !strings.Contains(err.Error(), "redirected") || strings.Contains(err.Error(), "\n") {
+					t.Errorf("%d to %q: err = %v, want one line saying the redirect was not followed", code, target, err)
+				}
+			}
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 0 || gotAuth != "" {
+		t.Errorf("the redirect target got %d requests (Authorization %q), want none", hits, gotAuth)
+	}
+}
+
+// A server that echoes the Authorization header never gets the key onto the
+// screen: a 401 or 403 shows no body at all, and any other status has the key
+// replaced before the excerpt is shown.
+func TestLLMAdminErrorsNeverShowTheKey(t *testing.T) {
+	const key = "echo-me-key-123"
+	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusInternalServerError, http.StatusBadRequest} {
+		adminServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+			fmt.Fprintf(w, "bad request, you sent %s; key=%s", r.Header.Get("Authorization"), key)
+		})
+		t.Setenv("OMLX_API_KEY", key)
+		err := llmModelAction(context.Background(), "m", "load")
+		if err == nil {
+			t.Fatalf("%d: want an error", code)
+		}
+		msg := err.Error()
+		if strings.Contains(msg, key) {
+			t.Errorf("%d: error %q shows the key", code, msg)
+		}
+		if code == http.StatusUnauthorized || code == http.StatusForbidden {
+			if strings.Contains(msg, "you sent") {
+				t.Errorf("%d: error %q shows the response body", code, msg)
+			}
+		} else if !strings.Contains(msg, "[redacted]") || !strings.Contains(msg, "you sent") {
+			t.Errorf("%d: error %q, want the body excerpt with the key redacted", code, msg)
+		}
+	}
+}
+
+// The key sent over plain http to a host that is not loopback gets one
+// warning per process, naming the host; the request still goes out.
+func TestLLMAdminWarnsOnceAboutAnUnencryptedKey(t *testing.T) {
+	var warnings []string
+	prev := llmWarn
+	llmWarn = func(line string) { warnings = append(warnings, line) }
+	t.Cleanup(func() { llmWarn = prev; insecureKeyOnce = sync.Once{} })
+
+	port := strings.TrimPrefix(deadLoopbackURL(t), "http://127.0.0.1")
+	try := func(base, key string) {
+		t.Helper()
+		insecureKeyOnce = sync.Once{}
+		warnings = nil
+		t.Setenv("OMLX_BASE_URL", base)
+		t.Setenv("OMLX_API_KEY", key)
+		for i := 0; i < 3; i++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			llmModelAction(ctx, "m", "load")
+			cancel()
+		}
+	}
+
+	try("http://0.0.0.0"+port, "k")
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "unencrypted") || !strings.Contains(warnings[0], "0.0.0.0") {
+		t.Errorf("http to a remote host: warnings = %q, want one naming the host", warnings)
+	}
+	if strings.Contains(strings.Join(warnings, ""), "\n") {
+		t.Errorf("warning %q is not one line", warnings)
+	}
+	for _, base := range []string{"http://127.0.0.1" + port, "http://127.8.9.10" + port, "http://localhost" + port, "http://[::1]" + port, "https://0.0.0.0" + port} {
+		if try(base, "k"); len(warnings) != 0 {
+			t.Errorf("%s: warnings = %q, want none", base, warnings)
+		}
+	}
+	if try("http://0.0.0.0"+port, ""); len(warnings) != 0 {
+		t.Errorf("no key: warnings = %q, want none", warnings)
 	}
 }

@@ -15,9 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
-	"blkchain/cli/internal/client"
+	"blkchain/cli/internal/modeleval"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 
@@ -27,14 +26,13 @@ import (
 
 // llm.go holds the RAG synthesis building blocks shared by AnswerLoop
 // (rag.go): prompt construction, the oMLX (OpenAI-compatible) LangChainGo
-// client, and citation extraction. It does not depend on the Python /answer
-// endpoint.
+// client, and citation extraction.
 
-// defaultOMLXBaseURL matches the local oMLX server (V2-BRIEF.md Env).
+// defaultOMLXBaseURL matches the local oMLX server.
 const defaultOMLXBaseURL = "http://127.0.0.1:8000/v1"
 
 // citationRefPattern matches inline [n] citation markers in a synthesized
-// answer, mirroring the Python agent.py _synthesize citation-extraction regex.
+// answer.
 var citationRefPattern = regexp.MustCompile(`\[(\d+)\]`)
 
 // answerSystemPrompt instructs the model to treat all retrieved material as
@@ -53,8 +51,8 @@ func omlxBaseURL() string {
 	return defaultOMLXBaseURL
 }
 
-// capRunes truncates s to at most n runes (no ellipsis), mirroring the Python
-// context slice. It is byte-safe on multi-byte UTF-8.
+// capRunes truncates s to at most n runes (no ellipsis). It is byte-safe on
+// multi-byte UTF-8.
 func capRunes(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {
@@ -65,8 +63,7 @@ func capRunes(s string, n int) string {
 
 // boundChunks caps the retrieved results to cfg.AnswerMaxChunks and truncates
 // each chunk's text to cfg.ContextCharsPerChunk runes, so the prefill stays
-// bounded (mirrors the Python BLKCHAIN_ANSWER_MAX_CHUNKS /
-// BLKCHAIN_CONTEXT_CHARS_PER_CHUNK caps via the shared rag.json contract).
+// bounded (BLKCHAIN_ANSWER_MAX_CHUNKS and BLKCHAIN_CONTEXT_CHARS_PER_CHUNK).
 func boundChunks(cfg ragconfig.Config, results []retrieval.Result) []retrieval.Result {
 	if len(results) > cfg.AnswerMaxChunks {
 		results = results[:cfg.AnswerMaxChunks]
@@ -95,7 +92,7 @@ func buildContext(chunks []retrieval.Result) string {
 	blocks := make([]evidence, 0, len(chunks))
 	for i, r := range chunks {
 		trust := "untrusted_corpus"
-		if r.Payload.Source == "web" {
+		if r.Payload.Source == webSource {
 			trust = "untrusted_external"
 		}
 		blocks = append(blocks, evidence{i + 1, trust, r.Payload.Source,
@@ -106,7 +103,7 @@ func buildContext(chunks []retrieval.Result) string {
 }
 
 // buildUserPrompt renders the operator turn: the question plus the numbered
-// sources, mirroring the Python /answer user prompt body.
+// sources.
 func buildUserPrompt(question string, chunks []retrieval.Result) string {
 	questionJSON, _ := json.Marshal(question)
 	return fmt.Sprintf("Question (JSON data):\n%s\n\nSources (JSON data):\n%s\n\nAnswer:", questionJSON, buildContext(chunks))
@@ -128,10 +125,8 @@ func buildMessages(question string, chunks []retrieval.Result) []llms.MessageCon
 // section) with first-seen (i.e. ascending index) order preserved.
 // Out-of-range or unparsable indices are ignored. When the answer cites
 // nothing (no markers, or all out of range), it falls back to citing every
-// retrieved chunk in chunk order. This mirrors the Python agent.py
-// _synthesize citation logic exactly: sorted(cited_indices) then dedup, with
-// the all-fallback when nothing was cited.
-func citationsFromAnswer(answer string, chunks []retrieval.Result) []client.Citation {
+// retrieved chunk in chunk order.
+func citationsFromAnswer(answer string, chunks []retrieval.Result) []citation {
 	indexSet := map[int]bool{}
 	for _, m := range citationRefPattern.FindAllStringSubmatch(answer, -1) {
 		n, err := strconv.Atoi(m[1])
@@ -158,8 +153,8 @@ func citationsFromAnswer(answer string, chunks []retrieval.Result) []client.Cita
 
 // dedupCitations turns a chunk slice into the citation list the SOURCES block
 // renders, deduped by (source, path, section) with order preserved.
-func dedupCitations(chunks []retrieval.Result) []client.Citation {
-	var cits []client.Citation
+func dedupCitations(chunks []retrieval.Result) []citation {
+	var cits []citation
 	seen := map[[3]string]bool{}
 	for _, r := range chunks {
 		key := [3]string{r.Payload.Source, r.Payload.Path, r.Payload.Section}
@@ -167,7 +162,7 @@ func dedupCitations(chunks []retrieval.Result) []client.Citation {
 			continue
 		}
 		seen[key] = true
-		cits = append(cits, client.Citation{
+		cits = append(cits, citation{
 			Source:  r.Payload.Source,
 			Path:    r.Payload.Path,
 			Section: r.Payload.Section,
@@ -176,101 +171,128 @@ func dedupCitations(chunks []retrieval.Result) []client.Citation {
 	return cits
 }
 
-// resolveModel picks the oMLX model: OMLX_MODEL, else the first id discovered
-// via GET {base}/models, else the shared rag.json contract's default_model.
-func resolveModel(baseURL, apiKey string) string {
+// omlxAPIKey is the LLM server's API key from OMLX_API_KEY, "" when unset.
+func omlxAPIKey() string { return strings.TrimSpace(os.Getenv("OMLX_API_KEY")) }
+
+// llmModels lists the LLM server's model ids, bounded by modelsListTimeout.
+func llmModels() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), modelsListTimeout)
+	defer cancel()
+	return modeleval.ListModels(ctx, localHTTP, omlxBaseURL(), omlxAPIKey())
+}
+
+// resolveModel picks the oMLX model when the caller named none: OMLX_MODEL,
+// else the first id the server lists (see listedModel), else cfg's
+// default_model.
+func resolveModel(cfg ragconfig.Config) string {
+	if id := listedModel(); id != "" {
+		return id
+	}
+	return cfg.DefaultModel
+}
+
+// listedModel is the model a turn uses when none is picked and the server
+// answers: OMLX_MODEL, else the first id the server lists. It is "" when
+// neither is known. It may call the LLM server.
+func listedModel() string {
 	if v := strings.TrimSpace(os.Getenv("OMLX_MODEL")); v != "" {
 		return v
 	}
-	if id := discoverModel(baseURL, apiKey); id != "" {
-		return id
-	}
-	return ragconfig.Load().DefaultModel
-}
-
-// discoverModel queries GET {baseURL}/models and returns the first model id, or
-// "" on any failure (the caller then uses the default).
-func discoverModel(baseURL, apiKey string) string {
-	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
-	if err != nil {
-		return ""
-	}
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	hc := &http.Client{Timeout: 5 * time.Second}
-	resp, err := hc.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return ""
-	}
-	var out struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return ""
-	}
-	if len(out.Data) > 0 {
-		return out.Data[0].ID
+	if ids, _ := llmModels(); len(ids) > 0 {
+		return ids[0]
 	}
 	return ""
 }
 
-// newOMLX builds the LangChainGo OpenAI client pointed at oMLX. It uses a
-// custom HTTP client whose transport injects chat_template_kwargs into chat
-// requests (see thinkingOffTransport). LangChainGo has no option for it, and
-// some local models otherwise run away in a reasoning channel on constrained
-// prompts and return empty content.
-func newOMLX() (*openai.LLM, error) {
+// newOMLX builds the LangChainGo OpenAI client pointed at oMLX for model (see
+// resolveModel when it is empty), with a custom
+// HTTP client whose transport shapes each request and bounds each response
+// (see llmTransport).
+func newOMLX(cfg ragconfig.Config, model string) (*openai.LLM, error) {
 	base := omlxBaseURL()
-	key := strings.TrimSpace(os.Getenv("OMLX_API_KEY"))
-	model := resolveModel(base, key)
+	key := omlxAPIKey()
+	if strings.TrimSpace(model) == "" {
+		model = resolveModel(cfg)
+	}
 	hc := &http.Client{
-		Timeout:   requestHTTPTimeout(),
-		Transport: &thinkingOffTransport{base: http.DefaultTransport},
+		Timeout:   cfg.RequestTimeout(),
+		Transport: &llmTransport{base: http.DefaultTransport, keyless: key == ""},
+	}
+	token := key
+	if token == "" {
+		// LangChainGo refuses an empty token and falls back to OPENAI_API_KEY.
+		// A keyless server gets this placeholder, and llmTransport drops the
+		// Authorization header it would carry.
+		token = "no-key"
 	}
 	return openai.New(
 		openai.WithBaseURL(base),
-		openai.WithToken(key),
+		openai.WithToken(token),
 		openai.WithModel(model),
 		openai.WithHTTPClient(hc),
 	)
 }
 
-// thinkingOffTransport injects top-level chat_template_kwargs.enable_thinking=false
-// into POST /chat/completions request bodies. oMLX honors this to disable the
-// model's reasoning channel (which otherwise loops on constrained prompts and
-// returns empty content). Set BLK_ENABLE_THINKING=1 to opt out of the injection.
-type thinkingOffTransport struct{ base http.RoundTripper }
+const (
+	// llmMaxBodyBytes caps a successful LLM response body. An answer is bounded
+	// by the token caps, so this only stops a misbehaving server.
+	llmMaxBodyBytes = 32 << 20
+	// llmMaxErrorBodyBytes caps a failed response's body, whose message
+	// LangChainGo quotes in the error that reaches the terminal.
+	llmMaxErrorBodyBytes = 512
+)
 
-func (t *thinkingOffTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if os.Getenv("BLK_ENABLE_THINKING") == "1" ||
-		req.Body == nil || !strings.HasSuffix(req.URL.Path, "/chat/completions") {
-		return t.base.RoundTrip(req)
+// llmTransport is the LLM client's transport. On POST /chat/completions it
+// injects top-level chat_template_kwargs.enable_thinking=false, which oMLX
+// honors to turn off the model's reasoning channel (it otherwise loops on
+// constrained prompts and returns empty content); LangChainGo has no option for
+// it, and BLK_ENABLE_THINKING=1 skips it. With keyless set it drops the
+// Authorization header. It caps every response body.
+type llmTransport struct {
+	base    http.RoundTripper
+	keyless bool
+}
+
+func (t *llmTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.keyless {
+		req = req.Clone(req.Context())
+		req.Header.Del("Authorization")
 	}
-	raw, err := io.ReadAll(req.Body)
-	req.Body.Close()
+	if os.Getenv("BLK_ENABLE_THINKING") != "1" && req.Body != nil && strings.HasSuffix(req.URL.Path, "/chat/completions") {
+		raw, err := io.ReadAll(req.Body)
+		req.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		var m map[string]any
+		if json.Unmarshal(raw, &m) == nil {
+			if _, ok := m["chat_template_kwargs"]; !ok {
+				m["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
+				if b, e := json.Marshal(m); e == nil {
+					raw = b
+				}
+			}
+		}
+		req.Body = io.NopCloser(strings.NewReader(string(raw)))
+		req.ContentLength = int64(len(raw))
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		return nil, err
 	}
-	var m map[string]any
-	if json.Unmarshal(raw, &m) == nil {
-		if _, ok := m["chat_template_kwargs"]; !ok {
-			m["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
-			if b, e := json.Marshal(m); e == nil {
-				raw = b
-			}
-		}
+	limit := int64(llmMaxBodyBytes)
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		limit = llmMaxErrorBodyBytes
 	}
-	req.Body = io.NopCloser(strings.NewReader(string(raw)))
-	req.ContentLength = int64(len(raw))
-	req.Header.Set("Content-Type", "application/json")
-	return t.base.RoundTrip(req)
+	resp.Body = limitedBody{io.LimitReader(resp.Body, limit), resp.Body}
+	return resp, nil
+}
+
+// limitedBody reads through a limit and closes the underlying body.
+type limitedBody struct {
+	io.Reader
+	io.Closer
 }
 
 // llmUnreachableError is a connection-refused or timeout failure talking to the
@@ -329,16 +351,6 @@ func redactedURL(raw string) string {
 	return u.String()
 }
 
-// requestHTTPTimeout mirrors the blk client timeout for the oMLX stream.
-func requestHTTPTimeout() time.Duration {
-	if v := strings.TrimSpace(os.Getenv("BLKCHAIN_TIMEOUT_SECONDS")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return time.Duration(n) * time.Second
-		}
-	}
-	return 300 * time.Second
-}
-
 // completionTokens extracts the completion-token count from a langchaingo
 // response's GenerationInfo when the model reported it (0 otherwise; streaming
 // responses often omit usage).
@@ -373,44 +385,6 @@ func asInt(v any) int {
 	default:
 		return 0
 	}
-}
-
-// omlxModels queries GET {base}/models and returns every model id, or nil on any
-// failure. It seeds the RAG-mode model picker (V2-BRIEF.md T4).
-func omlxModels() []string {
-	base := omlxBaseURL()
-	key := strings.TrimSpace(os.Getenv("OMLX_API_KEY"))
-	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(base, "/")+"/models", nil)
-	if err != nil {
-		return nil
-	}
-	if key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
-	}
-	hc := &http.Client{Timeout: 5 * time.Second}
-	resp, err := hc.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
-	var out struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
-		return nil
-	}
-	ids := make([]string, 0, len(out.Data))
-	for _, d := range out.Data {
-		if d.ID != "" {
-			ids = append(ids, d.ID)
-		}
-	}
-	return ids
 }
 
 // errRequestTimeout is the one-line wording for a turn that ran out of time.

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestBuiltinDefaultsMatchContractFile(t *testing.T) {
@@ -72,5 +73,16 @@ func repoRootForTest() (string, error) {
 			return "", os.ErrNotExist
 		}
 		d = p
+	}
+}
+
+// A turn is always bounded: a timeout that is not positive falls back to the
+// built-in default.
+func TestRequestTimeoutIsAlwaysBounded(t *testing.T) {
+	def := time.Duration(builtinDefaults().RequestTimeoutSeconds) * time.Second
+	for secs, want := range map[int]time.Duration{30: 30 * time.Second, 0: def, -5: def} {
+		if got := (Config{RequestTimeoutSeconds: secs}).RequestTimeout(); got != want {
+			t.Errorf("RequestTimeout(%d) = %s, want %s", secs, got, want)
+		}
 	}
 }

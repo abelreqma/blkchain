@@ -3,7 +3,6 @@ package modeleval
 import (
 	"fmt"
 	"math"
-	"strings"
 	"time"
 )
 
@@ -31,26 +30,6 @@ func ScoreSanity(scores []*float64) (nonFinite, outOfRange int) {
 		}
 	}
 	return nonFinite, outOfRange
-}
-
-// ProgressBar renders a fixed-width bar: `done/total` of `width` cells filled
-// with `fill`, the rest with `empty`. done is clamped to [0,total]; a
-// non-positive total renders an empty bar (there is no real progress to show).
-func ProgressBar(done, total, width int, fill, empty string) string {
-	if width <= 0 {
-		return ""
-	}
-	filled := 0
-	if total > 0 {
-		if done > total {
-			done = total
-		}
-		if done < 0 {
-			done = 0
-		}
-		filled = done * width / total
-	}
-	return strings.Repeat(fill, filled) + strings.Repeat(empty, width-filled)
 }
 
 // FormatElapsed renders a duration compactly: sub-second as whole ms, otherwise

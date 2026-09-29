@@ -317,7 +317,7 @@ func TestModelsPanelUnloadActiveNeedsTwoPresses(t *testing.T) {
 		t.Errorf("another key should only cancel: armed=%q sel=%q", p.armed, p.rows()[p.sel].name)
 	}
 	m, _ = step(t, m, keyRunes("u"))
-	m, _ = step(t, m, keyRunes("u"))
+	step(t, m, keyRunes("u"))
 	if len(*calls) != 1 || (*calls)[0] != "/admin/api/models/act-model/unload" {
 		t.Errorf("two presses should unload once, calls = %v", *calls)
 	}
@@ -328,7 +328,7 @@ func TestModelsPanelUnloadActiveNeedsTwoPresses(t *testing.T) {
 	d := panelData()
 	d.chat[2].Loaded = true
 	nm, _ := m.Update(modelsDataMsg{data: d})
-	m, _ = step(t, nm.(model), keyRunes("u"))
+	step(t, nm.(model), keyRunes("u"))
 	if len(*calls) != 1 {
 		t.Errorf("unload of an inactive model should take one press, calls = %v", *calls)
 	}
@@ -422,6 +422,19 @@ func TestModelsPanelLayout(t *testing.T) {
 			checkBox(t, fmt.Sprintf("%dx%d", w, h), panelOf(t, m).View(w, h), w, h)
 		}
 	}
+	// A short terminal keeps every row before the title, and says when rows
+	// are scrolled off.
+	if v := panelModel(t, 40, 16).View(); !strings.Contains(v, "web search") || strings.Contains(v, "MODELS") {
+		t.Errorf("40x16 should drop the title to keep every row:\n%s", v)
+	}
+	if v := panelModel(t, 80, 10).View(); !strings.Contains(v, "more lines, up/down to scroll") {
+		t.Errorf("80x10 should say rows are scrolled off:\n%s", v)
+	}
+	// A detail that does not fit drops whole parts, not half of one.
+	if v := panelModel(t, 60, 24).View(); strings.Contains(v, "| ...") || strings.Contains(v, "|...") {
+		t.Errorf("detail was cut inside a part:\n%s", v)
+	}
+
 	m := panelModel(t, 80, 24)
 	view := m.View()
 	for _, name := range []string{"act-model", "hid-model", "idle-model", "embedder", "reranker", "web search"} {
@@ -639,5 +652,198 @@ func TestModelPickerHidesHiddenModels(t *testing.T) {
 	nm, _ := m.Update(msg)
 	if v := nm.(model).View(); !strings.Contains(v, "/models") {
 		t.Errorf("an all-hidden picker should point to /models:\n%s", v)
+	}
+}
+
+// Many toggles in a row start one save each. However the saves are scheduled,
+// the file ends with the newest settings.
+func TestRapidToggleSavesLeaveTheNewestSettings(t *testing.T) {
+	isolateUserDirs(t)
+	toggles := func(m model, n int) (model, []tea.Cmd, modelPrefs) {
+		var cmds []tea.Cmd
+		var last modelPrefs
+		for i := 0; i < n; i++ {
+			last = modelPrefs{Rerank: i%2 == 0, Web: i%3 == 0, Hidden: []string{fmt.Sprint("m", i)}}
+			nm, cmd := m.Update(prefsChangedMsg{prefs: last})
+			m = nm.(model)
+			cmds = append(cmds, cmd)
+		}
+		return m, cmds, last
+	}
+
+	// The oldest save runs last.
+	m, cmds, last := toggles(model{}, 40)
+	for i := len(cmds) - 1; i >= 0; i-- {
+		if msg, ok := cmds[i]().(prefsSavedMsg); !ok || msg.err != nil {
+			t.Fatalf("save %d: %#v", i, msg)
+		}
+	}
+	if got := loadPrefs(); !reflect.DeepEqual(got, last) {
+		t.Fatalf("after saves in reverse order the file holds %+v, want the newest %+v", got, last)
+	}
+
+	// All at once.
+	_, cmds, last = toggles(m, 40)
+	var wg sync.WaitGroup
+	for _, c := range cmds {
+		wg.Add(1)
+		go func() { defer wg.Done(); c() }()
+	}
+	wg.Wait()
+	if got := loadPrefs(); !reflect.DeepEqual(got, last) {
+		t.Fatalf("after concurrent saves the file holds %+v, want the newest %+v", got, last)
+	}
+}
+
+// A panel toggle made while a "/models off <name>" command is in flight
+// survives the command's result, in memory and on disk, and the panel keeps
+// the command's change for its own next toggle.
+func TestModelsArgsKeepsAToggleMadeWhileInFlight(t *testing.T) {
+	argsServer(t)
+	m := newKeyModel(t)
+	m.ragModel = "gemma"
+
+	// The command runs (its network work is done) but its result is not yet in.
+	m.ta.SetValue("/models off qwen-a")
+	nm, cmd := m.submit()
+	m = nm.(model)
+	var done tea.Msg
+	for _, msg := range drain(cmd) {
+		if _, ok := msg.(modelsArgsDoneMsg); ok {
+			done = msg
+		}
+	}
+	if done == nil {
+		t.Fatal("the command produced no result")
+	}
+
+	// Meanwhile the panel turns the reranker off.
+	m.overlay = newModelsPanel(m.prefs, m.currentModel())
+	nm, _ = m.Update(modelsDataMsg{data: panelData()})
+	m = selectRow(t, nm.(model), "reranker")
+	m, _ = step(t, m, keySpace)
+	if m.prefs.Rerank {
+		t.Fatal("the panel toggle did not apply")
+	}
+
+	// The command's result lands.
+	nm, cmd = m.Update(done)
+	m = nm.(model)
+	for _, msg := range drain(cmd) {
+		if _, ok := msg.(prefsSavedMsg); ok {
+			nm, _ := m.Update(msg)
+			m = nm.(model)
+		}
+	}
+	check := func(when string, p modelPrefs) {
+		t.Helper()
+		if p.Rerank || !p.isHidden("qwen-a") {
+			t.Errorf("%s: prefs = %+v, want the reranker off and qwen-a hidden", when, p)
+		}
+	}
+	check("in memory", m.prefs)
+	check("on disk", loadPrefs())
+	check("in the panel", panelOf(t, m).prefs)
+
+	// The panel's next toggle keeps the command's change too.
+	m = selectRow(t, m, "web search")
+	m, _ = step(t, m, keySpace)
+	if p := loadPrefs(); p.Web || !p.isHidden("qwen-a") || p.Rerank {
+		t.Errorf("after the next toggle, on disk = %+v", p)
+	}
+}
+
+// With OMLX_MODEL unset and no model picked, a turn uses the first model the
+// server lists. The status line, the panel's active row, the hide guard, and
+// the unload confirmation follow that model once the list has loaded, and
+// before that nothing is protected.
+func TestActiveModelIsTheFirstListedModel(t *testing.T) {
+	var mu sync.Mutex
+	var unloads []string
+	useDeadServices(t)
+	adminServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/models":
+			fmt.Fprint(w, `{"data":[{"id":"b-model"},{"id":"a-model"}]}`)
+		case r.Method == http.MethodPost:
+			mu.Lock()
+			unloads = append(unloads, r.URL.Path)
+			mu.Unlock()
+		default:
+			fmt.Fprint(w, `{"models":[{"id":"a-model","loaded":true},{"id":"b-model","loaded":true}]}`)
+		}
+	})
+	t.Setenv("OMLX_MODEL", "")
+	m := newKeyModel(t)
+	m.cfg.DefaultModel = "a-model"
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = nm.(model)
+	openPanel := func(m model) model {
+		t.Helper()
+		m, _ = tuiSlash(t, m, "/models")
+		nm, _ := m.Update(fetchModelsCmd())
+		return nm.(model)
+	}
+
+	// Before the list loads: the configured default shows, nothing is active.
+	if s := m.statusLine(); !strings.Contains(s, "a-model") {
+		t.Errorf("status before the list loads = %q, want the configured default", s)
+	}
+	if got := m.activeModel(); got != "" {
+		t.Errorf("activeModel before the list loads = %q, want none", got)
+	}
+	pm := openPanel(m)
+	for _, name := range []string{"a-model", "b-model"} {
+		if st := rowState(t, pm, name); strings.Contains(st, "active") {
+			t.Errorf("before the list loads, %s is %q", name, st)
+		}
+	}
+
+	// The list loads.
+	msg := resolveModelCmd()
+	nm, _ = m.Update(msg)
+	m = nm.(model)
+	if got := m.activeModel(); got != "b-model" {
+		t.Fatalf("activeModel = %q, want b-model, the first listed", got)
+	}
+	if s := m.statusLine(); !strings.Contains(s, "b-model") || strings.Contains(s, "a-model") {
+		t.Errorf("status = %q, want b-model", s)
+	}
+	pm = openPanel(m)
+	if st := rowState(t, pm, "b-model"); !strings.HasPrefix(st, "active") {
+		t.Errorf("b-model state = %q, want active", st)
+	}
+	if st := rowState(t, pm, "a-model"); strings.Contains(st, "active") {
+		t.Errorf("a-model state = %q, want not active", st)
+	}
+	pm = selectRow(t, pm, "b-model")
+	pm, _ = step(t, pm, keySpace)
+	if pm.prefs.isHidden("b-model") {
+		t.Error("the panel hid the model a turn uses")
+	}
+	pm = selectRow(t, pm, "a-model")
+	pm, _ = step(t, pm, keySpace)
+	if !pm.prefs.isHidden("a-model") {
+		t.Error("the panel refused to hide the configured default, which is not in use")
+	}
+	pm = selectRow(t, pm, "b-model")
+	pm, _ = step(t, pm, keyRunes("u"))
+	if v := pm.View(); len(unloads) != 0 || !strings.Contains(v, "press u again") {
+		t.Errorf("one u on b-model: unloads %v, view:\n%s", unloads, v)
+	}
+
+	m, out := tuiSlash(t, m, "/models off b-model")
+	if !strings.Contains(out, "active model") || m.prefs.isHidden("b-model") {
+		t.Errorf("/models off b-model: %q, prefs %+v", out, m.prefs)
+	}
+
+	// A resolved model is kept for the session; a pick overrides it.
+	nm, _ = m.Update(modelResolvedMsg("c-model"))
+	if got := nm.(model).activeModel(); got != "b-model" {
+		t.Errorf("a second resolution changed the active model to %q", got)
+	}
+	m.ragModel = "a-model"
+	if got := m.activeModel(); got != "a-model" {
+		t.Errorf("activeModel with a pick = %q", got)
 	}
 }

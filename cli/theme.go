@@ -18,7 +18,7 @@ import (
 // older raw-ANSI helpers were retired once every caller moved onto these styles.
 
 // c builds a CompleteAdaptiveColor from light/dark hex, ANSI256, and ANSI-16
-// values, per DESIGN-SPEC.md §1.
+// values.
 func c(lHex, l256, l16, dHex, d256, d16 string) lipgloss.CompleteAdaptiveColor {
 	return lipgloss.CompleteAdaptiveColor{
 		Light: lipgloss.CompleteColor{TrueColor: lHex, ANSI256: l256, ANSI: l16},
@@ -26,7 +26,7 @@ func c(lHex, l256, l16, dHex, d256, d16 string) lipgloss.CompleteAdaptiveColor {
 	}
 }
 
-// Palette tokens (V2-BRIEF.md "Black/gray design"). Never set the terminal
+// Palette tokens. Never set the terminal
 // background. Accent is brightness (off-white), reserved for marks only
 // (prompt glyph, blk label, [n] citation index, selected marker, status dot).
 // H2 and Key use Heading instead so color stays under 10% of glyphs.
@@ -46,7 +46,7 @@ var (
 // the off-white default, applied once at init below.
 var slateAccent = c("#3E5C82", "60", "4", "#8AA2C8", "110", "12")
 
-// Styles (DESIGN-SPEC.md §2, restyled per V2-BRIEF.md black/gray palette).
+// Styles.
 var (
 	H1     = lipgloss.NewStyle().Foreground(Heading).Bold(true)
 	H2     = lipgloss.NewStyle().Foreground(Heading).Bold(true)
@@ -61,8 +61,8 @@ var (
 	Prompt = lipgloss.NewStyle().Foreground(Accent).Bold(true)
 )
 
-// scoreStyle bands a relevance score per DESIGN-SPEC.md §3/§6:
-// Success >= 0.85, Warn 0.65-0.84, Muted < 0.65.
+// scoreStyle bands a relevance score: Success >= 0.85, Warn 0.65-0.84,
+// Muted < 0.65.
 func scoreStyle(score float64) lipgloss.Style {
 	switch {
 	case score >= 0.85:
@@ -74,10 +74,10 @@ func scoreStyle(score float64) lipgloss.Style {
 	}
 }
 
-// --- capability detection (DESIGN-SPEC.md §1, §4) ---
+// --- capability detection ---
 
 // GlyphName identifies a themed glyph that has both a unicode and an ASCII
-// rendering (DESIGN-SPEC.md §4).
+// rendering.
 type GlyphName int
 
 const (
@@ -189,8 +189,7 @@ type capabilities struct {
 }
 
 // detectCapabilities is pure given its inputs so it can be unit tested
-// without touching the real environment or a real terminal. Rules
-// (DESIGN-SPEC.md §1, BUILD-BRIEF.md):
+// without touching the real environment or a real terminal. Rules:
 //   - NO_COLOR (any non-empty value) disables color, unless CLICOLOR_FORCE is
 //     also set (CLICOLOR_FORCE wins).
 //   - TERM=dumb or a non-TTY stdout disables color and unicode glyphs.
@@ -222,8 +221,7 @@ func isUTF8Locale(lcAll, lang string) bool {
 	return false
 }
 
-// isTerminalStdout reports whether stdout is a real character device (a TTY),
-// not a pipe or file.
+// isTerminalStdout reports whether stdout is a terminal.
 func isTerminalStdout() bool {
 	return isTerminalFile(os.Stdout)
 }
@@ -299,10 +297,10 @@ func errMark() string {
 	return errStyle(Fail, glyphFor(GlyphErr, useErrUnicode))
 }
 
-// isTerminalFile reports whether f is a real character device (a TTY).
+// isTerminalFile reports whether f is a terminal (not a pipe, a file, or
+// another character device such as /dev/null).
 func isTerminalFile(f *os.File) bool {
-	fi, err := f.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(f.Fd()))
 }
 
 // useColor and useUnicode are decided once at startup and drive Glyph,
@@ -355,7 +353,7 @@ func init() {
 	stderrRenderer = newStderrRenderer(os.Stderr, errCaps, dark)
 
 	// BLK_ACCENT=slate opts into a low-chroma blue accent instead of the
-	// off-white default (V2-BRIEF.md "Black/gray design"). Prompt is
+	// off-white default. Prompt is
 	// recomputed here because it's a package-level var initialized before
 	// init() runs, so it would otherwise bake in the pre-switch Accent value.
 	if os.Getenv("BLK_ACCENT") == "slate" {
@@ -389,7 +387,7 @@ func init() {
 	}
 }
 
-// --- prose wrapping (DESIGN-SPEC.md §2) ---
+// --- prose wrapping ---
 
 // terminalWidth reads the terminal width via golang.org/x/term, defaulting to
 // 80 columns when it can't be determined (non-TTY, error).
@@ -413,9 +411,4 @@ func wrapWidth(termWidth, max int) int {
 		w = 1
 	}
 	return w
-}
-
-// wrap word-wraps prose to fit the terminal width capped at max columns.
-func wrap(s string, max int) string {
-	return lipgloss.NewStyle().Width(wrapWidth(terminalWidth(), max)).Render(s)
 }

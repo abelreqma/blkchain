@@ -11,9 +11,10 @@ a bogus Content-Length and for an oversized body, where the old inline
 would raise (killing the handler thread) or over-allocate.
 """
 import io
+import json
 import unittest
 
-from blkchain.httputil import read_json_body
+from blkchain.httputil import _json_sanitize, read_json_body, send_json
 
 MAX = 1024  # small cap so an "oversized" body is cheap to construct
 
@@ -83,6 +84,45 @@ class ReadJsonBodyTest(unittest.TestCase):
         obj, code, msg = read_json_body(h, MAX)
         self.assertIsNone(code)
         self.assertEqual(obj["k"], "a" * (MAX - 10))
+
+
+class StrictJsonTest(unittest.TestCase):
+    """Responses must be strict JSON: NaN and Inf become null."""
+
+    def test_sanitize_replaces_non_finite(self):
+        obj = {"results": [{"score": float("nan"), "x": 1.0},
+                           {"score": float("inf"), "y": [float("-inf"), 2]}]}
+        clean = _json_sanitize(obj)
+        json.dumps(clean, allow_nan=False)  # raises on any remaining NaN or Inf
+        self.assertIsNone(clean["results"][0]["score"])
+        self.assertIsNone(clean["results"][1]["score"])
+        self.assertIsNone(clean["results"][1]["y"][0])
+        self.assertEqual(clean["results"][0]["x"], 1.0)
+
+    def test_send_json_writes_strict_json(self):
+        class Out:
+            def __init__(self):
+                self.wfile = io.BytesIO()
+                self.status = None
+
+            def send_response(self, code):
+                self.status = code
+
+            def send_header(self, *a):
+                pass
+
+            def end_headers(self):
+                pass
+
+        h = Out()
+        send_json(h, 200, {"scores": [float("nan"), 0.5, float("inf")]})
+
+        def reject(token):
+            raise ValueError(f"non-strict JSON constant {token}")
+
+        body = json.loads(h.wfile.getvalue(), parse_constant=reject)
+        self.assertEqual(h.status, 200)
+        self.assertEqual(body, {"scores": [None, 0.5, None]})
 
 
 if __name__ == "__main__":

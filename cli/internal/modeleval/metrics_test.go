@@ -33,20 +33,6 @@ func TestScoreSanity(t *testing.T) {
 	}
 }
 
-func TestProgressBar(t *testing.T) {
-	got := ProgressBar(2, 4, 4, "#", "-")
-	if got != "##--" {
-		t.Errorf("ProgressBar=%q want %q", got, "##--")
-	}
-	// full and clamp beyond total.
-	if got := ProgressBar(10, 4, 4, "#", "-"); got != "####" {
-		t.Errorf("ProgressBar clamp=%q want %q", got, "####")
-	}
-	if got := ProgressBar(0, 0, 4, "#", "-"); got != "----" {
-		t.Errorf("ProgressBar zero-total=%q want %q", got, "----")
-	}
-}
-
 func TestFormatElapsed(t *testing.T) {
 	if got := FormatElapsed(1500 * time.Millisecond); got != "1.5s" {
 		t.Errorf("FormatElapsed=%q want 1.5s", got)

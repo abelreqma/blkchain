@@ -70,7 +70,7 @@ func commandSpecs() []cmdSpec {
 				"It does not use the LLM server, so it is quick. " +
 				"Use it to see the raw sources, or to find a file to open with blk open. " +
 				"It needs the local services running (blk up).",
-			flags: func(fs *flag.FlagSet) { defineSearchFlags(fs, &searchOpts{}) },
+			flags: func(fs *flag.FlagSet) { defineSearchFlags(fs, &searchOpts{}, loadConfig().TopK) },
 			examples: []string{
 				`blk search "SSRF to cloud metadata"`,
 				`blk search "JWT none algorithm" --top-k 10`,
@@ -109,7 +109,7 @@ func commandSpecs() []cmdSpec {
 		{
 			name: "up", group: hgServices,
 			desc: "start the local services",
-			long: "Starts qdrant (in Docker), then embed_server and the API, and reports each one. " +
+			long: "Starts qdrant (in Docker), then embed_server, and reports each one. " +
 				"Run it before your first search or ask, and after a restart. " +
 				"Services that are already running are left alone. " +
 				"It does not start the LLM server, which you run separately.",
@@ -119,7 +119,7 @@ func commandSpecs() []cmdSpec {
 		{
 			name: "down", group: hgServices,
 			desc: "stop the local services",
-			long: "Stops the API, embed_server, and qdrant. " +
+			long: "Stops embed_server and qdrant. " +
 				"Use it when you are done, to free memory. " +
 				"Your indexed data is kept and comes back the next time you run blk up. " +
 				"The LLM server is not touched.",
@@ -129,7 +129,7 @@ func commandSpecs() []cmdSpec {
 		{
 			name: "status", group: hgServices,
 			desc: "show whether each local service is running",
-			long: "Shows whether qdrant, embed_server, and the API are up, with their ports. " +
+			long: "Shows whether qdrant and embed_server are up, with their ports. " +
 				"It is a quick look and never starts or stops anything. " +
 				"For a fuller check that says what to fix, use blk doctor.",
 			examples: []string{"blk status", "blk doctor"},
@@ -149,7 +149,7 @@ func commandSpecs() []cmdSpec {
 		{
 			name: "doctor", group: hgServices,
 			desc: "check the whole setup and say what to fix",
-			long: "Checks the whole setup and prints a checklist: the project folder, the Python environment, Docker, the three services, the LLM server, and the Hermes wiring. " +
+			long: "Checks the whole setup and prints a checklist: the project folder, the Python environment, Docker, qdrant and embed_server, the LLM server, and the Hermes wiring. " +
 				"It keeps going after a failed check, so you see everything at once. " +
 				"Run it after install, or when something does not work, and follow the hint under each failure.",
 			flags:    func(fs *flag.FlagSet) {},
@@ -159,26 +159,26 @@ func commandSpecs() []cmdSpec {
 		{
 			name: "models", group: hgServices,
 			desc: "check the chat, embedding, and rerank models and their speed",
-			long: "Checks the chat, embedding, and rerank models and times each one. " +
-				"For each it shows whether it is ready and how fast it is. " +
-				"Each model is checked on its own, so one being down does not hide the others. " +
-				"It can take up to a minute when a model is slow to load.",
+			long: "Checks the chat, embedding, and rerank models and shows whether each is ready and how fast it is, each on its own so one being down does not hide the others. " +
+				"It can take up to a minute when a model is slow to load. " +
+				"It also shows the switches set with /models in blk: the reranker when it is off, web search, and the chat models hidden from the model picker. " +
+				"With --json each entry has an enabled field, the chat entry lists the hidden models, and a web entry reports web search.",
 			flags:    func(fs *flag.FlagSet) { defineModelsFlags(fs, new(bool)) },
 			examples: []string{"blk models", "blk models --json"},
 			run:      runModels,
 		},
 		{
 			name: "logs", args: "[service]", group: hgServices,
-			desc: "show a service log (api or embed_server); -f follows it",
+			desc: "show the embed_server log; -f follows it",
 			long: "Prints the last lines of a service log from the project's .run folder. " +
-				"The service is api or embed_server, and api is the default. " +
+				"The only service with a log is embed_server, the default. " +
 				"Use -f to keep following the log until you press Ctrl-C. " +
 				"Logs exist once blk up has started the service.",
 			flags: func(fs *flag.FlagSet) { defineLogsFlags(fs, &logsOpts{}) },
 			examples: []string{
 				"blk logs",
 				"blk logs embed_server -n 100",
-				"blk logs api -f",
+				"blk logs -f",
 			},
 			run: runLogs,
 		},

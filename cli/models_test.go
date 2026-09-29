@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +30,8 @@ func TestRenderReportChatReady(t *testing.T) {
 }
 
 func TestRenderReportUnreachable(t *testing.T) {
-	r := modeleval.ModelReport{Kind: modeleval.KindEmbed, Ready: false, Err: modeleval.ErrUnreachable()}
+	cfg := modeleval.Config{EmbedHealthURL: deadLoopbackURL(t) + "/health", ReadyTimeout: time.Millisecond, ProbeTimeout: time.Second}
+	r := modeleval.ProbeEmbed(context.Background(), cfg)
 	out := renderReport(r)
 	if !strings.Contains(out, "blk up") {
 		t.Errorf("unreachable render should mention `blk up`, got:\n%s", out)
@@ -53,5 +56,96 @@ func TestModelsConfigEmbedURLsFromContract(t *testing.T) {
 	cfg := modelsConfig()
 	if cfg.EmbedHealthURL != base+"/health" || cfg.EmbedURL != base+"/embed" || cfg.RerankURL != base+"/rerank" {
 		t.Errorf("embed URLs not derived from %q: %+v", base, cfg)
+	}
+}
+
+func sampleReports() []modeleval.ModelReport {
+	return []modeleval.ModelReport{
+		{Kind: modeleval.KindChat, Ready: true, Perf: &modeleval.PerfResult{ModelID: "gemma", TokensPerSec: 40, UsageReported: true}},
+		{Kind: modeleval.KindEmbed, Ready: true, Perf: &modeleval.PerfResult{Dim: 1024, MsPerVector: 3}},
+		{Kind: modeleval.KindRerank, Ready: true, Perf: &modeleval.PerfResult{PoolSize: 50, Ms: 300}},
+	}
+}
+
+// blk models shows the /models switches: the reranker off, web search, and the
+// hidden chat models, in words.
+func TestModelsTextShowsTheSwitches(t *testing.T) {
+	noColor(t)
+	p := modelPrefs{Hidden: []string{"qwen-a", "x\x1b]0;t\x07y"}, Rerank: false, Web: true}
+	out := renderModelsText(sampleReports(), p, true)
+	if l := lineWith(out, "rerank"); !strings.Contains(l, "off") {
+		t.Errorf("rerank line lacks off: %q", l)
+	}
+	if l := lineWith(out, "web"); !strings.Contains(l, "on") {
+		t.Errorf("web line = %q, want on", l)
+	}
+	if l := lineWith(out, "hidden"); !strings.Contains(l, "qwen-a") {
+		t.Errorf("hidden line = %q", l)
+	}
+	if strings.Contains(out, "\x07") {
+		t.Errorf("hidden id was not sanitized: %q", out)
+	}
+	out = renderModelsText(sampleReports(), defaultPrefs(), false)
+	if l := lineWith(out, "web"); !strings.Contains(l, "not configured") {
+		t.Errorf("web line = %q, want not configured", l)
+	}
+	if strings.Contains(lineWith(out, "rerank"), "off") || strings.Contains(out, "hidden") {
+		t.Errorf("defaults should show nothing off or hidden:\n%s", out)
+	}
+}
+
+func TestModelsJSONIncludesTheSwitches(t *testing.T) {
+	var buf strings.Builder
+	p := modelPrefs{Hidden: []string{"qwen-a"}, Rerank: false, Web: false}
+	if err := emitReportsJSON(&buf, sampleReports(), p, true); err != nil {
+		t.Fatal(err)
+	}
+	var got []map[string]any
+	if err := json.Unmarshal([]byte(buf.String()), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
+	}
+	byModel := map[string]map[string]any{}
+	for _, r := range got {
+		byModel[r["model"].(string)] = r
+	}
+	if byModel["rerank"]["enabled"] != false || byModel["embed"]["enabled"] != true || byModel["chat"]["enabled"] != true {
+		t.Errorf("enabled fields wrong: %s", buf.String())
+	}
+	if h, _ := byModel["chat"]["hidden"].([]any); len(h) != 1 || h[0] != "qwen-a" {
+		t.Errorf("chat hidden = %v", byModel["chat"]["hidden"])
+	}
+	web := byModel["web"]
+	if web == nil || web["ready"] != true || web["enabled"] != false {
+		t.Errorf("web entry = %v", web)
+	}
+}
+
+// Hidden ids come from the LLM server. C1 controls and DEL in them are escaped
+// in the JSON, so none reaches the terminal raw, and they decode unchanged.
+func TestModelsJSONEscapesControlRunes(t *testing.T) {
+	hostile := []string{"csi\u009b31m", "osc\u009d0;t\u0007", "del\u007f"}
+	var buf strings.Builder
+	if err := emitReportsJSON(&buf, sampleReports(), modelPrefs{Hidden: hostile}, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []rune{0x9b, 0x9d, 0x7f} {
+		if strings.ContainsRune(buf.String(), r) {
+			t.Errorf("U+%04X reached the output raw", r)
+		}
+	}
+	var got []struct {
+		Model  string   `json:"model"`
+		Hidden []string `json:"hidden"`
+	}
+	if err := json.Unmarshal([]byte(buf.String()), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
+	}
+	for _, r := range got {
+		if r.Model == "chat" && strings.Join(r.Hidden, "|") != strings.Join(hostile, "|") {
+			t.Errorf("hidden decoded to %q, want %q", r.Hidden, hostile)
+		}
+	}
+	if !strings.HasSuffix(buf.String(), "]\n") {
+		t.Errorf("output should end with one newline: %q", buf.String()[max(buf.Len()-10, 0):])
 	}
 }

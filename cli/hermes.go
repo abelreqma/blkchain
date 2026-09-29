@@ -13,7 +13,7 @@ const hermesBin = "hermes"
 
 // runHermes runs a one-shot Hermes agent turn with the given prompt. The agent
 // has the blkChain KB tools (via the `blkchain` MCP server) plus its own tools,
-// so this is the "full agent" counterpart to the API's single-shot RAG answer.
+// so this is the "full agent" counterpart to blk ask's single-shot RAG answer.
 //
 // The prompt is passed as a single argv element (never through a shell), so
 // query text cannot inject shell commands.
@@ -28,7 +28,7 @@ func runHermes(args []string) error {
 		return fmt.Errorf("hermes: %q not found on PATH, install Hermes Agent or add it to PATH", hermesBin)
 	}
 
-	fmt.Fprintf(os.Stderr, "%s %s\n", Meta.Render(Glyph(GlyphArrow)+" hermes -z"), Meta.Render(truncate(prompt, 60)))
+	fmt.Fprintf(os.Stderr, "%s %s\n", Meta.Render(Glyph(GlyphArrow)+" hermes -z"), Meta.Render(ellipsize(prompt, 60)))
 	c := exec.Command(path, "-z", prompt)
 	c.Stdin = os.Stdin
 	// A piped Python child block-buffers stdout, so its output would arrive only

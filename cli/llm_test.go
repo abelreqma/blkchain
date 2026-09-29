@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
-	"blkchain/cli/internal/client"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 
@@ -139,7 +142,7 @@ func TestCitationsFallbackDedupesPreservesOrder(t *testing.T) {
 		chunk("web", "http://x", "T", "t4"),
 	}
 	got := citationsFromAnswer("no citations here", chunks)
-	want := []client.Citation{
+	want := []citation{
 		{Source: "kb", Path: "a.md", Section: "S1"},
 		{Source: "kb", Path: "b.md", Section: "S2"},
 		{Source: "web", Path: "http://x", Section: "T"},
@@ -160,5 +163,36 @@ func TestCapRunes(t *testing.T) {
 	}
 	if got := capRunes("hi", 10); got != "hi" {
 		t.Errorf("capRunes(hi,10) = %q, want hi", got)
+	}
+}
+
+// endlessModels serves a /models body that never ends.
+func endlessModels(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"id":"`))
+		chunk := bytes.Repeat([]byte("a"), 64<<10)
+		for {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// Model discovery stops reading a /models body at the cap instead of until the
+// client timeout.
+func TestResolveModelBoundsTheModelsList(t *testing.T) {
+	srv := endlessModels(t)
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "")
+	start := time.Now()
+	if got := resolveModel(ragconfig.Config{DefaultModel: "fallback"}); got != "fallback" {
+		t.Errorf("resolveModel = %q, want the default", got)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("resolveModel read for %s, want it to stop at the body cap", d)
 	}
 }

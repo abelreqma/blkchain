@@ -1,21 +1,24 @@
 package main
 
 import (
+	"blkchain/cli/internal/modeleval"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
 // llmadmin.go talks to the LLM server's admin API (oMLX): list the chat models
 // with their loaded state, and load or unload one. A server without the admin
-// API still lists its models through the OpenAI-style list (omlxModels), with
+// API still lists its models through the OpenAI-style list (llmModels), with
 // the loaded state unknown.
 
 const (
@@ -28,14 +31,46 @@ const (
 	modelUnloadTimeout = 30 * time.Second
 )
 
-// modelsHTTP is the one client for the /models calls: the LLM admin API and
-// embed_server's health. Each call bounds itself with a context deadline.
-var modelsHTTP = &http.Client{}
+// localHTTP is the one client for short calls to the local services: the
+// health probes and the model lists. Each call bounds itself with a context
+// deadline.
+var localHTTP = &http.Client{}
+
+// llmAdminHTTP is the client for the LLM admin API. It never follows a
+// redirect, so the API key goes only to the origin of OMLX_BASE_URL. Each call
+// bounds itself with a context deadline.
+var llmAdminHTTP = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
 
 var (
 	errLLMAuth        = errors.New("the LLM server refused the request: set OMLX_API_KEY to its API key")
 	errLLMUnsupported = errors.New("not supported by this LLM server")
+	errLLMRedirect    = errors.New("the LLM server redirected the request, which blk does not follow")
 )
+
+// llmWarn prints a one-line warning about the LLM server. The TUI points it at
+// its own output so the line lands above the input.
+var llmWarn = func(line string) { fmt.Fprintln(os.Stderr, line) }
+
+// insecureKeyOnce limits warnInsecureKey to one warning per process.
+var insecureKeyOnce sync.Once
+
+// warnInsecureKey warns, once per process, when the API key is about to go
+// over plain http to a host that is not loopback. It never blocks the request.
+func warnInsecureKey(base, key string) {
+	u, err := url.Parse(base)
+	if key == "" || err != nil || u.Scheme != "http" {
+		return
+	}
+	host := u.Hostname()
+	if ip := net.ParseIP(host); strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback()) {
+		return
+	}
+	insecureKeyOnce.Do(func() {
+		llmWarn(Caut.Render(Glyph(GlyphWarn)) + " " + Meta.Render("OMLX_API_KEY is being sent unencrypted to "+oneLine(sanitizeTerminal(host))))
+	})
+}
 
 // chatModel is one chat model the LLM server serves. Known is false when the
 // server has no admin API, so Loaded and Loading say nothing.
@@ -59,17 +94,20 @@ func llmAdminBase() string {
 }
 
 // llmAdminDo sends one admin request and returns the capped body of a 2xx
-// reply. A 401 or 403 is errLLMAuth, a 404 is errLLMUnsupported, and any other
-// status is one sanitized line with the start of the body.
+// reply. A 401 or 403 is errLLMAuth, a 404 is errLLMUnsupported, a 3xx is
+// errLLMRedirect, and any other status is one sanitized line with the start of
+// the body, the API key in it replaced by [redacted].
 func llmAdminDo(ctx context.Context, method, path string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, method, llmAdminBase()+path, nil)
 	if err != nil {
 		return nil, err
 	}
-	if key := strings.TrimSpace(os.Getenv("OMLX_API_KEY")); key != "" {
+	key := omlxAPIKey()
+	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	resp, err := modelsHTTP.Do(req)
+	warnInsecureKey(omlxBaseURL(), key)
+	resp, err := llmAdminHTTP.Do(req)
 	if errors.Is(err, context.DeadlineExceeded) {
 		return nil, fmt.Errorf("LLM server at %s did not answer in time", llmAdminBase())
 	}
@@ -89,15 +127,22 @@ func llmAdminDo(ctx context.Context, method, path string) ([]byte, error) {
 		return nil, errLLMAuth
 	case resp.StatusCode == http.StatusNotFound:
 		return nil, errLLMUnsupported
+	case resp.StatusCode >= 300 && resp.StatusCode <= 399:
+		return nil, errLLMRedirect
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
-		detail := ellipsize(strings.Join(strings.Fields(sanitizeTerminal(string(body))), " "), 120)
+		text := string(body)
+		if key != "" {
+			text = strings.ReplaceAll(text, key, "[redacted]")
+		}
+		detail := ellipsize(strings.Join(strings.Fields(sanitizeTerminal(text)), " "), 120)
 		return nil, fmt.Errorf("LLM server error %d: %s", resp.StatusCode, detail)
 	}
 	return body, nil
 }
 
 // fetchChatModels lists the chat models. admin reports whether the admin API
-// answered; without it the list comes from omlxModels with the state unknown.
+// answered; without it the list comes from the OpenAI-style list with the
+// state unknown.
 // Models of other types (embedding and so on) are left out.
 func fetchChatModels(ctx context.Context) (models []chatModel, admin bool, err error) {
 	body, err := llmAdminDo(ctx, http.MethodGet, "/admin/api/models")
@@ -116,7 +161,8 @@ func fetchChatModels(ctx context.Context) (models []chatModel, admin bool, err e
 		err = errLLMUnsupported // answered, but not with the oMLX admin shape
 	}
 	if errors.Is(err, errLLMUnsupported) {
-		for _, id := range omlxModels() {
+		ids, _ := modeleval.ListModels(ctx, llmAdminHTTP, omlxBaseURL(), omlxAPIKey())
+		for _, id := range ids {
 			models = append(models, chatModel{ID: id})
 		}
 		return models, false, nil

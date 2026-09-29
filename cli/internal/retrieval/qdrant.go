@@ -40,9 +40,8 @@ func buildHybridQuery(collection, denseName, sparseName, sparseModel, query stri
 }
 
 // buildFilter translates a simple {field: value} map into a Qdrant Filter of
-// must-match keyword conditions, mirroring the Python single-valued payload
-// filter in blkchain/api.py's _build_filter. Returns nil for an empty or nil
-// map so an unfiltered query carries no Filter.
+// must-match keyword conditions, one value per field. Returns nil for an empty
+// or nil map so an unfiltered query carries no Filter.
 func buildFilter(filter map[string]any) *qdrant.Filter {
 	if len(filter) == 0 {
 		return nil

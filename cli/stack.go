@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,31 +14,22 @@ import (
 	"time"
 )
 
-// stack.go is a native Go reimplementation of scripts/stack.sh (`blk
-// up|down|status`), preserving its behavior: paths, the qdrant container
-// lifecycle, the two resident Python services (embed_server, api), the
-// Tavily token handoff, and detached/child-process semantics. See
-// scripts/stack.sh for the shell version this ports (kept in place; not
-// removed by this change).
+// stack.go is `blk up|down|status`: the qdrant container lifecycle and the
+// resident Python embed_server, started detached so it outlives blk.
 
 // qdrantContainer is the fixed docker container name for the vector store.
 const qdrantContainer = "blkchain-qdrant"
 
-// pyService describes one of the two resident Python services the stack
-// manages, in the order stack.sh starts them (embed_server, then api).
+// pyService describes a resident Python service the stack manages.
 type pyService struct {
 	name   string
 	module string
 	port   int
 }
 
-var (
-	embedServerSvc = pyService{name: "embed_server", module: "blkchain.embed_server", port: 8100}
-	apiSvc         = pyService{name: "api", module: "blkchain.api", port: 8200}
-)
+var embedServerSvc = pyService{name: "embed_server", module: "blkchain.embed_server", port: 8100}
 
-// runDir returns <root>/.run, creating it if necessary (mirrors stack.sh's
-// RUN="$ROOT/.run"; mkdir -p "$RUN").
+// runDir returns <root>/.run, creating it private if necessary.
 func runDir(root string) (string, error) {
 	dir := filepath.Join(root, ".run")
 	if err := privateDir(dir); err != nil {
@@ -47,12 +39,12 @@ func runDir(root string) (string, error) {
 }
 
 // pidFilePath and logFilePath are the per-service files under <root>/.run
-// stack.sh reads/writes (<name>.pid, <name>.log).
+// (<name>.pid, <name>.log).
 func pidFilePath(root, name string) string { return filepath.Join(root, ".run", name+".pid") }
 func logFilePath(root, name string) string { return filepath.Join(root, ".run", name+".log") }
 
-// venvPython is <root>/.venv/bin/python, the interpreter stack.sh/start_mcp.sh
-// run resident services and the MCP server with.
+// venvPython is <root>/.venv/bin/python, the interpreter the resident service
+// and `blk add` run with.
 func venvPython(root string) string { return filepath.Join(root, ".venv", "bin", "python") }
 
 // --- health checks ---
@@ -60,29 +52,36 @@ func venvPython(root string) string { return filepath.Join(root, ".venv", "bin",
 const qdrantURL = "http://127.0.0.1:6333/"
 
 // healthURL builds the URL polled to decide whether a resident service at
-// port is up (mirrors stack.sh's health(): curl -m 2 http://127.0.0.1:$1/health).
+// port is up.
 func healthURL(port int) string {
 	return fmt.Sprintf("http://127.0.0.1:%d/health", port)
 }
 
-var httpTimeout = 2 * time.Second
+const httpTimeout = 2 * time.Second
 
-// httpGet performs a GET with the 2s timeout stack.sh's curl -m 2 uses,
-// returning the status code and body. err is non-nil only on a transport
-// failure (connection refused, timeout, DNS, ...).
+// maxHealthBodyBytes caps how much of a health reply is read.
+const maxHealthBodyBytes = 1 << 20
+
+// httpGet performs a GET with a 2s timeout, returning the status code and at most maxHealthBodyBytes of the body. err is
+// non-nil only on a transport failure (connection refused, timeout, DNS, ...).
 func httpGet(url string) (status int, body string, err error) {
-	client := &http.Client{Timeout: httpTimeout}
-	resp, err := client.Get(url)
+	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	resp, err := localHTTP.Do(req)
 	if err != nil {
 		return 0, "", err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxHealthBodyBytes))
 	return resp.StatusCode, string(b), nil
 }
 
 // isHealthyStatus reports whether a status code counts as healthy: any
-// 2xx/3xx (BUILD-BRIEF.md's health() spec).
+// 2xx/3xx.
 func isHealthyStatus(status int) bool {
 	return status >= 200 && status < 400
 }
@@ -94,49 +93,17 @@ func health(port int) bool {
 }
 
 // qhealth reports whether qdrant is reachable and its root response mentions
-// "qdrant" — mirrors stack.sh's qhealth() (curl | grep -q qdrant).
+// "qdrant".
 func qhealth() bool {
 	_, body, err := httpGet(qdrantURL)
 	return err == nil && strings.Contains(body, "qdrant")
-}
-
-// --- Tavily token resolution ---
-
-// resolveTavilyToken is the pure decision behind tavilyToken: the environment
-// wins if set; otherwise fall back to zshLookup. Factored out so the env-set
-// branch is unit-testable without shelling out to zsh. The token value itself
-// must never be logged — callers report only whether one was found.
-func resolveTavilyToken(envVal string, zshLookup func() string) string {
-	if envVal != "" {
-		return envVal
-	}
-	if zshLookup == nil {
-		return ""
-	}
-	return zshLookup()
-}
-
-// tavilyTokenFromZsh mirrors stack.sh's fallback:
-// zsh -ic 'print -rn -- ${TAVILY_SETUP_TOKEN:-}'
-// (a login/interactive shell so it picks up the operator's own zsh env files).
-func tavilyTokenFromZsh() string {
-	out, err := exec.Command("zsh", "-ic", "print -rn -- ${TAVILY_SETUP_TOKEN:-}").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// tavilyToken resolves the Tavily web-search token exactly like stack.sh.
-func tavilyToken() string {
-	return resolveTavilyToken(os.Getenv("TAVILY_SETUP_TOKEN"), tavilyTokenFromZsh)
 }
 
 // --- qdrant container management ---
 
 // containerNamePresent is the pure parsing logic behind qdrantContainerExists:
 // an exact (not substring) line match against `docker ps -a --format
-// '{{.Names}}'` output, mirroring `grep -qx`.
+// '{{.Names}}'` output.
 func containerNamePresent(output, name string) bool {
 	for _, line := range strings.Split(output, "\n") {
 		if strings.TrimSpace(line) == name {
@@ -157,9 +124,9 @@ func qdrantContainerExists() (bool, error) {
 }
 
 // dockerRunQdrantArgs builds the `docker run` argv that creates the qdrant
-// container fresh, mirroring stack.sh/start_qdrant.sh exactly: name, restart
-// policy, both ports bound to loopback only, and the persistent storage
-// volume under <root>/data/qdrant_storage.
+// container fresh: name, restart policy, both ports bound to loopback only,
+// the persistent storage volume under <root>/data/qdrant_storage, and the image
+// pinned by digest.
 func dockerRunQdrantArgs(root string) []string {
 	return []string{
 		"run", "-d", "--name", qdrantContainer, "--restart", "unless-stopped",
@@ -171,9 +138,8 @@ func dockerRunQdrantArgs(root string) []string {
 
 // --- resident Python service start/stop ---
 
-// pythonPath builds the PYTHONPATH value stack.sh's start_py sets:
-// PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" — the project root first, with
-// any existing PYTHONPATH preserved after it.
+// pythonPath builds the resident service's PYTHONPATH: the project root first,
+// with any existing PYTHONPATH preserved after it.
 func pythonPath(root, existing string) string {
 	if existing == "" {
 		return root
@@ -181,46 +147,50 @@ func pythonPath(root, existing string) string {
 	return root + ":" + existing
 }
 
-// buildChildEnv builds the environment for a detached resident service:
-// the current process environment with PYTHONPATH and TAVILY_SETUP_TOKEN
-// replaced (never duplicated), mirroring stack.sh exporting both before
-// backgrounding the child.
-func buildChildEnv(root, tavily string) []string {
-	env := make([]string, 0, len(os.Environ())+2)
-	existingPP := ""
-	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "PYTHONPATH=") {
-			existingPP = strings.TrimPrefix(e, "PYTHONPATH=")
-			continue
-		}
-		if strings.HasPrefix(e, "TAVILY_SETUP_TOKEN=") {
-			continue
-		}
-		env = append(env, e)
-	}
-	env = append(env, "PYTHONPATH="+pythonPath(root, existingPP), "TAVILY_SETUP_TOKEN="+tavily)
-	return env
+// buildChildEnv builds the environment for a detached resident service: the
+// current process environment with PYTHONPATH replaced (never duplicated) and
+// without the web-search key, which only blk reads.
+func buildChildEnv(root string) []string {
+	env := stripEnv(stripEnv(os.Environ(), "PYTHONPATH"), tavilyAPIKeyEnv)
+	return append(env, "PYTHONPATH="+pythonPath(root, os.Getenv("PYTHONPATH")))
 }
 
-// readPid reads an integer pid from a stack .pid file.
+// maxPid is the largest pid readPid accepts (the Linux pid_max ceiling).
+const maxPid = 4194304
+
+// readPid reads the pid a stack .pid file records. The file must be a regular
+// file, not a symlink, of at most 32 bytes that holds a decimal pid above 1 and
+// at most maxPid, with one optional trailing newline. Anything else is no pid.
 func readPid(path string) (int, bool) {
-	data, err := os.ReadFile(path)
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > 32 {
+		return 0, false
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return 0, false
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 33))
+	if err != nil || len(data) > 32 {
+		return 0, false
+	}
+	s := strings.TrimSuffix(string(data), "\n")
+	if s == "" || strings.Trim(s, "0123456789") != "" {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(s)
+	if err != nil || pid <= 1 || pid > maxPid {
 		return 0, false
 	}
 	return pid, true
 }
 
 // startPy starts a resident Python service if it isn't already healthy,
-// detached so it survives `blk` exiting (Setpgid mimics stack.sh's
-// nohup ... &), logging stdout+stderr to <root>/.run/<name>.log and recording
-// its pid to <root>/.run/<name>.pid, then polls health for up to 90s —
-// mirrors stack.sh's start_py().
-func startPy(root string, svc pyService, tavily string) {
+// detached so it survives `blk` exiting (its own process group), logging
+// stdout and stderr to <root>/.run/<name>.log and recording its pid to
+// <root>/.run/<name>.pid, then polls health for up to 90s.
+func startPy(root string, svc pyService) {
 	if health(svc.port) {
 		printSvcLine(true, svc.name, "already up", svc.port)
 		return
@@ -241,7 +211,7 @@ func startPy(root string, svc pyService, tavily string) {
 
 	cmd := exec.Command(python, "-m", svc.module)
 	cmd.Dir = root
-	cmd.Env = buildChildEnv(root, tavily)
+	cmd.Env = buildChildEnv(root)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -267,22 +237,46 @@ func startPy(root string, svc pyService, tavily string) {
 	}
 }
 
-// stopPy stops a resident service: kill the pidfile's pid, falling back to
-// `pkill -f <name>` if that fails, then remove the pidfile — mirrors
-// stack.sh's stop_py().
-func stopPy(root, name string) {
-	pidPath := pidFilePath(root, name)
-	if pid, ok := readPid(pidPath); ok && syscall.Kill(pid, syscall.SIGTERM) == nil {
-		os.Remove(pidPath)
-		fmt.Printf("  %s %s\n", OK.Render(Glyph(GlyphOK)), Body.Render(name+": stopped"))
+// stopService stops a resident service by the pid its pid file records, and
+// only after runsService confirms that pid is still the service blk started,
+// so a pid the system has since given to another process is never signaled.
+// Only that one pid is signaled, never a process group. With no valid pid
+// file it signals nothing and says so; a stale pid file is removed.
+func stopService(root string, svc pyService) {
+	pidPath := pidFilePath(root, svc.name)
+	pid, ok := readPid(pidPath)
+	if !ok {
+		if health(svc.port) {
+			fmt.Printf("  %s %s\n", Caut.Render(Glyph(GlyphWarn)), Body.Render(unmanagedNote(svc)))
+			return
+		}
+		fmt.Printf("  %s %s\n", Fail.Render(Glyph(GlyphErr)), Body.Render(svc.name+": not running (no valid pid file)"))
 		return
 	}
-	if err := exec.Command("pkill", "-f", name).Run(); err == nil {
+	if !runsService(root, pid, svc.module) || syscall.Kill(pid, syscall.SIGTERM) != nil {
 		os.Remove(pidPath)
-		fmt.Printf("  %s %s\n", OK.Render(Glyph(GlyphOK)), Body.Render(name+": stopped"))
+		fmt.Printf("  %s %s\n", Fail.Render(Glyph(GlyphErr)), Body.Render(svc.name+": not running"))
 		return
 	}
-	fmt.Printf("  %s %s\n", Fail.Render(Glyph(GlyphErr)), Body.Render(name+": not running"))
+	os.Remove(pidPath)
+	fmt.Printf("  %s %s\n", OK.Render(Glyph(GlyphOK)), Body.Render(svc.name+": stopped"))
+}
+
+// unmanagedNote is the one line blk down and blk status print when svc's port
+// answers but it has no valid pid file, so blk cannot tell which process to
+// stop. It names the command that finds the process.
+func unmanagedNote(svc pyService) string {
+	return fmt.Sprintf("%s: :%d answers but there is no valid pid file; find the process with lsof -nP -iTCP:%d -sTCP:LISTEN",
+		svc.name, svc.port, svc.port)
+}
+
+// runsService reports whether process pid is the service blk started: its
+// argument vector is exactly the project's venv python, -m, and module.
+// processArgs keeps the argument boundaries, so one argument that merely
+// contains "-m module" does not match.
+func runsService(root string, pid int, module string) bool {
+	args, err := processArgs(pid)
+	return err == nil && len(args) == 3 && args[0] == venvPython(root) && args[1] == "-m" && args[2] == module
 }
 
 // --- themed line helpers ---
@@ -297,27 +291,23 @@ func printSvcFail(name, detail string) {
 
 // --- up / down / status ---
 
-// runStackUp brings the stack up: qdrant, then embed_server, then api —
-// mirrors stack.sh's `up` case exactly.
-func runStackUp(root string) error {
+// runStackUp brings the stack up: qdrant, then embed_server. The tavily line
+// reports whether blk itself has the web-search key that ask reads.
+func runStackUp(root string) {
 	fmt.Println(H1.Render("blk up") + "  " + Meta.Render("starting the stack"))
 
 	upQdrant(root)
-	token := tavilyToken()
-	startPy(root, embedServerSvc, token)
-	startPy(root, apiSvc, token)
+	startPy(root, embedServerSvc)
 
-	if token != "" {
+	if tavilyKey() != "" {
 		fmt.Printf("  %s %s\n", OK.Render(Glyph(GlyphOK)), Body.Render("tavily: ")+Meta.Render("web fallback enabled"))
 	} else {
 		fmt.Printf("  %s %s\n", Caut.Render(Glyph(GlyphWarn)), Body.Render("tavily: ")+Meta.Render("token not found (web fallback off)"))
 	}
-	return nil
 }
 
 // upQdrant brings up the qdrant container: skip if already healthy, start
-// the existing container if one exists, otherwise create it fresh — mirrors
-// stack.sh's `up` case's qdrant branch.
+// the existing container if one exists, otherwise create it fresh.
 func upQdrant(root string) {
 	if qhealth() {
 		printSvcLine(true, "qdrant", "already up", 6333)
@@ -339,29 +329,33 @@ func upQdrant(root string) {
 	}
 }
 
-// runStackDown stops the stack: api, then embed_server, then qdrant —
-// mirrors stack.sh's `down` case exactly.
-func runStackDown(root string) error {
+// runStackDown stops the stack: embed_server, then qdrant.
+func runStackDown(root string) {
 	fmt.Println(H1.Render("blk down") + "  " + Meta.Render("stopping the stack"))
 
-	stopPy(root, apiSvc.name)
-	stopPy(root, embedServerSvc.name)
+	stopService(root, embedServerSvc)
 
 	if err := exec.Command("docker", "stop", qdrantContainer).Run(); err != nil {
 		fmt.Printf("  %s %s\n", Fail.Render(Glyph(GlyphErr)), Body.Render("qdrant: ")+Meta.Render("not running"))
 	} else {
 		fmt.Printf("  %s %s\n", OK.Render(Glyph(GlyphOK)), Body.Render("qdrant: stopped"))
 	}
-	return nil
 }
 
-// runStackStatus prints the up/down state of all three services — mirrors
-// stack.sh's `status` case exactly.
-func runStackStatus(root string) error {
+// runStackStatus prints the up/down state of qdrant and embed_server.
+func runStackStatus(root string) {
 	printStatusLine("qdrant", qhealth(), 6333)
-	printStatusLine("embed_server", health(embedServerSvc.port), embedServerSvc.port)
-	printStatusLine("api", health(apiSvc.port), apiSvc.port)
-	return nil
+	printServiceStatus(root, embedServerSvc)
+}
+
+// printServiceStatus prints svc's up/down line, and when it is up without a
+// valid pid file, the one line that says so.
+func printServiceStatus(root string, svc pyService) {
+	up := health(svc.port)
+	printStatusLine(svc.name, up, svc.port)
+	if _, ok := readPid(pidFilePath(root, svc.name)); up && !ok {
+		fmt.Printf("  %s %s\n", Caut.Render(Glyph(GlyphWarn)), Meta.Render(unmanagedNote(svc)))
+	}
 }
 
 func printStatusLine(name string, up bool, port int) {
@@ -372,8 +366,7 @@ func printStatusLine(name string, up bool, port int) {
 	fmt.Printf("  %s %s %s\n", check(up), Body.Render(pad(name+":", 13)), Meta.Render(fmt.Sprintf("%s (:%d)", state, port)))
 }
 
-// runStack dispatches `blk up|down|status` to the native implementation
-// above, replacing the old shell-out to scripts/stack.sh.
+// runStack dispatches `blk up|down|status`.
 func runStack(cmd string) error {
 	root, err := projectRoot()
 	if err != nil {
@@ -384,12 +377,13 @@ func runStack(cmd string) error {
 	}
 	switch cmd {
 	case "up":
-		return runStackUp(root)
+		runStackUp(root)
 	case "down":
-		return runStackDown(root)
+		runStackDown(root)
 	case "status":
-		return runStackStatus(root)
+		runStackStatus(root)
 	default:
 		return fmt.Errorf("stack: unknown command %q", cmd)
 	}
+	return nil
 }

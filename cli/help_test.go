@@ -31,7 +31,7 @@ var wordingDescs = map[string]string{
 	"health":     "check qdrant, embed_server, and the LLM",
 	"doctor":     "check the whole setup and say what to fix",
 	"models":     "check the chat, embedding, and rerank models and their speed",
-	"logs":       "show a service log (api or embed_server); -f follows it",
+	"logs":       "show the embed_server log; -f follows it",
 	"hermes":     "run one Hermes agent turn with the knowledge-base tools",
 	"gateway":    "set up and start the Hermes gateway for agent mode",
 	"mcp":        "serve the knowledge base to Hermes over MCP (stdio)",
@@ -667,5 +667,96 @@ func TestCompletionScriptsParse(t *testing.T) {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Errorf("%s -n rejected the completion script: %v\n%s", sh.bin, err, out)
 		}
+	}
+}
+
+// collapse joins s's words with single spaces, so wrapped help text compares
+// with the line it came from.
+func collapse(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// A slash command that is also a command-line command reads its description
+// from commandSpecs, so the command-line help, /help, the palette, the plain
+// REPL /help, and the zsh completion all say the same thing. /models is the one
+// slash command with its own text, because it does more than blk models.
+func TestSharedCommandWordingHasOneSource(t *testing.T) {
+	noColor(t)
+	usage := renderUsage(88)
+	block := collapse(helpBlock(200))
+	repl := collapse(captureStdout(t, replHelp))
+	zsh := zshCompletion()
+	for _, name := range []string{"ask", "search", "open", "up", "down", "status", "health", "doctor", "models", "logs", "hermes"} {
+		spec, ok := lookupCommand(name)
+		if !ok {
+			t.Fatalf("no spec for %q", name)
+		}
+		if lineWith(usage, spec.desc) == "" {
+			t.Errorf("%s: the usage lacks %q", name, spec.desc)
+		}
+		if !strings.Contains(collapse(renderCommandHelp(spec, 88)), spec.desc) {
+			t.Errorf("%s: blk help %s lacks %q", name, name, spec.desc)
+		}
+		if !strings.Contains(zsh, name+":"+zshEscape(spec.desc)) {
+			t.Errorf("%s: zsh completion lacks %q", name, spec.desc)
+		}
+		if name == "models" {
+			continue
+		}
+		slash, ok := slashCommand(name)
+		if !ok || slash.desc != spec.desc {
+			t.Errorf("/%s registry text = %q, want %q", name, slash.desc, spec.desc)
+		}
+		if items := filterCommands(slashCommands(), name); len(items) == 0 || items[0].desc != spec.desc {
+			t.Errorf("/%s palette text differs from %q", name, spec.desc)
+		}
+		if !strings.Contains(block, spec.desc) {
+			t.Errorf("/help lacks /%s's %q", name, spec.desc)
+		}
+		if !strings.Contains(repl, spec.desc) {
+			t.Errorf("the plain REPL /help lacks /%s's %q", name, spec.desc)
+		}
+	}
+	const models = "see all models; turn them on or off, load or unload"
+	if c, _ := slashCommand("models"); c.desc != models || !strings.Contains(block, models) || !strings.Contains(repl, models) {
+		t.Errorf("/models text = %q, want %q in the registry, /help, and the plain REPL", c.desc, models)
+	}
+}
+
+// /mode, /agent, and /rag read the same way in the TUI and the plain REPL.
+func TestModeCommandsShareOneWording(t *testing.T) {
+	noColor(t)
+	repl := collapse(captureStdout(t, replHelp))
+	for name, want := range map[string]string{
+		"mode":  "switch between knowledge-base answers and the Hermes agent (also /agent, /rag)",
+		"agent": "use the Hermes agent for questions",
+		"rag":   "answer from the knowledge base",
+	} {
+		if c, _ := slashCommand(name); c.desc != want {
+			t.Errorf("/%s registry text = %q, want %q", name, c.desc, want)
+		}
+		if !strings.Contains(repl, "/"+name+" "+want) {
+			t.Errorf("the plain REPL /help lacks /%s %q:\n%s", name, want, repl)
+		}
+	}
+	if block := collapse(helpBlock(200)); !strings.Contains(block, "/mode switch between knowledge-base answers") {
+		t.Errorf("/help lacks the /mode row:\n%s", block)
+	}
+}
+
+// The log command's argument is a service everywhere.
+func TestLogsArgumentIsAService(t *testing.T) {
+	noColor(t)
+	if c, _ := slashCommand("logs"); c.args != "[service]" {
+		t.Errorf("/logs args = %q, want [service]", c.args)
+	}
+	for label, out := range map[string]string{
+		"/help":            helpBlock(200),
+		"plain REPL /help": captureStdout(t, replHelp),
+	} {
+		if !strings.Contains(out, "/logs [service]") || strings.Contains(out, "[name]") {
+			t.Errorf("%s: want /logs [service]:\n%s", label, out)
+		}
+	}
+	if spec, _ := lookupCommand("logs"); spec.args != "[service]" {
+		t.Errorf("blk logs args = %q", spec.args)
 	}
 }

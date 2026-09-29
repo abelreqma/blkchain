@@ -13,11 +13,8 @@ import (
 	"github.com/tmc/langchaingo/llms/openai"
 )
 
-// gradePromptTemplate is the SINGLE SOURCE OF TRUTH for the grading
-// instruction. It mirrors the Python _grade prompt in blkchain/agent.py
-// verbatim: ask for one JSON verdict object, no prose, with sufficient/
-// rewrite/use_web fields. Keep this in sync with agent.py if that prompt
-// changes.
+// gradePromptTemplate is the grading instruction: ask for one JSON verdict
+// object, no prose, with sufficient/rewrite/use_web fields.
 const gradePromptTemplate = "You are grading whether the retrieved context below is sufficient to answer the " +
 	"user's offensive-security question. Respond with ONLY one JSON object, no prose, " +
 	"in exactly this shape: {\"sufficient\": true or false, \"rewrite\": \"<improved search " +
@@ -26,18 +23,17 @@ const gradePromptTemplate = "You are grading whether the retrieved context below
 	"information a local knowledge base would not contain.\n\n" +
 	"Question: %s\n\nRetrieved context:\n%s"
 
-// grade is the parsed sufficiency verdict from the grading call, mirroring
-// the dict Python's _parse_grade returns.
+// grade is the parsed sufficiency verdict from the grading call.
 type grade struct {
 	Sufficient bool
 	Rewrite    string
 	UseWeb     bool
 }
 
-// parseGrade mirrors Python's _parse_grade exactly: take the substring from
-// the first '{' to the last '}' (tolerating chatter/prose around the JSON
-// object), parse it as JSON, and fall back to the all-false/empty default on
-// any failure (missing braces, malformed JSON, or unexpected shape).
+// parseGrade takes the substring from the first '{' to the last '}'
+// (tolerating chatter/prose around the JSON object), parses it as JSON, and
+// falls back to the all-false/empty default on any failure (missing braces,
+// malformed JSON, or unexpected shape).
 func parseGrade(raw string) grade {
 	def := grade{Sufficient: false, Rewrite: "", UseWeb: false}
 
@@ -59,12 +55,10 @@ func parseGrade(raw string) grade {
 }
 
 // gradeContext runs one non-streaming oMLX call to grade whether the
-// retrieved chunks are sufficient to answer query, mirroring Python's
-// _grade. The numbered context block reuses buildContext (llm.go), the same
-// rendering _format_context does in agent.py. oMLX occasionally returns a
-// response with no choices at all; retry once before giving up, matching the
-// Python _chat retry loop. The error return is only populated when both
-// attempts fail to produce usable choices.
+// retrieved chunks are sufficient to answer query. The numbered context block
+// reuses buildContext (llm.go). oMLX occasionally returns a response with no
+// choices at all, so it retries once before giving up. The error return is
+// only populated when both attempts fail to produce usable choices.
 func gradeContext(ctx context.Context, l *openai.LLM, cfg ragconfig.Config, query string, chunks []retrieval.Result) (grade, error) {
 	contextText := "(no results retrieved)"
 	if len(chunks) > 0 {

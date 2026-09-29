@@ -14,8 +14,8 @@ import (
 // ~/.hermes/.env with API_SERVER_ENABLED=true and API_SERVER_KEY=<secret>, then
 // launches `hermes gateway`.
 //
-// Security: the secret is read from OMLX_API (falling back to OMLX_API_KEY),
-// preferring the process env, then the project .env. It is never written to
+// Security: the secret is read from OMLX_API (falling back to OMLX_API_KEY) in
+// the environment, which holds the project .env too. It is never written to
 // stdout/stderr, argv, or logs — only key names are printed. ~/.hermes/.env is
 // upserted (existing lines, comments, and order preserved) and written atomically
 // with 0600 perms; a single backup is kept when a value actually changes.
@@ -111,65 +111,29 @@ func runGateway(args []string) error {
 	return nil
 }
 
-// hermesEnvPath returns ~/.hermes/.env, honoring HERMES_HOME (matching doctor.go).
+// hermesEnvPath returns Hermes's .env (see hermesHome).
 func hermesEnvPath() (string, error) {
-	home := strings.TrimSpace(os.Getenv("HERMES_HOME"))
-	if home == "" {
-		h, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("gateway: cannot resolve home dir: %w", err)
-		}
-		home = filepath.Join(h, ".hermes")
+	home, err := hermesHome()
+	if err != nil {
+		return "", fmt.Errorf("gateway: cannot resolve home dir: %w", err)
 	}
 	return filepath.Join(home, ".env"), nil
 }
 
-// resolveGatewaySecret finds the gateway secret, preferring the process env over
-// the project .env, and OMLX_API over OMLX_API_KEY. It returns the value, a
-// human-readable source label (never the value), and an error naming the var to
-// set if nothing is found. The value is never included in the error.
+// resolveGatewaySecret finds the gateway secret in the environment, which
+// already holds the project .env (loadProjectEnv), preferring OMLX_API over
+// OMLX_API_KEY. It returns the value, the variable's name (never the value),
+// and an error naming the var to set if nothing is found. The value is never
+// included in the error.
 func resolveGatewaySecret(root string) (value, source string, err error) {
 	for _, key := range []string{"OMLX_API", "OMLX_API_KEY"} {
 		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 			return v, key, nil
 		}
 	}
-	if data, rerr := os.ReadFile(filepath.Join(root, ".env")); rerr == nil {
-		for _, key := range []string{"OMLX_API", "OMLX_API_KEY"} {
-			if v, ok := parseDotenvValue(data, key); ok && v != "" {
-				return v, key + " (.env)", nil
-			}
-		}
-	}
 	return "", "", fmt.Errorf(
 		"gateway: no oMLX key found, set OMLX_API (or OMLX_API_KEY) in the environment or in %s",
 		filepath.Join(root, ".env"))
-}
-
-// parseDotenvValue reads a KEY=value from a .env byte slice: it skips comments
-// and blanks, tolerates a leading `export `, trims surrounding whitespace, and
-// strips one layer of matching single or double quotes. The last occurrence wins.
-func parseDotenvValue(data []byte, key string) (string, bool) {
-	value, found := "", false
-	for _, raw := range strings.Split(string(data), "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimPrefix(line, "export ")
-		k, v, ok := strings.Cut(line, "=")
-		if !ok || strings.TrimSpace(k) != key {
-			continue
-		}
-		v = strings.TrimSpace(v)
-		if len(v) >= 2 {
-			if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
-				v = v[1 : len(v)-1]
-			}
-		}
-		value, found = v, true
-	}
-	return value, found
 }
 
 // upsertEnvLines returns existing with each update applied: an existing `KEY=...`

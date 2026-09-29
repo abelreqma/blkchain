@@ -20,21 +20,21 @@ func fakeRoot(t *testing.T) string {
 	return root
 }
 
-// fakeAPILog creates <root>/.run/api.log under a fake project root.
-func fakeAPILog(t *testing.T) {
+// fakeServiceLog creates <root>/.run/embed_server.log under a fake project root.
+func fakeServiceLog(t *testing.T) {
 	t.Helper()
 	root := fakeRoot(t)
 	if err := os.MkdirAll(filepath.Join(root, ".run"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".run", "api.log"), []byte("line\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".run", "embed_server.log"), []byte("line\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestRunLogsFollowCtrlCIsNotAnError(t *testing.T) {
 	skipIfSigintIgnored(t)
-	fakeAPILog(t)
+	fakeServiceLog(t)
 	fakeBinOnPath(t, "tail", interruptScript)
 	var err error
 	var stdout string
@@ -52,7 +52,7 @@ func TestRunLogsFollowCtrlCIsNotAnError(t *testing.T) {
 }
 
 func TestRunLogsFollowSanitizesTailOutput(t *testing.T) {
-	fakeAPILog(t)
+	fakeServiceLog(t)
 	fakeBinOnPath(t, "tail", evilScriptBody)
 
 	var err error
@@ -62,4 +62,17 @@ func TestRunLogsFollowSanitizesTailOutput(t *testing.T) {
 	}
 	assertClean(t, "stdout", stdout, "out-visible-tail")
 	assertClean(t, "stderr", stderr, "err-visible-tail")
+}
+
+// blk logs shows embed_server's log by default, and api is no longer a log.
+func TestRunLogsDefaultsToEmbedServer(t *testing.T) {
+	fakeServiceLog(t)
+	var err error
+	out := captureStdout(t, func() { err = runLogs(nil) })
+	if err != nil || !strings.Contains(out, "line") {
+		t.Errorf("runLogs() = %q, %v, want the embed_server log", out, err)
+	}
+	if err := runLogs([]string{"api"}); err == nil {
+		t.Error("runLogs(api) succeeded, want an unknown-service error")
+	}
 }

@@ -12,8 +12,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// attach.go is the @file attach + /init ambient-context features (V2-BRIEF.md
-// T5). @ (or /attach) opens a file picker overlay that injects a file's bounded
+// attach.go is the @file attach and /init ambient-context features. @ (or
+// /attach) opens a file picker overlay that injects a file's bounded
 // text into the NEXT prompt; /init loads ./.blk/context.md as ambient session
 // context. All file reads are zero-trust: size-bounded and read as text only.
 
@@ -132,8 +132,8 @@ func newFilePicker(dir string, width int) filePicker {
 	p := filePicker{dir: dir, width: width}
 	p.all = readDirEntries(dir)
 	items := fileItems(p.all, "")
-	w := clampWidth(width-6, 30, 72)
-	p.list = newCompactList(items, w, clampHeight(len(items), 10), fileRow)
+	w := clamp(width-6, 30, 72)
+	p.list = newCompactList(items, w, clamp(len(items), 1, 10), fileRow)
 	return p
 }
 
@@ -188,7 +188,7 @@ func fileItems(all []fileEntry, query string) []list.Item {
 func (p filePicker) refilter() filePicker {
 	items := fileItems(p.all, p.query)
 	p.list.SetItems(items)
-	p.list.SetHeight(clampHeight(len(items), 10))
+	p.list.SetHeight(clamp(len(items), 1, 10))
 	p.list.Select(0)
 	return p
 }
@@ -285,6 +285,6 @@ func (p filePicker) View(width, height int) string {
 	}
 	return overlayBox(overlaySpec{
 		title: "ATTACH FILE",
-		wantW: 72, wantRows: 2 + clampHeight(len(p.list.Items()), 10), minRows: 5, body: body,
+		wantW: 72, wantRows: 2 + clamp(len(p.list.Items()), 1, 10), minRows: 5, body: body,
 	}, width, height)
 }

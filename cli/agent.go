@@ -15,14 +15,13 @@ import (
 	"time"
 )
 
-// agent.go is the AGENT-mode client (V2-BRIEF.md "Hermes API server contract"
-// and "Agent fallback"). It connects blk directly to the hermes-agent for full
+// agent.go is the AGENT-mode client. It connects blk directly to the hermes-agent for full
 // agentic turns (tools, web, memory, skills), preferring the HTTP+SSE gateway
 // and falling back to the `hermes chat --format stream-json` subprocess when the
 // gateway is not running. RAG mode (llm.go) is untouched.
 
 const (
-	// defaultHermesAPIURL is the local hermes gateway (V2-BRIEF.md Env).
+	// defaultHermesAPIURL is the local hermes gateway.
 	defaultHermesAPIURL = "http://127.0.0.1:8642"
 	// agentHealthTimeout bounds the gateway /health probe so a down gateway is
 	// detected quickly rather than stalling the turn.
@@ -53,12 +52,11 @@ const (
 // deltas / commentary / the model id / the terminal final text; tool carries the
 // tool name for tool activity (with text = "running"|"done"|"failed").
 type agentEvent struct {
-	kind        agentEventKind
-	text        string
-	tool        string
-	err         error
-	tokens      int // completion tokens from run.completed usage (0 if absent)
-	totalTokens int
+	kind   agentEventKind
+	text   string
+	tool   string
+	err    error
+	tokens int // completion tokens from run.completed usage (0 if absent)
 }
 
 // --- config ---
@@ -199,7 +197,7 @@ func StreamAgent(ctx context.Context, sessionID, message, model, reasoning strin
 
 // parseAgentSSE reads a Server-Sent Events stream and calls onEvent for each
 // mapped event. It is pure with respect to IO (reads from r), so it is unit
-// tested with synthetic streams. Per the SSE spec and V2-BRIEF.md it accumulates
+// tested with synthetic streams. Per the SSE spec it accumulates
 // event:/data: lines, dispatches on a blank line, and skips lines starting with
 // ':' (keepalive comments).
 func parseAgentSSE(r io.Reader, onEvent func(agentEvent)) error {
@@ -300,7 +298,6 @@ func mapAgentEvent(event, data string) (agentEvent, bool) {
 			Usage struct {
 				CompletionTokens int `json:"completion_tokens"`
 				OutputTokens     int `json:"output_tokens"`
-				TotalTokens      int `json:"total_tokens"`
 			} `json:"usage"`
 		}
 		_ = json.Unmarshal([]byte(data), &d)
@@ -308,7 +305,7 @@ func mapAgentEvent(event, data string) (agentEvent, bool) {
 		if ct == 0 {
 			ct = d.Usage.OutputTokens
 		}
-		return agentEvent{kind: agentTerminal, tokens: ct, totalTokens: d.Usage.TotalTokens}, true
+		return agentEvent{kind: agentTerminal, tokens: ct}, true
 
 	case "run.failed":
 		var d struct {
@@ -461,7 +458,7 @@ func parseAgentJSONLine(line string) (agentEvent, bool) {
 			e = fmt.Errorf("hermes exited with code %d", raw.ExitCode)
 		}
 		// hermes emits the final answer as "text"; "final_response" is honored
-		// too (V2-BRIEF.md). The caller uses this only when no text streamed, so
+		// too. The caller uses this only when no text streamed, so
 		// duplicating the streamed answer here is harmless.
 		return agentEvent{kind: agentTerminal, text: firstNonEmpty(raw.FinalResponse, raw.Text), err: e}, true
 	}

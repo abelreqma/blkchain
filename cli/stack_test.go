@@ -1,9 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHealthURL(t *testing.T) {
@@ -12,7 +21,6 @@ func TestHealthURL(t *testing.T) {
 		want string
 	}{
 		{8100, "http://127.0.0.1:8100/health"},
-		{8200, "http://127.0.0.1:8200/health"},
 	}
 	for _, c := range cases {
 		if got := healthURL(c.port); got != c.want {
@@ -44,40 +52,9 @@ func TestIsHealthyStatus(t *testing.T) {
 	}
 }
 
-func TestResolveTavilyToken_EnvSet(t *testing.T) {
-	// When the environment already has the token, it must win outright — the
-	// zsh fallback must never even be invoked (never spawn a shell needlessly,
-	// and never risk it clobbering a value the caller already resolved).
-	called := false
-	zsh := func() string {
-		called = true
-		return "from-zsh"
-	}
-	got := resolveTavilyToken("from-env", zsh)
-	if got != "from-env" {
-		t.Errorf("resolveTavilyToken() = %q, want %q", got, "from-env")
-	}
-	if called {
-		t.Error("resolveTavilyToken() called the zsh fallback despite env being set")
-	}
-}
-
-func TestResolveTavilyToken_EnvEmptyFallsBackToZsh(t *testing.T) {
-	got := resolveTavilyToken("", func() string { return "from-zsh" })
-	if got != "from-zsh" {
-		t.Errorf("resolveTavilyToken() = %q, want %q", got, "from-zsh")
-	}
-}
-
-func TestResolveTavilyToken_NilFallback(t *testing.T) {
-	if got := resolveTavilyToken("", nil); got != "" {
-		t.Errorf("resolveTavilyToken() = %q, want empty", got)
-	}
-}
-
 func TestPidFilePath(t *testing.T) {
-	got := pidFilePath("/root", "api")
-	want := "/root/.run/api.pid"
+	got := pidFilePath("/root", "embed_server")
+	want := "/root/.run/embed_server.pid"
 	if got != want {
 		t.Errorf("pidFilePath() = %q, want %q", got, want)
 	}
@@ -153,20 +130,22 @@ func TestPythonPath(t *testing.T) {
 	}
 }
 
+// The resident service gets the project root first on PYTHONPATH, once, and
+// never the web-search key, which only blk itself reads.
 func TestBuildChildEnv(t *testing.T) {
 	t.Setenv("PYTHONPATH", "/existing")
-	env := buildChildEnv("/root", "secret-token")
+	t.Setenv("TAVILY_SETUP_TOKEN", "secret-token")
+	env := buildChildEnv("/root")
 
-	var pythonPathVal, tavilyVal string
-	pythonPathCount, tavilyCount := 0, 0
+	var pythonPathVal string
+	pythonPathCount := 0
 	for _, e := range env {
 		if strings.HasPrefix(e, "PYTHONPATH=") {
 			pythonPathVal = strings.TrimPrefix(e, "PYTHONPATH=")
 			pythonPathCount++
 		}
 		if strings.HasPrefix(e, "TAVILY_SETUP_TOKEN=") {
-			tavilyVal = strings.TrimPrefix(e, "TAVILY_SETUP_TOKEN=")
-			tavilyCount++
+			t.Error("buildChildEnv() passes TAVILY_SETUP_TOKEN to the service")
 		}
 	}
 	if pythonPathCount != 1 {
@@ -175,17 +154,11 @@ func TestBuildChildEnv(t *testing.T) {
 	if pythonPathVal != "/root:/existing" {
 		t.Errorf("buildChildEnv() PYTHONPATH = %q, want %q", pythonPathVal, "/root:/existing")
 	}
-	if tavilyCount != 1 {
-		t.Errorf("buildChildEnv() has %d TAVILY_SETUP_TOKEN entries, want exactly 1 (no duplicates)", tavilyCount)
-	}
-	if tavilyVal != "secret-token" {
-		t.Errorf("buildChildEnv() TAVILY_SETUP_TOKEN = %q, want %q", tavilyVal, "secret-token")
-	}
 }
 
 func TestBuildChildEnv_NoExistingPythonPath(t *testing.T) {
 	t.Setenv("PYTHONPATH", "")
-	env := buildChildEnv("/root", "")
+	env := buildChildEnv("/root")
 	found := false
 	for _, e := range env {
 		if e == "PYTHONPATH=/root" {
@@ -199,24 +172,313 @@ func TestBuildChildEnv_NoExistingPythonPath(t *testing.T) {
 
 func TestReadPid(t *testing.T) {
 	dir := t.TempDir()
-	path := dir + "/svc.pid"
+	path := filepath.Join(dir, "svc.pid")
 
 	if _, ok := readPid(path); ok {
 		t.Error("readPid() on missing file should return ok=false")
 	}
+	for _, good := range []struct {
+		data string
+		want int
+	}{{"12345\n", 12345}, {"12345", 12345}, {"2", 2}, {"4194304\n", 4194304}} {
+		if err := os.WriteFile(path, []byte(good.data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if pid, ok := readPid(path); !ok || pid != good.want {
+			t.Errorf("readPid(%q) = (%d, %v), want (%d, true)", good.data, pid, ok, good.want)
+		}
+	}
+	for _, bad := range []string{
+		"", "\n", "0", "1", "-1", "-0", "+5", "12abc", "1 2", " 12", "12 ", "12\n\n", "12\r\n",
+		"not-a-number\n", "4194305", "99999999999999999999", strings.Repeat("0", 31) + "12",
+	} {
+		if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if pid, ok := readPid(path); ok {
+			t.Errorf("readPid(%q) = %d, want no valid pid", bad, pid)
+		}
+	}
 
-	if err := os.WriteFile(path, []byte("12345\n"), 0o644); err != nil {
+	// A symlink to a valid pid file, and a directory, are not pid files.
+	target := filepath.Join(dir, "target.pid")
+	if err := os.WriteFile(target, []byte("12345\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pid, ok := readPid(path)
-	if !ok || pid != 12345 {
-		t.Errorf("readPid() = (%d, %v), want (12345, true)", pid, ok)
-	}
-
-	if err := os.WriteFile(path, []byte("not-a-number\n"), 0o644); err != nil {
+	link := filepath.Join(dir, "link.pid")
+	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := readPid(path); ok {
-		t.Error("readPid() on malformed pidfile should return ok=false")
+	if pid, ok := readPid(link); ok {
+		t.Errorf("readPid(symlink) = %d, want no valid pid", pid)
+	}
+	if pid, ok := readPid(dir); ok {
+		t.Errorf("readPid(directory) = %d, want no valid pid", pid)
+	}
+}
+
+// sleeperEnv makes the test binary a stand-in child for the stop tests: started
+// with it set, the binary sleeps instead of running the tests, whatever its
+// argument vector says. The tests only ever signal these children.
+const sleeperEnv = "BLK_TEST_SLEEPER"
+
+func init() {
+	if os.Getenv(sleeperEnv) == "1" {
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+}
+
+// startSleeper starts the test's own child with exactly the argument vector
+// argv, so it reads like whatever process argv names. It returns the child,
+// already waited on in the background.
+func startSleeper(t *testing.T, argv ...string) (*exec.Cmd, <-chan struct{}) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &exec.Cmd{Path: exe, Args: argv, Env: append(os.Environ(), sleeperEnv+"=1")}
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { c.Wait(); close(done) }()
+	t.Cleanup(func() { c.Process.Kill(); <-done })
+	return c, done
+}
+
+// fakePkill puts a pkill on PATH that records any call, so a test can prove the
+// stop path never falls back to matching command lines.
+func fakePkill(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	log := filepath.Join(dir, "pkill.log")
+	script := "#!/bin/sh\necho \"$@\" >> " + log + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "pkill"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	return log
+}
+
+func writePidFile(t *testing.T, root, name string, pid int) {
+	t.Helper()
+	writePidText(t, root, name, strconv.Itoa(pid)+"\n")
+}
+
+func writePidText(t *testing.T, root, name, text string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, ".run"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pidFilePath(root, name), []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// testSvc is embed_server on port, so a test never probes the real :8100.
+func testSvc(port int) pyService {
+	return pyService{name: embedServerSvc.name, module: embedServerSvc.module, port: port}
+}
+
+// deadPort is a loopback port nothing listens on.
+func deadPort(t *testing.T) int {
+	t.Helper()
+	u, err := url.Parse(deadLoopbackURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+// liveHealthPort serves GET /health on a loopback port and returns the port.
+func liveHealthPort(t *testing.T) int {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"ok"}`))
+	}))
+	t.Cleanup(srv.Close)
+	u, _ := url.Parse(srv.URL)
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+func TestStopServiceSignalsTheRecordedMatchingPid(t *testing.T) {
+	root := t.TempDir()
+	svc := testSvc(deadPort(t))
+	c, done := startSleeper(t, venvPython(root), "-m", svc.module)
+	writePidFile(t, root, svc.name, c.Process.Pid)
+
+	out := captureStdout(t, func() { stopService(root, svc) })
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the recorded embed_server pid was not stopped")
+	}
+	if !strings.Contains(out, "embed_server: stopped") {
+		t.Errorf("output = %q, want it to say stopped", out)
+	}
+	if _, err := os.Stat(pidFilePath(root, svc.name)); !os.IsNotExist(err) {
+		t.Errorf("pid file still present after stop: %v", err)
+	}
+}
+
+// Only a process whose argument vector is exactly the venv python, -m, and the
+// module is signaled. Text that merely contains the module, another python,
+// and a longer module name are all left alone.
+func TestStopServiceNeverSignalsAnotherProcess(t *testing.T) {
+	log := fakePkill(t)
+	for name, argv := range map[string]func(root string) []string{
+		"one argument holding the text": func(root string) []string {
+			return []string{venvPython(root), "-m blkchain.embed_server"}
+		},
+		"python -c with the text": func(root string) []string {
+			return []string{"python3", "-c", "pass", "notes about -m blkchain.embed_server usage"}
+		},
+		"another python": func(root string) []string {
+			return []string{"/usr/bin/python3", "-m", "blkchain.embed_server"}
+		},
+		"a longer module name": func(root string) []string {
+			return []string{venvPython(root), "-m", "blkchain.embed_server_evil"}
+		},
+		"an extra argument": func(root string) []string {
+			return []string{venvPython(root), "-m", "blkchain.embed_server", "--evil"}
+		},
+		"some other module": func(root string) []string {
+			return []string{venvPython(root), "-m", "some.other_module"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			svc := testSvc(deadPort(t))
+			c, done := startSleeper(t, argv(root)...)
+			writePidFile(t, root, svc.name, c.Process.Pid)
+
+			out := captureStdout(t, func() { stopService(root, svc) })
+			select {
+			case <-done:
+				t.Fatal("a process that is not embed_server was signaled")
+			case <-time.After(300 * time.Millisecond):
+			}
+			if !strings.Contains(out, "embed_server: not running") {
+				t.Errorf("output = %q, want it to say not running", out)
+			}
+		})
+	}
+	if b, _ := os.ReadFile(log); len(b) > 0 {
+		t.Errorf("pkill was run: %q", b)
+	}
+}
+
+// A pid file that is not a plain pid of another process (0, 1, a negative
+// value, or a symlink to a matching pid) signals nothing.
+func TestStopServiceRefusesInvalidPidFiles(t *testing.T) {
+	log := fakePkill(t)
+	for _, text := range []string{"0\n", "1\n", "-1\n"} {
+		root := t.TempDir()
+		writePidText(t, root, embedServerSvc.name, text)
+		out := captureStdout(t, func() { stopService(root, testSvc(deadPort(t))) })
+		if !strings.Contains(out, "embed_server: not running (no valid pid file)") {
+			t.Errorf("pid file %q: output = %q, want no valid pid file", text, out)
+		}
+	}
+
+	root := t.TempDir()
+	svc := testSvc(deadPort(t))
+	c, done := startSleeper(t, venvPython(root), "-m", svc.module)
+	target := filepath.Join(t.TempDir(), "elsewhere.pid")
+	if err := os.WriteFile(target, []byte(strconv.Itoa(c.Process.Pid)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".run"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, pidFilePath(root, svc.name)); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() { stopService(root, svc) })
+	select {
+	case <-done:
+		t.Fatal("a pid read through a symlinked pid file was signaled")
+	case <-time.After(300 * time.Millisecond):
+	}
+	if !strings.Contains(out, "no valid pid file") {
+		t.Errorf("symlinked pid file: output = %q, want no valid pid file", out)
+	}
+	if b, _ := os.ReadFile(log); len(b) > 0 {
+		t.Errorf("pkill was run: %q", b)
+	}
+}
+
+func TestStopServiceWithoutPidFileDoesNothing(t *testing.T) {
+	root := t.TempDir()
+	log := fakePkill(t)
+	out := captureStdout(t, func() { stopService(root, testSvc(deadPort(t))) })
+	if !strings.Contains(out, "embed_server: not running (no valid pid file)") {
+		t.Errorf("output = %q, want it to say not running", out)
+	}
+	if b, _ := os.ReadFile(log); len(b) > 0 {
+		t.Errorf("pkill was run with no pid file: %q", b)
+	}
+}
+
+// With no valid pid file but the port answering, blk down and blk status say
+// so on one line and name the lsof command that finds the process. Nothing is
+// signaled.
+func TestNoPidFileButPortAnswersPointsToLsof(t *testing.T) {
+	log := fakePkill(t)
+	port := liveHealthPort(t)
+	svc := testSvc(port)
+	want := fmt.Sprintf("lsof -nP -iTCP:%d -sTCP:LISTEN", port)
+
+	root := t.TempDir()
+	down := captureStdout(t, func() { stopService(root, svc) })
+	status := captureStdout(t, func() { printServiceStatus(root, svc) })
+	for name, out := range map[string]string{"down": down, "status": status} {
+		var hits []string
+		for _, ln := range strings.Split(out, "\n") {
+			if strings.Contains(ln, want) {
+				hits = append(hits, ln)
+			}
+		}
+		if len(hits) != 1 || !strings.Contains(hits[0], "no valid pid file") {
+			t.Errorf("%s output = %q, want one line naming the missing pid file and %q", name, out, want)
+		}
+	}
+	if strings.Contains(down, "stopped") {
+		t.Errorf("down output = %q, must not claim a stop", down)
+	}
+	if b, _ := os.ReadFile(log); len(b) > 0 {
+		t.Errorf("pkill was run: %q", b)
+	}
+
+	// With a valid pid file, status says nothing about lsof.
+	c, _ := startSleeper(t, venvPython(root), "-m", svc.module)
+	writePidFile(t, root, svc.name, c.Process.Pid)
+	if out := captureStdout(t, func() { printServiceStatus(root, svc) }); strings.Contains(out, "lsof") {
+		t.Errorf("status with a valid pid file = %q, want no lsof hint", out)
+	}
+}
+
+func TestHTTPGetBoundsTheBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("qdrant "))
+		w.Write(bytes.Repeat([]byte("x"), 4<<20))
+	}))
+	defer srv.Close()
+	status, body, err := httpGet(srv.URL)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("httpGet: status %d err %v", status, err)
+	}
+	if len(body) > maxHealthBodyBytes || !strings.HasPrefix(body, "qdrant") {
+		t.Errorf("body is %d bytes, want the start of it, at most %d", len(body), maxHealthBodyBytes)
 	}
 }

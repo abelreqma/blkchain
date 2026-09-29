@@ -12,17 +12,13 @@ dependencies = [
   # local MLX embedder + reranker serving
   "mlx-embeddings==0.1.0",
   "mlx-lm==0.31.3",
-  # LLM client, tokenization, PDF, web search
+  # LLM client (eval judge), tokenization, PDF
   "openai==3.19.2",
   "tiktoken==0.14.0",
   "pypdf==6.19.0",
-  "tavily-python==0.8.4",
   "requests==2.34.2",
-  "httpx==0.28.1",
   "numpy==2.5.3",
   "transformers==5.17.0",  # tokenizer-only (reranker); no torch
-  # Hermes MCP server
-  "mcp==2.2.0",
   "deepeval==4.2.6",
 ]
 
