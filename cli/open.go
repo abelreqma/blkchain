@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -13,21 +12,33 @@ import (
 // be absolute or relative to the project root, so a `Path` printed by
 // `blk search` (e.g. sources/foo.md) can be opened verbatim.
 func runOpen(args []string) error {
-	fs := flag.NewFlagSet("open", flag.ContinueOnError)
-	edit := fs.Bool("edit", false, "open in $EDITOR instead of the pager")
-	if err := fs.Parse(reorder(args, nil)); err != nil {
+	var edit bool
+	fs := newFlagSet("open")
+	defineOpenFlags(fs, &edit)
+	if err := parseFlags(fs, reorder(args, nil)); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return errors.New("open: give me a file path, e.g.  blk open sources/notes/ssrf.md")
+		return missingArg("open", "missing file path", "open sources/notes/ssrf.md")
 	}
-	return openFile(fs.Arg(0), *edit)
+	return openFile(fs.Arg(0), edit)
+}
+
+// defineOpenFlags declares `blk open`'s flags.
+func defineOpenFlags(fs *flag.FlagSet, edit *bool) {
+	fs.BoolVar(edit, "edit", false, "open in your editor ($EDITOR) instead of the pager")
 }
 
 // openFile resolves path (absolute, or relative to CWD then project root) and
-// opens it. When edit is true it uses $EDITOR; otherwise $PAGER, falling back
+// opens it. An http(s) URL only prints the web notice. When edit is true it uses $EDITOR; otherwise $PAGER, falling back
 // to less. The file path is passed as an argv element, never via a shell.
 func openFile(path string, edit bool) error {
+	// A web result is never launched or fetched: say so and show the URL, the
+	// same answer the TUI /open gives.
+	if isWebURL(path) {
+		fmt.Println(openWebNotice(path))
+		return nil
+	}
 	resolved, err := resolveSourcePath(path)
 	if err != nil {
 		return err
@@ -42,9 +53,21 @@ func openFile(path string, edit bool) error {
 
 	bin, lookErr := exec.LookPath(viewer)
 	if lookErr != nil {
-		return fmt.Errorf("open: %q not found — set $%s", viewer, pagerOrEditor(edit))
+		return fmt.Errorf("open: %q not found, set $%s", viewer, pagerOrEditor(edit))
 	}
-	c := exec.Command(bin, resolved)
+	// A CWD-relative path can start with "-" or "+" and would reach the viewer
+	// as an option (less -oX, vi +cmd). An absolute path always starts with "/".
+	abs, err := filepath.Abs(resolved)
+	if err != nil {
+		return fmt.Errorf("open: %w", err)
+	}
+	return runViewer(bin, []string{abs})
+}
+
+// runViewer runs the pager or editor on the terminal. It is a variable so tests
+// can capture the argv.
+var runViewer = func(bin string, args []string) error {
+	c := exec.Command(bin, args...)
 	c.Stdout, c.Stderr, c.Stdin = os.Stdout, os.Stderr, os.Stdin
 	return c.Run()
 }

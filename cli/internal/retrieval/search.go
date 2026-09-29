@@ -21,7 +21,7 @@ const defaultQdrantPort = 6334
 // could not be reached at all. It mirrors cli/internal/client.UnreachableError's
 // hint so callers get the same actionable guidance regardless of which
 // engine path served them.
-var ErrUnreachable = errors.New("blkChain retrieval services are not reachable — start them with `blk up`")
+var ErrUnreachable = errors.New("blkChain retrieval services are not reachable, start them with `blk up`")
 
 // Client is a Go-native hybrid retrieval client: it talks to embed_server
 // (dense embeddings and cross-encoder rerank) and Qdrant (hybrid dense+sparse
@@ -30,6 +30,10 @@ type Client struct {
 	cfg        ragconfig.Config
 	qc         *qdrant.Client
 	collection string
+
+	// SkipRerank makes Search skip the cross-encoder and keep the hybrid (RRF)
+	// order and scores. The caller decides it; this package reads no settings.
+	SkipRerank bool
 }
 
 // New constructs a Client for the given collection. It does not dial Qdrant
@@ -72,8 +76,10 @@ func splitHostPort(addr string) (string, int) {
 // Search retrieves the top-scoring chunks for query: it embeds the query,
 // runs a hybrid dense+sparse RRF query against Qdrant to build a candidate
 // pool, reranks that pool with the cross-encoder, and returns the top topK
-// results sorted by rerank score. If topK <= 0, cfg.TopK is used. An empty
-// candidate pool is not an error: it returns an empty, non-nil slice.
+// results sorted by rerank score. With SkipRerank it makes no rerank call and
+// returns the top topK in hybrid order with their RRF scores. If topK <= 0,
+// cfg.TopK is used. An empty candidate pool is not an error: it returns an
+// empty, non-nil slice.
 func (c *Client) Search(ctx context.Context, query string, topK int, filter map[string]any) ([]Result, error) {
 	if topK <= 0 {
 		topK = c.cfg.TopK
@@ -116,6 +122,9 @@ func (c *Client) Search(ctx context.Context, query string, topK int, filter map[
 			},
 		}
 		texts[i] = text
+	}
+	if c.SkipRerank {
+		return results[:min(topK, len(results))], nil
 	}
 
 	scores, err := rerank(ctx, c.cfg.EmbedServerURL, query, texts)

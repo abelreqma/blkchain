@@ -13,25 +13,38 @@ import (
 // knownLogs are the service log basenames written under <root>/.run.
 var knownLogs = []string{"api", "embed_server"}
 
+// logsOpts holds the flags of `blk logs`.
+type logsOpts struct {
+	follow bool
+	n      int
+}
+
+// defineLogsFlags declares `blk logs`'s flags.
+func defineLogsFlags(fs *flag.FlagSet, o *logsOpts) {
+	fs.BoolVar(&o.follow, "f", false, "keep following the log as it grows (like tail -f)")
+	fs.IntVar(&o.n, "n", 40, "show the last `N` lines")
+}
+
 // runLogs prints (or follows) a service log from <root>/.run/<name>.log.
 //
 //	blk logs            tail the api log
 //	blk logs embed_server -n 100
 //	blk logs api -f      follow (like tail -f)
 func runLogs(args []string) error {
-	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
-	follow := fs.Bool("f", false, "follow the log (like tail -f)")
-	n := fs.Int("n", 40, "number of trailing lines to show")
-	if err := fs.Parse(reorder(args, map[string]bool{"n": true})); err != nil {
+	var o logsOpts
+	fs := newFlagSet("logs")
+	defineLogsFlags(fs, &o)
+	if err := parseFlags(fs, reorder(args, map[string]bool{"n": true})); err != nil {
 		return err
 	}
+	follow, n := &o.follow, &o.n
 
 	name := "api"
 	if fs.NArg() > 0 {
 		name = fs.Arg(0)
 	}
 	if !validLogName(name) {
-		return fmt.Errorf("logs: unknown service %q (known: %s)", name, strings.Join(knownLogs, ", "))
+		return usageErr(`logs: unknown service %q (known: %s). Example: blk logs api. See "blk help logs".`, name, strings.Join(knownLogs, ", "))
 	}
 
 	root, err := projectRoot()
@@ -40,14 +53,16 @@ func runLogs(args []string) error {
 	}
 	logPath := filepath.Join(root, ".run", name+".log")
 	if _, err := os.Stat(logPath); err != nil {
-		return fmt.Errorf("logs: no log at %s — is the service running? try `blk up`", logPath)
+		return fmt.Errorf("logs: no log at %s, is the service running? try `blk up`", logPath)
 	}
 
 	if *follow {
 		// Delegate following to tail(1): correct rotation handling for free.
 		c := exec.Command("tail", "-n", fmt.Sprint(*n), "-f", logPath)
-		c.Stdout, c.Stderr, c.Stdin = os.Stdout, os.Stderr, os.Stdin
-		return c.Run()
+		c.Stdin = os.Stdin
+		// tail -f only ends by ctrl+c, which is not an error.
+		_, err := runSanitized(c)
+		return err
 	}
 
 	lines, err := lastLines(logPath, *n)
@@ -55,7 +70,7 @@ func runLogs(args []string) error {
 		return err
 	}
 	for _, l := range lines {
-		fmt.Println(l)
+		fmt.Println(sanitizeTerminal(l))
 	}
 	return nil
 }

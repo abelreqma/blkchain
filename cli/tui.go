@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"blkchain/cli/internal/client"
 	"blkchain/cli/internal/modeleval"
 	"blkchain/cli/internal/ragconfig"
+	"blkchain/cli/internal/retrieval"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -45,7 +47,7 @@ import (
 // back into the event loop with prog.Send(chunkMsg). Because tea.NewProgram
 // takes the model by value, "p := tea.NewProgram(m); m.prog = p" would set the
 // field on a copy the program never sees. Instead we build the model, hand the
-// program its ADDRESS, then set prog on that same value before Run — the value
+// program its ADDRESS, then set prog on that same value before Run. The value
 // (with prog set) is copied into every subsequent model returned from Update.
 func runTUI() error {
 	m := initialModel()
@@ -60,21 +62,26 @@ func runTUI() error {
 type keyMap struct {
 	Submit, Newline, HistPrev, HistNext, Cancel, Quit, Help, PickModel key.Binding
 	ReverseSearch, Editor, ClearQueue                                  key.Binding
+	Esc, Attach, CancelTurn, QueueSubmit                               key.Binding
 }
 
 func defaultKeys() keyMap {
 	return keyMap{
 		Submit:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "ask")),
 		Newline:       key.NewBinding(key.WithKeys("ctrl+j"), key.WithHelp("ctrl+j", "newline")),
-		HistPrev:      key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "prev")),
-		HistNext:      key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "next")),
-		Cancel:        key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel/quit")),
+		HistPrev:      key.NewBinding(key.WithKeys("up"), key.WithHelp(Glyph(GlyphUp), "prev")),
+		HistNext:      key.NewBinding(key.WithKeys("down"), key.WithHelp(Glyph(GlyphDown), "next")),
+		Cancel:        key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel/clear/quit")),
 		Quit:          key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "quit")),
 		Help:          key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "keys")),
-		PickModel:     key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "model")),
+		PickModel:     key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "model (idle only, shadows line up)")),
 		ReverseSearch: key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "search")),
 		Editor:        key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "editor")),
-		ClearQueue:    key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "clear queue")),
+		ClearQueue:    key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "clear queue (only while queued, shadows delete to line start)")),
+		Esc:           key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "cancel turn/close")),
+		Attach:        key.NewBinding(key.WithKeys("@"), key.WithHelp("@", "attach file")),
+		CancelTurn:    key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel")),
+		QueueSubmit:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "queue")),
 	}
 }
 
@@ -85,9 +92,107 @@ func (k keyMap) ShortHelp() []key.Binding {
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Submit, k.Newline, k.HistPrev, k.HistNext},
-		{k.ReverseSearch, k.Editor, k.PickModel},
-		{k.Help, k.Cancel, k.Quit},
+		{k.ReverseSearch, k.Editor, k.PickModel, k.ClearQueue, k.Attach},
+		{k.Help, k.Esc, k.Cancel, k.Quit},
 	}
+}
+
+// footerKeyMap is the state-dependent key list the footer renders (help.KeyMap).
+type footerKeyMap struct {
+	short []key.Binding
+	full  [][]key.Binding
+}
+
+func (f footerKeyMap) ShortHelp() []key.Binding  { return f.short }
+func (f footerKeyMap) FullHelp() [][]key.Binding { return f.full }
+
+// hint builds a footer-only binding from a key label and its description.
+func hint(k, desc string) key.Binding {
+	return key.NewBinding(key.WithKeys(k), key.WithHelp(k, desc))
+}
+
+// footerKeys picks the footer hints for the current state, innermost first: an
+// open overlay, reverse search, the slash palette, a running turn, then idle.
+func (m model) footerKeys() help.KeyMap {
+	closeKey := hint("esc/ctrl+c", "close")
+	switch {
+	case m.overlay != nil:
+		switch ov := m.overlay.(type) {
+		case resumePicker:
+			if ov.confirm {
+				return footerKeyMap{short: []key.Binding{hint("y", "confirm delete"), hint("ctrl+d", "quit"), hint("any other key", "cancel")}}
+			}
+			return footerKeyMap{short: []key.Binding{hint("1-9", "open"), hint("up/down", "move"), hint("enter", "open"), hint("d then y", "delete"), closeKey}}
+		case modelPicker:
+			return footerKeyMap{short: []key.Binding{hint("up/down", "choose"), hint("tab/left/right", "switch column"), hint("enter", "apply"), closeKey}}
+		case filePicker:
+			return footerKeyMap{short: []key.Binding{hint("type", "filter"), hint("up/down", "move"), hint("enter", "open/select"), hint("backspace", "erase/up"), closeKey}}
+		case modelsPanel:
+			return footerKeyMap{short: ov.hints(closeKey)}
+		}
+		return footerKeyMap{short: []key.Binding{closeKey}}
+	case m.rsearch.open:
+		return footerKeyMap{short: []key.Binding{hint("type", "search"), hint("ctrl+r", "next"), hint("enter", "accept"), hint("esc/ctrl+c", "cancel")}}
+	case m.pal.open:
+		return footerKeyMap{short: []key.Binding{hint("up/down", "move"), hint("tab", "complete"), hint("enter", "run"), closeKey}}
+	case m.working:
+		short := []key.Binding{m.keys.QueueSubmit, m.keys.CancelTurn}
+		if len(m.queue) > 0 {
+			short = append(short, m.keys.ClearQueue)
+		}
+		return footerKeyMap{short: append(short, m.keys.Quit)}
+	case m.keyPanel:
+		short := []key.Binding{hint("?/esc", "close")}
+		if w, _ := m.termSize(); len(keyPanelLines(m.keys, w)) > m.keyPanelRows() {
+			short = append(short, hint(m.keys.HistPrev.Help().Key+"/"+m.keys.HistNext.Help().Key, "scroll"))
+		}
+		return footerKeyMap{short: short}
+	}
+	return m.keys
+}
+
+// footer renders the one-line help footer. The full key list is the key panel
+// (keyPanelView), not a footer, so this line is always one row.
+func (m model) footer() string {
+	// help only truncates a line when its ellipsis fits, so a narrow terminal can
+	// still get an overlong line that wraps and costs rows. Cut it to the width.
+	w, _ := m.termSize()
+	return lipgloss.NewStyle().MaxWidth(w).Render(m.help.View(m.footerKeys()))
+}
+
+// inputCharLimit is the draft cap in characters (64 KiB): large enough for a
+// pasted HTTP request or payload.
+const inputCharLimit = 65536
+
+// limitNotice is the one-line warning shown while the draft sits at the cap,
+// since the textarea drops further input silently. Empty otherwise.
+func (m model) limitNotice() string {
+	if m.ta.CharLimit > 0 && m.ta.Length() >= m.ta.CharLimit {
+		return " " + Caut.Render(Glyph(GlyphWarn)+" input truncated at 64 KiB")
+	}
+	return ""
+}
+
+// reduceMotion reports whether BLK_REDUCE_MOTION asks for a static working line
+// instead of the animated spinner (any non-empty value except 0 or false).
+func reduceMotion() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("BLK_REDUCE_MOTION")))
+	return v != "" && v != "0" && v != "false"
+}
+
+// secondTickMsg refreshes the static working line once per second in
+// reduced-motion mode. gen ties it to the turn that started the chain, so a
+// stale chain from an earlier turn dies instead of doubling the tick rate.
+type secondTickMsg struct{ gen int }
+
+// workTick starts the redraw ticker for a turn: the spinner animation normally,
+// a once-per-second tick in reduced-motion mode.
+func (m model) workTick() tea.Cmd {
+	if !m.reduceMotion {
+		return m.sp.Tick
+	}
+	gen := m.tickGen
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return secondTickMsg{gen: gen} })
 }
 
 // ctrlCWindow is how long after a Ctrl-C a second Ctrl-C is treated as "quit".
@@ -104,7 +209,19 @@ type healthReportMsg struct {
 	h   *client.HealthResponse
 	err error
 }
-type healthMsg struct{ ok bool } // startup status-dot check
+type healthMsg struct { // status-dot check: qdrant, embed_server, llm
+	h       *client.HealthResponse
+	rerank  bool      // embed_server's /health says the reranker loaded
+	started time.Time // when the probe began, to tell a stale result from a current one
+}
+
+// stageMsg is the AnswerLoop phase name ("retrieving", "grading", ...), pushed
+// through prog.Send by the Stage callback and shown as the working verb.
+type stageMsg string
+
+// noResultsMsg ends a turn when AnswerLoop found nothing to answer from. It is
+// a warning with next steps, not an answer.
+type noResultsMsg struct{}
 type errMsg struct{ err error }
 type canceledMsg struct{}
 type execDoneMsg struct{ err error }
@@ -121,6 +238,7 @@ type streamDoneMsg struct {
 	full      string
 	citations []client.Citation
 	usedWeb   bool
+	rerankOff bool // the reranker was turned off for this answer
 	err       error
 	agent     bool
 	tokens    int // completion tokens when the transport exposed usage, else 0
@@ -134,7 +252,7 @@ type dequeueMsg struct{}
 // Agent-mode streaming messages (V2-BRIEF.md T3), pushed into the event loop by
 // the StreamAgent/StreamAgentSubprocess callback via prog.Send. Answer deltas
 // reuse chunkMsg; these carry the non-answer signals.
-type agentToolMsg struct{ verb, tool string } // muted "· running <tool>…" line
+type agentToolMsg struct{ verb, tool string } // muted "- running <tool>..." line
 type agentNoteMsg string                      // muted commentary / fallback note line
 type agentModelMsg string                     // model id for the status line
 type agentSessionMsg string                   // gateway session id to cache
@@ -148,15 +266,14 @@ type agentHealthMsg struct {                  // startup/mode-switch agent healt
 // --- model ---
 
 type model struct {
-	client *client.Client
-	prog   *tea.Program // set in runTUI so the stream callback can Send messages
+	prog *tea.Program // set in runTUI so the stream callback can Send messages
 
 	ta   textarea.Model
 	sp   spinner.Model
 	help help.Model
 	keys keyMap
 
-	width int
+	width, height int
 
 	working     bool
 	workingVerb string
@@ -176,14 +293,17 @@ type model struct {
 	// Ctrl-C double-press; rsearch is the Ctrl-R reverse history search;
 	// attachments are @file contents to inject into the next prompt; ambient is the
 	// /init .blk/context.md context; lastCost is the last turn's usage for /cost.
-	pal         palette
-	queue       []string
-	lastCtrlC   time.Time
-	rsearch     reverseSearch
-	attachments []attachment
-	ambient     string
-	lastCost    turnCost
-	lastCostSet bool
+	pal          palette
+	queue        []string
+	lastCtrlC    time.Time
+	quitArmed    string // "turn" or "draft" after one ctrl+d, awaiting the confirming press
+	reduceMotion bool   // BLK_REDUCE_MOTION: static working line, no animated spinner
+	tickGen      int    // generation of the current turn's once-per-second ticker
+	rsearch      reverseSearch
+	attachments  []attachment
+	ambient      string
+	lastCost     turnCost
+	lastCostSet  bool
 
 	// Session persistence (V2-BRIEF.md T4). sess is the current transcript
 	// handle (nil if persistence is unavailable); sessTitle mirrors its title for
@@ -203,11 +323,24 @@ type model struct {
 	ragModel  string
 	reasoning string
 
+	// prefs is the saved /models settings: hidden chat models and the reranker
+	// and web switches. Changes are kept here at once and saved in a command.
+	prefs modelPrefs
+
 	lastAnswer  string
 	openTargets []string // paths for /open N (from the last answer or search)
 
 	apiOK      bool
 	apiChecked bool
+	health     *client.HealthResponse // last qdrant/embed_server/llm probe; names what is down
+	rerankUp   bool                   // the last probe found the reranker loaded
+	llmDownAt  time.Time              // when a turn last found the LLM refusing connections
+	probeSeen  bool                   // the first health probe has arrived, so the down-service hint is spent
+
+	// keyPanel is the "?" key reference, drawn above the input; keyScroll is how
+	// many of its rows are scrolled off the top on a short terminal.
+	keyPanel  bool
+	keyScroll int
 
 	// Agent mode (V2-BRIEF.md T3). mode is "rag" (default) or "agent"; the agent
 	// fields track the gateway session handle and the health/transport shown in
@@ -225,10 +358,12 @@ func initialModel() model {
 	ta := textarea.New()
 	ta.Placeholder = randomPlaceholder()
 	ta.Prompt = Glyph(GlyphPrompt) + " "
-	ta.CharLimit = 4000
+	ta.CharLimit = inputCharLimit
 	ta.ShowLineNumbers = false
 	ta.SetHeight(1)
 	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(Accent).Bold(true)
+	ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(Muted)
+	ta.BlurredStyle.Placeholder = lipgloss.NewStyle().Foreground(Muted)
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("ctrl+j"), key.WithHelp("ctrl+j", "newline"))
 	ta.Focus()
@@ -251,11 +386,19 @@ func initialModel() model {
 	// (V2-BRIEF.md T5). The muted "loaded" note is printed from Init.
 	ambient, _ := loadInitContext()
 
+	// The bubbles help defaults use dim grays and a unicode bullet and
+	// ellipsis; route them through the theme.
+	hp := help.New()
+	hp.ShortSeparator = " " + Glyph(GlyphSep) + " "
+	hp.Ellipsis = ellipsis()
+	hp.Styles.ShortKey, hp.Styles.ShortDesc, hp.Styles.ShortSeparator = Meta, Meta, Meta
+	hp.Styles.FullKey, hp.Styles.FullDesc, hp.Styles.FullSeparator = Meta, Meta, Meta
+	hp.Styles.Ellipsis = Meta
+
 	return model{
-		client:    client.NewClient(),
 		ta:        ta,
 		sp:        sp,
-		help:      help.New(),
+		help:      hp,
 		keys:      defaultKeys(),
 		history:   hist,
 		histIdx:   len(hist),
@@ -264,27 +407,31 @@ func initialModel() model {
 		sessTitle: title,
 		reasoning: "medium",
 		ambient:   ambient,
+		prefs:     loadPrefs(),
+
+		reduceMotion: reduceMotion(),
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{
-		textarea.Blink,
-		tea.Println(welcomeBanner()),
-		healthCmd(m.client),
-	}
+	w, _ := m.termSize()
+	// The banner, the context note, and the first probe run in order, so the
+	// down-service hint the probe can trigger prints under the banner.
+	start := []tea.Cmd{tea.Println(welcomeBanner(w))}
 	if strings.TrimSpace(m.ambient) != "" {
-		cmds = append(cmds, tea.Println("   "+Meta.Render("loaded .blk/context.md")))
+		start = append(start, tea.Println("   "+Meta.Render("loaded .blk/context.md")))
 	}
-	return tea.Batch(cmds...)
+	start = append(start, healthCmd())
+	return tea.Batch(textarea.Blink, tea.Sequence(start...))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
-		m.ta.SetWidth(msg.Width)
-		m.help.Width = msg.Width
+		m.height = msg.Height
+		m.ta.SetWidth(max(msg.Width, 1))
+		m.help.Width = max(msg.Width, 1)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -295,9 +442,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// An open overlay captures every key except quit (V2-BRIEF.md T4). Esc is
 		// handled inside the overlay (it cancels). The draft in the textarea is
 		// left untouched, so it survives the overlay.
+		// Any key other than ctrl+d disarms a pending quit confirmation.
+		if !key.Matches(msg, m.keys.Quit) {
+			m.quitArmed = ""
+		}
 		if m.overlay != nil {
 			if key.Matches(msg, m.keys.Quit) {
-				return m, tea.Quit
+				return m.handleQuit()
+			}
+			// Ctrl-C closes an overlay the same way Esc does.
+			if key.Matches(msg, m.keys.Cancel) {
+				msg = tea.KeyMsg{Type: tea.KeyEsc}
 			}
 			var cmd tea.Cmd
 			m.overlay, cmd = m.overlay.Update(msg)
@@ -305,7 +460,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Ctrl-R reverse-search captures every key while open.
 		if m.rsearch.open {
+			if key.Matches(msg, m.keys.Quit) {
+				return m.handleQuit()
+			}
 			return m.reverseSearchKey(msg)
+		}
+
+		// Ctrl-C closes the slash palette the same way Esc does, leaving the draft
+		// and any running turn alone.
+		if m.pal.open && key.Matches(msg, m.keys.Cancel) {
+			if nm, cmd, handled := m.paletteKey(tea.KeyMsg{Type: tea.KeyEsc}); handled {
+				return nm, cmd
+			}
+		}
+
+		// The key panel closes on "?" or esc and scrolls on up and down. Any other
+		// key closes it and then does its normal job.
+		if m.keyPanel {
+			switch msg.String() {
+			case "?", "esc":
+				m.keyPanel, m.keyScroll = false, 0
+				return m, nil
+			case "up", "down", "pgup", "pgdown":
+				return m.scrollKeyPanel(msg.String()), nil
+			}
+			m.keyPanel, m.keyScroll = false, 0
 		}
 
 		// Global keys that always apply, even while a turn runs.
@@ -313,10 +492,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Cancel):
 			return m.handleCancel()
 		case key.Matches(msg, m.keys.Quit):
-			return m, tea.Quit
+			return m.handleQuit()
 		}
 
-		// The palette intercepts navigation/complete/run keys while open, so ↑/↓ and
+		// The palette intercepts navigation/complete/run keys while open, so up/down and
 		// Enter drive it instead of history/submit.
 		if m.pal.open {
 			if nm, cmd, handled := m.paletteKey(msg); handled {
@@ -325,6 +504,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch {
+		case key.Matches(msg, m.keys.Esc):
+			// Esc cancels a running turn like ctrl+c, but never arms the ctrl+c
+			// double-press quit.
+			if m.working {
+				if m.cancel != nil {
+					m.cancel()
+				}
+				return m, nil
+			}
 		case key.Matches(msg, m.keys.ReverseSearch):
 			return m.openReverseSearch()
 		case key.Matches(msg, m.keys.Editor):
@@ -341,10 +529,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.openModelPickerCmd()
 			}
 		case key.Matches(msg, m.keys.Help):
-			// Only toggle the key list when the input is empty, so "?" can be
-			// typed inside a question.
+			// Only open the key panel when the input is empty, so "?" can be
+			// typed inside a question. The panel handles the closing "?" itself.
 			if !m.working && strings.TrimSpace(m.ta.Value()) == "" {
-				m.help.ShowAll = !m.help.ShowAll
+				m.keyPanel, m.keyScroll = true, 0
 				return m, nil
 			}
 		case key.Matches(msg, m.keys.Submit):
@@ -384,6 +572,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case secondTickMsg:
+		if !m.working || !m.reduceMotion || msg.gen != m.tickGen {
+			return m, nil
+		}
+		return m, m.workTick()
+
 	case chunkMsg:
 		if !m.working {
 			return m, nil // stray token after cancel/done
@@ -395,6 +589,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.liveTokens++
 		return m, nil
+
+	case stageMsg:
+		if !m.working {
+			return m, nil // stray stage after cancel/done
+		}
+		m.workingVerb = string(msg) + ellipsis()
+		return m, nil
+
+	case noResultsMsg:
+		m.working = false
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
+		m.live = ""
+		m.workingVerb = ""
+		m.openTargets = nil
+		return m, m.finish(tea.Println(formatNoResults()))
 
 	case streamDoneMsg:
 		m.working = false
@@ -417,7 +629,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.agent {
 			if msg.err != nil && errors.Is(msg.err, context.Canceled) {
-				return m, m.finishNoDequeue(tea.Println("   " + Meta.Render("canceled")))
+				return m, m.finishNoDequeue(tea.Println(canceledOutput(full, m.renderWidth())))
 			}
 			m.lastAnswer = full
 			m.openTargets = nil
@@ -440,7 +652,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if errors.Is(msg.err, context.Canceled) {
-				return m, m.finishNoDequeue(tea.Println("   " + Meta.Render("canceled")))
+				return m, m.finishNoDequeue(tea.Println(canceledOutput(full, m.renderWidth())))
 			}
 			// Errored after streaming partial output. Commit what streamed, then
 			// note the early end.
@@ -448,10 +660,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var b strings.Builder
 			if strings.TrimSpace(full) != "" {
 				resp := &client.AnswerResponse{Answer: full, Citations: msg.citations, UsedWeb: msg.usedWeb}
-				b.WriteString(formatAnswer(resp, elapsed, m.renderWidth()))
+				b.WriteString(formatAnswer(resp, elapsed, m.renderWidth(), msg.rerankOff))
 				b.WriteByte('\n')
 			}
-			b.WriteString(styleErr(fmt.Errorf("stream ended early: %w", msg.err)))
+			b.WriteString(styleErr(fmt.Errorf("stream ended early: %w", timeoutOrErr(msg.err))))
 			return m, m.finishNoDequeue(tea.Println(b.String()))
 		}
 		m.lastAnswer = full
@@ -460,7 +672,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recordTurn(full)
 		m.lastCost, m.lastCostSet = cost, true
 		resp := &client.AnswerResponse{Answer: full, Citations: msg.citations, UsedWeb: msg.usedWeb}
-		out := formatAnswer(resp, elapsed, m.renderWidth()) + "\n" + costFooter(cost)
+		out := formatAnswer(resp, elapsed, m.renderWidth(), msg.rerankOff) + "\n" + costFooter(cost)
 		return m, m.finish(tea.Println(out))
 
 	case searchMsg:
@@ -470,8 +682,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel = nil
 		}
 		m.openTargets = resultPaths(msg.results)
-		m.apiOK, m.apiChecked = true, true
-		return m, m.finish(tea.Println(strings.TrimRight(formatResults(msg.query, msg.results, msg.elapsed), "\n")))
+		m.markRetrievalOK()
+		return m, m.finish(tea.Println(strings.TrimRight(formatResults(msg.query, msg.results, msg.elapsed, m.renderWidth()), "\n")))
 
 	case healthReportMsg:
 		m.working = false
@@ -481,7 +693,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.apiChecked = true
 		m.apiOK = msg.err == nil && msg.h != nil && msg.h.Status == "ok"
-		return m, m.finish(tea.Println(formatHealth(msg.h, msg.err, m.client.BaseURL)))
+		m.health = msg.h
+		return m, m.finish(tea.Println(formatHealth(msg.h, msg.err, loadConfig())))
 
 	case errMsg:
 		m.working = false
@@ -491,8 +704,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if isUnreachable(msg.err) {
 			m.apiOK, m.apiChecked = false, true
+			m.health = nil // the last probe is stale, so do not name a service from it
 		}
-		return m, m.finishNoDequeue(tea.Println(styleErr(msg.err)))
+		var llmErr *llmUnreachableError
+		if errors.As(msg.err, &llmErr) && llmErr.refused() {
+			m.markLLMDown()
+		}
+		return m, m.finishNoDequeue(tea.Println(styleErr(timeoutOrErr(msg.err))))
 
 	case canceledMsg:
 		m.working = false
@@ -500,7 +718,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel()
 			m.cancel = nil
 		}
-		return m, m.finishNoDequeue(tea.Println("   " + Meta.Render("canceled")))
+		partial := strings.TrimRight(m.live, "\n")
+		m.live = ""
+		m.workingVerb = ""
+		return m, m.finishNoDequeue(tea.Println(canceledOutput(partial, m.renderWidth())))
 
 	case execDoneMsg:
 		if msg.err != nil {
@@ -509,15 +730,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case healthMsg:
-		m.apiOK = msg.ok
+		h := msg.h
+		if h != nil && h.LLM && msg.started.Before(m.llmDownAt) {
+			// The probe began before a turn found the LLM refusing connections, so
+			// its LLM-up result is stale. Keep the rest of what it found.
+			c := *h
+			c.LLM, c.Status = false, "degraded"
+			h = &c
+		}
+		m.apiOK = h != nil && h.Status == "ok"
 		m.apiChecked = true
+		m.health = h
+		m.rerankUp = msg.rerank
+		// Only the first probe of a session says what is down and how to fix it,
+		// so a service that stays down does not repeat the line on every probe.
+		first := !m.probeSeen
+		m.probeSeen = true
+		if first && h != nil && len(downServices(h)) > 0 {
+			w, _ := m.termSize()
+			return m, tea.Println(downHint(h, w))
+		}
 		return m, nil
 
 	case agentToolMsg:
 		if !m.working {
 			return m, nil
 		}
-		line := " " + Meta.Render(Glyph(GlyphBullet)+" "+msg.verb+" "+msg.tool)
+		line := " " + Meta.Render(Glyph(GlyphBullet)+" "+sanitizeTerminal(msg.verb+" "+msg.tool))
 		if msg.verb == "running" {
 			line += Meta.Render(ellipsis())
 		}
@@ -527,7 +766,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(string(msg)) == "" {
 			return m, nil
 		}
-		return m, tea.Println("   " + Meta.Render(oneLine(string(msg))))
+		return m, tea.Println("   " + Meta.Render(oneLine(sanitizeTerminal(string(msg)))))
 
 	case agentModelMsg:
 		if s := strings.TrimSpace(string(msg)); s != "" {
@@ -559,8 +798,54 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.overlay != nil || m.rsearch.open || m.pal.open {
 			return m, nil
 		}
-		m.overlay = newModelPicker(msg.models, msg.current, msg.reasoning, m.width)
+		p := newModelPicker(msg.models, msg.current, msg.reasoning, m.width)
+		if msg.allHidden {
+			p.hint = "every other model is hidden; run /models to show them"
+		}
+		m.overlay = p
 		return m, nil
+
+	case modelsDataMsg:
+		if p, ok := m.overlay.(modelsPanel); ok {
+			var cmd tea.Cmd
+			m.overlay, cmd = p.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
+	case modelActionDoneMsg:
+		if p, ok := m.overlay.(modelsPanel); ok {
+			var cmd tea.Cmd
+			m.overlay, cmd = p.Update(msg)
+			return m, cmd
+		}
+		// The panel closed while the load or unload ran: print the result.
+		if msg.err != nil {
+			return m, tea.Println(styleErr(fmt.Errorf("%s %s: %w", msg.action, msg.id, msg.err)))
+		}
+		return m, tea.Println("   " + Meta.Render(sanitizeTerminal(modelActionNote(msg.id, msg.action, msg.id == m.currentModel()))))
+
+	case prefsChangedMsg:
+		m.prefs = msg.prefs
+		return m, savePrefsCmd(msg.prefs)
+
+	case prefsSavedMsg:
+		if msg.err == nil {
+			return m, nil
+		}
+		err := fmt.Errorf("saving the model settings: %w", msg.err)
+		if p, ok := m.overlay.(modelsPanel); ok {
+			m.overlay = p.setNote(err.Error(), true)
+			return m, nil
+		}
+		return m, tea.Println(styleErr(err))
+
+	case modelsArgsDoneMsg:
+		if msg.err != nil {
+			return m, tea.Println(styleErr(msg.err))
+		}
+		m.prefs = msg.prefs
+		return m, tea.Println("   " + Meta.Render(oneLine(sanitizeTerminal(msg.note))))
 
 	case overlayCloseMsg:
 		m.overlay = nil
@@ -581,7 +866,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Println(styleErr(fmt.Errorf("attach: %w", err)))
 		}
 		m.attachments = append(m.attachments, attachment{path: msg.path, content: content})
-		chip := " " + OK.Render(Glyph(GlyphOK)) + " " + Meta.Render("attached "+filepath.Base(msg.path))
+		chip := " " + OK.Render(Glyph(GlyphOK)) + " " + Meta.Render("attached "+sanitizeTerminal(filepath.Base(msg.path)))
 		return m, tea.Println(chip)
 
 	case editorDoneMsg:
@@ -597,6 +882,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// markRetrievalOK records a successful retrieval: qdrant and embed_server
+// answered. It never touches the LLM field, so a known-down LLM keeps the dot
+// down. With no probe result yet there is nothing to keep, and the dot is ok.
+func (m *model) markRetrievalOK() {
+	m.apiChecked = true
+	if m.health == nil {
+		m.apiOK = true
+		return
+	}
+	h := *m.health
+	h.Qdrant, h.EmbedServer = true, true
+	h.Status = "degraded"
+	if len(downServices(&h)) == 0 {
+		h.Status = "ok"
+	}
+	m.health = &h
+	m.apiOK = h.Status == "ok"
+}
+
+// markLLMDown records that a turn found the LLM server refusing connections, so
+// the status dot and label update without waiting for the next probe. Reaching
+// the LLM stage means retrieval worked, so an unknown probe result starts from
+// qdrant and embed_server up.
+func (m *model) markLLMDown() {
+	h := client.HealthResponse{Qdrant: true, EmbedServer: true}
+	if m.health != nil {
+		h = *m.health
+	}
+	h.LLM = false
+	h.Status = "degraded"
+	m.health = &h
+	m.apiOK, m.apiChecked = false, true
+	m.llmDownAt = time.Now()
 }
 
 // finish wraps a turn-completion command: when prompts are queued, it schedules
@@ -624,8 +944,8 @@ func (m model) clearQueue() (tea.Model, tea.Cmd) {
 }
 
 // handleCancel implements Ctrl-C: cancel a running turn, or clear a non-empty
-// idle draft, with a second press within ctrlCWindow (or an empty idle draft)
-// quitting (V2-BRIEF.md T5). Ctrl-D remains an immediate quit.
+// idle draft, with a second press within ctrlCWindow quitting. An empty idle
+// draft gets the hint on the first press (V2-BRIEF.md T5).
 func (m model) handleCancel() (tea.Model, tea.Cmd) {
 	now := time.Now()
 	action := decideCtrlC(now, m.lastCtrlC, m.working, strings.TrimSpace(m.ta.Value()) == "")
@@ -638,12 +958,43 @@ func (m model) handleCancel() (tea.Model, tea.Cmd) {
 			m.cancel()
 		}
 		return m, nil
-	default: // ccClear
-		m.ta.Reset()
-		m.ta.SetHeight(1)
-		m.pal = palette{}
+	default: // ccClear, ccHint
+		if action == ccClear {
+			m.ta.Reset()
+			m.ta.SetHeight(1)
+			m.pal = palette{}
+		}
 		return m, tea.Println("   " + Meta.Render("(ctrl+c again to quit)"))
 	}
+}
+
+// handleQuit implements Ctrl-D. With an empty draft and no running turn it quits
+// at once. Otherwise the first press prints a hint and arms the quit for that
+// state; a second press in the same state quits, and any other key disarms it.
+func (m model) handleQuit() (tea.Model, tea.Cmd) {
+	state := ""
+	switch {
+	case m.working:
+		state = "turn"
+	case strings.TrimSpace(m.ta.Value()) != "":
+		state = "draft"
+	}
+	if state == "" || m.quitArmed == state {
+		return m, tea.Quit
+	}
+	m.quitArmed = state
+	return m, tea.Println("   " + Meta.Render("press ctrl+d again to quit"))
+}
+
+// canceledOutput is the scrollback text for a canceled turn: the partial answer,
+// if any, through the same sanitizing markdown path a finished answer uses,
+// then a muted canceled tag.
+func canceledOutput(partial string, width int) string {
+	tag := "   " + Meta.Render("canceled")
+	if strings.TrimSpace(partial) == "" {
+		return tag
+	}
+	return strings.TrimRight(glowRender(partial, width), "\n") + "\n" + tag
 }
 
 // ctrlCAction is the decision handleCancel makes for one Ctrl-C press.
@@ -652,12 +1003,13 @@ type ctrlCAction int
 const (
 	ccCancel ctrlCAction = iota
 	ccClear
+	ccHint
 	ccQuit
 )
 
 // decideCtrlC is the pure Ctrl-C decision: a press within ctrlCWindow of the last
 // quits; otherwise a running turn is cancelled, a non-empty idle draft is cleared,
-// and an empty idle draft quits.
+// and an empty idle draft prints the quit hint.
 func decideCtrlC(now, last time.Time, working, draftEmpty bool) ctrlCAction {
 	if !last.IsZero() && now.Sub(last) < ctrlCWindow {
 		return ccQuit
@@ -668,7 +1020,7 @@ func decideCtrlC(now, last time.Time, working, draftEmpty bool) ctrlCAction {
 	if !draftEmpty {
 		return ccClear
 	}
-	return ccQuit
+	return ccHint
 }
 
 // currentModel is the model id shown/recorded for the active mode.
@@ -714,7 +1066,7 @@ func (m model) applyModel(modelID, reasoning string) (tea.Model, tea.Cmd) {
 	} else {
 		m.ragModel = strings.TrimSpace(modelID)
 	}
-	note := "   " + Meta.Render(fmt.Sprintf("model: %s · reasoning: %s", m.currentModel(), m.reasoning))
+	note := "   " + Meta.Render(joinSep("model: "+sanitizeTerminal(m.currentModel()), "reasoning: "+m.reasoning))
 	return m, tea.Batch(tea.Println(note), m.modeSwitchCmd())
 }
 
@@ -735,7 +1087,7 @@ func (m model) openSessionInto(id string) (tea.Model, tea.Cmd) {
 		m.sessTitle = s.id
 	}
 
-	cmds := []tea.Cmd{tea.Println(" " + Meta.Render("resumed session: "+m.sessTitle))}
+	cmds := []tea.Cmd{tea.Println(" " + Meta.Render("resumed session: "+sanitizeTerminal(m.sessTitle)))}
 	for _, r := range recs {
 		switch r.Role {
 		case roleUser:
@@ -791,7 +1143,8 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 	case "quit":
 		return m, tea.Quit
 	case "help":
-		return m, tea.Sequence(tea.Println(echo), tea.Println(helpBlock()))
+		w, _ := m.termSize()
+		return m, tea.Sequence(tea.Println(echo), tea.Println(helpBlock(w)))
 	case "mode":
 		if m.mode == "agent" {
 			m.mode = "rag"
@@ -816,6 +1169,20 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		return m, tea.Println(echo)
 	case "model":
 		return m, tea.Batch(tea.Println(echo), m.openModelPickerCmd())
+	case "models":
+		if strings.TrimSpace(arg) == "" {
+			m.overlay = newModelsPanel(m.prefs, m.currentModel())
+			return m, tea.Batch(tea.Println(echo), fetchModelsCmd)
+		}
+		verb, name, err := parseModelsArgs(arg)
+		if err != nil {
+			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
+		}
+		cmds := []tea.Cmd{tea.Println(echo)}
+		if verb == "load" {
+			cmds = append(cmds, tea.Println("   "+Meta.Render("loading can take a few minutes; the result prints here")))
+		}
+		return m, tea.Sequence(append(cmds, modelsArgsCmd(verb, name, m.currentModel(), m.prefs))...)
 	case "attach":
 		return m.openFilePickerEcho(echo)
 	case "editor":
@@ -852,6 +1219,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("%s: give me something to %s", verb, verb))))
 		}
 		m.working = true
+		m.tickGen++
 		m.workingVerb = workingVerbLabel(verb)
 		m.live = ""
 		m.turnStart = time.Now()
@@ -865,9 +1233,9 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			// not the RAG client's HTTP timeout.
 			ctx, cancel = context.WithCancel(context.Background())
 		} else {
-			// Match the client's own timeout so the context doesn't fire before the
-			// HTTP call does (ask can be slow; see client.requestTimeout).
-			ctx, cancel = context.WithTimeout(context.Background(), m.client.HTTPClient.Timeout)
+			// ask can be slow on a large local model, so bound the turn by the
+			// configured request timeout (BLKCHAIN_TIMEOUT_SECONDS).
+			ctx, cancel = context.WithTimeout(context.Background(), time.Duration(loadConfig().RequestTimeoutSeconds)*time.Second)
 		}
 		m.cancel = cancel
 		if verb == "ask" {
@@ -882,15 +1250,15 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 				if preface != "" {
 					message = preface + "\n\n" + arg
 				}
-				return m, tea.Batch(tea.Println(echo), m.sp.Tick, m.agentStreamCmd(ctx, message))
+				return m, tea.Batch(tea.Println(echo), m.workTick(), m.agentStreamCmd(ctx, message))
 			}
 			// RAG mode: stream the full AnswerLoop synthesis directly from oMLX.
-			return m, tea.Batch(tea.Println(echo), m.sp.Tick, m.streamCmd(ctx, arg, preface, m.turnStart))
+			return m, tea.Batch(tea.Println(echo), m.workTick(), m.streamCmd(ctx, arg, preface, m.turnStart))
 		}
-		return m, tea.Batch(tea.Println(echo), m.sp.Tick, dispatchCmd(ctx, m.client, verb, arg, m.turnStart))
+		return m, tea.Batch(tea.Println(echo), m.workTick(), dispatchCmd(ctx, verb, arg, m.turnStart))
 	}
 	// Unknown /verb.
-	return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("unknown command /%s — try /help", verb))))
+	return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("unknown command /%s, try /help", verb))))
 }
 
 // openFilePickerEcho echoes the /attach command then opens the file picker.
@@ -948,55 +1316,139 @@ func (m model) recallNext() model {
 }
 
 func (m model) View() string {
+	w, h := m.termSize()
+	// The status line collapses once, but a long model or health label can still
+	// overshoot a narrow terminal, so cut it to the width.
+	status := lipgloss.NewStyle().MaxWidth(w).Render(m.statusLine())
+	footer := m.footer()
 	var b strings.Builder
-	b.WriteString(m.statusLine())
+	b.WriteString(status)
 	b.WriteByte('\n')
-	switch {
-	case m.overlay != nil:
-		b.WriteString(m.overlay.View(m.renderWidth()))
-	default:
+	if m.overlay != nil {
+		b.WriteString(m.overlay.View(w, h))
+	} else {
+		// One row budget: the terminal height minus the status line, the spinner
+		// line while a turn runs, and the footer. The input area (a multi-line
+		// draft or the palette) takes its share of it first; the live region
+		// above the input gets the rest, and is omitted when nothing is left.
+		spin := ""
+		if m.working {
+			spin = m.spinnerLine()
+		}
+		budget := h - lipgloss.Height(status) - lipgloss.Height(footer)
+		if spin != "" {
+			budget -= lipgloss.Height(spin)
+		}
+		input := m.inputView(w, budget)
 		// While a turn runs, show the spinner + live region ABOVE the input, so a
 		// prompt can still be typed and queued (queue-while-busy, V2-BRIEF.md T5).
+		// A long stream never pushes the status line and spinner off screen.
 		if m.working {
-			b.WriteString(m.spinnerLine())
-			if lr := m.liveRegion(); lr != "" {
-				b.WriteByte('\n')
-				b.WriteString(lr)
+			b.WriteString(spin)
+			if rows := budget - lipgloss.Height(input); rows > 0 {
+				if lr := m.liveRegion(rows); lr != "" {
+					b.WriteByte('\n')
+					b.WriteString(lr)
+				}
 			}
 			b.WriteByte('\n')
 		}
-		switch {
-		case m.rsearch.open:
-			b.WriteString(m.reverseSearchView())
-		case m.pal.open:
-			b.WriteString(m.paletteView(m.renderWidth()))
-			b.WriteByte('\n')
-			b.WriteString(m.ta.View())
-		default:
-			b.WriteString(m.ta.View())
-		}
+		b.WriteString(input)
 	}
 	b.WriteByte('\n')
-	b.WriteString(m.help.View(m.keys))
+	b.WriteString(footer)
 	return b.String()
 }
 
-// liveRegion renders the in-progress streamed answer under a Muted left "│"
+// inputView renders the input area within budget rows: the reverse-search
+// prompt, or the draft with the palette above it, or the draft with the input
+// limit notice. The draft is cut to the rows the budget allows (at least one)
+// and gets them first; the palette is clamped to what the draft leaves, and the
+// notice is dropped when there is no row for it.
+func (m model) inputView(w, budget int) string {
+	if m.rsearch.open {
+		return m.reverseSearchView()
+	}
+	want := m.ta.Height()
+	rows := clamp(want, 1, max(budget, 1))
+	if rows != want {
+
+		m.ta, _ = m.ta.Update(nil)
+		_ = m.ta.View()
+		m.ta.SetHeight(rows)
+		defer m.ta.SetHeight(want)
+		m.ta, _ = m.ta.Update(nil)
+	}
+	draft := m.ta.View()
+	left := budget - rows
+	if m.pal.open {
+		if pv := m.paletteView(w, left); pv != "" {
+			return pv + "\n" + draft
+		}
+		return draft
+	}
+	if m.keyPanelShown() {
+		if kv := m.keyPanelView(w, left); kv != "" {
+			return kv + "\n" + draft
+		}
+		return draft
+	}
+	if n := m.limitNotice(); n != "" && left >= 1 {
+		return draft + "\n" + n
+	}
+	return draft
+}
+
+// liveRegion renders the in-progress streamed answer under a Muted left "|"
 // bar. It shows raw tokens (glamour-rendered only once the turn completes, in
 // the streamDoneMsg handler). Empty when nothing has streamed yet.
-func (m model) liveRegion() string {
+//
+// maxRows caps the region (0 means no cap). When the text is taller, the tail
+// is shown, where new tokens arrive, under a one-row indicator counting the
+// hidden earlier lines; a cap of 1 shows the newest line alone.
+func (m model) liveRegion(maxRows int) string {
 	if strings.TrimSpace(m.live) == "" {
 		return ""
 	}
+	termW, _ := m.termSize()
 	bar := Meta.Render(Glyph(GlyphBar))
-	wrapped := lipgloss.NewStyle().Width(m.renderWidth()).Render(strings.TrimRight(m.live, "\n"))
+	// m.live is the raw accumulated stream (untrusted). Sanitizing the whole
+	// buffer on each render, not each chunk, means an escape sequence split
+	// across chunks is still recognized and dropped. The buffer is wrapped once
+	// per render, at the width left after the " | " prefix, hard-breaking any
+	// token longer than that; only the visible tail is styled.
+	wrapW := clamp(termW-3, 1, 100)
+	wrapped := lipgloss.NewStyle().Width(wrapW).Render(strings.TrimRight(sanitizeTerminal(m.live), "\n"))
 	lines := strings.Split(wrapped, "\n")
+	hidden := 0
+	if maxRows > 0 {
+		if len(lines) > maxRows {
+			if maxRows == 1 {
+				lines = lines[len(lines)-1:]
+			} else {
+				hidden = len(lines) - (maxRows - 1)
+				lines = lines[hidden:]
+			}
+		}
+	}
 	var b strings.Builder
+	if hidden > 0 {
+		noun := "lines"
+		if hidden == 1 {
+			noun = "line"
+		}
+		note := ellipsize(fmt.Sprintf("... %d earlier %s hidden", hidden, noun), wrapW)
+		b.WriteString(" " + bar + " " + Meta.Render(note))
+	}
 	for i, ln := range lines {
-		if i > 0 {
+		if i > 0 || hidden > 0 {
 			b.WriteByte('\n')
 		}
-		b.WriteString(" " + bar + " " + Body.Render(ln))
+		b.WriteString(" " + bar + " " + Body.Render(strings.TrimRight(ln, " ")))
+	}
+	// Guard for terminals narrower than the prefix itself.
+	if termW < 4 {
+		return lipgloss.NewStyle().MaxWidth(termW).Render(b.String())
 	}
 	return b.String()
 }
@@ -1005,11 +1457,11 @@ func (m model) liveRegion() string {
 
 // dispatchCmd runs the network call for search/health in a goroutine and
 // selects it against ctx, so a Ctrl+C (which calls cancel) surfaces a
-// canceledMsg immediately even though the underlying HTTP call keeps running
-// until the client's own timeout. A deadline exceeded is reported as a
+// canceledMsg immediately even though the underlying search or native health
+// probe keeps running until its own timeout. A deadline exceeded is reported as a
 // one-line timeout error. ask is handled separately by streamCmd (always the
 // full AnswerLoop, never this dispatcher).
-func dispatchCmd(ctx context.Context, c *client.Client, verb, arg string, start time.Time) tea.Cmd {
+func dispatchCmd(ctx context.Context, verb, arg string, start time.Time) tea.Cmd {
 	return func() tea.Msg {
 		ch := make(chan tea.Msg, 1)
 		go func() {
@@ -1027,14 +1479,13 @@ func dispatchCmd(ctx context.Context, c *client.Client, verb, arg string, start 
 				}
 				ch <- searchMsg{query: arg, results: toClientResults(results), elapsed: time.Since(start)}
 			case "health":
-				h, err := c.Health()
-				ch <- healthReportMsg{h: h, err: err}
+				ch <- healthReportMsg{h: nativeHealth(loadConfig())}
 			}
 		}()
 		select {
 		case <-ctx.Done():
 			if ctx.Err() == context.DeadlineExceeded {
-				return errMsg{errors.New("request timed out (raise BLKCHAIN_TIMEOUT_SECONDS)")}
+				return errMsg{errRequestTimeout}
 			}
 			return canceledMsg{}
 		case msg := <-ch:
@@ -1056,34 +1507,67 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 		if err != nil {
 			return errMsg{err}
 		}
-		cfg := ragconfig.Load()
+		cfg := loadConfig()
 		streamed := false
 		full, cits, usedWeb, _, tokens, err := AnswerLoop(ctx, rc, cfg, question, AnswerOpts{
 			Model:     ragModel,
 			Preface:   preface,
 			Reasoning: reasoning,
+			NoWeb:     !loadPrefs().Web,
 			Stream: func(b []byte) {
 				streamed = true
 				if prog != nil {
 					prog.Send(chunkMsg(string(b)))
 				}
 			},
+			Stage: func(stage string) {
+				if prog != nil {
+					prog.Send(stageMsg(stage))
+				}
+			},
 		})
+		if errors.Is(err, ErrNoResults) {
+			return noResultsMsg{}
+		}
 		if err != nil && !streamed {
 			if errors.Is(err, context.Canceled) {
 				return canceledMsg{}
 			}
-			return errMsg{err}
+			return errMsg{timeoutOrErr(err)}
 		}
-		return streamDoneMsg{full: full, citations: cits, usedWeb: usedWeb, err: err, tokens: tokens}
+		return streamDoneMsg{full: full, citations: cits, usedWeb: usedWeb, rerankOff: rc.SkipRerank, err: err, tokens: tokens}
 	}
 }
 
-func healthCmd(c *client.Client) tea.Cmd {
+// healthCmd runs the status-line probe: the three services, and alongside
+// them embed_server's /health for whether the reranker loaded.
+func healthCmd() tea.Cmd {
 	return func() tea.Msg {
-		h, err := c.Health()
-		return healthMsg{ok: err == nil && h != nil && h.Status == "ok"}
+		started := time.Now()
+		cfg := loadConfig()
+		rerank := make(chan bool, 1)
+		go func() {
+			eh, ok := probeEmbedHealth(cfg)
+			rerank <- ok && eh.Reranker
+		}()
+		h := nativeHealth(cfg)
+		return healthMsg{h: h, rerank: <-rerank, started: started}
 	}
+}
+
+// nativeHealth probes Qdrant, embed_server, and the LLM server directly (the
+// same probes `blk health` uses) and folds them into a HealthResponse: "ok"
+// only when all three answer, else "degraded". The LLM probe runs alongside the
+// retrieval probes so a dead service does not add its timeout to the others.
+func nativeHealth(cfg ragconfig.Config) *client.HealthResponse {
+	llmOK := make(chan bool, 1)
+	go func() { llmOK <- probeLLM(omlxBaseURL(), strings.TrimSpace(os.Getenv("OMLX_API_KEY"))) }()
+	qdrantOK, embedOK := probeHealth(cfg)
+	h := &client.HealthResponse{Status: "degraded", Qdrant: qdrantOK, EmbedServer: embedOK, LLM: <-llmOK}
+	if len(downServices(h)) == 0 {
+		h.Status = "ok"
+	}
+	return h
 }
 
 // agentStreamCmd runs one AGENT-mode turn in a goroutine (tea.Cmd). It decides
@@ -1175,12 +1659,12 @@ func (m model) agentStreamCmd(ctx context.Context, message string) tea.Cmd {
 }
 
 // modeSwitchCmd refreshes the status-line health after a mode change: the agent
-// gateway/binary for agent mode, the blkChain API for rag mode.
+// gateway/binary for agent mode, qdrant + embed_server for rag mode.
 func (m model) modeSwitchCmd() tea.Cmd {
 	if m.mode == "agent" {
 		return agentHealthCmd()
 	}
-	return healthCmd(m.client)
+	return healthCmd()
 }
 
 // agentHealthCmd probes the hermes gateway and the hermes binary so the status
@@ -1211,20 +1695,27 @@ func (m model) sessID() string {
 // loop stays responsive and the input draft is preserved (V2-BRIEF.md T4). When
 // discovery fails it still opens with the current model plus the reasoning
 // levels, so the picker always works.
+//
+// In rag mode the models hidden in /models are left out. When that leaves only
+// the active model, the picker says so and points to /models.
 func (m model) openModelPickerCmd() tea.Cmd {
 	mode := m.mode
 	current := m.currentModel()
 	reasoning := m.reasoning
+	prefs := m.prefs
 	return func() tea.Msg {
 		var models []string
+		allHidden := false
 		if mode == "agent" {
 			ctx, cancel := context.WithTimeout(context.Background(), agentSessionTimeout)
 			defer cancel()
 			models, _ = modelOptions(ctx)
 		} else {
-			models = omlxModels()
+			all := omlxModels()
+			models = slices.DeleteFunc(slices.Clone(all), prefs.isHidden)
+			allHidden = len(models) < len(all) && len(ensureFirst(models, current)) <= 1
 		}
-		return openModelPickerMsg{models: ensureFirst(models, current), current: current, reasoning: reasoning}
+		return openModelPickerMsg{models: ensureFirst(models, current), current: current, reasoning: reasoning, allHidden: allHidden}
 	}
 }
 
@@ -1336,9 +1827,30 @@ func (m model) openCmd(arg string) tea.Cmd {
 		if path == "" {
 			return tea.Println(styleErr(fmt.Errorf("open: item %d has no file path", n)))
 		}
+		if isWebURL(path) {
+			return tea.Println(openWebNotice(path))
+		}
 		return execFuncCmd(func() error { return openFile(path, false) })
 	}
+	if isWebURL(arg) {
+		return tea.Println(openWebNotice(arg))
+	}
 	return execFuncCmd(func() error { return openFile(arg, false) })
+}
+
+// isWebURL reports whether a source path is an http(s) URL (a web citation or an
+// indexed page), which /open never launches or fetches.
+func isWebURL(p string) bool {
+	p = strings.ToLower(strings.TrimSpace(p))
+	return strings.HasPrefix(p, "http://") || strings.HasPrefix(p, "https://")
+}
+
+// openWebNotice is the one-line answer to /open on a web result: it says why
+// nothing opened and prints the sanitized URL so the operator can copy it.
+func openWebNotice(url string) string {
+	return " " + Caut.Render(Glyph(GlyphWarn)) + " " +
+		Meta.Render("open: web results are not opened automatically; copy the URL: ") +
+		oneLine(sanitizeTerminal(strings.TrimSpace(url)))
 }
 
 // --- clipboard ---
@@ -1362,7 +1874,8 @@ func copyToClipboard(text string) error {
 			continue
 		}
 		c := exec.Command(bin, cand[1:]...)
-		c.Stdin = strings.NewReader(text)
+		// The text is untrusted LLM output the operator may paste into a terminal.
+		c.Stdin = strings.NewReader(sanitizeTerminal(text))
 		return c.Run()
 	}
 	return errors.New("no clipboard tool found (install pbcopy, wl-copy, or xclip)")
@@ -1402,56 +1915,120 @@ func parseInput(line string) (verb, arg string) {
 
 // --- rendering helpers (all return strings for tea.Println) ---
 
-// statusLine shows the active mode, the model, and an api-health dot on one
-// muted line (V2-BRIEF.md T3). In rag mode the dot reflects the blkChain API; in
-// agent mode it reflects the hermes gateway (or "subprocess" on fallback).
+// statusLine shows the active mode, the model, and a services-health dot on one
+// muted line (V2-BRIEF.md T3). In rag mode the dot reflects qdrant, embed_server, and the LLM; in
+// agent mode it reflects the hermes gateway (or "subprocess" on fallback). Rag
+// mode also shows the embedder and reranker once the probe has run, and the
+// reranker switch.
 func (m model) statusLine() string {
 	if m.mode == "agent" {
 		return m.agentStatusLine()
 	}
 	dot := Glyph(GlyphDot)
 	style := Caut
-	label := "checking"
+	label := "checking services"
 	if m.apiChecked {
 		if m.apiOK {
-			style, label = OK, "api ok"
+			style, label = OK, "services ok"
 		} else {
-			style, label = Fail, "api down"
+			style, label = Fail, "services down"
+			if m.health != nil {
+				if down := downServices(m.health); len(down) > 0 {
+					label = strings.Join(down, ", ") + " down"
+				}
+			}
 		}
 	}
-	return m.composeStatus(style.Render(dot), "rag", m.currentModel(), label)
+	var retrieval []string
+	if m.health != nil {
+		embed := "embed down"
+		if m.health.EmbedServer {
+			embed = "embed ok"
+		}
+		retrieval = append(retrieval, embed)
+	}
+	switch {
+	case !m.prefs.Rerank:
+		retrieval = append(retrieval, "rerank off")
+	case m.health != nil && m.health.EmbedServer && m.rerankUp:
+		retrieval = append(retrieval, "rerank ok")
+	case m.health != nil:
+		retrieval = append(retrieval, "rerank down")
+	}
+	return m.composeStatus(style.Render(dot), "rag", m.currentModel(), label, retrieval)
 }
 
-// composeStatus renders the status line as mode · model · reasoning · health ·
-// session title, collapsing to dot · mode · model · health when the full line
-// would overflow the terminal width (V2-BRIEF.md status line).
-func (m model) composeStatus(dot, mode, modelID, health string) string {
-	full := []string{
-		" " + dot,
-		Meta.Render(mode),
-		Meta.Render(modelID),
-		Meta.Render(m.reasoning),
-		Meta.Render(health),
-	}
+// modelPriorityCols is how much of the model name the status line keeps
+// visible before it drops the other segments to make room.
+const modelPriorityCols = 24
+
+// statusLayout is which optional segments a status line carries: the session
+// title, the reasoning, the retrieval models, and the long health label
+// ("services ok" rather than "ok").
+type statusLayout struct{ title, reasoning, retrieval, longHealth bool }
+
+// composeStatus renders the status line as labeled fields: mode, model,
+// reasoning, the retrieval models, health, and session title, so each value
+// says what it is. The model name has priority. While the line overflows and
+// fewer than modelPriorityCols of the name would show, the session title goes
+// first, then the reasoning, then the word "services" in the health label.
+// Past that the line collapses to mode, model, and health, and the model is
+// cut as the last resort (with an ASCII "...").
+func (m model) composeStatus(dot, mode, modelID, health string, retrieval []string) string {
+	modelID = sanitizeTerminal(modelID)
+	title := ""
 	if t := strings.TrimSpace(m.sessTitle); t != "" {
-		full = append(full, Meta.Render(oneLine(t)))
+		title = oneLine(sanitizeTerminal(t))
 	}
-	if q := m.queuedIndicator(); q != "" {
-		full = append(full, Meta.Render(q))
-	}
-	line := strings.Join(full, "  ")
-	if m.width > 0 && lipgloss.Width(line) > m.width {
-		collapsed := []string{" " + dot, Meta.Render(mode), Meta.Render(modelID), Meta.Render(health)}
-		if q := m.queuedIndicator(); q != "" {
-			collapsed = append(collapsed, Meta.Render(q))
+	shortHealth := strings.TrimSpace(strings.Replace(health, "services", "", 1))
+	queued := m.queuedIndicator()
+	build := func(model string, l statusLayout) string {
+		parts := []string{mode, "model " + model}
+		if l.reasoning {
+			parts = append(parts, "reasoning "+m.reasoning)
 		}
-		line = strings.Join(collapsed, "  ")
+		if l.retrieval {
+			parts = append(parts, retrieval...)
+		}
+		if l.longHealth {
+			parts = append(parts, health)
+		} else {
+			parts = append(parts, shortHealth)
+		}
+		if l.title && title != "" {
+			parts = append(parts, title)
+		}
+		if queued != "" {
+			parts = append(parts, queued)
+		}
+		return " " + dot + " " + Meta.Render(joinSep(parts...))
 	}
-	return line
+	w, _ := m.termSize()
+	for _, l := range []statusLayout{
+		{title: true, reasoning: true, retrieval: true, longHealth: true},
+		{reasoning: true, retrieval: true, longHealth: true},
+		{retrieval: true, longHealth: true},
+		{retrieval: true},
+	} {
+		line := build(modelID, l)
+		over := lipgloss.Width(line) - w
+		if over <= 0 {
+			return line
+		}
+		// ellipsize keeps keep-3 columns of the name plus "...".
+		if keep := lipgloss.Width(modelID) - over; keep-3 >= modelPriorityCols {
+			return build(ellipsize(modelID, keep), l)
+		}
+	}
+	collapsed := statusLayout{}
+	if over := lipgloss.Width(build(modelID, collapsed)) - w; over > 0 {
+		return build(ellipsize(modelID, max(lipgloss.Width(modelID)-over, 4)), collapsed)
+	}
+	return build(modelID, collapsed)
 }
 
 // queuedIndicator is the muted "N queued" status marker, empty when the queue is
-// empty. Uses the ⧉ glyph when unicode is available (V2-BRIEF.md T5).
+// empty. Uses a boxed-copy glyph when unicode is available (V2-BRIEF.md T5).
 func (m model) queuedIndicator() string {
 	n := len(m.queue)
 	if n == 0 {
@@ -1482,13 +2059,18 @@ func (m model) agentStatusLine() string {
 		}
 	}
 	style := Caut
+	label := xport
 	switch xport {
 	case "gateway":
-		style = OK
+		style, label = OK, "via gateway"
+	case "subprocess":
+		label = "via subprocess"
 	case "unavailable":
-		style = Fail
+		style, label = Fail, "gateway unavailable"
+	case "checking":
+		label = "checking gateway"
 	}
-	return m.composeStatus(style.Render(dot), "agent", m.currentModel(), xport)
+	return m.composeStatus(style.Render(dot), "agent", m.currentModel(), label, nil)
 }
 
 // ragModelLabel is the oMLX model shown in rag-mode status, without a network
@@ -1497,7 +2079,7 @@ func ragModelLabel() string {
 	if v := strings.TrimSpace(os.Getenv("OMLX_MODEL")); v != "" {
 		return v
 	}
-	return ragconfig.Load().DefaultModel
+	return loadConfig().DefaultModel
 }
 
 // modeNote is the one-line confirmation printed when the mode changes.
@@ -1523,11 +2105,27 @@ func (m model) spinnerLine() string {
 	if d := time.Since(m.turnStart); d > 2*time.Second {
 		el = " " + Meta.Render("("+d.Round(time.Second).String()+")")
 	}
-	line := " " + m.sp.View() + " " + Meta.Render(m.workingVerb) + el
-	if !m.firstTokAt.IsZero() {
-		line += "  " + liveReadout(m.liveTokens, time.Since(m.firstTokAt), useUnicode)
+	lead := m.sp.View()
+	if m.reduceMotion {
+		// Static marker and whole elapsed seconds, redrawn once per second.
+		lead = Meta.Render(Glyph(GlyphBullet))
+		el = " " + Meta.Render(fmt.Sprintf("(%ds)", int(time.Since(m.turnStart).Seconds())))
 	}
-	return line
+	readout := ""
+	if !m.firstTokAt.IsZero() {
+		readout = "  " + liveReadout(m.liveTokens, time.Since(m.firstTokAt), useUnicode)
+	}
+	// Fit the line to the terminal: drop the live readout first, then the elapsed
+	// time, then cut the verb.
+	w, _ := m.termSize()
+	head := " " + lead + " "
+	for _, tail := range []string{el + readout, el, ""} {
+		if line := head + Meta.Render(m.workingVerb) + tail; lipgloss.Width(line) <= w {
+			return line
+		}
+	}
+	line := head + Meta.Render(ellipsize(m.workingVerb, w-lipgloss.Width(head)))
+	return lipgloss.NewStyle().MaxWidth(w).Render(line)
 }
 
 func liveReadout(tokens int, since time.Duration, unicode bool) string {
@@ -1544,6 +2142,21 @@ func liveReadout(tokens int, since time.Duration, unicode bool) string {
 	return Meta.Render(strings.Join(parts, sep))
 }
 
+// termSize is the terminal size the layout fits: the model's width and height
+// from the last tea.WindowSizeMsg, falling back to the detected terminal width
+// (80 off a TTY) and 24 rows before the first size message arrives, so both
+// are always at least 1.
+func (m model) termSize() (int, int) {
+	w, h := m.width, m.height
+	if w <= 0 {
+		w = terminalWidth()
+	}
+	if h <= 0 {
+		h = 24
+	}
+	return w, h
+}
+
 func (m model) renderWidth() int {
 	w := m.width
 	if w <= 0 {
@@ -1558,7 +2171,9 @@ func (m model) renderWidth() int {
 	return w
 }
 
-func formatAnswer(resp *client.AnswerResponse, elapsed time.Duration, width int) string {
+// formatAnswer renders a finished RAG answer with its SOURCES block. rerankOff
+// adds the note that the reranker was off for it.
+func formatAnswer(resp *client.AnswerResponse, elapsed time.Duration, width int, rerankOff bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, " %s %s\n", OK.Render(Glyph(GlyphOK)),
 		Meta.Render("Answered in "+elapsed.Round(100*time.Millisecond).String()))
@@ -1568,21 +2183,13 @@ func formatAnswer(resp *client.AnswerResponse, elapsed time.Duration, width int)
 		b.WriteString("   " + Meta.Render("(none)") + "\n")
 	}
 	for i, cit := range resp.Citations {
-		line := "   " + Key.Render(fmt.Sprintf("[%d]", i+1)) + "  " + Body.Render(cit.Source)
-		meta := cit.Path
-		if cit.Section != "" {
-			if meta != "" {
-				meta += " · "
-			}
-			meta += cit.Section
-		}
-		if meta != "" {
-			line += "  " + Meta.Render(meta)
-		}
-		b.WriteString(line + "\n")
+		b.WriteString(citationLine("   ", i, cit) + "\n")
 	}
 	if resp.UsedWeb {
 		b.WriteString("   " + Meta.Render("(this answer used a web search)") + "\n")
+	}
+	if rerankOff {
+		b.WriteString("   " + Meta.Render(rerankOffNote) + "\n")
 	}
 	if len(resp.Citations) > 0 {
 		b.WriteString("   " + Meta.Render("open a source with /open N") + "\n")
@@ -1590,26 +2197,57 @@ func formatAnswer(resp *client.AnswerResponse, elapsed time.Duration, width int)
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func formatHealth(h *client.HealthResponse, err error, baseURL string) string {
+// formatNoResults is the warning shown when AnswerLoop found nothing to answer
+// from. It is not a success: no check mark, no timing, no SOURCES block.
+func formatNoResults() string {
+	return renderNoResults(func(s lipgloss.Style, text string) string { return s.Render(text) },
+		Glyph(GlyphWarn), Glyph(GlyphBullet))
+}
+
+// formatNoResultsErr is formatNoResults for stderr: styled and glyphed by
+// stderr's capabilities, not stdout's.
+func formatNoResultsErr() string {
+	return renderNoResults(errStyle, glyphFor(GlyphWarn, useErrUnicode), glyphFor(GlyphBullet, useErrUnicode))
+}
+
+// renderNoResults builds the no-results warning with the given style function
+// and glyphs, so stdout and stderr callers share one text.
+func renderNoResults(style func(lipgloss.Style, string) string, warn, bullet string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, " %s %s\n", style(Caut, warn), style(Meta, "No relevant sources were found, so there is no answer."))
+	b.WriteString("   " + style(Meta, "Try one of these:") + "\n")
+	b.WriteString("   " + style(Meta, bullet+" rephrase the question with different keywords") + "\n")
+	b.WriteString("   " + style(Meta, bullet+" run `blk status` to check that the services are up") + "\n")
+	b.WriteString("   " + style(Meta, bullet+" run `blk add <path or url>` to index more content"))
+	return b.String()
+}
+
+func formatHealth(h *client.HealthResponse, err error, cfg ragconfig.Config) string {
 	if err != nil {
 		return styleErr(err)
 	}
+	llmBase := redactedURL(omlxBaseURL())
 	var b strings.Builder
-	fmt.Fprintf(&b, " %s blkChain API: %s  %s\n", check(h.Status == "ok"), h.Status, Meta.Render("("+baseURL+")"))
-	fmt.Fprintf(&b, "   %s qdrant\n", check(h.Qdrant))
-	fmt.Fprintf(&b, "   %s embed_server", check(h.EmbedServer))
+	fmt.Fprintf(&b, " %s blkChain services: %s\n", check(h.Status == "ok"), h.Status)
+	fmt.Fprintf(&b, "   %s qdrant        %s\n", check(h.Qdrant), Meta.Render("("+cfg.QdrantGRPCURL+")"))
+	fmt.Fprintf(&b, "   %s embed_server  %s\n", check(h.EmbedServer), Meta.Render("("+cfg.EmbedServerURL+")"))
+	fmt.Fprintf(&b, "   %s llm           %s", check(h.LLM), Meta.Render("("+llmBase+")"))
+	if !h.Qdrant || !h.EmbedServer {
+		b.WriteString("\n   " + Meta.Render("start the services with `blk up`"))
+	}
+	if !h.LLM {
+		b.WriteString("\n   " + Meta.Render("start the LLM server at "+llmBase))
+	}
 	return b.String()
 }
 
 func styleErr(err error) string {
-	line := " " + Fail.Render(Glyph(GlyphErr)) + " " + oneLine(err.Error())
-	if isUnreachable(err) {
-		line += "\n   " + Meta.Render("start the services with `blk up`")
-	}
-	return line
+	// retrieval.ErrUnreachable already carries the `blk up` hint.
+	return " " + Fail.Render(Glyph(GlyphErr)) + " " + oneLine(sanitizeTerminal(err.Error()))
 }
 
 func promptEcho(q string) string {
+	q = sanitizeTerminal(q) // replayed sessions come from disk
 	label := Prompt.Render(Glyph(GlyphPrompt))
 	lines := strings.Split(q, "\n")
 	var b strings.Builder
@@ -1620,42 +2258,274 @@ func promptEcho(q string) string {
 	return b.String()
 }
 
-func welcomeBanner() string {
-	return " " + H1.Render("blk") + " " +
-		Meta.Render("· ask the knowledge base — Enter to ask, / for commands, ctrl+g editor, ctrl+r search, @ attach, ctrl+d to quit")
+// welcomeBanner is the two-line greeting printed at startup. Line one names the
+// tool and says what to do; line two lists the next steps. Neither line wraps at
+// width: the wording is shortened, then hints are dropped from the end.
+func welcomeBanner(width int) string {
+	const lead = 6 // " blk  "
+	head := " " + H1.Render("blk")
+	for _, text := range []string{"Type a question and press enter.", "Ask a question, press enter."} {
+		if lead+len(text) <= width {
+			head += "  " + Meta.Render(text)
+			break
+		}
+	}
+	full := []string{"/ for commands", "? for keys", "ctrl+d to quit"}
+	terse := []string{"/ commands", "? keys", "ctrl+d quit"}
+	for _, indent := range []int{lead, 1} {
+		for n := len(full); n >= 1; n-- {
+			for _, hints := range [][]string{full[:n], terse[:n]} {
+				if line := joinSep(hints...); indent+lipgloss.Width(line) <= width {
+					return lipgloss.NewStyle().MaxWidth(width).Render(head) + "\n" +
+						strings.Repeat(" ", indent) + Meta.Render(line)
+				}
+			}
+		}
+	}
+	return lipgloss.NewStyle().MaxWidth(max(width, 1)).Render(head)
 }
 
-func helpBlock() string {
+// helpBlock is the /help text: one section per command group, every description
+// in one column (wrapped to width), and a pointer to the key panel. Descriptions
+// come from the command registry, so they match the palette and the command line.
+func helpBlock(width int) string {
 	groups := commandGroups()
-	names := make([][]string, len(groups))
-	width := len("<question>")
+	sections := make([][]helpRow, len(groups))
+	nameW := 0
 	for gi, g := range groups {
-		names[gi] = make([]string, len(g.cmds))
-		for ci, c := range g.cmds {
+		if gi == 0 {
+			sections[gi] = append(sections[gi], helpRow{"<question>", "type a question and press enter (same as /ask)"})
+		}
+		for _, c := range g.cmds {
 			n := "/" + c.name
 			if c.args != "" {
 				n += " " + c.args
 			}
-			names[gi][ci] = n
-			if len(n) > width {
-				width = len(n)
+			sections[gi] = append(sections[gi], helpRow{n, c.desc})
+			if c.name == "search" {
+				sections[gi] = append(sections[gi], helpRow{"s <q>", "short for /search"})
 			}
 		}
+		for _, r := range sections[gi] {
+			nameW = max(nameW, len(r.name))
+		}
 	}
+	descW := max(width-3-nameW-2, 1)
 	var b strings.Builder
-	fmt.Fprintf(&b, "   %s  %s\n\n", Key.Render(pad("<question>", width)),
-		Body.Render("ask (rag mode streams a cited answer; agent mode runs hermes)"))
 	for gi, g := range groups {
 		if gi > 0 {
 			b.WriteString("\n")
 		}
 		b.WriteString(" " + H2.Render(strings.ToUpper(g.title)) + "\n")
-		for ci, c := range g.cmds {
-			fmt.Fprintf(&b, "   %s  %s\n", Key.Render(pad(names[gi][ci], width)), Body.Render(c.desc))
+		for _, r := range sections[gi] {
+			for i, ln := range strings.Split(wrapIndent(r.desc, 0, descW), "\n") {
+				name := strings.Repeat(" ", nameW)
+				if i == 0 {
+					name = Key.Render(padCols(r.name, nameW))
+				}
+				b.WriteString("   " + name + "  " + Body.Render(ln) + "\n")
+			}
 		}
 	}
-	b.WriteString("\n   " + Meta.Render("Enter submits · ctrl+j newline · ↑/↓ history · ctrl+r search · ctrl+g editor · @ attach · ? keys"))
+	b.WriteString("\n   " + Meta.Render("Press ? for keyboard shortcuts."))
 	return b.String()
+}
+
+// padCols right-pads s with spaces to width display columns.
+func padCols(s string, width int) string {
+	if n := width - lipgloss.Width(s); n > 0 {
+		return s + strings.Repeat(" ", n)
+	}
+	return s
+}
+
+// --- key panel ---
+
+// keyRow is one line of the key panel: the key label and what it does.
+type keyRow struct{ keys, desc string }
+
+// keyGroup is a titled block of key rows.
+type keyGroup struct {
+	title string
+	rows  []keyRow
+}
+
+// panelGroups is the full key reference, grouped. Key labels come from the
+// bindings, so the panel shows the keys the model listens for. Every binding in
+// the key map has a row; the two bindings that shadow a textarea key say when
+// they apply.
+func (k keyMap) panelGroups() []keyGroup {
+	label := func(bs ...key.Binding) string {
+		parts := make([]string, len(bs))
+		for i, b := range bs {
+			parts[i] = b.Help().Key
+		}
+		return strings.Join(parts, "/")
+	}
+	return []keyGroup{
+		{"MOVE AND EDIT", []keyRow{
+			{label(k.Newline), "new line in the draft"},
+			{label(k.HistPrev, k.HistNext), "recall earlier questions; moves the cursor in a multi-line draft"},
+			{label(k.Editor), "compose in $EDITOR (only while idle)"},
+		}},
+		{"ASK", []keyRow{
+			{label(k.Submit), "ask; while a turn runs, queue it"},
+			{label(k.ClearQueue), "clear queued questions (only while some are queued; else deletes to line start)"},
+			{label(k.Esc), "cancel the turn; close pickers"},
+			{label(k.Cancel), "cancel the turn or clear the draft; press twice to quit"},
+		}},
+		{"OVERLAYS", []keyRow{
+			{label(k.Help), "show or hide this list"},
+			{"/", "open the command list"},
+			{label(k.Attach), "attach a file to your next question"},
+			{label(k.ReverseSearch), "search earlier questions"},
+			{label(k.PickModel), "pick the model and reasoning level (only while idle; replaces cursor up)"},
+		}},
+		{"SESSION", []keyRow{
+			{label(k.Quit), "quit; press twice if a draft or turn is active"},
+		}},
+	}
+}
+
+// keyPanelLines renders the whole key reference for a terminal width w: one
+// column below 70 columns, two above, each line at most w wide. Callers show a
+// window of the result when the terminal is short.
+func keyPanelLines(k keyMap, w int) []string {
+	groups := k.panelGroups()
+	keyW := 0
+	for _, g := range groups {
+		for _, r := range g.rows {
+			keyW = max(keyW, lipgloss.Width(r.keys))
+		}
+	}
+	cols, colW := 1, max(w-1, 1)
+	if w >= 70 {
+		cols, colW = 2, (w-1-3)/2
+	}
+	descW := max(colW-2-keyW-2, 1)
+	blocks := make([][]string, len(groups))
+	for i, g := range groups {
+		blocks[i] = []string{H2.Render(g.title)}
+		for _, r := range g.rows {
+			for j, ln := range strings.Split(wrapIndent(r.desc, 0, descW), "\n") {
+				keys := strings.Repeat(" ", keyW)
+				if j == 0 {
+					keys = Key.Render(padCols(r.keys, keyW))
+				}
+				blocks[i] = append(blocks[i], "  "+keys+"  "+Body.Render(ln))
+			}
+		}
+	}
+	// stack joins blocks into one column, a blank row between them.
+	stack := func(bs [][]string) []string {
+		var out []string
+		for i, blk := range bs {
+			if i > 0 {
+				out = append(out, "")
+			}
+			out = append(out, blk...)
+		}
+		return out
+	}
+	var lines []string
+	if cols == 1 {
+		for _, ln := range stack(blocks) {
+			lines = append(lines, strings.TrimRight(" "+ln, " "))
+		}
+	} else {
+		// Split the groups, in order, where the taller column is shortest.
+		split, best := 1, -1
+		for s := 1; s < len(blocks); s++ {
+			h := max(len(stack(blocks[:s])), len(stack(blocks[s:])))
+			if best < 0 || h < best {
+				split, best = s, h
+			}
+		}
+		left, right := stack(blocks[:split]), stack(blocks[split:])
+		for i := 0; i < max(len(left), len(right)); i++ {
+			l, r := "", ""
+			if i < len(left) {
+				l = left[i]
+			}
+			if i < len(right) {
+				r = right[i]
+			}
+			lines = append(lines, strings.TrimRight(" "+padCols(l, colW)+"   "+r, " "))
+		}
+	}
+	for i, ln := range lines {
+		lines[i] = lipgloss.NewStyle().MaxWidth(max(w, 1)).Render(ln)
+	}
+	return lines
+}
+
+// keyPanelShown reports whether the key panel is drawn: it only belongs on an
+// idle input, never over a turn, an overlay, reverse search, or the palette.
+func (m model) keyPanelShown() bool {
+	return m.keyPanel && !m.working && m.overlay == nil && !m.rsearch.open && !m.pal.open
+}
+
+// keyPanelRows is how many rows the key panel is offered: the terminal minus the
+// status line, the one-row draft, and the footer.
+func (m model) keyPanelRows() int {
+	_, h := m.termSize()
+	return max(h-3, 0)
+}
+
+// scrollKeyPanel moves the key panel window for an up, down, pgup, or pgdown key,
+// keeping it inside the rows that exist.
+func (m model) scrollKeyPanel(k string) model {
+	w, _ := m.termSize()
+	limit := max(len(keyPanelLines(m.keys, w))-max(m.keyPanelRows()-1, 0), 0)
+	step := map[string]int{"up": -1, "down": 1, "pgup": -5, "pgdown": 5}[k]
+	m.keyScroll = clamp(m.keyScroll+step, 0, limit)
+	return m
+}
+
+// keyPanelView draws the key panel in at most rows rows. When the terminal is
+// too short for the whole reference it shows a window of it, scrolled by
+// keyScroll, and ends with a "+N more" row that says how to scroll.
+func (m model) keyPanelView(w, rows int) string {
+	if rows < 1 {
+		return ""
+	}
+	lines := keyPanelLines(m.keys, w)
+	if len(lines) <= rows {
+		return strings.Join(lines, "\n")
+	}
+	shown := rows - 1
+	off := clamp(m.keyScroll, 0, len(lines)-shown)
+	note := fmt.Sprintf(" +%d more, %s/%s to scroll", len(lines)-shown, m.keys.HistPrev.Help().Key, m.keys.HistNext.Help().Key)
+	out := append(append([]string{}, lines[off:off+shown]...), lipgloss.NewStyle().MaxWidth(max(w, 1)).Render(Meta.Render(note)))
+	return strings.Join(out, "\n")
+}
+
+// downHint is the first-use note printed under the banner when the first health
+// probe finds a service down: what is down and how to fix it, wrapped to width.
+// The LLM server is started separately from /up, so it gets its own advice with
+// the configured URL, credentials removed.
+func downHint(h *client.HealthResponse, width int) string {
+	var local []string
+	for _, s := range downServices(h) {
+		if s != "llm" {
+			local = append(local, s)
+		}
+	}
+	var parts []string
+	switch n := len(local); {
+	case n == 1:
+		parts = append(parts, local[0]+" is down. Run /up to start it.")
+	case n > 1:
+		parts = append(parts, strings.Join(local[:n-1], ", ")+" and "+local[n-1]+" are down. Run /up to start them.")
+	}
+	if !h.LLM {
+		parts = append(parts, "The LLM is down: start the LLM server at "+redactedURL(omlxBaseURL())+".")
+	}
+	lines := strings.Split(wrapIndent(oneLine(sanitizeTerminal(strings.Join(parts, " "))), 3, width), "\n")
+	for i, ln := range lines {
+		lines[i] = Meta.Render(ln)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // --- small helpers ---
@@ -1695,8 +2565,7 @@ func resultPaths(results []client.SearchResult) []string {
 }
 
 func isUnreachable(err error) bool {
-	var un *client.UnreachableError
-	return errors.As(err, &un)
+	return errors.Is(err, retrieval.ErrUnreachable)
 }
 
 func oneLine(s string) string {

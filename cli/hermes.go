@@ -20,18 +20,27 @@ const hermesBin = "hermes"
 func runHermes(args []string) error {
 	prompt := strings.TrimSpace(strings.Join(args, " "))
 	if prompt == "" {
-		return errors.New("hermes: give me a prompt, e.g.  blk hermes summarize the SSRF notes")
+		return missingArg("hermes", "missing prompt", `hermes "summarize the SSRF notes"`)
 	}
 
 	path, err := exec.LookPath(hermesBin)
 	if err != nil {
-		return fmt.Errorf("hermes: %q not found on PATH — install Hermes Agent or add it to PATH", hermesBin)
+		return fmt.Errorf("hermes: %q not found on PATH, install Hermes Agent or add it to PATH", hermesBin)
 	}
 
 	fmt.Fprintf(os.Stderr, "%s %s\n", Meta.Render(Glyph(GlyphArrow)+" hermes -z"), Meta.Render(truncate(prompt, 60)))
 	c := exec.Command(path, "-z", prompt)
-	c.Stdout, c.Stderr, c.Stdin = os.Stdout, os.Stderr, os.Stdin
-	if err := c.Run(); err != nil {
+	c.Stdin = os.Stdin
+	// A piped Python child block-buffers stdout, so its output would arrive only
+	// at exit and out of order with stderr.
+	c.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
+	// -z is one-shot and non-interactive, so its output is safe to pipe through
+	// the sanitizer.
+	canceled, err := runSanitized(c)
+	if canceled {
+		return errors.New("hermes: canceled")
+	}
+	if err != nil {
 		return fmt.Errorf("hermes: %w", err)
 	}
 	return nil

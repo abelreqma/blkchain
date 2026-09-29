@@ -19,10 +19,12 @@ import (
 // model directly; they emit result messages the base Update handles.
 
 // overlayModel is the minimal contract the base loop drives: feed it a msg, get
-// back the (possibly updated) overlay and a command; render it at a width.
+// back the (possibly updated) overlay and a command; render it for a terminal
+// of the given width and height. The size is passed on every render, so an
+// overlay always fits the current terminal, including right after a resize.
 type overlayModel interface {
 	Update(tea.Msg) (overlayModel, tea.Cmd)
-	View(width int) string
+	View(width, height int) string
 }
 
 // --- overlay result messages (handled in the base Update) ---
@@ -34,10 +36,12 @@ type modelSelectedMsg struct{ model, reasoning string }
 // openModelPickerMsg carries the discovered models into the model picker. Model
 // discovery is a network call, so it runs in a command and opens the overlay on
 // completion, keeping the event loop responsive and preserving the input draft.
+// allHidden says every model but the active one is hidden in /models.
 type openModelPickerMsg struct {
 	models    []string
 	current   string
 	reasoning string
+	allHidden bool
 }
 
 // reasoningLevels are the reasoning-effort choices, low to high.
@@ -47,7 +51,7 @@ var reasoningLevels = []string{"minimal", "low", "medium", "high"}
 
 // rowDelegate is a compact single-line list delegate: it defers each row's
 // rendering to render(selected, item), so the pickers control the selected
-// styling (Heading bold + ❯ Accent) directly.
+// styling (Heading bold + the prompt glyph in Accent) directly.
 type rowDelegate struct {
 	render func(selected bool, item list.Item) string
 }
@@ -56,11 +60,17 @@ func (d rowDelegate) Height() int                         { return 1 }
 func (d rowDelegate) Spacing() int                        { return 0 }
 func (d rowDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
 func (d rowDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
-	fmt.Fprint(w, d.render(index == m.Index(), item))
+	row := d.render(index == m.Index(), item)
+	// A row wider than the list is cut to fit and marked with an ASCII "...", so
+	// the box border is never pushed or clipped by a long title.
+	if lw := m.Width(); lw > 3 && lipgloss.Width(row) > lw {
+		row = lipgloss.NewStyle().MaxWidth(lw-3).Render(row) + Meta.Render("...")
+	}
+	fmt.Fprint(w, row)
 }
 
 // newCompactList builds a list stripped of its title, status bar, help,
-// pagination, and filtering — just a scrollable column of rows for an overlay.
+// pagination, and filtering: just a scrollable column of rows for an overlay.
 func newCompactList(items []list.Item, width, height int, render func(bool, list.Item) string) list.Model {
 	l := list.New(items, rowDelegate{render: render}, width, height)
 	l.SetShowTitle(false)
@@ -80,34 +90,81 @@ func (s strItem) FilterValue() string { return string(s) }
 
 // strRow renders a plain string row with the selected marker/styling.
 func strRow(selected bool, item list.Item) string {
-	label := string(item.(strItem))
+	label := sanitizeTerminal(string(item.(strItem)))
 	if selected {
 		return Prompt.Render(Glyph(GlyphPrompt)) + " " + Key.Render(label)
 	}
 	return "  " + Body.Render(label)
 }
 
+// overlaySpec describes one overlay for overlayBox. wantW and wantRows are the
+// preferred text width and body row count on a roomy terminal; minRows is the
+// fewest body rows to keep before dropping chrome (0 means 3); below it the
+// title goes and the body shrinks to as little as one row. body renders the
+// body at the width and row count overlayBox settles on, and must fit it. Key hints are not part
+// of the box: the state-aware footer under the view (footerKeys in tui.go) is
+// the single source of them.
+type overlaySpec struct {
+	title    string
+	wantW    int
+	wantRows int
+	minRows  int
+	body     func(w, rows int) string
+}
+
 // overlayBox wraps content in the one rounded border + Surface fill the design
-// prescribes, with a title heading and a muted footer keybar.
-func overlayBox(title, body, footer string, width int) string {
-	var b strings.Builder
-	b.WriteString(H2.Render(title))
-	b.WriteString("\n\n")
-	b.WriteString(body)
-	if footer != "" {
-		b.WriteString("\n\n")
-		b.WriteString(footer)
+// prescribes, with a title heading. It fits the box to the terminal on every
+// call: never wider than width-2 or taller than height-4, with every line padded
+// to one width so the border stays intact. On a short terminal it first drops
+// the blank spacer row, then the title, keeping at least minRows body rows.
+// Shorter than that the title stays off and the body shrinks to as little as
+// one row, so the smallest box is 3 rows (below height 7 it exceeds height-4).
+func overlayBox(s overlaySpec, width, height int) string {
+	maxOuter := max(width-2, 5)
+	textW := max(min(s.wantW, maxOuter-4), 1)
+	maxBox := height - 4
+
+	floor := s.minRows
+	if floor < 1 {
+		floor = 3
 	}
+	floor = max(min(floor, s.wantRows), 1)
+
+	type level struct{ title, gap bool }
+	levels := []level{{true, true}, {true, false}, {false, false}}
+	pick, rows := levels[len(levels)-1], max(min(floor, maxBox-2), 1)
+	for _, lv := range levels {
+		chrome := 2 // border rows
+		if lv.title {
+			chrome++
+			if lv.gap {
+				chrome++
+			}
+		}
+		if r := min(s.wantRows, maxBox-chrome); r >= floor {
+			pick, rows = lv, r
+			break
+		}
+	}
+
+	var parts []string
+	if pick.title {
+		parts = append(parts, H2.Render(s.title))
+		if pick.gap {
+			parts = append(parts, "")
+		}
+	}
+	parts = append(parts, s.body(textW, rows))
+	// Cut any line that still overshoots (a very narrow terminal), so the
+	// padding below and the border are computed from a width every line fits.
+	content := lipgloss.NewStyle().MaxWidth(textW).Render(strings.Join(parts, "\n"))
 	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(Border()).
 		BorderForeground(Rule).
 		Background(Surface).
-		Padding(0, 1)
-	inner := width - 4
-	if inner > 20 {
-		box = box.MaxWidth(width)
-	}
-	return box.Render(b.String())
+		Padding(0, 1).
+		Width(textW + 2)
+	return box.Render(content)
 }
 
 // clampHeight bounds a list's visible height to [1, cap].
@@ -124,7 +181,7 @@ func clampHeight(n, cap int) int {
 // relTime renders a compact "n ago" for a unix timestamp.
 func relTime(ts int64) string {
 	if ts == 0 {
-		return "—"
+		return Glyph(GlyphDash)
 	}
 	d := time.Since(time.Unix(ts, 0))
 	switch {
@@ -185,7 +242,7 @@ func resumeItems(metas []sessionMeta) []list.Item {
 
 func resumeRow(selected bool, item list.Item) string {
 	r := item.(resumeItem)
-	title := strings.TrimSpace(r.meta.Title)
+	title := strings.TrimSpace(sanitizeTerminal(r.meta.Title))
 	if title == "" {
 		title = r.meta.ID
 	}
@@ -193,7 +250,7 @@ func resumeRow(selected bool, item list.Item) string {
 	if r.num > 0 {
 		num = fmt.Sprintf("%d ", r.num)
 	}
-	meta := fmt.Sprintf("%d msgs · %s", r.meta.MsgCount, relTime(r.meta.UpdatedAt))
+	meta := joinSep(fmt.Sprintf("%d msgs", r.meta.MsgCount), relTime(r.meta.UpdatedAt))
 	if selected {
 		return Prompt.Render(Glyph(GlyphPrompt)) + " " + Key.Render(num) + Key.Render(title) + "  " + Meta.Render(meta)
 	}
@@ -258,16 +315,20 @@ func (p resumePicker) reload() resumePicker {
 	return p
 }
 
-func (p resumePicker) View(width int) string {
-	body := p.list.View()
-	if len(p.metas) == 0 {
-		body = Meta.Render("no saved sessions yet")
+func (p resumePicker) View(width, height int) string {
+	// The list is sized to the box on every render (p is a copy, so the stored
+	// list keeps no stale geometry). SetSize keeps the selected row on screen.
+	body := func(w, rows int) string {
+		if len(p.metas) == 0 {
+			return Meta.Render("no saved sessions yet")
+		}
+		p.list.SetSize(w, rows)
+		return p.list.View()
 	}
-	footer := Meta.Render("1-9 open · ↑/↓ move · enter open · d then y delete · esc cancel")
-	if p.confirm {
-		footer = Caut.Render(Glyph(GlyphWarn) + " delete this session? y to confirm, any key to cancel")
-	}
-	return overlayBox("RESUME SESSION", body, footer, width)
+	return overlayBox(overlaySpec{
+		title: "RESUME SESSION",
+		wantW: 72, wantRows: clampHeight(len(p.metas), 9), body: body,
+	}, width, height)
 }
 
 // --- model / reasoning picker ---
@@ -275,7 +336,8 @@ func (p resumePicker) View(width int) string {
 type modelPicker struct {
 	models  list.Model
 	reasons list.Model
-	focus   int // 0 = models column, 1 = reasoning column
+	focus   int    // 0 = models column, 1 = reasoning column
+	hint    string // a muted line under the columns, when set
 }
 
 // newModelPicker builds the two-column picker. When discovery yields no models it
@@ -350,12 +412,41 @@ func (p modelPicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 	return p, cmd
 }
 
-func (p modelPicker) View(width int) string {
-	left := modelColumn("MODEL", p.models.View(), p.focus == 0)
-	right := modelColumn("REASONING", p.reasons.View(), p.focus == 1)
-	joined := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
-	footer := Meta.Render("↑/↓ choose · →/tab switch column · enter apply · esc cancel")
-	return overlayBox("MODEL / REASONING", joined, footer, width)
+func (p modelPicker) View(width, height int) string {
+	// Both columns are sized to the box on every render. The reasoning column
+	// is at most 14 wide (a third of the box when narrow), the model column
+	// takes the rest, and each column is padded to a fixed width so the
+	// reasoning column does not shift as the selection changes.
+	body := func(w, rows int) string {
+		hint := ""
+		if p.hint != "" && rows > 2 {
+			rows--
+			hint = "\n" + Meta.Render(ellipsize(p.hint, w))
+		}
+		rw := clamp(w/3, 9, 14)
+		mw := max(min(w-2-rw, 30), 8)
+		// One row goes to the column heading, unless that would leave no list row.
+		listRows := max(rows-1, 1)
+		p.models.SetSize(mw, listRows)
+		p.reasons.SetSize(rw, min(len(reasoningLevels), listRows))
+		pad := func(cw int, s string) string { return lipgloss.NewStyle().Width(cw).Render(s) }
+		left, right := p.models.View(), p.reasons.View()
+		if rows > 1 {
+			left = modelColumn("MODEL", left, p.focus == 0)
+			right = modelColumn("REASONING", right, p.focus == 1)
+		}
+		left, right = pad(mw, left), pad(rw, right)
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right) + hint
+	}
+	hintRows := 0
+	if p.hint != "" {
+		hintRows = 1
+	}
+	return overlayBox(overlaySpec{
+		title: "MODEL / REASONING",
+		wantW: 46, wantRows: 1 + max(min(len(p.models.Items()), 8), len(reasoningLevels)) + hintRows,
+		minRows: 4, body: body,
+	}, width, height)
 }
 
 // modelColumn renders one picker column with a heading that brightens when the

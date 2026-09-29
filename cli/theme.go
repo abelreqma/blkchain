@@ -1,7 +1,9 @@
 package main
 
 import (
+	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/glamour/styles"
@@ -26,18 +28,18 @@ func c(lHex, l256, l16, dHex, d256, d16 string) lipgloss.CompleteAdaptiveColor {
 
 // Palette tokens (V2-BRIEF.md "Black/gray design"). Never set the terminal
 // background. Accent is brightness (off-white), reserved for marks only
-// (prompt glyph, blk label, [n] citation index, selected marker, ● dot) —
+// (prompt glyph, blk label, [n] citation index, selected marker, status dot).
 // H2 and Key use Heading instead so color stays under 10% of glyphs.
 var (
 	Accent  = c("#18181B", "234", "0", "#FAFAFA", "231", "15")
 	Heading = c("#18181B", "234", "0", "#E4E4E7", "255", "15")
 	FgBody  = c("#27272A", "235", "0", "#D4D4D8", "253", "7")
-	Muted   = c("#71717A", "243", "8", "#A1A1AA", "246", "8")
-	Rule    = c("#D4D4D8", "252", "7", "#3F3F46", "238", "8")
+	Muted   = c("#63636C", "242", "8", "#A1A1AA", "246", "7")
+	Rule    = c("#85858E", "244", "7", "#767680", "244", "8")
 	Surface = c("#F4F4F5", "255", "15", "#27272A", "235", "0") // overlay fill only
-	Success = c("#4F7355", "65", "2", "#6E9B77", "108", "2")   // muted sage
-	Warn    = c("#8A6D3B", "94", "3", "#C9A26B", "179", "3")   // muted tan
-	Err     = c("#9B4A4A", "131", "1", "#C77B7B", "167", "1")  // muted rose
+	Success = c("#4F7355", "22", "2", "#7AA783", "108", "2")   // muted sage
+	Warn    = c("#7A5F2E", "94", "3", "#C9A26B", "179", "3")   // muted tan
+	Err     = c("#9B4A4A", "95", "1", "#D08B8B", "174", "1")   // muted rose
 )
 
 // slateAccent is the BLK_ACCENT=slate opt-in: a low-chroma blue instead of
@@ -49,8 +51,8 @@ var (
 	H1     = lipgloss.NewStyle().Foreground(Heading).Bold(true)
 	H2     = lipgloss.NewStyle().Foreground(Heading).Bold(true)
 	Body   = lipgloss.NewStyle().Foreground(FgBody)
-	Meta   = lipgloss.NewStyle().Foreground(Muted).Faint(true)
-	Code   = lipgloss.NewStyle().Foreground(FgBody).Faint(true)
+	Meta   = lipgloss.NewStyle().Foreground(Muted)
+	Code   = lipgloss.NewStyle().Foreground(FgBody)
 	RuleS  = lipgloss.NewStyle().Foreground(Rule)
 	Key    = lipgloss.NewStyle().Foreground(Heading).Bold(true)
 	OK     = lipgloss.NewStyle().Foreground(Success).Bold(true)
@@ -89,6 +91,10 @@ const (
 	GlyphArrow
 	GlyphDot
 	GlyphBar
+	GlyphSep
+	GlyphDash
+	GlyphUp
+	GlyphDown
 )
 
 // glyphPairs maps each glyph to its {unicode, ascii} rendering.
@@ -103,6 +109,10 @@ var glyphPairs = map[GlyphName][2]string{
 	GlyphArrow:  {"→", "->"},
 	GlyphDot:    {"●", "*"},
 	GlyphBar:    {"│", "|"},
+	GlyphSep:    {"·", "|"},
+	GlyphDash:   {"—", "-"},
+	GlyphUp:     {"↑", "up"},
+	GlyphDown:   {"↓", "down"},
 }
 
 var spinnerUnicodeFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -121,6 +131,34 @@ func glyphFor(name GlyphName, unicode bool) string {
 		return pair[0]
 	}
 	return pair[1]
+}
+
+// borderFor is the pure border selection: rounded box-drawing when unicode is
+// usable, plain ASCII (+, -, |) otherwise.
+func borderFor(unicode bool) lipgloss.Border {
+	if unicode {
+		return lipgloss.RoundedBorder()
+	}
+	return lipgloss.Border{
+		Top: "-", Bottom: "-", Left: "|", Right: "|",
+		TopLeft: "+", TopRight: "+", BottomLeft: "+", BottomRight: "+",
+	}
+}
+
+// Border returns the box border for the current capability detection.
+func Border() lipgloss.Border {
+	return borderFor(useUnicode)
+}
+
+// joinSepFor joins parts with the themed separator glyph.
+func joinSepFor(unicode bool, parts ...string) string {
+	return strings.Join(parts, " "+glyphFor(GlyphSep, unicode)+" ")
+}
+
+// joinSep joins parts with the themed separator glyph for the current
+// capability detection.
+func joinSep(parts ...string) string {
+	return joinSepFor(useUnicode, parts...)
 }
 
 // spinnerFramesFor is the pure counterpart of SpinnerFrames.
@@ -187,7 +225,83 @@ func isUTF8Locale(lcAll, lang string) bool {
 // isTerminalStdout reports whether stdout is a real character device (a TTY),
 // not a pipe or file.
 func isTerminalStdout() bool {
-	fi, err := os.Stdout.Stat()
+	return isTerminalFile(os.Stdout)
+}
+
+// parseThemeMode normalizes BLK_THEME to "light", "dark", or "auto". Anything
+// else, including an empty value, is "auto".
+func parseThemeMode(v string) string {
+	switch m := strings.ToLower(strings.TrimSpace(v)); m {
+	case "light", "dark":
+		return m
+	}
+	return "auto"
+}
+
+// parseColorFGBG reads the COLORFGBG hint ("fg;bg" or "fg;default;bg"). Only
+// the background matters: 7 and 15 are light, 0 to 6 and 8 are dark. Any other
+// value, or a malformed string, reports ok=false.
+func parseColorFGBG(v string) (dark, ok bool) {
+	parts := strings.Split(v, ";")
+	if len(parts) < 2 {
+		return false, false
+	}
+	bg, err := strconv.Atoi(strings.TrimSpace(parts[len(parts)-1]))
+	if err != nil {
+		return false, false
+	}
+	switch {
+	case bg == 7 || bg == 15:
+		return false, true
+	case (bg >= 0 && bg <= 6) || bg == 8:
+		return true, true
+	}
+	return false, false
+}
+
+// resolveDarkBackground decides whether to use the dark palette. BLK_THEME
+// light or dark wins. Under auto, a usable COLORFGBG is honored next, and the
+// terminal probe runs last. The probe cannot report failure (tmux and SSH
+// often drop the query and it then reads as dark), which is why the explicit
+// hints come first.
+func resolveDarkBackground(mode, colorFGBG string, probe func() bool) bool {
+	switch parseThemeMode(mode) {
+	case "light":
+		return false
+	case "dark":
+		return true
+	}
+	if dark, ok := parseColorFGBG(colorFGBG); ok {
+		return dark
+	}
+	return probe()
+}
+
+// newStderrRenderer builds the renderer used for styled stderr output. It
+// decides color from stderr's own capabilities, not stdout's, and carries the
+// already-resolved background so it never probes the terminal.
+func newStderrRenderer(w io.Writer, caps capabilities, dark bool) *lipgloss.Renderer {
+	r := lipgloss.NewRenderer(w)
+	if !caps.color {
+		r.SetColorProfile(termenv.Ascii)
+	}
+	r.SetHasDarkBackground(dark)
+	return r
+}
+
+// errStyle renders text with style s for stderr.
+func errStyle(s lipgloss.Style, text string) string {
+	return s.Renderer(stderrRenderer).Render(text)
+}
+
+// errMark is the styled error glyph for stderr output.
+func errMark() string {
+	return errStyle(Fail, glyphFor(GlyphErr, useErrUnicode))
+}
+
+// isTerminalFile reports whether f is a real character device (a TTY).
+func isTerminalFile(f *os.File) bool {
+	fi, err := f.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
@@ -196,6 +310,10 @@ func isTerminalStdout() bool {
 var (
 	useColor   bool
 	useUnicode bool
+	// useErrUnicode and stderrRenderer are the stderr counterparts: stderr can
+	// be a TTY while stdout is piped, or the reverse.
+	useErrUnicode  bool
+	stderrRenderer *lipgloss.Renderer
 	// mdStyle is glamour's markdown style name, resolved ONCE at startup (see
 	// init). Rendering with a fixed style avoids glamour.WithAutoStyle's
 	// per-Render OSC 11 background query, which inside the TUI leaks the
@@ -214,6 +332,27 @@ func init() {
 	)
 	useColor = caps.color
 	useUnicode = caps.unicode
+
+	// Resolve the background once. BLK_THEME and COLORFGBG are consulted
+	// before the terminal probe, and the probe only runs when color is on and
+	// stdout is a TTY, so plain and piped runs never query the terminal.
+	dark := resolveDarkBackground(os.Getenv("BLK_THEME"), os.Getenv("COLORFGBG"), func() bool {
+		return !useColor || lipgloss.HasDarkBackground()
+	})
+	if useColor {
+		lipgloss.SetHasDarkBackground(dark)
+	}
+
+	errCaps := detectCapabilities(
+		isTerminalFile(os.Stderr),
+		os.Getenv("TERM"),
+		os.Getenv("NO_COLOR"),
+		os.Getenv("CLICOLOR_FORCE"),
+		os.Getenv("LC_ALL"),
+		os.Getenv("LANG"),
+	)
+	useErrUnicode = errCaps.unicode
+	stderrRenderer = newStderrRenderer(os.Stderr, errCaps, dark)
 
 	// BLK_ACCENT=slate opts into a low-chroma blue accent instead of the
 	// off-white default (V2-BRIEF.md "Black/gray design"). Prompt is
@@ -243,12 +382,10 @@ func init() {
 	switch {
 	case !useColor:
 		mdStyle = styles.NoTTYStyle
-	case isTerminalStdout() && lipgloss.HasDarkBackground():
+	case dark:
 		mdStyle = styles.DarkStyle
-	case isTerminalStdout():
-		mdStyle = styles.LightStyle
 	default:
-		mdStyle = styles.DarkStyle
+		mdStyle = styles.LightStyle
 	}
 }
 

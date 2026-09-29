@@ -5,6 +5,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // reverseSearch is the transient Ctrl-R state. cycle is how many matches to skip
@@ -61,8 +62,6 @@ func (m model) reverseSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "ctrl+c":
 		m.rsearch = reverseSearch{}
 		return m, nil
-	case "ctrl+d":
-		return m, tea.Quit
 	case "enter":
 		match := m.rsearch.match
 		m.rsearch = reverseSearch{}
@@ -93,21 +92,55 @@ func (m model) reverseSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// reverseSearchView renders the reverse-search prompt in place of the input.
+// reverseSearchView renders the reverse-search prompt in place of the input,
+// fitted to the terminal width. The label shrinks, then goes, before the query
+// is cut; the match tail gets the ASCII ellipsis, and its "(ctrl+r for next)"
+// hint is the first thing dropped. The query and the match come from typing
+// and history, so both are sanitized and reduced to one line.
 func (m model) reverseSearchView() string {
-	label := Meta.Render("(reverse-i-search)")
-	q := Body.Render(m.rsearch.query)
-	var tail string
+	w, _ := m.termSize()
+	q := oneLine(sanitizeTerminal(m.rsearch.query))
+	tail, tailStyle, hint := oneLine(sanitizeTerminal(m.rsearch.match)), Body, ""
 	switch {
 	case m.rsearch.match != "":
-		tail = Body.Render(m.rsearch.match)
 		if m.rsearch.count > 1 {
-			tail += "  " + Meta.Render("(ctrl+r for next)")
+			hint = "  (ctrl+r for next)"
 		}
 	case strings.TrimSpace(m.rsearch.query) == "":
-		tail = Meta.Render("type to search history")
+		tail, tailStyle = "type to search history", Meta
 	default:
-		tail = Meta.Render("no match")
+		tail, tailStyle = "no match", Meta
 	}
-	return " " + label + " " + Prompt.Render("`") + q + Prompt.Render("':") + " " + tail
+
+	// Pick the longest label that still leaves room for a useful stretch of the
+	// tail. The line is " " + label + " `" + query + "':" + " " + tail.
+	label, room := "", 0
+	for _, l := range []string{"(reverse-i-search)", "(i-search)", ""} {
+		label = l
+		head := 1 + 3 + lipgloss.Width(q)
+		if l != "" {
+			head += lipgloss.Width(l) + 1
+		}
+		if room = w - head - 1; room >= min(lipgloss.Width(tail), 4) {
+			break
+		}
+	}
+	if room < 0 { // even the bare query is too wide
+		q = ellipsize(q, max(w-4, 0))
+		room = 0
+	}
+
+	line := " "
+	if label != "" {
+		line += Meta.Render(label) + " "
+	}
+	line += Prompt.Render("`") + Body.Render(q) + Prompt.Render("':")
+	switch tw := lipgloss.Width(tail); {
+	case tail == "":
+	case room >= tw+lipgloss.Width(hint):
+		line += " " + tailStyle.Render(tail) + Meta.Render(hint)
+	case room >= 1:
+		line += " " + tailStyle.Render(ellipsize(tail, room))
+	}
+	return lipgloss.NewStyle().MaxWidth(w).Render(line)
 }

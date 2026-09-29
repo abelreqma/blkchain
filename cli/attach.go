@@ -195,7 +195,7 @@ func (p filePicker) refilter() filePicker {
 
 func fileRow(selected bool, item list.Item) string {
 	e := item.(fileEntry)
-	name := e.name
+	name := sanitizeTerminal(e.name)
 	if e.isDir && e.name != ".." {
 		name += "/"
 	}
@@ -256,15 +256,35 @@ func (p filePicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 	}
 }
 
-func (p filePicker) View(width int) string {
-	body := p.list.View()
-	if len(p.all) == 0 {
-		body = Meta.Render("empty directory")
+func (p filePicker) View(width, height int) string {
+	// The header (directory and filter) takes 2 rows; the list gets the rest and
+	// is sized to the box on every render. The directory is untrusted (file
+	// names), so it is sanitized and reduced to one line before it is cut to fit.
+	body := func(w, rows int) string {
+		dirW := w
+		if p.query != "" {
+			dirW = max(w-2-len([]rune(p.query)), 1)
+		}
+		header := Meta.Render(ellipsize(oneLine(sanitizeTerminal(p.dir)), dirW))
+		if p.query != "" {
+			header += "  " + Body.Render(p.query)
+		}
+		// Below 3 rows the blank spacer goes, then the header, so the list keeps a row.
+		var parts []string
+		if rows >= 2 {
+			parts = append(parts, header)
+		}
+		if rows >= 3 {
+			parts = append(parts, "")
+		}
+		if len(p.all) == 0 {
+			return strings.Join(append(parts, Meta.Render("empty directory")), "\n")
+		}
+		p.list.SetSize(w, max(rows-len(parts), 1))
+		return strings.Join(append(parts, p.list.View()), "\n")
 	}
-	header := Meta.Render(oneLine(p.dir))
-	if p.query != "" {
-		header += "  " + Body.Render(p.query)
-	}
-	footer := Meta.Render("type to filter · ↑/↓ move · enter open/select · backspace up · esc cancel")
-	return overlayBox("ATTACH FILE", header+"\n\n"+body, footer, width)
+	return overlayBox(overlaySpec{
+		title: "ATTACH FILE",
+		wantW: 72, wantRows: 2 + clampHeight(len(p.list.Items()), 10), minRows: 5, body: body,
+	}, width, height)
 }

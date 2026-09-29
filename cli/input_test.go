@@ -7,17 +7,17 @@ import (
 	"testing"
 	"time"
 
-	"blkchain/cli/internal/client"
-
 	"github.com/charmbracelet/bubbles/textarea"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // newTestModel builds a minimal model for exercising submit/queue logic without a
 // TTY. History is redirected to a temp dir so tests never touch the real store.
 func newTestModel(t *testing.T) model {
 	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	return model{ta: textarea.New(), client: client.NewClient()}
+	isolateUserDirs(t)
+	return model{ta: textarea.New()}
 }
 
 func TestQueueWhileBusyFIFO(t *testing.T) {
@@ -84,8 +84,9 @@ func TestDecideCtrlC(t *testing.T) {
 	}{
 		{"first press while working cancels", old, true, true, ccCancel},
 		{"first press idle nonempty clears", old, false, false, ccClear},
-		{"first press idle empty quits", old, false, true, ccQuit},
-		{"zero last idle empty quits", time.Time{}, false, true, ccQuit},
+		{"first press idle empty hints", old, false, true, ccHint},
+		{"zero last idle empty hints", time.Time{}, false, true, ccHint},
+		{"second press idle empty quits", recent, false, true, ccQuit},
 		{"second press within window quits", recent, false, false, ccQuit},
 		{"second press quits even while working", recent, true, true, ccQuit},
 	}
@@ -132,6 +133,82 @@ func TestReverseSearchMatch(t *testing.T) {
 	if m, _ := reverseSearchMatch(hist, "zzz", 0); m != "" {
 		t.Errorf("no match should return empty, got %q", m)
 	}
+}
+
+// The reverse-search prompt never exceeds the terminal width. The label
+// shrinks or goes before the query is cut, and the match tail is what gets
+// the ASCII ellipsis.
+func TestReverseSearchViewFitsEveryWidth(t *testing.T) {
+	long := strings.Repeat("payload ", 40)
+	states := map[string]reverseSearch{
+		"match with hint": {open: true, query: "ssrf", match: long, count: 3},
+		"single match":    {open: true, query: "ssrf", match: long, count: 1},
+		"long query":      {open: true, query: strings.Repeat("q", 90), match: long, count: 2},
+		"empty":           {open: true},
+		"no match":        {open: true, query: "zz"},
+	}
+	for name, rs := range states {
+		for w := 20; w <= 120; w++ {
+			m := layoutModel(t, w, 24)
+			m.rsearch = rs
+			view := m.reverseSearchView()
+			if strings.Contains(view, "\n") || lipgloss.Width(view) > w {
+				t.Fatalf("%s width %d: prompt is %d columns: %q", name, w, lipgloss.Width(view), view)
+			}
+			if rs.query == "ssrf" && !strings.Contains(view, "`ssrf'") {
+				t.Errorf("%s width %d: the query was cut: %q", name, w, view)
+			}
+		}
+	}
+}
+
+func TestReverseSearchViewShrinksLabelThenTail(t *testing.T) {
+	m := layoutModel(t, 80, 24)
+	m.rsearch = reverseSearch{open: true, query: "ssrf", match: "what is ssrf", count: 2}
+	if v := m.reverseSearchView(); !strings.Contains(v, "(reverse-i-search)") || !strings.Contains(v, "what is ssrf") || !strings.Contains(v, "(ctrl+r for next)") {
+		t.Errorf("a roomy prompt keeps everything: %q", v)
+	}
+
+	m.rsearch.match = strings.Repeat("long match ", 20)
+	m = layoutModelWidth(t, m, 50)
+	v := m.reverseSearchView()
+	if !strings.Contains(v, "(reverse-i-search)") || !strings.Contains(v, "`ssrf'") || !strings.HasSuffix(v, "...") {
+		t.Errorf("width 50 should keep label and query and cut the match with an ASCII ellipsis: %q", v)
+	}
+	if strings.Contains(v, "ctrl+r for next") {
+		t.Errorf("the hint goes before the match is cut: %q", v)
+	}
+
+	m = layoutModelWidth(t, m, 26)
+	v = m.reverseSearchView()
+	if strings.Contains(v, "(reverse-i-search)") || !strings.Contains(v, "`ssrf'") {
+		t.Errorf("width 26 should shorten the label and keep the query: %q", v)
+	}
+
+	m = layoutModelWidth(t, m, 20)
+	v = m.reverseSearchView()
+	if strings.Contains(v, "i-search") || !strings.Contains(v, "`ssrf'") {
+		t.Errorf("width 20 should drop the label and keep the query: %q", v)
+	}
+}
+
+func TestReverseSearchViewSanitizesMatchAndQuery(t *testing.T) {
+	m := layoutModel(t, 80, 24)
+	m.rsearch = reverseSearch{open: true, query: "a\x1b]0;q-title\x07b", match: "hit \x1b]0;evil\x07tail\nsecond line", count: 1}
+	v := m.reverseSearchView()
+	if strings.ContainsAny(v, "\x1b\x07\n") || strings.Contains(v, "evil") || strings.Contains(v, "q-title") {
+		t.Errorf("control sequences reached the prompt: %q", v)
+	}
+	if !strings.Contains(v, "hit") || !strings.Contains(v, "tail") {
+		t.Errorf("printable match text was lost: %q", v)
+	}
+}
+
+// layoutModelWidth resizes m to w columns through Update, keeping its state.
+func layoutModelWidth(t *testing.T, m model, w int) model {
+	t.Helper()
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: 24})
+	return nm.(model)
 }
 
 func TestReadAttachmentSizeBound(t *testing.T) {

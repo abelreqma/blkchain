@@ -3,18 +3,22 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
-// subcommands is the list offered by shell completion and help.
-var subcommands = []string{
-	"search", "ask", "add", "open", "hermes", "up", "down", "status", "mcp",
-	"health", "doctor", "logs", "install", "version", "repl", "completion", "help",
+// commandNames lists every command in the registry, for shell completion.
+func commandNames() []string {
+	var names []string
+	for _, c := range commandSpecs() {
+		names = append(names, c.name)
+	}
+	return names
 }
 
 // runCompletion prints a completion script for the named shell.
 func runCompletion(args []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("completion: specify a shell — bash or zsh")
+		return missingArg("completion", "missing shell (bash or zsh)", "completion zsh")
 	}
 	switch args[0] {
 	case "bash":
@@ -22,37 +26,48 @@ func runCompletion(args []string) error {
 	case "zsh":
 		fmt.Fprint(os.Stdout, zshCompletion())
 	default:
-		return fmt.Errorf("completion: unsupported shell %q (want bash or zsh)", args[0])
+		return usageErr(`completion: unsupported shell %q (want bash or zsh). Example: blk completion zsh. See "blk help completion".`, args[0])
 	}
 	return nil
 }
 
-func cmdList() string {
-	out := ""
-	for i, c := range subcommands {
-		if i > 0 {
-			out += " "
+// flagCases builds one case arm per command that has flags, in the shell's
+// case syntax: "name) <action> <flags>;;". The flag lists come from the same
+// flag sets the help uses, so completion cannot drift from the real flags.
+func flagCases(action string) string {
+	var b strings.Builder
+	for _, c := range commandSpecs() {
+		if c.flags == nil {
+			continue
 		}
-		out += c
+		names := flagNames(commandFlagSet(c))
+		if len(names) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "      %s) %s;;\n", c.name, fmt.Sprintf(action, strings.Join(names, " ")))
 	}
-	return out
+	return b.String()
 }
 
 func bashCompletion() string {
-	return `# blk bash completion — add to ~/.bashrc:  source <(blk completion bash)
+	cmds := strings.Join(commandNames(), " ")
+	return `# blk bash completion - add to ~/.bashrc:  source <(blk completion bash)
 _blk_complete() {
   local cur prev
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   if [ "$COMP_CWORD" -eq 1 ]; then
-    COMPREPLY=( $(compgen -W "` + cmdList() + `" -- "$cur") )
+    COMPREPLY=( $(compgen -W "` + cmds + `" -- "$cur") )
     return
   fi
+  if [[ "$cur" == -* ]]; then
+    case "${COMP_WORDS[1]}" in
+` + flagCases(`COMPREPLY=( $(compgen -W "%s" -- "$cur") ); return`) + `    esac
+  fi
   case "$prev" in
+    help)       COMPREPLY=( $(compgen -W "` + cmds + `" -- "$cur") ); return;;
     completion) COMPREPLY=( $(compgen -W "bash zsh" -- "$cur") ); return;;
     logs)       COMPREPLY=( $(compgen -W "api embed_server" -- "$cur") ); return;;
-    search)     COMPREPLY=( $(compgen -W "--top-k --source --type --filter --json" -- "$cur") ); return;;
-    ask)        COMPREPLY=( $(compgen -W "--sources --agent --json" -- "$cur") ); return;;
   esac
   COMPREPLY=( $(compgen -f -- "$cur") )
 }
@@ -60,20 +75,38 @@ complete -F _blk_complete blk
 `
 }
 
+// zshEscape makes a description safe inside a single-quoted zsh _describe
+// entry: a colon separates the name from the text, and a single quote ends the
+// string.
+func zshEscape(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, ":", `\:`)
+	return strings.ReplaceAll(s, "'", `'\''`)
+}
+
 func zshCompletion() string {
-	return `# blk zsh completion — add to ~/.zshrc:  source <(blk completion zsh)
+	var entries strings.Builder
+	for _, c := range commandSpecs() {
+		fmt.Fprintf(&entries, "    '%s:%s'\n", c.name, zshEscape(c.desc))
+	}
+	return `# blk zsh completion - add to ~/.zshrc:  source <(blk completion zsh)
 _blk() {
   local -a cmds
-  cmds=(` + cmdList() + `)
+  cmds=(
+` + entries.String() + `  )
   if (( CURRENT == 2 )); then
-    compadd -a cmds
+    _describe -t commands 'blk command' cmds
+    return
+  fi
+  if [[ "${words[CURRENT]}" == -* ]]; then
+    case "${words[2]}" in
+` + flagCases("compadd -- %s") + `    esac
     return
   fi
   case "${words[2]}" in
+    help)       _describe -t commands 'blk command' cmds;;
     completion) compadd bash zsh;;
     logs)       compadd api embed_server;;
-    search)     compadd -- --top-k --source --type --filter --json;;
-    ask)        compadd -- --sources --agent --json;;
     *)          _files;;
   esac
 }

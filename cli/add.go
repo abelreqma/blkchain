@@ -2,9 +2,7 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -40,21 +38,30 @@ type addArgs struct {
 // (no filesystem or process access) so argument handling can be unit tested
 // without shelling out to python.
 func parseAddArgs(args []string) (addArgs, error) {
-	fs := flag.NewFlagSet("add", flag.ContinueOnError)
-	source := fs.String("source", "", "source label (default: derived from the path)")
-	typ := fs.String("type", "", "force chunking as md, txt, or pdf instead of inferring it")
+	var source, typ string
+	fs := newFlagSet("add")
+	defineAddFlags(fs, &source, &typ)
 	valueFlags := map[string]bool{"source": true, "type": true}
-	if err := fs.Parse(reorder(args, valueFlags)); err != nil {
+	if err := parseFlags(fs, reorder(args, valueFlags)); err != nil {
 		return addArgs{}, err
 	}
 
-	if fs.NArg() != 1 {
-		return addArgs{}, errors.New("add: give me exactly one file, directory, or URL, e.g.  blk add ./my-notes.md")
+	if fs.NArg() == 0 {
+		return addArgs{}, missingArg("add", "missing file, folder, or URL", "add ./my-notes.md")
 	}
-	if *typ != "" && !addTypeMap[*typ] {
-		return addArgs{}, fmt.Errorf("add: --type must be md, txt, or pdf, got %q", *typ)
+	if fs.NArg() > 1 {
+		return addArgs{}, missingArg("add", fmt.Sprintf("expected one file, folder, or URL, got %d", fs.NArg()), "add ./my-notes.md")
 	}
-	return addArgs{path: fs.Arg(0), source: *source, typ: *typ}, nil
+	if typ != "" && !addTypeMap[typ] {
+		return addArgs{}, usageErr(`add: --type must be md, txt, or pdf, got %q. Example: blk add ./notes.txt --type txt. See "blk help add".`, typ)
+	}
+	return addArgs{path: fs.Arg(0), source: source, typ: typ}, nil
+}
+
+// defineAddFlags declares `blk add`'s flags.
+func defineAddFlags(fs *flag.FlagSet, source, typ *string) {
+	fs.StringVar(source, "source", "", "use `NAME` as the source label (default: taken from the path)")
+	fs.StringVar(typ, "type", "", "read the input as `TYPE` (md, txt, or pdf) instead of guessing from its name")
 }
 
 // runAdd implements `blk add <path|url> [--source NAME] [--type md|txt|pdf]`:
@@ -73,7 +80,7 @@ func runAdd(args []string) error {
 	}
 	python := filepath.Join(root, ".venv", "bin", "python")
 	if _, err := os.Stat(python); err != nil {
-		return fmt.Errorf("add: venv python not found at %s — set up the project venv first", python)
+		return fmt.Errorf("add: venv python not found at %s, set up the project venv first", python)
 	}
 
 	pyArgs := []string{"-m", "blkchain.add", a.path}
@@ -90,8 +97,10 @@ func runAdd(args []string) error {
 	c.Dir = root
 	c.Env = stripEnv(os.Environ(), "PYTHONPATH")
 	c.Env = append(c.Env, "PYTHONPATH="+root)
-	var stderrBuf bytes.Buffer
-	c.Stderr = io.MultiWriter(os.Stderr, &stderrBuf) // stream to the operator, keep a copy to inspect
+	stderrBuf := &tailBuffer{max: stderrTailBytes}
+	// Stream to the operator through the sanitizer, keep a raw tail to inspect.
+	stderrTerm := newSanitizingWriter(os.Stderr)
+	c.Stderr = io.MultiWriter(stderrTerm, stderrBuf)
 	stdout, err := c.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("add: %w", err)
@@ -100,11 +109,15 @@ func runAdd(args []string) error {
 		return fmt.Errorf("add: %w", err)
 	}
 	line, readErr := lastNonEmptyLine(stdout)
+	// The scanner stops early on an over-long line. Drain the rest so the child
+	// cannot block on a full pipe and deadlock Wait.
+	io.Copy(io.Discard, stdout)
 	runErr := c.Wait()
+	stderrTerm.Flush()
 
 	if runErr != nil {
 		if isConnectionRefused(line) || isConnectionRefused(fmt.Sprint(runErr)) || isConnectionRefused(stderrBuf.String()) {
-			return fmt.Errorf("add: the blkChain services aren't reachable — start them with `blk up`")
+			return fmt.Errorf("add: the blkChain services aren't reachable, start them with `blk up`")
 		}
 		return fmt.Errorf("add: %w", runErr)
 	}
@@ -114,12 +127,38 @@ func runAdd(args []string) error {
 
 	var stats addStats
 	if err := json.Unmarshal([]byte(line), &stats); err != nil {
-		return fmt.Errorf("add: unexpected output from blkchain.add: %s", line)
+		return fmt.Errorf("add: unexpected output from blkchain.add: %s", sanitizeTerminal(line))
 	}
 
 	fmt.Printf("%s added %d chunk(s) (%d updated, %d skipped) from %s\n",
-		OK.Render(Glyph(GlyphOK)), stats.Indexed, stats.Updated, stats.Skipped, Body.Render(stats.Source))
+		OK.Render(Glyph(GlyphOK)), stats.Indexed, stats.Updated, stats.Skipped, Body.Render(sanitizeTerminal(stats.Source)))
 	return nil
+}
+
+// stderrTailBytes is how much of the child's stderr runAdd keeps to inspect.
+const stderrTailBytes = 64 << 10
+
+// tailBuffer keeps the last max bytes written to it. It holds at most 2*max
+// between trims, so memory stays bounded however much the child writes.
+type tailBuffer struct {
+	max int
+	buf []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > 2*t.max {
+		t.buf = append(t.buf[:0], t.buf[len(t.buf)-t.max:]...)
+	}
+	return len(p), nil
+}
+
+// String returns at most the last max bytes written.
+func (t *tailBuffer) String() string {
+	if len(t.buf) > t.max {
+		return string(t.buf[len(t.buf)-t.max:])
+	}
+	return string(t.buf)
 }
 
 // lastNonEmptyLine reads all of r and returns its last non-empty line (the

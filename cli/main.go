@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/qdrant/go-client/qdrant"
 
@@ -29,14 +30,28 @@ const defaultCollection = "blkchain"
 
 // newRetrievalClient builds a Go-native retrieval client (Task 8): it reads
 // the shared RAG config plus BLKCHAIN_COLLECTION, replacing the Python
-// /search HTTP call for the search command and RAG streaming.
+// /search HTTP call for the search command and RAG streaming. It follows the
+// saved reranker switch (/models).
 func newRetrievalClient() (*retrieval.Client, error) {
-	cfg := ragconfig.Load()
+	cfg := loadConfig()
 	collection := os.Getenv("BLKCHAIN_COLLECTION")
 	if collection == "" {
 		collection = defaultCollection
 	}
-	return retrieval.New(cfg, collection)
+	rc, err := retrieval.New(cfg, collection)
+	if err != nil {
+		return nil, err
+	}
+	return followPrefs(rc, loadPrefs()), nil
+}
+
+// followPrefs returns a copy of rc that skips the reranker when p turns it off.
+// A long-running server applies it per call, so a /models change reaches it
+// without a restart.
+func followPrefs(rc *retrieval.Client, p modelPrefs) *retrieval.Client {
+	c := *rc
+	c.SkipRerank = !p.Rerank
+	return &c
 }
 
 // toClientResults adapts retrieval.Result (the Go-native retrieval package's
@@ -63,174 +78,33 @@ func toClientResults(rs []retrieval.Result) []client.SearchResult {
 
 func main() {
 	loadProjectEnv()
-
-	if len(os.Args) < 2 {
-		// Bare `blk` drops into the interactive REPL — the friendliest entry
-		// point for repeated search/ask without re-invoking the binary.
-		if err := runREPL(); err != nil {
-			fmt.Fprintf(os.Stderr, "%s %v\n", Fail.Render(Glyph(GlyphErr)), err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	cmd := os.Args[1]
-	args := os.Args[2:]
-
-	var err error
-	switch cmd {
-	case "search":
-		err = runSearch(args)
-	case "ask":
-		err = runAsk(args)
-	case "add":
-		err = runAdd(args)
-	case "health":
-		err = runHealth(args)
-	case "up", "down", "status":
-		err = runStack(cmd)
-	case "mcp":
-		err = runMCP(args)
-	case "install":
-		err = runInstall(args)
-	case "doctor":
-		err = runDoctor(args)
-	case "models":
-		err = runModels(args)
-	case "logs":
-		err = runLogs(args)
-	case "open":
-		err = runOpen(args)
-	case "hermes":
-		err = runHermes(args)
-	case "gateway":
-		err = runGateway(args)
-	case "repl", "chat":
-		err = runREPL()
-	case "version", "--version", "-v":
-		printVersion(os.Stdout)
-		return
-	case "completion":
-		err = runCompletion(args)
-	case "-h", "--help", "help":
-		usage(os.Stdout)
-		return
-	default:
-		fmt.Fprintf(os.Stderr, "%s unknown command %q\n\n", Fail.Render("blk:"), cmd)
-		usage(os.Stderr)
-		os.Exit(2)
-	}
-
-	if err != nil {
-		var unreachable *client.UnreachableError
-		if errors.As(err, &unreachable) {
-			fmt.Fprintf(os.Stderr, "%s %v\n%s  %s\n",
-				Fail.Render(Glyph(GlyphErr)), err, Meta.Render("Start the services with:"), Key.Render("blk up"))
-		} else {
-			fmt.Fprintf(os.Stderr, "%s %v\n", Fail.Render(Glyph(GlyphErr)), err)
-		}
-		os.Exit(1)
-	}
+	err := execute(os.Args[1:])
+	reportError(os.Stderr, err)
+	os.Exit(exitCode(err))
 }
 
-// usageCmd is one row of the COMMANDS section: a command name (as typed
-// after "blk"), its description, and whether it's the primary/default verb
-// marked with the accent ❯ (DESIGN-SPEC.md §3's help mockup).
-type usageCmd struct {
-	name    string
-	desc    string
-	primary bool
-}
-
-var usageCmds = []usageCmd{
-	{"ask <query...>", "get a synthesized, cited answer", true},
-	{"search <query...>", "find ranked source chunks", false},
-	{"add <path|url>", "index your own docs into the KB", false},
-	{"repl", "interactive REPL (bare blk too — search/ask without re-launching)", false},
-	{"open <path|N>", "open a source file in $PAGER/$EDITOR", false},
-	{"hermes <prompt...>", "run a Hermes agent turn (has the blkChain KB tools)", false},
-	{"gateway", "provision ~/.hermes/.env + start hermes gateway (richer agent mode)", false},
-	{"up|down|status", "start / stop / check the local services", false},
-	{"mcp", "run the Hermes MCP stdio server (for ~/.hermes/config.yaml)", false},
-	{"health", "check the API and its dependencies", false},
-	{"doctor", "diagnose the whole stack (+ Hermes MCP wiring)", false},
-	{"models", "readiness + live perf of the chat/embed/rerank models", false},
-	{"logs [name]", "tail a service log (api, embed_server)", false},
-	{"install", "install blk onto your PATH (run once, from the project)", false},
-	{"version", "show version and build info", false},
-	{"completion bash|zsh", "print a shell-completion script", false},
-	{"help", "show this help", false},
-}
-
-// usageRow is a name/description pair, used for FLAGS and ENVIRONMENT.
-type usageRow struct{ name, desc string }
-
-var usageFlags = []usageRow{
-	{"--top-k N", "(search) how many results to return"},
-	{"--source S", "(search) only results from source S (repeatable)"},
-	{"--type T", "(search) only results of type T"},
-	{"--filter k=v", "(search) arbitrary payload filter (repeatable)"},
-	{"--sources", "(ask) also print the retrieved chunks"},
-	{"--agent", "(ask) answer via the Hermes agent instead of plain RAG"},
-	{"--source S", "(add) source label (default: derived from the path)"},
-	{"--type T", "(add) force chunking as md, txt, or pdf"},
-	{"--json", "print raw JSON instead of formatted text"},
-}
-
-var usageEnv = []usageRow{
-	{"BLKCHAIN_API_URL", "API base URL (default http://127.0.0.1:8200)"},
-	{"BLKCHAIN_ROOT", "project root, if blk is run from outside it and not installed"},
-	{"NO_COLOR", "disable colored output"},
-}
-
-// usage prints the help menu per DESIGN-SPEC.md §3: an H1 banner + version,
-// a single rule, then H2 sections with Key-styled names and Body
-// descriptions. The primary command is marked with the accent ❯.
-func usage(w *os.File) {
-	v, _, _, _ := versionInfo()
-	fmt.Fprintln(w, " "+headerLine(H1.Render("blk · knowledge-base client"), Meta.Render(v)))
-	fmt.Fprintln(w, " "+RuleS.Render(strings.Repeat("─", wrapWidth(terminalWidth(), 78))))
-
-	fmt.Fprintln(w, " "+H2.Render("USAGE"))
-	fmt.Fprintf(w, "   %s\n", Key.Render("blk <command> [flags]"))
-
-	fmt.Fprintln(w, " "+H2.Render("COMMANDS"))
-	nameWidth := 0
-	for _, c := range usageCmds {
-		if len(c.name) > nameWidth {
-			nameWidth = len(c.name)
-		}
+// execute runs blk with the arguments after the program name. No arguments
+// starts the interactive session, the friendliest entry point for repeated
+// search and ask without re-invoking the binary.
+func execute(args []string) error {
+	if len(args) == 0 {
+		return runREPL()
 	}
-	for _, c := range usageCmds {
-		marker := "  "
-		if c.primary {
-			marker = Prompt.Render(Glyph(GlyphPrompt)) + " "
-		}
-		fmt.Fprintf(w, " %s%s  %s\n", marker, Key.Render(pad(c.name, nameWidth)), Body.Render(c.desc))
-	}
-
-	fmt.Fprintln(w, " "+H2.Render("FLAGS"))
-	printUsageRows(w, usageFlags)
-	fmt.Fprintf(w, "   %s\n", Meta.Render("Flags may appear anywhere, before or after the query."))
-
-	fmt.Fprintln(w, " "+H2.Render("ENVIRONMENT"))
-	printUsageRows(w, usageEnv)
-
-	fmt.Fprintf(w, " %s\n", Meta.Render(`Run "blk <command> --help" for detail.`))
+	return dispatch(args[0], args[1:])
 }
 
-// printUsageRows renders a FLAGS/ENVIRONMENT-style two-column block: Key name
-// padded to align, Meta description.
-func printUsageRows(w *os.File, rows []usageRow) {
-	width := 0
-	for _, r := range rows {
-		if len(r.name) > width {
-			width = len(r.name)
-		}
+// dispatch runs the named command. A help flag as the first argument prints
+// the command's help for every command, including those that take no flags.
+func dispatch(cmd string, args []string) error {
+	c, ok := lookupCommand(cmd)
+	if !ok {
+		return unknownCommand(cmd)
 	}
-	for _, r := range rows {
-		fmt.Fprintf(w, "   %s   %s\n", Key.Render(pad(r.name, width)), Meta.Render(r.desc))
+	if helpRequested(args) {
+		printCommandHelp(os.Stdout, c)
+		return nil
 	}
+	return c.run(args)
 }
 
 // pad right-pads s with spaces to width (a no-op if s is already that long).
@@ -266,23 +140,38 @@ func reorder(args []string, valueFlags map[string]bool) []string {
 	return append(flags, pos...)
 }
 
+// searchOpts holds the flags of `blk search`.
+type searchOpts struct {
+	topK    int
+	json    bool
+	sources multiFlag
+	typ     string
+	filters multiFlag
+}
+
+// defineSearchFlags declares `blk search`'s flags. Placeholders are the
+// backquoted words, which the FLAGS help section shows after each flag name.
+func defineSearchFlags(fs *flag.FlagSet, o *searchOpts) {
+	fs.IntVar(&o.topK, "top-k", 0, fmt.Sprintf("return `N` results (default %d)", loadConfig().TopK))
+	fs.BoolVar(&o.json, "json", false, "print JSON instead of formatted text")
+	fs.Var(&o.sources, "source", "only results from source `NAME` (the last one wins)")
+	fs.StringVar(&o.typ, "type", "", "only results of this `TYPE`, such as doc, note, or payload")
+	fs.Var(&o.filters, "filter", "match a payload field, as `KEY=VALUE` (repeatable)")
+}
+
 func runSearch(args []string) error {
-	fs := flag.NewFlagSet("search", flag.ContinueOnError)
-	topK := fs.Int("top-k", 0, "number of results to return")
-	jsonOut := fs.Bool("json", false, "print raw JSON")
-	var sources, filters multiFlag
-	var typ string
-	fs.Var(&sources, "source", "only results from this source (repeatable)")
-	fs.StringVar(&typ, "type", "", "only results of this type")
-	fs.Var(&filters, "filter", "payload filter key=value (repeatable)")
+	var o searchOpts
+	fs := newFlagSet("search")
+	defineSearchFlags(fs, &o)
 	valueFlags := map[string]bool{"top-k": true, "source": true, "type": true, "filter": true}
-	if err := fs.Parse(reorder(args, valueFlags)); err != nil {
+	if err := parseFlags(fs, reorder(args, valueFlags)); err != nil {
 		return err
 	}
+	topK, jsonOut, sources, typ, filters := &o.topK, &o.json, o.sources, o.typ, o.filters
 
 	query := strings.Join(fs.Args(), " ")
 	if query == "" {
-		return errors.New("search: give me something to search for, e.g.  blk search SSRF to cloud metadata")
+		return missingArg("search", "missing query", `search "SSRF to cloud metadata"`)
 	}
 
 	filterMap, err := buildFilters(sources, typ, filters)
@@ -323,7 +212,7 @@ func buildFilters(sources multiFlag, typ string, kv multiFlag) (map[string]inter
 	for _, f := range kv {
 		k, v, ok := strings.Cut(f, "=")
 		if !ok || k == "" {
-			return nil, fmt.Errorf("search: --filter must be key=value, got %q", f)
+			return nil, usageErr(`search: --filter must be KEY=VALUE, got %q. Example: blk search --filter section=intro "ssrf". See "blk help search".`, f)
 		}
 		m[k] = v
 	}
@@ -333,61 +222,104 @@ func buildFilters(sources multiFlag, typ string, kv multiFlag) (map[string]inter
 	return m, nil
 }
 
-// printResults renders ranked search results per DESIGN-SPEC.md §3's SEARCH
+// printResults renders ranked search results per DESIGN-SPEC.md section 3's SEARCH
 // banner + ranked-row layout (rank Meta, title Body, path Meta, score
 // right-aligned and banded via scoreStyle), or a friendly empty message.
 // elapsed is omitted from the banner when zero (the --sources path under
 // runAsk has no separate timing to show).
 func printResults(query string, results []client.SearchResult, elapsed time.Duration) {
-	fmt.Print(formatResults(query, results, elapsed))
+	fmt.Print(formatResults(query, results, elapsed, terminalWidth()))
 }
 
 // formatResults builds the same rendering as printResults but returns it as a
 // string, so the TUI REPL can commit it to scrollback via tea.Println instead
-// of writing straight to stdout (which would corrupt the live region).
-func formatResults(query string, results []client.SearchResult, elapsed time.Duration) string {
+// of writing straight to stdout (which would corrupt the live region). width
+// is the terminal or model width: no line exceeds it, and long unbroken
+// tokens are hard-broken rather than overflowing.
+func formatResults(query string, results []client.SearchResult, elapsed time.Duration, width int) string {
 	var b strings.Builder
 	if len(results) == 0 {
 		fmt.Fprintf(&b, " %s\n", Body.Render(fmt.Sprintf("No results for %q.", query)))
 		return b.String()
 	}
 
-	banner := H1.Render("SEARCH") + "  " + H1.Render(fmt.Sprintf("%q", query))
+	hw := wrapWidth(width, 78)
+	indent := 6
+	if hw < 20 {
+		indent = 2
+	}
+
 	count := fmt.Sprintf("%d result(s)", len(results))
 	if elapsed > 0 {
-		count = fmt.Sprintf("%s · %s", count, elapsed.Round(time.Millisecond))
+		count = joinSep(count, elapsed.Round(time.Millisecond).String())
 	}
-	fmt.Fprintln(&b, " "+headerLine(banner, Meta.Render(count)))
+	quoted := ellipsize(fmt.Sprintf("%q", query), hw-len("SEARCH  ")-utf8.RuneCountInString(count)-1)
+	banner := H1.Render("SEARCH") + "  " + H1.Render(quoted)
+	fmt.Fprintln(&b, " "+headerLine(banner, Meta.Render(count), width))
 	fmt.Fprintln(&b)
 
 	for i, r := range results {
-		title := r.Payload.Source
+		title := sanitizeTerminal(r.Payload.Source)
 		if r.Payload.Section != "" {
-			title += " · " + r.Payload.Section
+			title += " " + Glyph(GlyphSep) + " " + sanitizeTerminal(r.Payload.Section)
 		}
-		left := fmt.Sprintf(" %s  %s", Meta.Render(fmt.Sprintf("%2d", i+1)), Body.Render(title))
-		score := scoreStyle(r.Score).Render(fmt.Sprintf("%.4f", r.Score))
-		fmt.Fprintln(&b, headerLine(left, score))
+		rank := fmt.Sprintf("%2d", i+1)
+		scoreText := fmt.Sprintf("%.4f", r.Score)
+		// The row is " <rank>  <title> ... <score>": 4 columns of fixed chrome
+		// around the rank, plus one column between title and score.
+		title = ellipsize(title, hw-len(rank)-4-len(scoreText)-1)
+		left := fmt.Sprintf(" %s  %s", Meta.Render(rank), Body.Render(title))
+		fmt.Fprintln(&b, headerLine(left, scoreStyle(r.Score).Render(scoreText), width))
 		if r.Payload.Path != "" {
-			fmt.Fprintf(&b, "      %s\n", Meta.Render(r.Payload.Path))
+			for _, ln := range strings.Split(wrapIndent(sanitizeTerminal(r.Payload.Path), indent, hw), "\n") {
+				fmt.Fprintln(&b, Meta.Render(ln))
+			}
 		}
-		fmt.Fprintf(&b, "      %s\n\n", truncate(r.Payload.Text, 240))
+		// Chunk text carries newlines and tabs; collapse them so the preview
+		// keeps the row indent.
+		preview := strings.Join(strings.Fields(sanitizeTerminal(r.Payload.Text)), " ")
+		fmt.Fprintf(&b, "%s\n\n", wrapIndent(truncate(preview, 240), indent, hw))
 	}
 	return b.String()
 }
 
+// newAskStream returns the token callback for the streaming ask path: it strips
+// control sequences (holding back one split across tokens), writes the clean
+// text to w, and records it in full.
+func newAskStream(w io.Writer, full *strings.Builder) func([]byte) {
+	var ts termStream
+	return func(b []byte) {
+		clean := ts.Write(string(b))
+		full.WriteString(clean)
+		io.WriteString(w, clean)
+	}
+}
+
+// askOpts holds the flags of `blk ask`.
+type askOpts struct {
+	json    bool
+	sources bool
+	agent   bool
+}
+
+func defineAskFlags(fs *flag.FlagSet, o *askOpts) {
+	fs.BoolVar(&o.json, "json", false, "print the answer as JSON instead of formatted text")
+	fs.BoolVar(&o.sources, "sources", false, "also print the retrieved passages")
+	fs.BoolVar(&o.agent, "agent", false, "answer with the Hermes agent instead of the knowledge base alone")
+}
+
 func runAsk(args []string) error {
-	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
-	jsonOut := fs.Bool("json", false, "print raw JSON")
-	showSources := fs.Bool("sources", false, "also print the retrieved chunks")
-	agent := fs.Bool("agent", false, "answer via the Hermes agent instead of plain RAG")
-	if err := fs.Parse(reorder(args, nil)); err != nil {
+	var o askOpts
+	fs := newFlagSet("ask")
+	defineAskFlags(fs, &o)
+	if err := parseFlags(fs, reorder(args, nil)); err != nil {
 		return err
 	}
+	jsonOut, showSources, agent := &o.json, &o.sources, &o.agent
 
 	query := strings.Join(fs.Args(), " ")
 	if query == "" {
-		return errors.New("ask: give me a question, e.g.  blk ask how do I chain this SSRF to RCE?")
+		return missingArg("ask", "missing question", `ask "what is SSRF?"`)
 	}
 
 	// --agent hands the question to the Hermes agent (which has the blkChain KB
@@ -406,29 +338,36 @@ func runAsk(args []string) error {
 	// --sources needs the retrieved chunks, neither of which the token stream
 	// carries.
 	if !*jsonOut && !*showSources {
+		// Tokens are untrusted LLM output: strip control sequences before they
+		// reach the terminal. termStream holds back a sequence split across tokens.
 		var full strings.Builder
 		_, cits, usedWeb, _, _, err := AnswerLoop(context.Background(), rc, cfg, query, AnswerOpts{
-			Stream: func(b []byte) {
-				full.Write(b)
-				os.Stdout.Write(b)
-			},
+			Stream: newAskStream(os.Stdout, &full),
+			NoWeb:  !loadPrefs().Web,
 		})
+		if errors.Is(err, ErrNoResults) {
+			return reportNoResults(os.Stderr, false)
+		}
+		err = timeoutOrErr(err)
 		if err != nil && full.Len() == 0 {
 			return err
 		}
 		if !strings.HasSuffix(full.String(), "\n") {
 			fmt.Println()
 		}
-		printSources(cits, usedWeb)
+		printSources(cits, usedWeb, rc.SkipRerank)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s stream ended early: %v\n", Fail.Render(Glyph(GlyphErr)), err)
+			fmt.Fprintf(os.Stderr, "%s stream ended early: %s\n", errMark(), sanitizeTerminal(err.Error()))
 		}
 		return nil
 	}
 
-	answer, cits, usedWeb, results, _, err := AnswerLoop(context.Background(), rc, cfg, query, AnswerOpts{})
+	answer, cits, usedWeb, results, _, err := AnswerLoop(context.Background(), rc, cfg, query, AnswerOpts{NoWeb: !loadPrefs().Web})
+	if errors.Is(err, ErrNoResults) {
+		return reportNoResults(os.Stderr, *jsonOut)
+	}
 	if err != nil {
-		return err
+		return timeoutOrErr(err)
 	}
 	resp := &client.AnswerResponse{
 		Answer:    answer,
@@ -450,51 +389,96 @@ func runAsk(args []string) error {
 		fmt.Println()
 		printResults(query, resp.Results, 0)
 	}
-	printSources(resp.Citations, resp.UsedWeb)
+	printSources(resp.Citations, resp.UsedWeb, rc.SkipRerank)
 	return nil
 }
 
+// reportNoResults handles AnswerLoop's ErrNoResults for the non-interactive ask
+// paths. Text mode prints the warning and next steps to stderr and leaves
+// stdout empty. JSON mode keeps the AnswerResponse wire shape, with the plain
+// no-results statement as the answer and no citations.
+func reportNoResults(stderr io.Writer, jsonOut bool) error {
+	if jsonOut {
+		return printJSON(&client.AnswerResponse{Answer: noResultsAnswer, Citations: []client.Citation{}})
+	}
+	fmt.Fprintln(stderr, formatNoResultsErr())
+	return nil
+}
+
+// isWebCitation reports whether a citation came from the live web search
+// fallback. tavilySearchAt tags every web hit with Source "web", and
+// buildContext treats that value as untrusted external evidence.
+func isWebCitation(cit client.Citation) bool { return cit.Source == "web" }
+
+// webTag is the plain-text marker shown next to web citations. It is text so it
+// survives without color.
+const webTag = "[web, untrusted]"
+
+// citationLine renders one numbered SOURCES row: index, source, path and
+// section (all sanitized, they come from the corpus or the web), and the web tag.
+func citationLine(indent string, i int, cit client.Citation) string {
+	line := indent + Key.Render(fmt.Sprintf("[%d]", i+1)) + "  " + Body.Render(sanitizeTerminal(cit.Source))
+	meta := sanitizeTerminal(cit.Path)
+	if cit.Section != "" {
+		if meta != "" {
+			meta += " " + Glyph(GlyphSep) + " "
+		}
+		meta += sanitizeTerminal(cit.Section)
+	}
+	if meta != "" {
+		line += "  " + Meta.Render(meta)
+	}
+	if isWebCitation(cit) {
+		line += "  " + Caut.Render(webTag)
+	}
+	return line
+}
+
+// rerankOffNote is the sources-block line for an answer made with the reranker
+// turned off in /models.
+const rerankOffNote = "(the reranker was off for this answer, so sources are in hybrid order)"
+
 // printSources renders the SOURCES block to stdout, shared by the streaming and
-// non-streaming ask paths.
-func printSources(citations []client.Citation, usedWeb bool) {
+// non-streaming ask paths. rerankOff adds rerankOffNote.
+func printSources(citations []client.Citation, usedWeb, rerankOff bool) {
 	fmt.Println()
 	fmt.Println(H2.Render("SOURCES"))
 	if len(citations) == 0 {
 		fmt.Println("  " + Meta.Render("(none)"))
 	}
 	for i, cit := range citations {
-		line := "  " + Key.Render(fmt.Sprintf("[%d]", i+1)) + "  " + Body.Render(cit.Source)
-		meta := cit.Path
-		if cit.Section != "" {
-			if meta != "" {
-				meta += " · "
-			}
-			meta += cit.Section
-		}
-		if meta != "" {
-			line += "  " + Meta.Render(meta)
-		}
-		fmt.Println(line)
+		fmt.Println(citationLine("  ", i, cit))
+	}
+	if usedWeb || rerankOff {
+		fmt.Println()
 	}
 	if usedWeb {
-		fmt.Println()
 		fmt.Println(Meta.Render("(this answer used a web search)"))
+	}
+	if rerankOff {
+		fmt.Println(Meta.Render(rerankOffNote))
 	}
 }
 
 func runHealth(args []string) error {
-	fs := flag.NewFlagSet("health", flag.ContinueOnError)
-	if err := fs.Parse(args); err != nil {
+	fs := newFlagSet("health")
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 
-	cfg := ragconfig.Load()
-	qdrantOK, embedOK := probeHealth(cfg)
+	cfg := loadConfig()
+	h := nativeHealth(cfg)
 	fmt.Println("blkChain services:")
-	fmt.Printf("  %s qdrant        %s\n", check(qdrantOK), Meta.Render("("+cfg.QdrantGRPCURL+")"))
-	fmt.Printf("  %s embed_server  %s\n", check(embedOK), Meta.Render("("+cfg.EmbedServerURL+")"))
+	fmt.Printf("  %s qdrant        %s\n", check(h.Qdrant), Meta.Render("("+cfg.QdrantGRPCURL+")"))
+	fmt.Printf("  %s embed_server  %s\n", check(h.EmbedServer), Meta.Render("("+cfg.EmbedServerURL+")"))
+	fmt.Printf("  %s llm           %s\n", check(h.LLM), Meta.Render("("+redactedURL(omlxBaseURL())+")"))
 	return nil
 }
+
+// loadConfig is how the retrieval and health paths read the RAG config. It is a variable so
+// tests can point the embed server at a dead loopback port instead of the
+// real default one; the embed URL has no environment override.
+var loadConfig = ragconfig.Load
 
 // healthProbeTimeout bounds each liveness probe so `blk health` never hangs
 // on a dead dependency.
@@ -579,8 +563,80 @@ func probeEmbedServer(cfg ragconfig.Config) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+// embedHealth is embed_server's GET /health report of which of its models
+// loaded.
+type embedHealth struct {
+	Embedder bool `json:"embedder"`
+	Reranker bool `json:"reranker"`
+}
+
+// probeEmbedHealth reads embed_server's GET /health, bounded by the probe
+// timeout and a 1 MiB body cap. ok is false when it does not answer with a
+// 200 and valid JSON.
+func probeEmbedHealth(cfg ragconfig.Config) (h embedHealth, ok bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), healthProbeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.EmbedServerURL+"/health", nil)
+	if err != nil {
+		return h, false
+	}
+	resp, err := modelsHTTP.Do(req)
+	if err != nil {
+		return h, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return h, false
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&h); err != nil {
+		return embedHealth{}, false
+	}
+	return h, true
+}
+
+// probeLLM reports whether the LLM server at baseURL answers GET /models with a
+// 2xx status. The API key, when set, goes in the Authorization header and is
+// never printed. The body read is capped at 1 MiB and discarded.
+func probeLLM(baseURL, apiKey string) bool {
+	return probeLLMWithTimeout(baseURL, apiKey, healthProbeTimeout)
+}
+
+func probeLLMWithTimeout(baseURL, apiKey string, timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
+	if err != nil {
+		return false
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+// downServices names the services h reports as down, in status-line order.
+func downServices(h *client.HealthResponse) []string {
+	var down []string
+	if !h.Qdrant {
+		down = append(down, "qdrant")
+	}
+	if !h.EmbedServer {
+		down = append(down, "embed_server")
+	}
+	if !h.LLM {
+		down = append(down, "llm")
+	}
+	return down
+}
+
 // check renders the theme's OK/Fail glyph for a boolean dependency state
-// (DESIGN-SPEC.md §2, §4).
+// (DESIGN-SPEC.md sections 2 and 4).
 func check(ok bool) string {
 	if ok {
 		return OK.Render(Glyph(GlyphOK))
@@ -593,8 +649,34 @@ func printJSON(v interface{}) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(data))
+	fmt.Println(string(escapeJSONControls(data)))
 	return nil
+}
+
+// escapeJSONControls rewrites DEL and the C1 runes (U+0080..U+009F) in marshaled
+// JSON as \uXXXX. encoding/json emits them raw, and a terminal would act on
+// U+009B (CSI) or U+009D (OSC). They can only occur inside string literals, so
+// the JSON stays valid and decodes to the same strings. Other bytes are copied
+// unchanged.
+func escapeJSONControls(data []byte) []byte {
+	var out []byte
+	last := 0
+	for i := 0; i < len(data); {
+		r, n := utf8.DecodeRune(data[i:])
+		if r == 0x7f || (r >= 0x80 && r <= 0x9f && n > 1) {
+			if out == nil {
+				out = make([]byte, 0, len(data)+16)
+			}
+			out = append(out, data[last:i]...)
+			out = append(out, fmt.Sprintf(`\u%04x`, r)...)
+			last = i + n
+		}
+		i += n
+	}
+	if out == nil {
+		return data
+	}
+	return append(out, data[last:]...)
 }
 
 // truncate shortens s to at most n runes, appending "..." if it was cut.

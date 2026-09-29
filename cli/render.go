@@ -19,8 +19,11 @@ import (
 // capability detection (see theme.go) says color is off, it forces glamour's
 // plain notty/ascii style instead of letting glamour auto-detect, so piped
 // or NO_COLOR output never carries ANSI. On any renderer error it falls back
-// to the raw markdown so an answer is never lost.
+// to the raw markdown so an answer is never lost. md is untrusted (corpus,
+// web, LLM output), so it is stripped of terminal control sequences first;
+// that also covers the raw fallback.
 func glowRender(md string, width int) string {
+	md = sanitizeTerminal(md)
 	w := width
 	if w <= 0 || w > 100 {
 		w = 100
@@ -40,16 +43,86 @@ func glowRender(md string, width int) string {
 	return out
 }
 
-// headerLine right-aligns right against left within the wrap width (capped
-// at 78 columns, matching DESIGN-SPEC.md's mockups), for banner-style rows
-// like "blk · knowledge-base client ... v0.4.1" or a search result's
-// "title ... score". Widths are measured with lipgloss.Width so ANSI styling
-// already applied to left or right doesn't throw off the padding.
-func headerLine(left, right string) string {
-	width := wrapWidth(terminalWidth(), 78)
-	pad := width - lipgloss.Width(left) - lipgloss.Width(right)
-	if pad < 1 {
+// headerLine right-aligns right against left within the wrap width derived
+// from width (the caller's terminal or model width; capped at 78 columns,
+// matching DESIGN-SPEC.md's mockups), for banner-style rows like "blk ...
+// knowledge-base client ... v0.4.1" or a search result's "title ... score".
+// Widths are measured with lipgloss.Width so ANSI styling already applied to
+// left or right doesn't throw off the padding. The result never exceeds the
+// wrap width: an oversized left is cut, and right is dropped when there is no
+// room for both.
+func headerLine(left, right string, width int) string {
+	w := wrapWidth(width, 78)
+	rw := lipgloss.Width(right)
+	if w-rw-1 < 1 {
+		right, rw = "", 0
+	}
+	room := w - rw
+	if rw > 0 {
+		room--
+	}
+	if lipgloss.Width(left) > room {
+		left = lipgloss.NewStyle().MaxWidth(room).Render(left)
+	}
+	pad := w - lipgloss.Width(left) - rw
+	if pad < 0 {
+		pad = 0
+	}
+	if rw > 0 && pad < 1 {
 		pad = 1
 	}
 	return left + strings.Repeat(" ", pad) + right
+}
+
+// ellipsize shortens plain text s to at most n display columns, ending in an
+// ASCII "..." when it was cut. n <= 0 yields "", and n <= 3 yields only dots.
+// s must be unstyled: styled text is cut with lipgloss MaxWidth instead.
+func ellipsize(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= n {
+		return s
+	}
+	if n <= 3 {
+		return strings.Repeat(".", n)
+	}
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if used+rw > n-3 {
+			break
+		}
+		b.WriteRune(r)
+		used += rw
+	}
+	return b.String() + "..."
+}
+
+// wrapIndent word-wraps plain text s so every line, indent columns of leading
+// space included, fits in total columns. A token longer than the room is
+// hard-broken instead of overflowing, so URLs, base64, and payload strings
+// stay inside the width. total and indent are guarded so the text width is
+// always at least 1.
+func wrapIndent(s string, indent, total int) string {
+	if indent < 0 {
+		indent = 0
+	}
+	if indent > total-1 {
+		indent = total - 1
+	}
+	if indent < 0 {
+		indent = 0
+	}
+	w := total - indent
+	if w < 1 {
+		w = 1
+	}
+	pad := strings.Repeat(" ", indent)
+	lines := strings.Split(lipgloss.NewStyle().Width(w).Render(s), "\n")
+	for i, ln := range lines {
+		lines[i] = pad + strings.TrimRight(ln, " ")
+	}
+	return strings.Join(lines, "\n")
 }

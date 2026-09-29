@@ -1,15 +1,20 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"blkchain/cli/internal/client"
@@ -218,7 +223,7 @@ func discoverModel(baseURL, apiKey string) string {
 
 // newOMLX builds the LangChainGo OpenAI client pointed at oMLX. It uses a
 // custom HTTP client whose transport injects chat_template_kwargs into chat
-// requests (see thinkingOffTransport) — LangChainGo has no option for it, and
+// requests (see thinkingOffTransport). LangChainGo has no option for it, and
 // some local models otherwise run away in a reasoning channel on constrained
 // prompts and return empty content.
 func newOMLX() (*openai.LLM, error) {
@@ -266,6 +271,62 @@ func (t *thinkingOffTransport) RoundTrip(req *http.Request) (*http.Response, err
 	req.ContentLength = int64(len(raw))
 	req.Header.Set("Content-Type", "application/json")
 	return t.base.RoundTrip(req)
+}
+
+// llmUnreachableError is a connection-refused or timeout failure talking to the
+// LLM server, carrying the base URL. Unwrap exposes the original network error to
+// errors.Is and errors.As. Only a refused connection means the server is down; a
+// timeout means the model is slow, so the two get different advice.
+type llmUnreachableError struct {
+	base    string
+	timeout bool
+	err     error
+}
+
+func (e *llmUnreachableError) Error() string {
+	if e.timeout {
+		return fmt.Sprintf("LLM request to %s timed out: raise BLKCHAIN_TIMEOUT_SECONDS", e.base)
+	}
+	return fmt.Sprintf("LLM server at %s did not answer (connection refused): start the LLM server at %s, or set OMLX_BASE_URL", e.base, e.base)
+}
+
+func (e *llmUnreachableError) Unwrap() error { return e.err }
+
+// refused reports whether the server refused the connection (it is down), as
+// opposed to a timeout.
+func (e *llmUnreachableError) refused() bool { return !e.timeout }
+
+// mapLLMError turns a connection-refused or timeout failure from the LLM client
+// into a one-line llmUnreachableError naming baseURL. Any other error, and a
+// cancellation, is returned unchanged. It matches on the error chain, not text.
+func mapLLMError(err error, baseURL string) error {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return err
+	}
+	var timeout bool
+	var ne net.Error
+	switch {
+	case errors.Is(err, syscall.ECONNREFUSED):
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+		timeout = true
+	default:
+		return err
+	}
+	return &llmUnreachableError{base: redactedURL(baseURL), timeout: timeout, err: err}
+}
+
+// redactedURL drops the userinfo, query, and fragment of a URL before it is
+// shown, since any of them can carry a token. An unparsable URL is not echoed.
+func redactedURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "(invalid URL)"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawFragment = ""
+	return u.String()
 }
 
 // requestHTTPTimeout mirrors the blk client timeout for the oMLX stream.
@@ -350,4 +411,19 @@ func omlxModels() []string {
 		}
 	}
 	return ids
+}
+
+// errRequestTimeout is the one-line wording for a turn that ran out of time.
+var errRequestTimeout = errors.New("request timed out (raise BLKCHAIN_TIMEOUT_SECONDS)")
+
+// timeoutOrErr maps a bare context deadline (a turn that timed out with nothing
+// to answer from) to errRequestTimeout. A deadline that already carries its own
+// advice (an LLM or unreachable-service error) and every other error, cancel
+// included, pass through unchanged. It matches on the error chain, not text.
+func timeoutOrErr(err error) error {
+	var llmErr *llmUnreachableError
+	if errors.Is(err, context.DeadlineExceeded) && !errors.As(err, &llmErr) && !isUnreachable(err) {
+		return errRequestTimeout
+	}
+	return err
 }

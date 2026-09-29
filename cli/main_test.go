@@ -1,16 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"blkchain/cli/internal/client"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 // captureStdout runs fn with os.Stdout redirected, returning everything it printed.
@@ -55,7 +57,7 @@ func TestRunSearchRendersResults(t *testing.T) {
 		},
 	}
 
-	out := formatResults("how does consensus work", results, 0)
+	out := formatResults("how does consensus work", results, 0, 80)
 
 	if !strings.Contains(out, "0.8765") {
 		t.Errorf("output missing score, got:\n%s", out)
@@ -110,7 +112,7 @@ func TestPrintSourcesRendersCitationsAndWebNote(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		printSources(citations, true)
+		printSources(citations, true, false)
 	})
 
 	if !strings.Contains(out, "SOURCES") {
@@ -155,16 +157,11 @@ func TestRunAskJSONShape(t *testing.T) {
 	}
 }
 
+// TestRunHealth is hermetic: Qdrant points at a dead port, so both rows print
+// as down without any live service, and runHealth still returns nil.
 func TestRunHealth(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		json.NewEncoder(w).Encode(client.HealthResponse{Status: "ok"})
-	}))
-	defer srv.Close()
-
-	t.Setenv("BLKCHAIN_API_URL", srv.URL)
+	useDeadServices(t)
+	t.Setenv("QDRANT_GRPC_URL", "127.0.0.1:1")
 
 	out := captureStdout(t, func() {
 		if err := runHealth(nil); err != nil {
@@ -172,8 +169,10 @@ func TestRunHealth(t *testing.T) {
 		}
 	})
 
-	if !strings.Contains(out, "ok") {
-		t.Errorf("output missing status, got:\n%s", out)
+	for _, want := range []string{"qdrant", "embed_server", "127.0.0.1:1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q, got:\n%s", want, out)
+		}
 	}
 }
 
@@ -181,6 +180,7 @@ func TestRunHealth(t *testing.T) {
 // probes Qdrant and embed_server directly and never depends on the Python
 // API, so a dead dependency is reported as a down row, not a hard error.
 func TestRunHealthUnreachable(t *testing.T) {
+	useDeadServices(t)
 	t.Setenv("QDRANT_GRPC_URL", "127.0.0.1:1")
 
 	if err := runHealth(nil); err != nil {
@@ -218,5 +218,129 @@ func TestProjectRootViaBlkchainRoot(t *testing.T) {
 	}
 	if got != root {
 		t.Errorf("projectRoot() = %q, want %q", got, root)
+	}
+}
+
+func TestPrintSourcesTagsWebCitations(t *testing.T) {
+	old := useColor
+	useColor = false
+	defer func() { useColor = old }()
+
+	out := captureStdout(t, func() {
+		printSources([]client.Citation{
+			{Source: "wstg", Path: "docs/a.md", Section: "Intro"},
+			{Source: "web", Path: "https://example.com/post", Section: "A post"},
+		}, true, false)
+	})
+	if n := strings.Count(out, "[web, untrusted]"); n != 1 {
+		t.Fatalf("want exactly one [web, untrusted] tag, got %d:\n%s", n, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "docs/a.md") && strings.Contains(line, "[web, untrusted]") {
+			t.Errorf("local citation was tagged as web: %q", line)
+		}
+		if strings.Contains(line, "example.com/post") && !strings.Contains(line, "[web, untrusted]") {
+			t.Errorf("web citation is not tagged on its own line: %q", line)
+		}
+	}
+}
+
+func TestReportNoResultsTextIsWarningWithNextSteps(t *testing.T) {
+	old := useColor
+	useColor = false
+	defer func() { useColor = old }()
+
+	var stderr bytes.Buffer
+	stdout := captureStdout(t, func() {
+		if err := reportNoResults(&stderr, false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if strings.Contains(stdout, "SOURCES") || strings.Contains(stderr.String(), "SOURCES") {
+		t.Error("no-results must not print an empty SOURCES block")
+	}
+	for _, want := range []string{glyphFor(GlyphWarn, useErrUnicode), "rephrase", "blk status", "blk add"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+}
+
+// The no-results warning goes to stderr, so it follows stderr's capabilities:
+// with stdout in color and unicode but stderr redirected to a log, the log gets
+// no ANSI and no unicode glyphs.
+func TestReportNoResultsUsesStderrCapabilities(t *testing.T) {
+	oldUni, oldErrUni, oldRenderer := useUnicode, useErrUnicode, stderrRenderer
+	oldProfile := lipgloss.ColorProfile()
+	t.Cleanup(func() {
+		useUnicode, useErrUnicode, stderrRenderer = oldUni, oldErrUni, oldRenderer
+		lipgloss.SetColorProfile(oldProfile)
+	})
+	useUnicode, useErrUnicode = true, false
+	lipgloss.SetColorProfile(termenv.TrueColor)
+
+	var stderr bytes.Buffer
+	stderrRenderer = newStderrRenderer(&stderr, capabilities{}, true)
+	captureStdout(t, func() {
+		if err := reportNoResults(&stderr, false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	out := stderr.String()
+	if strings.Contains(out, "\x1b") {
+		t.Errorf("stderr got ANSI escapes from the stdout renderer: %q", out)
+	}
+	for _, r := range out {
+		if r > 0x7e {
+			t.Errorf("stderr got a unicode glyph %q with stderr unicode off: %q", r, out)
+			break
+		}
+	}
+	if !strings.Contains(out, "[!]") || !strings.Contains(out, "rephrase") {
+		t.Errorf("warning text is missing:\n%s", out)
+	}
+}
+
+func TestReportNoResultsJSONKeepsWireShape(t *testing.T) {
+	var stderr bytes.Buffer
+	out := captureStdout(t, func() {
+		if err := reportNoResults(&stderr, true); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var resp client.AnswerResponse
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("not valid AnswerResponse JSON: %v\n%s", err, out)
+	}
+	if resp.Answer != noResultsAnswer || len(resp.Citations) != 0 || resp.UsedWeb {
+		t.Errorf("resp = %+v", resp)
+	}
+	if !strings.Contains(out, `"citations": []`) {
+		t.Errorf("citations must serialize as [] not null:\n%s", out)
+	}
+}
+
+// A web URL is never opened or fetched by `blk open` or the plain REPL: both
+// print the same notice as the TUI /open, with the URL sanitized.
+func TestOpenWebURLPrintsNoticeAndNeverLaunches(t *testing.T) {
+	t.Setenv("PAGER", "/nonexistent/pager-that-must-not-run")
+	url := "https://example.com/x\x1b]0;pwned\x07"
+	cases := map[string]func() error{
+		"blk open":          func() error { return runOpen([]string{url}) },
+		"repl open url":     func() error { return replOpen(url, nil) },
+		"repl open by rank": func() error { return replOpen("1", []client.SearchResult{{Payload: client.Payload{Path: url}}}) },
+	}
+	for name, run := range cases {
+		var err error
+		out := captureStdout(t, func() { err = run() })
+		if err != nil {
+			t.Errorf("%s: err = %v, want nil", name, err)
+		}
+		if !strings.Contains(out, "not opened automatically") || !strings.Contains(out, "https://example.com/x") {
+			t.Errorf("%s: output = %q, want the web notice and the URL", name, out)
+		}
+		if strings.ContainsAny(out, "\x1b\x07") {
+			t.Errorf("%s: control bytes reached the terminal: %q", name, out)
+		}
 	}
 }

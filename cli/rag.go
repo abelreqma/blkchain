@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 
@@ -12,10 +13,36 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
-// noResultsAnswer is returned by AnswerLoop when no chunks were retrieved,
-// mirroring Python's _synthesize on an empty results list verbatim.
+// noResultsAnswer is the plain-text statement that nothing was found. It
+// mirrors Python's _synthesize on an empty results list verbatim. AnswerLoop
+// does not stream or return it as an answer; it is the text of ErrNoResults
+// and what non-interactive callers (MCP, --json) report.
 const noResultsAnswer = "No relevant sources were found in the knowledge base or " +
 	"web search for this question, so no grounded answer can be given."
+
+// ErrNoResults is returned by AnswerLoop when retrieval, the optional web
+// fallback, and any rewrite produced nothing to answer from. Nothing is
+// streamed and no LLM synthesis runs. Callers check it with errors.Is and
+// present it as a warning with next steps, not as an answer.
+var ErrNoResults = errors.New(noResultsAnswer)
+
+// Stage names passed to AnswerOpts.Stage, in the order AnswerLoop enters them.
+const (
+	stageRetrieving = "retrieving"
+	stageGrading    = "grading"
+	stageWeb        = "searching web"
+	stageRewriting  = "rewriting query"
+	stageAnswering  = "answering"
+)
+
+// searcher is the retrieval surface AnswerLoop needs. *retrieval.Client
+// satisfies it; tests substitute a fake.
+type searcher interface {
+	Search(ctx context.Context, query string, topK int, filter map[string]any) ([]retrieval.Result, error)
+}
+
+// webSearch is the web fallback, a variable so tests do not touch the network.
+var webSearch = tavilySearch
 
 // rag.go is the single canonical bounded RAG answer loop (AnswerLoop),
 // mirroring blkchain/agent.py's kb_answer: retrieve, grade sufficiency,
@@ -61,10 +88,15 @@ func nextAction(g grade, hasTavily, looksCVE bool, results int) string {
 // AnswerOpts carries the per-turn knobs AnswerLoop needs from its caller.
 // Reasoning is display-only (tracked for the status line / session record)
 // and is never sent to oMLX: langchaingo v0.1.13 exposes no reasoning_effort
-// call option.
+// call option. Stage, when set, is called as the loop enters each phase (see
+// the stage constants); nil is a no-op. It runs on the AnswerLoop goroutine.
+// NoWeb turns the web-search fallback off (the /models web switch): the loop
+// then rewrites and re-retrieves where it would have searched the web.
 type AnswerOpts struct {
 	Model, Preface, Reasoning string
 	Stream                    func([]byte)
+	Stage                     func(stage string)
+	NoWeb                     bool
 }
 
 // AnswerLoop is the bounded, code-orchestrated RAG answer loop: retrieval
@@ -72,9 +104,15 @@ type AnswerOpts struct {
 // the final, source-attributed answer. It mirrors blkchain/agent.py's
 // kb_answer loop control exactly (see nextAction), then streams the
 // synthesis from oMLX.
-func AnswerLoop(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Config, question string, opts AnswerOpts) (answer string, cits []client.Citation, usedWeb bool, results []retrieval.Result, tokens int, err error) {
+func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question string, opts AnswerOpts) (answer string, cits []client.Citation, usedWeb bool, results []retrieval.Result, tokens int, err error) {
 	_ = opts.Reasoning // display-only (see AnswerOpts doc comment)
+	stage := func(name string) {
+		if opts.Stage != nil {
+			opts.Stage(name)
+		}
+	}
 
+	stage(stageRetrieving)
 	results, err = rc.Search(ctx, question, cfg.TopK, nil)
 	if err != nil {
 		return "", nil, false, nil, 0, err
@@ -86,10 +124,11 @@ func AnswerLoop(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Config,
 	}
 
 	searchQuery := question
-	hasTavily := tavilyKey() != ""
+	hasTavily := tavilyKey() != "" && !opts.NoWeb
 	looksCVE := looksLikeCVEorPoC(question)
 
 	for i := 0; i < cfg.MaxLoops; i++ {
+		stage(stageGrading)
 		g, gerr := gradeContext(ctx, l, cfg, question, results)
 		if gerr != nil {
 			// Degrade: proceed to synthesis with whatever we already have,
@@ -107,7 +146,8 @@ func AnswerLoop(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Config,
 			if webQuery == "" {
 				webQuery = searchQuery
 			}
-			webResults, werr := tavilySearch(ctx, tavilyKey(), webQuery, cfg.TavilyMaxResults, cfg.ReputableDomains)
+			stage(stageWeb)
+			webResults, werr := webSearch(ctx, tavilyKey(), webQuery, cfg.TavilyMaxResults, cfg.ReputableDomains)
 			if werr == nil && len(webResults) > 0 {
 				results = append(results, webResults...)
 				usedWeb = true
@@ -119,6 +159,9 @@ func AnswerLoop(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Config,
 
 		if g.Rewrite != "" {
 			searchQuery = g.Rewrite
+			stage(stageRewriting)
+		} else {
+			stage(stageRetrieving)
 		}
 		retried, rerr := rc.Search(ctx, searchQuery, cfg.TopK, nil)
 		if rerr == nil && len(retried) > 0 {
@@ -128,13 +171,15 @@ func AnswerLoop(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Config,
 
 	chunks := boundChunks(cfg, results)
 	if len(chunks) == 0 {
-		// Degrade gracefully, matching Python's _synthesize on an empty
-		// results list: a friendly answer, no citations, no error.
-		if opts.Stream != nil {
-			opts.Stream([]byte(noResultsAnswer))
+		// A canceled or timed-out turn can leave retrieval empty; report that, not
+		// "no results", so the caller does not treat it as a completed turn.
+		if cerr := ctx.Err(); cerr != nil {
+			return "", nil, usedWeb, results, 0, cerr
 		}
-		return noResultsAnswer, nil, usedWeb, results, 0, nil
+		return "", nil, usedWeb, results, 0, ErrNoResults
 	}
+
+	stage(stageAnswering)
 
 	msgs := buildMessages(question, chunks)
 	if strings.TrimSpace(opts.Preface) != "" {
@@ -168,5 +213,5 @@ func AnswerLoop(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Config,
 	cr, genErr := l.GenerateContent(ctx, msgs, callOpts...)
 	answer = full.String()
 	cits = citationsFromAnswer(answer, chunks)
-	return answer, cits, usedWeb, results, completionTokens(cr), genErr
+	return answer, cits, usedWeb, results, completionTokens(cr), mapLLMError(genErr, omlxBaseURL())
 }

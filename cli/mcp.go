@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 
+	"blkchain/cli/internal/client"
 	"blkchain/cli/internal/ragconfig"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -50,7 +52,7 @@ func runMCP(_ []string) error {
 		if in.TopK != nil {
 			topK = *in.TopK
 		}
-		res, err := rc.Search(ctx, in.Query, topK, in.Filters)
+		res, err := followPrefs(rc, loadPrefs()).Search(ctx, in.Query, topK, in.Filters)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -61,17 +63,32 @@ func runMCP(_ []string) error {
 		Name:        "kb_answer",
 		Description: "Bounded, code-orchestrated agentic answer over the local blkChain knowledge base: retrieves, grades sufficiency, optionally rewrites the query or falls back to web search, then synthesizes a grounded, source-cited answer.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpAnswerIn) (*mcp.CallToolResult, any, error) {
-		answer, cits, usedWeb, results, _, err := AnswerLoop(ctx, rc, cfg, in.Query, AnswerOpts{})
+		p := loadPrefs()
+		out, err := kbAnswer(ctx, followPrefs(rc, p), cfg, in.Query, !p.Web)
 		if err != nil {
 			return nil, nil, err
 		}
-		return nil, map[string]any{
-			"answer":    answer,
-			"citations": cits,
-			"used_web":  usedWeb,
-			"results":   results,
-		}, nil
+		return nil, out, nil
 	})
 
 	return s.Run(context.Background(), &mcp.StdioTransport{MaxLineLength: 1 << 20})
+}
+
+// kbAnswer runs the answer loop for the kb_answer tool. Finding nothing is a
+// normal result whose answer says so, not a tool error, so an MCP client can
+// tell "no sources" from a failure. noWeb is the /models web switch turned off.
+func kbAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, query string, noWeb bool) (map[string]any, error) {
+	answer, cits, usedWeb, results, _, err := AnswerLoop(ctx, rc, cfg, query, AnswerOpts{NoWeb: noWeb})
+	if errors.Is(err, ErrNoResults) {
+		answer, cits, err = noResultsAnswer, []client.Citation{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"answer":    answer,
+		"citations": cits,
+		"used_web":  usedWeb,
+		"results":   results,
+	}, nil
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -31,5 +30,5 @@ func costFooter(c turnCost) string {
 		}
 		parts = append(parts, tok)
 	}
-	return "   " + Meta.Render(Glyph(GlyphBullet)+" "+strings.Join(parts, " · "))
+	return "   " + Meta.Render(Glyph(GlyphBullet)+" "+joinSep(parts...))
 }

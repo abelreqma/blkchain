@@ -2,12 +2,15 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"blkchain/cli/internal/client"
+	"blkchain/cli/internal/ragconfig"
 	"golang.org/x/term"
 )
 
@@ -31,21 +34,30 @@ func isInteractive() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
+// replBanner is the muted hint line printed when the plain REPL starts.
+func replBanner() string {
+	return joinSep("type a question", "/help for commands", "/quit or Ctrl-D to leave")
+}
+
+// replPrompt is the plain REPL prompt text.
+func replPrompt() string {
+	return "blk" + Glyph(GlyphPrompt) + " "
+}
+
 // plainREPL is the non-TTY fallback: a simple line loop that mirrors the TUI's
 // command model so behavior is consistent across both. Bare input is an ask
 // (the headline verb for a Q&A KB); a leading "/" (or the bare verb) switches
 // modes. It keeps the last search results so `open N` can open the N-th hit.
 func plainREPL() error {
-	c := client.NewClient()
 	var last []client.SearchResult
 	mode := "rag"
 
-	fmt.Printf("%s  %s\n", H1.Render("blkChain"), Meta.Render("type a question to ask · /mode · /search <q> · /help · Ctrl-D to quit"))
+	fmt.Printf("%s  %s\n", H1.Render("blkChain"), Meta.Render(replBanner()))
 
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for {
-		fmt.Print(Prompt.Render("blk› "))
+		fmt.Print(Prompt.Render(replPrompt()))
 		if !in.Scan() {
 			fmt.Println()
 			return in.Err()
@@ -73,6 +85,8 @@ func plainREPL() error {
 				largs = strings.Fields(rest)
 			}
 			printErr(runLogs(largs))
+		case "models":
+			printErr(replModels(rest))
 		case "copy":
 			fmt.Println(Meta.Render("/copy is only available in the interactive TUI"))
 		case "mode":
@@ -89,7 +103,7 @@ func plainREPL() error {
 			mode = "rag"
 			fmt.Println(Meta.Render("mode: rag"))
 		case "search", "s":
-			last = replSearch(c, rest, last)
+			last = replSearch(rest, last)
 		case "ask", "a":
 			printErr(replAsk(mode, rest))
 		case "hermes":
@@ -116,18 +130,26 @@ func replAsk(mode, query string) error {
 
 // replSearch runs a search, prints it, and returns the new results (or the
 // previous ones on error/empty query, so `open N` keeps working).
-func replSearch(c *client.Client, query string, prev []client.SearchResult) []client.SearchResult {
+func replSearch(query string, prev []client.SearchResult) []client.SearchResult {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return prev
 	}
-	resp, err := c.Search(query, 0, nil)
+	rc, err := newRetrievalClient()
 	if err != nil {
 		printErr(err)
 		return prev
 	}
-	printResults(query, resp.Results, 0)
-	return resp.Results
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(ragconfig.Load().RequestTimeoutSeconds)*time.Second)
+	defer cancel()
+	results, err := rc.Search(ctx, query, 0, nil)
+	if err != nil {
+		printErr(err)
+		return prev
+	}
+	adapted := toClientResults(results)
+	printResults(query, adapted, 0)
+	return adapted
 }
 
 // replOpen opens the N-th result from the last search, or a literal path.
@@ -149,45 +171,67 @@ func replOpen(arg string, last []client.SearchResult) error {
 	return openFile(arg, false)
 }
 
-// replHelp renders the command reference grouped by commandGroups() (the same
-// registry that drives the TUI palette and helpBlock), so the plain-REPL help
-// can never drift from the TUI's. Each group prints as a header followed by
-// its command rows, "/name args" aligned against a description.
-func replHelp() {
-	groups := commandGroups()
-	width := len("<question>")
-	for _, g := range groups {
-		for _, c := range g.cmds {
-			if n := len(commandInvocation(c)); n > width {
-				width = n
-			}
-		}
+// replSpecDesc is a command's shared one-line description.
+func replSpecDesc(name string) string {
+	c, _ := lookupCommand(name)
+	return c.desc
+}
+
+// replModelsDesc is /models' description from the slash-command registry: the
+// plain REPL's /models is the TUI's, not the `blk models` report.
+func replModelsDesc() string {
+	c, _ := slashCommand("models")
+	return c.desc
+}
+
+// replGroups lists the commands the plain REPL supports, in the same groups and
+// with the same descriptions as the usage. Lines that exist only in the REPL
+// (bare text, /mode, /quit) have their own wording.
+func replGroups() []rowGroup {
+	return []rowGroup{
+		{hgAsk, []helpRow{
+			{"<question>", "type a question with no command to ask it"},
+			{"/ask <q>", replSpecDesc("ask")},
+			{"/search <q>", replSpecDesc("search")},
+			{"/open <N|path>", replSpecDesc("open")},
+		}},
+		{hgServices, []helpRow{
+			{"/up", replSpecDesc("up")},
+			{"/down", replSpecDesc("down")},
+			{"/status", replSpecDesc("status")},
+			{"/health", replSpecDesc("health")},
+			{"/doctor", replSpecDesc("doctor")},
+			{"/logs [service]", replSpecDesc("logs")},
+			{"/models [verb <name>]", replModelsDesc()},
+		}},
+		{hgAgent, []helpRow{
+			{"/hermes <prompt>", replSpecDesc("hermes")},
+			{"/mode", "toggle ask between the knowledge base and Hermes"},
+			{"/agent", "use Hermes for questions from now on"},
+			{"/rag", "answer from the knowledge base again"},
+		}},
+		{hgSetup, []helpRow{
+			{"/help", "show this list"},
+			{"/quit", "leave (also Ctrl-D)"},
+		}},
 	}
+}
+
+// replHelp prints the plain REPL's command reference: the usage's groups,
+// limited to what the plain REPL supports, laid out to fit the terminal.
+func replHelp() {
+	total := helpWidth(terminalWidth())
 	var b strings.Builder
-	for gi, g := range groups {
+	for gi, g := range replGroups() {
 		if gi > 0 {
 			b.WriteString("\n")
 		}
 		b.WriteString(H2.Render(g.title) + "\n")
-		if gi == 0 {
-			fmt.Fprintf(&b, "  %s  %s\n", Key.Render(pad("<question>", width)),
-				Meta.Render("ask (rag streams a cited answer; agent runs Hermes)"))
-		}
-		for _, c := range g.cmds {
-			fmt.Fprintf(&b, "  %s  %s\n", Key.Render(pad(commandInvocation(c), width)), Meta.Render(c.desc))
-		}
+		writeRows(&b, g.rows, 2, total, Key, Meta)
 	}
+	b.WriteString("\n")
+	writePara(&b, "Press Ctrl-D or type /quit to leave.", 0, total, Meta)
 	fmt.Print(b.String())
-}
-
-// commandInvocation renders a command's registry entry as its REPL invocation,
-// e.g. "/search <q>".
-func commandInvocation(c command) string {
-	n := "/" + c.name
-	if c.args != "" {
-		n += " " + c.args
-	}
-	return n
 }
 
 // splitFirst splits s into its first whitespace-delimited word and the rest.
@@ -201,7 +245,5 @@ func splitFirst(s string) (first, rest string) {
 
 // printErr prints a non-nil error in the REPL without aborting the loop.
 func printErr(err error) {
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s %v\n", Fail.Render(Glyph(GlyphErr)), err)
-	}
+	reportError(os.Stderr, err)
 }

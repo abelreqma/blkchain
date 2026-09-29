@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"blkchain/cli/internal/modeleval"
+	"blkchain/cli/internal/ragconfig"
 )
 
 func TestRenderReportChatReady(t *testing.T) {
@@ -42,5 +43,15 @@ func TestRenderReportRerankNonFinite(t *testing.T) {
 	out := renderReport(r)
 	if !strings.Contains(out, "non-finite") {
 		t.Errorf("expected non-finite flag, got:\n%s", out)
+	}
+}
+
+// TestModelsConfigEmbedURLsFromContract verifies the embed probe URLs derive
+// from ragconfig's EmbedServerURL rather than a hardcoded port.
+func TestModelsConfigEmbedURLsFromContract(t *testing.T) {
+	base := strings.TrimRight(ragconfig.Load().EmbedServerURL, "/")
+	cfg := modelsConfig()
+	if cfg.EmbedHealthURL != base+"/health" || cfg.EmbedURL != base+"/embed" || cfg.RerankURL != base+"/rerank" {
+		t.Errorf("embed URLs not derived from %q: %+v", base, cfg)
 	}
 }

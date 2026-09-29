@@ -12,15 +12,22 @@ import (
 	"time"
 
 	"blkchain/cli/internal/modeleval"
+	"blkchain/cli/internal/ragconfig"
 )
+
+// defineModelsFlags declares `blk models`'s flags.
+func defineModelsFlags(fs *flag.FlagSet, jsonOut *bool) {
+	fs.BoolVar(jsonOut, "json", false, "print the reports as JSON instead of formatted text")
+}
 
 // runModels implements `blk models`: a per-model readiness + live performance
 // dashboard for the three local models (chat, embed, rerank). Each model probes
 // independently; one being down never aborts the others.
 func runModels(args []string) error {
-	fs := flag.NewFlagSet("models", flag.ContinueOnError)
-	jsonOut := fs.Bool("json", false, "emit reports as JSON")
-	if err := fs.Parse(args); err != nil {
+	var jsonOut bool
+	fs := newFlagSet("models")
+	defineModelsFlags(fs, &jsonOut)
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 
@@ -42,7 +49,7 @@ func runModels(args []string) error {
 	}
 	wg.Wait()
 
-	if *jsonOut {
+	if jsonOut {
 		return emitReportsJSON(os.Stdout, reports)
 	}
 
@@ -57,13 +64,14 @@ func runModels(args []string) error {
 // modelsConfig resolves probe config from the env, reusing llm.go's oMLX
 // resolution and the stack's embed_server port (8100).
 func modelsConfig() modeleval.Config {
+	embedBase := strings.TrimRight(ragconfig.Load().EmbedServerURL, "/")
 	return modeleval.Config{
 		ChatBaseURL:    omlxBaseURL(),
 		ChatAPIKey:     strings.TrimSpace(os.Getenv("OMLX_API_KEY")),
 		ChatModel:      strings.TrimSpace(os.Getenv("OMLX_MODEL")),
-		EmbedHealthURL: "http://127.0.0.1:8100/health",
-		EmbedURL:       "http://127.0.0.1:8100/embed",
-		RerankURL:      "http://127.0.0.1:8100/rerank",
+		EmbedHealthURL: embedBase + "/health",
+		EmbedURL:       embedBase + "/embed",
+		RerankURL:      embedBase + "/rerank",
 		ReadyTimeout:   30 * time.Second,
 		ProbeTimeout:   60 * time.Second,
 	}
@@ -76,7 +84,7 @@ func renderReport(r modeleval.ModelReport) string {
 
 	if r.Err != nil && !r.Ready {
 		return fmt.Sprintf(" %s %s %s", name, Fail.Render(Glyph(GlyphErr)),
-			Meta.Render(r.Err.Error()))
+			Meta.Render(sanitizeTerminal(r.Err.Error())))
 	}
 
 	ready := fmt.Sprintf("%s ready %s", OK.Render(Glyph(GlyphOK)),
@@ -93,7 +101,7 @@ func renderReport(r modeleval.ModelReport) string {
 			metrics = fmt.Sprintf("%s   %s   %s",
 				Key.Render(tps),
 				Meta.Render(fmt.Sprintf("ttft %s", modeleval.FormatElapsed(r.Perf.TTFT))),
-				Meta.Render(r.Perf.ModelID))
+				Meta.Render(sanitizeTerminal(r.Perf.ModelID)))
 		}
 	case modeleval.KindEmbed:
 		if r.Perf != nil {
@@ -115,7 +123,7 @@ func renderReport(r modeleval.ModelReport) string {
 	line := fmt.Sprintf(" %s %s   %s", name, ready, metrics)
 	// A ready-but-perf-failed model shows the probe error after the ready mark.
 	if r.Err != nil {
-		line += "   " + Caut.Render(Glyph(GlyphWarn)+" "+r.Err.Error())
+		line += "   " + Caut.Render(Glyph(GlyphWarn)+" "+sanitizeTerminal(r.Err.Error()))
 	}
 	return strings.TrimRight(line, " ")
 }

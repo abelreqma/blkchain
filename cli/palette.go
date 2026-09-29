@@ -32,47 +32,56 @@ type command struct {
 }
 
 // Command group labels, in display order (see commandGroups). Kept as consts so
-// the registry and the group ordering cannot drift.
+// the registry and the group ordering cannot drift. Groups that also exist on
+// the command line use the same names there (ux-vocabulary); Modes and Session
+// are specific to this screen. groupHidden marks a command that grouped help
+// leaves out because another row already covers it (/agent and /rag sit under
+// /mode); the palette still lists it.
 const (
-	groupAsk      = "Ask & search"
+	groupAsk      = "Ask and search"
 	groupModes    = "Modes"
 	groupSession  = "Session"
 	groupServices = "Services"
-	groupMeta     = "Meta"
+	groupAgent    = "Agent (Hermes)"
+	groupSetup    = "Setup"
+	groupHidden   = ""
 )
 
 // groupOrder is the order sections appear in grouped help.
-var groupOrder = []string{groupAsk, groupModes, groupSession, groupServices, groupMeta}
+var groupOrder = []string{groupAsk, groupModes, groupSession, groupServices, groupAgent, groupSetup}
 
 // slashCommands is the command registry shared by the palette, helpBlock, and
 // replHelp. It mirrors the verbs handled in submit/dispatchInput (tui.go).
+// Descriptions for commands that also exist on the command line are the shared
+// wording from the UX vocabulary, word for word.
 func slashCommands() []command {
 	return []command{
-		{"ask", "<q>", "ask explicitly (rag streams a cited answer; agent runs hermes)", groupAsk},
-		{"search", "<q>", "find ranked source chunks (also: s <q>)", groupAsk},
-		{"open", "<N|path>", "open source N from the last answer/search, or a path", groupAsk},
-		{"mode", "", "toggle rag / agent mode (also /agent, /rag)", groupModes},
-		{"agent", "", "switch to agent mode", groupModes},
-		{"rag", "", "switch to rag mode", groupModes},
-		{"resume", "", "reopen a saved session (1-9 quick-pick, d y deletes)", groupSession},
-		{"model", "", "pick model + reasoning (also ctrl+p)", groupSession},
+		{"ask", "<q>", "answer a question from the knowledge base, with cited sources", groupAsk},
+		{"search", "<q>", "find the most relevant source passages for a query", groupAsk},
+		{"open", "<N|path>", "open a cited source in your pager or editor", groupAsk},
+		{"mode", "", "switch between rag and agent mode (also /agent, /rag)", groupModes},
+		{"agent", "", "switch to agent mode", groupHidden},
+		{"rag", "", "switch to rag mode", groupHidden},
+		{"resume", "", "reopen a saved session; press 1-9 to pick, d then y to delete", groupSession},
+		{"model", "", "pick the model and reasoning level (also ctrl+p)", groupSession},
 		{"title", "<name>", "rename the current session", groupSession},
-		{"attach", "", "attach a file's contents to the next prompt (also @)", groupSession},
-		{"editor", "", "compose the draft in $EDITOR (also ctrl+g)", groupSession},
-		{"init", "", "load ./.blk/context.md as session context", groupSession},
-		{"cost", "", "show the last turn's tokens + latency", groupSession},
-		{"undo", "", "drop the last exchange from this session", groupSession},
-		{"clear", "", "clear the working transcript (scrollback stays)", groupSession},
+		{"attach", "", "attach a file to your next question (also @)", groupSession},
+		{"editor", "", "write your question in $EDITOR (also ctrl+g)", groupSession},
+		{"init", "", "load ./.blk/context.md as context for this session", groupSession},
+		{"cost", "", "show the tokens and time of the last answer", groupSession},
+		{"undo", "", "drop the last question and answer from this session", groupSession},
+		{"clear", "", "start fresh; earlier output stays in your scrollback", groupSession},
 		{"copy", "", "copy the last answer to the clipboard", groupSession},
-		{"hermes", "<prompt>", "run a Hermes agent turn", groupServices},
-		{"health", "", "API + dependency status", groupServices},
-		{"doctor", "", "diagnose the whole stack", groupServices},
-		{"logs", "[name]", "tail a service log (api, embed_server)", groupServices},
 		{"up", "", "start the local services", groupServices},
 		{"down", "", "stop the local services", groupServices},
-		{"status", "", "service status", groupServices},
-		{"help", "", "this help", groupMeta},
-		{"quit", "", "leave (also ctrl+d)", groupMeta},
+		{"status", "", "show whether each local service is running", groupServices},
+		{"health", "", "check qdrant, embed_server, and the LLM", groupServices},
+		{"doctor", "", "check the whole setup and say what to fix", groupServices},
+		{"models", "[verb <name>]", "see all models; turn them on or off, load or unload", groupServices},
+		{"logs", "[name]", "show a service log (api or embed_server); -f follows it", groupServices},
+		{"hermes", "<prompt>", "run one Hermes agent turn with the knowledge-base tools", groupAgent},
+		{"help", "", "show this list of commands", groupSetup},
+		{"quit", "", "leave blk (also ctrl+d)", groupSetup},
 	}
 }
 
@@ -85,8 +94,8 @@ type commandGroup struct {
 // commandGroups partitions slashCommands() into ordered sections (groupOrder)
 // for grouped help. The palette stays flat; only help renders grouped. Commands
 // keep their registry order within each group. A command whose group is unknown
-// is dropped rather than silently misfiled, so a registry typo is visible as a
-// missing row in help.
+// or groupHidden is dropped rather than silently misfiled, so a registry typo is
+// visible as a missing row in help.
 func commandGroups() []commandGroup {
 	byGroup := map[string][]command{}
 	for _, c := range slashCommands() {
@@ -101,15 +110,21 @@ func commandGroups() []commandGroup {
 	return groups
 }
 
+// slashCommand returns the registry entry for name (without the leading slash).
+func slashCommand(name string) (command, bool) {
+	for _, c := range slashCommands() {
+		if c.name == name {
+			return c, true
+		}
+	}
+	return command{}, false
+}
+
 // isExactCommand reports whether name (lowercased, without the leading slash)
 // exactly matches a registered command verb.
 func isExactCommand(name string) bool {
-	for _, c := range slashCommands() {
-		if c.name == name {
-			return true
-		}
-	}
-	return false
+	_, ok := slashCommand(name)
+	return ok
 }
 
 // paletteItem is one filtered row: the command plus the byte positions in its
@@ -287,43 +302,90 @@ func (m model) paletteKey(msg tea.KeyMsg) (model, tea.Cmd, bool) {
 
 // paletteView renders the floating panel: one rounded box (Rule border, Surface
 // fill, matching the overlay style) holding up to maxPaletteRows command rows with
-// the matched substring bold, then a muted "+N more" line when it overflows.
-func (m model) paletteView(width int) string {
-	if !m.pal.open || len(m.pal.items) == 0 {
+// the matched substring bold and every description starting in one column, then a
+// muted "+N more" line that says how to narrow the list when it overflows. It
+// is at most maxHeight rows tall (2 border rows, the command rows, and the
+// "+N more" row when it fits) and is empty when there is no room for even one
+// command row.
+func (m model) paletteView(width, maxHeight int) string {
+	if !m.pal.open || len(m.pal.items) == 0 || maxHeight < 3 {
 		return ""
 	}
-	start := 0
-	if m.pal.selected >= maxPaletteRows {
-		start = m.pal.selected - maxPaletteRows + 1
+	// Size from what the layout leaves on every render: never wider than
+	// width-2, and the selected row always stays in view.
+	textW := max(width-2-4, 1)
+	maxRows := min(len(m.pal.items), maxPaletteRows, maxHeight-2)
+	showMore := maxRows < len(m.pal.items)
+	if showMore && maxRows+3 > maxHeight { // no spare row for "+N more"
+		if maxRows > 1 {
+			maxRows--
+		} else {
+			showMore = false
+		}
 	}
-	end := start + maxPaletteRows
+	start := 0
+	if m.pal.selected >= maxRows {
+		start = m.pal.selected - maxRows + 1
+	}
+	end := start + maxRows
 	if end > len(m.pal.items) {
 		end = len(m.pal.items)
+	}
+	// One name column for the whole filtered list, so the descriptions stay
+	// aligned while the list scrolls.
+	nameW := 0
+	for _, it := range m.pal.items {
+		nameW = max(nameW, paletteNameWidth(it))
 	}
 	var b strings.Builder
 	for i := start; i < end; i++ {
 		if i > start {
 			b.WriteByte('\n')
 		}
-		b.WriteString(paletteRow(m.pal.items[i], i == m.pal.selected))
+		b.WriteString(paletteRow(m.pal.items[i], i == m.pal.selected, nameW, textW))
 	}
-	if more := len(m.pal.items) - end; more > 0 {
-		b.WriteString("\n" + Meta.Render("  +"+strconv.Itoa(more)+" more"))
+	if more := len(m.pal.items) - end; more > 0 && showMore {
+		b.WriteString("\n" + Meta.Render(paletteMoreLine(more, textW)))
 	}
+	// Rows are already at most textW wide; this cut only guards a terminal too
+	// narrow for even the command name, and lets Width pad every line equally.
+	content := lipgloss.NewStyle().MaxWidth(textW).Render(b.String())
 	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(Border()).
 		BorderForeground(Rule).
 		Background(Surface).
-		Padding(0, 1)
-	if width > 24 {
-		box = box.MaxWidth(width)
-	}
-	return box.Render(b.String())
+		Padding(0, 1).
+		Width(min(lipgloss.Width(content), textW) + 2)
+	return box.Render(content)
 }
 
-// paletteRow renders one command row: a selection marker, the name with matched
-// chars bold, the arg hint, and the description.
-func paletteRow(it paletteItem, selected bool) string {
+// paletteMoreLine is the overflow row: how many commands are hidden and how to
+// narrow the list. The hint is dropped when the box is too narrow for it.
+func paletteMoreLine(more, width int) string {
+	n := strconv.Itoa(more)
+	if full := "  +" + n + " more, keep typing to filter"; lipgloss.Width(full) <= width {
+		return full
+	}
+	return "  +" + n + " more"
+}
+
+// paletteNameWidth is the display width of a row's name column: "/name" plus the
+// argument hint when there is one.
+func paletteNameWidth(it paletteItem) int {
+	w := 1 + len(it.name)
+	if it.args != "" {
+		w += 1 + len(it.args)
+	}
+	return w
+}
+
+// paletteRow renders one command row within width columns: a selection marker,
+// the name with matched chars bold and the arg hint, padded to nameW columns so
+// every description starts in the same column, then the description. The name
+// and arg hint are never cut; a description that does not fit is shortened with
+// an ASCII "..." (or dropped, along with the padding, when there is no room for
+// one).
+func paletteRow(it paletteItem, selected bool, nameW, width int) string {
 	marker := "  "
 	base := Body
 	if selected {
@@ -334,7 +396,14 @@ func paletteRow(it paletteItem, selected bool) string {
 	if it.args != "" {
 		name += " " + Meta.Render(it.args)
 	}
-	return marker + name + "  " + Meta.Render(it.desc)
+	head := marker + name
+	nameW = max(nameW, paletteNameWidth(it))
+	descW := width - 2 - nameW - 2
+	if descW < 4 {
+		return head
+	}
+	gap := strings.Repeat(" ", 2+nameW-paletteNameWidth(it))
+	return head + gap + Meta.Render(ellipsize(it.desc, descW))
 }
 
 // boldMatch renders name with the byte positions in pos bolded, everything else

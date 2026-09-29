@@ -224,3 +224,33 @@ func TestSummarizeUpdates_RedactsSecret(t *testing.T) {
 		t.Errorf("secret key name should be shown:\n%s", joined)
 	}
 }
+
+func TestRunGatewaySetsUnbuffered(t *testing.T) {
+	fakeRoot(t)
+	t.Setenv("HERMES_HOME", t.TempDir())
+	t.Setenv("OMLX_API", "test-only-value")
+	fakeBinOnPath(t, "hermes", `echo "unbuffered=$PYTHONUNBUFFERED"`+"\n")
+
+	var err error
+	stdout := captureStdout(t, func() {
+		captureStderr(t, func() { err = runGateway(nil) })
+	})
+	if err != nil || !strings.Contains(stdout, "unbuffered=1") {
+		t.Errorf("runGateway() = %v, stdout %q, want PYTHONUNBUFFERED=1 in the child", err, stdout)
+	}
+}
+
+func TestRunGatewaySanitizesChildOutput(t *testing.T) {
+	fakeRoot(t)
+	t.Setenv("HERMES_HOME", t.TempDir())
+	t.Setenv("OMLX_API", "test-only-value")
+	fakeBinOnPath(t, "hermes", evilScriptBody)
+
+	var err error
+	stdout, stderr := captureBoth(t, func() { err = runGateway(nil) })
+	if err != nil {
+		t.Fatalf("runGateway() error = %v", err)
+	}
+	assertClean(t, "stdout", stdout, "out-visible-tail")
+	assertClean(t, "stderr", stderr, "err-visible-tail")
+}

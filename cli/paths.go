@@ -65,7 +65,7 @@ func candidateRoots(includeSaved bool) []string {
 }
 
 var errNoRoot = errors.New(
-	"cannot locate the blkChain project — install once with `blk install` from the project, " +
+	"cannot locate the blkChain project: install once with `blk install` from the project, " +
 		"or set BLKCHAIN_ROOT to the project root")
 
 // projectRoot finds the blkChain project root using every strategy, including

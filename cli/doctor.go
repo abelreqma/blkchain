@@ -1,22 +1,19 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"blkchain/cli/internal/client"
 )
 
 // runDoctor reports the health of the whole blkChain stack and its integration
 // with Hermes, as a checklist. It never fails hard on a single failing check —
 // it prints every result so you can see the complete picture at a glance.
 func runDoctor(args []string) error {
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	if err := fs.Parse(args); err != nil {
+	fs := newFlagSet("doctor")
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 
@@ -39,18 +36,21 @@ func runDoctor(args []string) error {
 			fmt.Printf("%s docker not on PATH %s\n", check(false), Meta.Render("(needed for qdrant)"))
 		}
 	} else {
-		fmt.Printf("%s project root not found — run `blk install` from the project\n", check(false))
+		fmt.Printf("%s project root not found, run `blk install` from the project\n", check(false))
 	}
 
-	// 2. API + dependencies.
-	c := client.NewClient()
-	h, err := c.Health()
-	if err != nil {
-		fmt.Printf("%s blkChain API unreachable %s — try `blk up`\n", check(false), Meta.Render("("+c.BaseURL+")"))
-	} else {
-		fmt.Printf("%s blkChain API %s %s\n", check(h.Status == "ok"), h.Status, Meta.Render("("+c.BaseURL+")"))
-		fmt.Printf("  %s qdrant\n", check(h.Qdrant))
-		fmt.Printf("  %s embed_server\n", check(h.EmbedServer))
+	// 2. Retrieval dependencies (probed directly, no Python API).
+	cfg := loadConfig()
+	h := nativeHealth(cfg)
+	llmBase := redactedURL(omlxBaseURL())
+	fmt.Printf("%s qdrant %s\n", check(h.Qdrant), Meta.Render("("+cfg.QdrantGRPCURL+")"))
+	fmt.Printf("%s embed_server %s\n", check(h.EmbedServer), Meta.Render("("+cfg.EmbedServerURL+")"))
+	fmt.Printf("%s llm %s\n", check(h.LLM), Meta.Render("("+llmBase+")"))
+	if !h.Qdrant || !h.EmbedServer {
+		fmt.Printf("  %s\n", Meta.Render("try `blk up`"))
+	}
+	if !h.LLM {
+		fmt.Printf("  %s\n", Meta.Render("start the LLM server at "+llmBase))
 	}
 
 	// 3. Hermes binary.

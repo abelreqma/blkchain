@@ -36,12 +36,18 @@ type envKV struct {
 	secret bool
 }
 
+// defineGatewayFlags declares `blk gateway`'s flags.
+func defineGatewayFlags(fs *flag.FlagSet, setupOnly *bool) {
+	fs.BoolVar(setupOnly, "setup-only", false, "write ~/.hermes/.env but do not start the gateway")
+}
+
 // runGateway provisions ~/.hermes/.env and launches `hermes gateway`. With
 // --setup-only it provisions and exits without launching.
 func runGateway(args []string) error {
-	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
-	setupOnly := fs.Bool("setup-only", false, "provision ~/.hermes/.env but do not launch the gateway")
-	if err := fs.Parse(args); err != nil {
+	var setupOnly bool
+	fs := newFlagSet("gateway")
+	defineGatewayFlags(fs, &setupOnly)
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 
@@ -83,19 +89,23 @@ func runGateway(args []string) error {
 		fmt.Fprintf(os.Stderr, "  %s\n", Meta.Render("(no changes needed)"))
 	}
 
-	if *setupOnly {
+	if setupOnly {
 		fmt.Fprintf(os.Stderr, "%s run %s to start it\n", Meta.Render(Glyph(GlyphArrow)), Key.Render("hermes gateway"))
 		return nil
 	}
 
 	path, err := exec.LookPath(hermesBin)
 	if err != nil {
-		return fmt.Errorf("gateway: %q not found on PATH — install Hermes Agent or run %q yourself", hermesBin, "hermes gateway")
+		return fmt.Errorf("gateway: %q not found on PATH, install Hermes Agent or run %q yourself", hermesBin, "hermes gateway")
 	}
 	fmt.Fprintf(os.Stderr, "%s %s\n", Meta.Render(Glyph(GlyphArrow)), Meta.Render("hermes gateway"))
 	c := exec.Command(path, "gateway")
-	c.Stdout, c.Stderr, c.Stdin = os.Stdout, os.Stderr, os.Stdin
-	if err := c.Run(); err != nil {
+	c.Stdin = os.Stdin
+	// A piped Python child block-buffers stdout, which would hold log lines
+	// until about 8 KB and reorder them against stderr.
+	c.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
+	// A foreground server is normally ended with ctrl+c, which is not an error.
+	if _, err := runSanitized(c); err != nil {
 		return fmt.Errorf("hermes gateway: %w", err)
 	}
 	return nil
@@ -132,7 +142,7 @@ func resolveGatewaySecret(root string) (value, source string, err error) {
 		}
 	}
 	return "", "", fmt.Errorf(
-		"gateway: no oMLX key found — set OMLX_API (or OMLX_API_KEY) in the environment or in %s",
+		"gateway: no oMLX key found, set OMLX_API (or OMLX_API_KEY) in the environment or in %s",
 		filepath.Join(root, ".env"))
 }
 

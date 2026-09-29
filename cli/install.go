@@ -8,12 +8,18 @@ import (
 	"strings"
 )
 
+// defineInstallFlags declares `blk install`'s flags.
+func defineInstallFlags(fs *flag.FlagSet, dir *string) {
+	fs.StringVar(dir, "dir", defaultBinDir(), "install into `DIR`, which should be on your PATH (default ~/.local/bin)")
+}
+
 // runInstall copies the running binary onto PATH as a real file (not a symlink)
 // and records the project root so `blk` works from any directory afterward.
 func runInstall(args []string) error {
-	fs := flag.NewFlagSet("install", flag.ContinueOnError)
-	dir := fs.String("dir", defaultBinDir(), "directory to install into (should be on PATH)")
-	if err := fs.Parse(args); err != nil {
+	var dir string
+	fs := newFlagSet("install")
+	defineInstallFlags(fs, &dir)
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 
@@ -30,7 +36,7 @@ func runInstall(args []string) error {
 		src = resolved
 	}
 
-	destDir := expandTilde(*dir)
+	destDir := expandTilde(dir)
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return fmt.Errorf("install: %w", err)
 	}
