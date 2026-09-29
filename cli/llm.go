@@ -178,7 +178,7 @@ func omlxAPIKey() string { return strings.TrimSpace(os.Getenv("OMLX_API_KEY")) }
 func llmModels() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), modelsListTimeout)
 	defer cancel()
-	return modeleval.ListModels(ctx, localHTTP, omlxBaseURL(), omlxAPIKey())
+	return modeleval.ListModels(ctx, llmHTTP, omlxBaseURL(), omlxAPIKey())
 }
 
 // resolveModel picks the oMLX model when the caller named none: OMLX_MODEL,
@@ -242,12 +242,46 @@ const (
 	llmMaxErrorBodyBytes = 512
 )
 
+// samplingKey is the context key for the answer call's sampling settings.
+type samplingKey struct{}
+
+// sampling holds the answer sampling settings LangChainGo v0.1.13 drops from
+// the request body: it never copies top_p into the request and has no top_k
+// field. oMLX honors both as top-level fields. Zero means the server default.
+type sampling struct {
+	topP float64
+	topK int
+}
+
+// withSampling returns ctx carrying cfg's answer sampling settings, for
+// llmTransport to add to that one call's body.
+func withSampling(ctx context.Context, cfg ragconfig.Config) context.Context {
+	return context.WithValue(ctx, samplingKey{}, sampling{topP: cfg.SynthTopP, topK: cfg.SynthTopK})
+}
+
+// addTo sets each nonzero setting in body when body lacks that key, so a field
+// the library did send is never overwritten. It reports whether body changed.
+func (s sampling) addTo(body map[string]any) bool {
+	changed := false
+	add := func(key string, v any, set bool) {
+		if _, ok := body[key]; set && !ok {
+			body[key] = v
+			changed = true
+		}
+	}
+	add("top_p", s.topP, s.topP != 0)
+	add("top_k", s.topK, s.topK != 0)
+	return changed
+}
+
 // llmTransport is the LLM client's transport. On POST /chat/completions it
 // injects top-level chat_template_kwargs.enable_thinking=false, which oMLX
 // honors to turn off the model's reasoning channel (it otherwise loops on
 // constrained prompts and returns empty content); LangChainGo has no option for
-// it, and BLK_ENABLE_THINKING=1 skips it. With keyless set it drops the
-// Authorization header. It caps every response body.
+// it, and BLK_ENABLE_THINKING=1 skips it. When the request context carries
+// sampling (see withSampling) it adds those fields too. A body that is not JSON
+// passes through unchanged. With keyless set it drops the Authorization
+// header. It caps every response body.
 type llmTransport struct {
 	base    http.RoundTripper
 	keyless bool
@@ -258,7 +292,9 @@ func (t *llmTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		req = req.Clone(req.Context())
 		req.Header.Del("Authorization")
 	}
-	if os.Getenv("BLK_ENABLE_THINKING") != "1" && req.Body != nil && strings.HasSuffix(req.URL.Path, "/chat/completions") {
+	noThinking := os.Getenv("BLK_ENABLE_THINKING") != "1"
+	samp, hasSampling := req.Context().Value(samplingKey{}).(sampling)
+	if (noThinking || hasSampling) && req.Body != nil && strings.HasSuffix(req.URL.Path, "/chat/completions") {
 		raw, err := io.ReadAll(req.Body)
 		req.Body.Close()
 		if err != nil {
@@ -266,8 +302,15 @@ func (t *llmTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		var m map[string]any
 		if json.Unmarshal(raw, &m) == nil {
-			if _, ok := m["chat_template_kwargs"]; !ok {
+			changed := false
+			if _, ok := m["chat_template_kwargs"]; noThinking && !ok {
 				m["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
+				changed = true
+			}
+			if hasSampling && samp.addTo(m) {
+				changed = true
+			}
+			if changed {
 				if b, e := json.Marshal(m); e == nil {
 					raw = b
 				}

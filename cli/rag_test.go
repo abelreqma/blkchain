@@ -518,3 +518,106 @@ func TestAnswerLoopUsesTheNamedModelWithoutListing(t *testing.T) {
 		t.Errorf("models used = %v, want picked for the grade and the answer", models)
 	}
 }
+
+// bodyLLM is recordingLLM that keeps each chat call's raw JSON body, so a test
+// can check exactly which fields reached the server.
+func bodyLLM(t *testing.T) (*httptest.Server, func() []map[string]any) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		seen = append(seen, body)
+		mu.Unlock()
+		if body["stream"] == true {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok [1]\"}}]}\n\ndata: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"{\"sufficient\":true,\"rewrite\":\"\",\"use_web\":false}"},"finish_reason":"stop"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []map[string]any {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]map[string]any(nil), seen...)
+	}
+}
+
+// samplingFields is every sampling or cap field a chat body may carry.
+var samplingFields = []string{"temperature", "top_p", "top_k", "presence_penalty", "max_tokens", "max_completion_tokens"}
+
+// sampled returns the sampling and cap fields present in body.
+func sampled(body map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, k := range samplingFields {
+		if v, ok := body[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// runAnswerForBodies runs one answer turn against bodyLLM with cfg and returns
+// the sampling fields of the grade call and of the answer call.
+func runAnswerForBodies(t *testing.T, cfg ragconfig.Config) (grade, answer map[string]any) {
+	t.Helper()
+	isolateUserDirs(t)
+	useDeadServices(t)
+	srv, seen := bodyLLM(t)
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	t.Setenv("TAVILY_SETUP_TOKEN", "")
+	rc := fakeSearcher{[]retrieval.Result{chunk("wstg", "a.md", "s", "text")}}
+	if _, _, _, _, _, err := AnswerLoop(context.Background(), rc, cfg, "q", AnswerOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range seen() {
+		if b["stream"] == true {
+			answer = sampled(b)
+		} else {
+			grade = sampled(b)
+		}
+	}
+	if grade == nil || answer == nil {
+		t.Fatalf("calls seen: %v, want a grade and an answer", seen())
+	}
+	t.Logf("grade body: %v", grade)
+	t.Logf("answer body: %v", answer)
+	return grade, answer
+}
+
+// The answer call carries the configured sampling settings and the answer cap
+// as top-level fields. The grade call carries temperature 0 and its own cap
+// and no other sampling field, so grading stays deterministic.
+func TestAnswerLoopSendsTheSamplingSettings(t *testing.T) {
+	cfg := answerCfg(1)
+	cfg.SynthTemperature, cfg.SynthTopP, cfg.SynthTopK, cfg.SynthPresencePenalty = 0.7, 0.95, 64, 0.5
+	cfg.GradeTemperature, cfg.AnswerMaxTokens, cfg.GradeMaxTokens = 0, 321, 45
+	grade, answer := runAnswerForBodies(t, cfg)
+
+	want := map[string]any{"temperature": 0.7, "top_p": 0.95, "top_k": 64.0, "presence_penalty": 0.5, "max_completion_tokens": 321.0}
+	if !reflect.DeepEqual(answer, want) {
+		t.Errorf("answer body sampling = %v, want %v", answer, want)
+	}
+	wantGrade := map[string]any{"temperature": 0.0, "max_completion_tokens": 45.0}
+	if !reflect.DeepEqual(grade, wantGrade) {
+		t.Errorf("grade body sampling = %v, want %v", grade, wantGrade)
+	}
+}
+
+// A zero top_p, top_k, or presence_penalty means the server default, so the
+// field is left out. A zero temperature is a real value and is still sent.
+func TestAnswerLoopOmitsZeroSampling(t *testing.T) {
+	cfg := answerCfg(1)
+	cfg.SynthTemperature, cfg.SynthTopP, cfg.SynthTopK, cfg.SynthPresencePenalty = 0, 0, 0, 0
+	cfg.AnswerMaxTokens = 321
+	_, answer := runAnswerForBodies(t, cfg)
+	want := map[string]any{"temperature": 0.0, "max_completion_tokens": 321.0}
+	if !reflect.DeepEqual(answer, want) {
+		t.Errorf("answer body sampling = %v, want %v", answer, want)
+	}
+}

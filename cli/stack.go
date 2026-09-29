@@ -240,8 +240,11 @@ func startPy(root string, svc pyService) {
 // stopService stops a resident service by the pid its pid file records, and
 // only after runsService confirms that pid is still the service blk started,
 // so a pid the system has since given to another process is never signaled.
-// Only that one pid is signaled, never a process group. With no valid pid
-// file it signals nothing and says so; a stale pid file is removed.
+// Only that one pid is signaled, never a process group. When the pid file is
+// missing, invalid, or names another process while the port answers, nothing
+// is signaled, the pid file is kept, and one line says how to find the
+// process. A pid file whose process is gone and whose port is dead is stale
+// and removed.
 func stopService(root string, svc pyService) {
 	pidPath := pidFilePath(root, svc.name)
 	pid, ok := readPid(pidPath)
@@ -253,7 +256,16 @@ func stopService(root string, svc pyService) {
 		fmt.Printf("  %s %s\n", Fail.Render(Glyph(GlyphErr)), Body.Render(svc.name+": not running (no valid pid file)"))
 		return
 	}
-	if !runsService(root, pid, svc.module) || syscall.Kill(pid, syscall.SIGTERM) != nil {
+	if !runsService(root, pid, svc.module) {
+		if health(svc.port) {
+			fmt.Printf("  %s %s\n", Caut.Render(Glyph(GlyphWarn)), Body.Render(unmanagedNote(svc)))
+			return
+		}
+		os.Remove(pidPath)
+		fmt.Printf("  %s %s\n", Fail.Render(Glyph(GlyphErr)), Body.Render(svc.name+": not running"))
+		return
+	}
+	if syscall.Kill(pid, syscall.SIGTERM) != nil {
 		os.Remove(pidPath)
 		fmt.Printf("  %s %s\n", Fail.Render(Glyph(GlyphErr)), Body.Render(svc.name+": not running"))
 		return
@@ -263,20 +275,45 @@ func stopService(root string, svc pyService) {
 }
 
 // unmanagedNote is the one line blk down and blk status print when svc's port
-// answers but it has no valid pid file, so blk cannot tell which process to
-// stop. It names the command that finds the process.
+// answers but no valid pid file names the process, so blk cannot tell which
+// process to stop. It names the command that finds the process.
 func unmanagedNote(svc pyService) string {
-	return fmt.Sprintf("%s: :%d answers but there is no valid pid file; find the process with lsof -nP -iTCP:%d -sTCP:LISTEN",
+	return fmt.Sprintf("%s: :%d answers but is not managed by this blk (no valid pid file names it); find the process with lsof -nP -iTCP:%d -sTCP:LISTEN",
 		svc.name, svc.port, svc.port)
 }
 
-// runsService reports whether process pid is the service blk started: its
-// argument vector is exactly the project's venv python, -m, and module.
-// processArgs keeps the argument boundaries, so one argument that merely
-// contains "-m module" does not match.
+// runsService reports whether process pid is the service blk started (see
+// isService).
 func runsService(root string, pid int, module string) bool {
-	args, err := processArgs(pid)
-	return err == nil && len(args) == 3 && args[0] == venvPython(root) && args[1] == "-m" && args[2] == module
+	exe, args, err := processArgs(pid)
+	return err == nil && isService(root, exe, args, module)
+}
+
+// isService reports whether a process with executable exe and argument vector
+// args is the service blk started: args is exactly the project's venv python,
+// -m, and module, and exe is that python. processArgs keeps the argument
+// boundaries, so one argument that merely contains "-m module" does not match.
+// argv[0] is compared with its directory's symlinks resolved, so a project root
+// spelled through a symlink still matches, while the venv python itself is not
+// resolved to the interpreter other venvs share. exe is compared fully
+// resolved.
+func isService(root, exe string, args []string, module string) bool {
+	py := venvPython(root)
+	if len(args) != 3 || args[1] != "-m" || args[2] != module {
+		return false
+	}
+	if filepath.Base(args[0]) != filepath.Base(py) || resolvedPath(filepath.Dir(args[0])) != resolvedPath(filepath.Dir(py)) {
+		return false
+	}
+	return resolvedPath(exe) == resolvedPath(py)
+}
+
+// resolvedPath is p with every symlink resolved, or p itself when that fails.
+func resolvedPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
 }
 
 // --- themed line helpers ---

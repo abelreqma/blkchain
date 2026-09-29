@@ -101,14 +101,17 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	}
 }
 
-// footerKeyMap is the state-dependent key list the footer renders (help.KeyMap).
+// footerKeyMap is the state-dependent key list the footer renders. drop is the
+// order in which hints leave a line too narrow for all of them, as indexes
+// into short; nil drops from the end with the way out last (see exitHint).
 type footerKeyMap struct {
 	short []key.Binding
-	full  [][]key.Binding
+	drop  []int
 }
 
-func (f footerKeyMap) ShortHelp() []key.Binding  { return f.short }
-func (f footerKeyMap) FullHelp() [][]key.Binding { return f.full }
+// confirmDrop is the drop order of a confirm footer (confirm, quit, cancel):
+// quit goes first, then cancel, and the confirm key stays longest.
+var confirmDrop = []int{1, 2, 0}
 
 // hint builds a footer-only binding from a key label and its description.
 func hint(k, desc string) key.Binding {
@@ -117,14 +120,14 @@ func hint(k, desc string) key.Binding {
 
 // footerKeys picks the footer hints for the current state, innermost first: an
 // open overlay, reverse search, the slash palette, a running turn, then idle.
-func (m model) footerKeys() help.KeyMap {
+func (m model) footerKeys() footerKeyMap {
 	closeKey := hint("esc/ctrl+c", "close")
 	switch {
 	case m.overlay != nil:
 		switch ov := m.overlay.(type) {
 		case resumePicker:
 			if ov.confirm {
-				return footerKeyMap{short: []key.Binding{hint("y", "confirm delete"), hint("ctrl+d", "quit"), hint("any other key", "cancel")}}
+				return footerKeyMap{short: []key.Binding{hint("y", "confirm delete"), hint("ctrl+d", "quit"), hint("any other key", "cancel")}, drop: confirmDrop}
 			}
 			return footerKeyMap{short: []key.Binding{hint("1-9", "open"), hint("up/down", "move"), hint("enter", "open"), hint("d then y", "delete"), closeKey}}
 		case modelPicker:
@@ -132,6 +135,9 @@ func (m model) footerKeys() help.KeyMap {
 		case filePicker:
 			return footerKeyMap{short: []key.Binding{hint("type", "filter"), hint("up/down", "move"), hint("enter", "open/select"), hint("backspace", "erase/up"), closeKey}}
 		case modelsPanel:
+			if ov.armed != "" {
+				return footerKeyMap{short: ov.hints(closeKey), drop: confirmDrop}
+			}
 			return footerKeyMap{short: ov.hints(closeKey)}
 		}
 		return footerKeyMap{short: []key.Binding{closeKey}}
@@ -152,33 +158,55 @@ func (m model) footerKeys() help.KeyMap {
 		}
 		return footerKeyMap{short: short}
 	}
-	return m.keys
+	// Idle: ctrl+j newline goes first, then enter ask, then ? keys, which
+	// opens the full key list, and ctrl+d quit last.
+	return footerKeyMap{short: m.keys.ShortHelp(), drop: []int{1, 0, 2, 3}}
 }
 
 // footer renders the one-line help footer. The full key list is the key panel
 // (keyPanelView), not a footer, so this line is always one row. When the hints
-// do not fit, they are dropped from the end, except the way out (see
-// exitHint), which is dropped last. A line that still does not fit is cut to
-// the width.
+// do not fit, they are dropped in the footer's drop order, and the last one in
+// that order always stays. A line that still does not fit is cut to the width.
 func (m model) footer() string {
 	w, _ := m.termSize()
 	h := m.help
 	h.Width = 0 // render every hint given; the fitting happens here
-	keys := m.footerKeys().ShortHelp()
-	exit := exitHint(keys)
-	line := h.ShortHelpView(keys)
-	for lipgloss.Width(line) > w && len(keys) > 1 {
-		drop := len(keys) - 1
-		if drop == exit {
-			drop--
+	fk := m.footerKeys()
+	order := fk.drop
+	if order == nil {
+		order = defaultDrop(fk.short)
+	}
+	gone := map[int]bool{}
+	line := h.ShortHelpView(fk.short)
+	for _, i := range order[:max(len(order)-1, 0)] {
+		if lipgloss.Width(line) <= w {
+			break
 		}
-		keys = slices.Delete(slices.Clone(keys), drop, drop+1)
-		if drop < exit {
-			exit--
+		gone[i] = true
+		var kept []key.Binding
+		for j, k := range fk.short {
+			if !gone[j] {
+				kept = append(kept, k)
+			}
 		}
-		line = h.ShortHelpView(keys)
+		line = h.ShortHelpView(kept)
 	}
 	return lipgloss.NewStyle().MaxWidth(w).Render(line)
+}
+
+// defaultDrop drops hints from the end, the way out (see exitHint) last.
+func defaultDrop(keys []key.Binding) []int {
+	exit := exitHint(keys)
+	var order []int
+	for i := len(keys) - 1; i >= 0; i-- {
+		if i != exit {
+			order = append(order, i)
+		}
+	}
+	if exit >= 0 {
+		order = append(order, exit)
+	}
+	return order
 }
 
 // exitHint is the index of the footer hint that leaves the current state: the
@@ -481,6 +509,21 @@ func (m model) Init() tea.Cmd {
 
 // modelResolvedMsg carries the model a rag turn uses when none is picked.
 type modelResolvedMsg string
+
+// resolveModel records id as the model a rag turn uses when none is picked.
+// The first resolution holds for the session, and an open /models panel
+// follows it. An empty id changes nothing.
+func (m model) resolveModel(id string) model {
+	if m.resolvedModel != "" || id == "" {
+		return m
+	}
+	m.resolvedModel = id
+	if p, ok := m.overlay.(modelsPanel); ok && m.mode == "rag" {
+		p.active = m.activeModel()
+		m.overlay = p
+	}
+	return m
+}
 
 // resolveModelCmd lists the LLM server's models to learn the model a turn will
 // use (see listedModel). It reports nothing when the list does not load.
@@ -861,24 +904,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		p := newModelPicker(msg.models, msg.current, msg.reasoning, m.width)
-		if msg.allHidden {
+		switch {
+		case msg.listErr != nil:
+			p.hint = msg.listErr.Error()
+		case msg.allHidden:
 			p.hint = "every other model is hidden; run /models to show them"
 		}
 		m.overlay = p
 		return m, nil
 
 	case modelResolvedMsg:
-		// The first resolution holds for the session.
-		if m.resolvedModel == "" {
-			m.resolvedModel = string(msg)
-			if p, ok := m.overlay.(modelsPanel); ok && m.mode == "rag" {
-				p.active = m.activeModel()
-				m.overlay = p
-			}
-		}
-		return m, nil
+		return m.resolveModel(string(msg)), nil
 
 	case modelsDataMsg:
+		// A list that loads before the model was resolved resolves it now, so
+		// the panel marks and protects the model a turn uses.
+		m = m.resolveModel(msg.listed)
 		if p, ok := m.overlay.(modelsPanel); ok {
 			var cmd tea.Cmd
 			m.overlay, cmd = p.Update(msg)
@@ -1869,17 +1910,21 @@ func (m model) openModelPickerCmd() tea.Cmd {
 	prefs := m.prefs
 	return func() tea.Msg {
 		var models []string
+		var listErr error
 		allHidden := false
 		if mode == "agent" {
 			ctx, cancel := context.WithTimeout(context.Background(), agentSessionTimeout)
 			defer cancel()
 			models, _ = modelOptions(ctx)
 		} else {
-			all, _ := llmModels()
+			all, err := llmModels()
+			if errors.Is(err, errLLMRedirect) {
+				listErr = errLLMRedirect
+			}
 			models = slices.DeleteFunc(slices.Clone(all), prefs.isHidden)
 			allHidden = len(models) < len(all) && len(ensureFirst(models, current)) <= 1
 		}
-		return openModelPickerMsg{models: ensureFirst(models, current), current: current, reasoning: reasoning, allHidden: allHidden}
+		return openModelPickerMsg{models: ensureFirst(models, current), current: current, reasoning: reasoning, allHidden: allHidden, listErr: listErr}
 	}
 }
 
@@ -2399,7 +2444,7 @@ func formatHealth(h *serviceHealth, cfg ragconfig.Config) string {
 		b.WriteString("\n   " + Meta.Render("start the services with `blk up`"))
 	}
 	if !h.LLM {
-		b.WriteString("\n   " + Meta.Render("start the LLM server at "+llmBase))
+		b.WriteString("\n   " + Meta.Render(llmDownHint(h, llmBase)))
 	}
 	return b.String()
 }

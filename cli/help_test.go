@@ -760,3 +760,28 @@ func TestLogsArgumentIsAService(t *testing.T) {
 		t.Errorf("blk logs args = %q", spec.args)
 	}
 }
+
+// The ENVIRONMENT section lists the answer sampling variables, each on one row
+// with the code default, and no row runs past 80 columns.
+func TestUsageListsTheSamplingVariables(t *testing.T) {
+	f := func(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
+	rows := map[string]string{
+		"BLKCHAIN_SYNTH_TEMPERATURE": "", "BLKCHAIN_SYNTH_TOP_P": "",
+		"BLKCHAIN_SYNTH_TOP_K": "", "BLKCHAIN_SYNTH_PRESENCE_PENALTY": "",
+	}
+	for k := range rows {
+		t.Setenv(k, "")
+	}
+	cfg := ragconfig.Load()
+	rows["BLKCHAIN_SYNTH_TEMPERATURE"] = f(cfg.SynthTemperature)
+	rows["BLKCHAIN_SYNTH_TOP_P"] = f(cfg.SynthTopP)
+	rows["BLKCHAIN_SYNTH_TOP_K"] = strconv.Itoa(cfg.SynthTopK)
+	rows["BLKCHAIN_SYNTH_PRESENCE_PENALTY"] = f(cfg.SynthPresencePenalty)
+	out := renderUsage(80)
+	assertMaxWidth(t, "usage", out, 80)
+	for name, def := range rows {
+		if l := lineWith(out, name); !strings.Contains(l, "(default "+def+")") {
+			t.Errorf("ENVIRONMENT row for %s = %q, want it on one row with (default %s)", name, l, def)
+		}
+	}
+}

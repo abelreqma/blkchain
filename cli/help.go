@@ -612,6 +612,12 @@ func usageEnv() []rowGroup {
 			{"OMLX_API_KEY", "key for the LLM server, if it needs one"},
 			{"BLKCHAIN_TIMEOUT_SECONDS", "seconds before a request gives up (default 300)"},
 		}},
+		{"LLM ANSWER SAMPLING", []helpRow{
+			{"BLKCHAIN_SYNTH_TEMPERATURE", "temperature, 0 to 2 (default 0.7)"},
+			{"BLKCHAIN_SYNTH_TOP_P", "top_p, over 0 up to 1 (default 0.95)"},
+			{"BLKCHAIN_SYNTH_TOP_K", "top_k, 0 to 1000 (default 64)"},
+			{"BLKCHAIN_SYNTH_PRESENCE_PENALTY", "presence penalty, -2 to 2 (default 0.5)"},
+		}},
 		{"RETRIEVAL", []helpRow{
 			{"BLKCHAIN_ROOT", "project folder (default: found automatically)"},
 			{"BLKCHAIN_COLLECTION", "name of the index to search (default " + defaultCollection + ")"},
@@ -678,25 +684,14 @@ func renderUsage(width int) string {
 
 	b.WriteString("\n")
 	helpHeading(&b, "ENVIRONMENT")
-	env := usageEnv()
-	envW := 0
-	for _, g := range env {
-		for _, r := range g.rows {
-			if len(r.name) > envW {
-				envW = len(r.name)
-			}
-		}
-	}
-	for gi, g := range env {
+	// Each group aligns to its own widest name, so the long sampling names do
+	// not push every other row onto two lines.
+	for gi, g := range usageEnv() {
 		if gi > 0 {
 			b.WriteString("\n")
 		}
 		b.WriteString("  " + Meta.Render(g.title) + "\n")
-		rows := make([]helpRow, len(g.rows))
-		for i, r := range g.rows {
-			rows[i] = helpRow{pad(r.name, envW), r.desc}
-		}
-		writeRows(&b, rows, 3, total, Key, Meta)
+		writeRows(&b, g.rows, 3, total, Key, Meta)
 	}
 
 	b.WriteString("\n")

@@ -195,9 +195,14 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 		llms.WithStreamingFunc(stream),
 		llms.WithTemperature(cfg.SynthTemperature),
 		llms.WithMaxTokens(cfg.AnswerMaxTokens),
+		llms.WithTopP(cfg.SynthTopP),
+		llms.WithTopK(cfg.SynthTopK),
+		llms.WithPresencePenalty(cfg.SynthPresencePenalty),
 	}
 
-	cr, genErr := l.GenerateContent(ctx, msgs, callOpts...)
+	// The library drops top_p and top_k; llmTransport adds them for this call
+	// only, so the grade call stays deterministic.
+	cr, genErr := l.GenerateContent(withSampling(ctx, cfg), msgs, callOpts...)
 	answer = full.String()
 	cits = citationsFromAnswer(answer, chunks)
 	return answer, cits, usedWeb, results, completionTokens(cr), mapLLMError(genErr, omlxBaseURL())

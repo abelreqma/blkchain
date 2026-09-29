@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -194,5 +198,87 @@ func TestResolveModelBoundsTheModelsList(t *testing.T) {
 	}
 	if d := time.Since(start); d > 3*time.Second {
 		t.Errorf("resolveModel read for %s, want it to stop at the body cap", d)
+	}
+}
+
+// rawBodyServer records the raw body of each request it gets.
+func rawBodyServer(t *testing.T) (*httptest.Server, func() [][]byte) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		seen = append(seen, b)
+		mu.Unlock()
+		w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() [][]byte {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([][]byte(nil), seen...)
+	}
+}
+
+// postThroughTransport sends body to srv's chat completions path through
+// llmTransport with ctx and returns what the server received.
+func postThroughTransport(t *testing.T, ctx context.Context, body string) []byte {
+	t.Helper()
+	srv, seen := rawBodyServer(t)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := (&llmTransport{base: http.DefaultTransport}).RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	got := seen()
+	if len(got) != 1 {
+		t.Fatalf("server got %d requests, want 1", len(got))
+	}
+	return got[0]
+}
+
+// A field the library already sent is never overwritten; only a missing one is
+// added.
+func TestLLMTransportKeepsAFieldAlreadySent(t *testing.T) {
+	cfg := ragconfig.Config{SynthTopP: 0.95, SynthTopK: 64}
+	raw := postThroughTransport(t, withSampling(context.Background(), cfg), `{"model":"m","top_p":0.1}`)
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["top_p"] != 0.1 {
+		t.Errorf("top_p = %v, want the 0.1 already in the body", m["top_p"])
+	}
+	if m["top_k"] != 64.0 {
+		t.Errorf("top_k = %v, want 64 added", m["top_k"])
+	}
+}
+
+// A body that is not JSON passes through byte for byte, sampling or not.
+func TestLLMTransportPassesANonJSONBodyThrough(t *testing.T) {
+	t.Setenv("BLK_ENABLE_THINKING", "")
+	body := "not json {top_p"
+	ctx := withSampling(context.Background(), ragconfig.Config{SynthTopP: 0.95, SynthTopK: 64})
+	if got := postThroughTransport(t, ctx, body); string(got) != body {
+		t.Errorf("body = %q, want %q unchanged", got, body)
+	}
+}
+
+// Without sampling on the context, the transport adds no sampling field.
+func TestLLMTransportAddsNoSamplingWithoutTheContext(t *testing.T) {
+	raw := postThroughTransport(t, context.Background(), `{"model":"m","temperature":0}`)
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"top_p", "top_k", "presence_penalty"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("body carries %s without sampling on the context: %s", k, raw)
+		}
 	}
 }

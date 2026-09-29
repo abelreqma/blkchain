@@ -396,7 +396,12 @@ func replModels(arg string) error {
 // --- TUI messages and commands ---
 
 // modelsDataMsg carries a fetch into the open panel.
-type modelsDataMsg struct{ data modelsData }
+// listed is the model a turn uses when none is picked (see listedModel), ""
+// when the server did not say.
+type modelsDataMsg struct {
+	data   modelsData
+	listed string
+}
 
 // modelActionDoneMsg ends a load or unload started from the panel.
 type modelActionDoneMsg struct {
@@ -419,7 +424,11 @@ type modelsArgsDoneMsg struct {
 	err  error
 }
 
-func fetchModelsCmd() tea.Msg { return modelsDataMsg{data: fetchModelsData()} }
+// fetchModelsCmd fetches the panel's data and, with it, the model a turn uses,
+// so the first list that loads also resolves the active model.
+func fetchModelsCmd() tea.Msg {
+	return modelsDataMsg{data: fetchModelsData(), listed: listedModel()}
+}
 
 func modelActionCmd(id, action string) tea.Cmd {
 	return func() tea.Msg {

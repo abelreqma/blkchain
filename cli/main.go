@@ -74,6 +74,9 @@ type answerResponse struct {
 // serviceHealth is one probe of the services an answer needs.
 type serviceHealth struct {
 	Qdrant, EmbedServer, LLM bool
+	// LLMRedirect is set when the LLM server answered with a redirect, which
+	// blk does not follow.
+	LLMRedirect bool
 }
 
 // ok reports whether every service answered.
@@ -488,6 +491,9 @@ func runHealth(args []string) error {
 	fmt.Printf("  %s qdrant        %s\n", check(h.Qdrant), Meta.Render("("+cfg.QdrantGRPCURL+")"))
 	fmt.Printf("  %s embed_server  %s\n", check(h.EmbedServer), Meta.Render("("+cfg.EmbedServerURL+")"))
 	fmt.Printf("  %s llm           %s\n", check(h.LLM), Meta.Render("("+redactedURL(omlxBaseURL())+")"))
+	if h.LLMRedirect {
+		fmt.Printf("    %s\n", Meta.Render(errLLMRedirect.Error()))
+	}
 	return nil
 }
 
@@ -505,10 +511,11 @@ const healthProbeTimeout = 4 * time.Second
 // depend on. The LLM probe runs alongside the retrieval probes so a dead
 // service does not add its timeout to the others.
 func nativeHealth(cfg ragconfig.Config, rc *retrieval.Client) *serviceHealth {
-	llmOK := make(chan bool, 1)
-	go func() { llmOK <- probeLLM(omlxBaseURL(), omlxAPIKey(), healthProbeTimeout) }()
+	llmErr := make(chan error, 1)
+	go func() { llmErr <- probeLLM(omlxBaseURL(), omlxAPIKey(), healthProbeTimeout) }()
 	h := &serviceHealth{Qdrant: probeQdrant(rc), EmbedServer: probeEmbedServer(cfg)}
-	h.LLM = <-llmOK
+	err := <-llmErr
+	h.LLM, h.LLMRedirect = err == nil, errors.Is(err, errLLMRedirect)
 	return h
 }
 
@@ -581,26 +588,42 @@ func probeEmbedHealth(cfg ragconfig.Config) (h embedHealth, ok bool) {
 	return h, true
 }
 
-// probeLLM reports whether the LLM server at baseURL answers GET /models with a
-// 2xx status within timeout. The API key, when set, goes in the Authorization
+// probeLLM checks that the LLM server at baseURL answers GET /models with a
+// 2xx status within timeout; nil means it does. A redirect, which it never
+// follows, is errLLMRedirect. The API key, when set, goes in the Authorization
 // header and is never printed. The body read is capped at 1 MiB and discarded.
-func probeLLM(baseURL, apiKey string, timeout time.Duration) bool {
+func probeLLM(baseURL, apiKey string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
 	if err != nil {
-		return false
+		return err
 	}
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	resp, err := localHTTP.Do(req)
+	resp, err := llmHTTP.Do(req)
+	if errors.Is(err, errLLMRedirect) {
+		return errLLMRedirect
+	}
 	if err != nil {
-		return false
+		return err
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("LLM server status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// llmDownHint is the line under a down llm row: the redirect, when that is why,
+// else where to start the LLM server. llmBase is already redacted.
+func llmDownHint(h *serviceHealth, llmBase string) string {
+	if h.LLMRedirect {
+		return errLLMRedirect.Error()
+	}
+	return "start the LLM server at " + llmBase
 }
 
 // downServices names the services h reports as down, in status-line order.

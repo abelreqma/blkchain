@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -147,5 +150,42 @@ func TestModelsJSONEscapesControlRunes(t *testing.T) {
 	}
 	if !strings.HasSuffix(buf.String(), "]\n") {
 		t.Errorf("output should end with one newline: %q", buf.String()[max(buf.Len()-10, 0):])
+	}
+}
+
+// The blk models chat probe sends only its own fixed settings: none of the
+// answer sampling settings reach it.
+func TestModelsChatProbeSendsNoSampling(t *testing.T) {
+	isolateUserDirs(t)
+	useDeadServices(t)
+	var mu sync.Mutex
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			w.Write([]byte(`{"data":[{"id":"m"}]}`))
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "")
+	modeleval.ProbeChat(context.Background(), modelsConfig())
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 1 {
+		t.Fatalf("probe sent %d chat calls, want 1", len(bodies))
+	}
+	for _, k := range []string{"top_p", "top_k", "presence_penalty"} {
+		if _, ok := bodies[0][k]; ok {
+			t.Errorf("probe body carries %s: %v", k, bodies[0])
+		}
 	}
 }

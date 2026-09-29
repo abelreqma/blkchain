@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // adminServer serves the LLM admin API from h and points OMLX_BASE_URL at it.
@@ -289,5 +291,88 @@ func TestLLMAdminWarnsOnceAboutAnUnencryptedKey(t *testing.T) {
 	}
 	if try("http://0.0.0.0"+port, ""); len(warnings) != 0 {
 		t.Errorf("no key: warnings = %q, want none", warnings)
+	}
+}
+
+// A body that splits the key with an escape sequence or a C1 control still
+// never shows the key: the text is sanitized before the key is redacted.
+func TestLLMAdminRedactsAKeySplitByControls(t *testing.T) {
+	const key = "sekritvalue123"
+	for _, body := range []string{"echo sekrit\x1b[0mvalue123 end", "echo sekrit\u0085value123 end", "echo sekrit\x07value123 end"} {
+		adminServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, body)
+		})
+		t.Setenv("OMLX_API_KEY", key)
+		err := llmModelAction(context.Background(), "m", "load")
+		if err == nil || strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "[redacted]") {
+			t.Errorf("body %q: error %v, want the key redacted", body, err)
+		}
+	}
+}
+
+// The model list and the health probe carry the key too, so they never follow
+// a redirect: the second server sees nothing, and the redirect is reported,
+// never taken for an empty list.
+func TestKeyBearingModelCallsNeverFollowRedirects(t *testing.T) {
+	var hits int
+	var mu sync.Mutex
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		fmt.Fprint(w, `{"data":[{"id":"x"}]}`)
+	}))
+	defer second.Close()
+	useDeadServices(t)
+	adminServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/admin/api/models" {
+			http.NotFound(w, r)
+			return
+		}
+		http.Redirect(w, r, second.URL+r.URL.Path, http.StatusFound)
+	})
+	t.Setenv("OMLX_API_KEY", "k")
+
+	if _, err := llmModels(); !errors.Is(err, errLLMRedirect) {
+		t.Errorf("llmModels err = %v, want errLLMRedirect", err)
+	}
+	if err := probeLLM(omlxBaseURL(), "k", healthProbeTimeout); !errors.Is(err, errLLMRedirect) {
+		t.Errorf("probeLLM err = %v, want errLLMRedirect", err)
+	}
+	if _, _, err := fetchChatModels(context.Background()); !errors.Is(err, errLLMRedirect) {
+		t.Errorf("fetchChatModels err = %v, want errLLMRedirect", err)
+	}
+	noColor(t)
+	isolateUserDirs(t)
+	t.Setenv("QDRANT_GRPC_URL", "127.0.0.1:1")
+	t.Setenv("HERMES_HOME", t.TempDir())
+	health := captureStdout(t, func() { runHealth(nil) })
+	doctor := captureStdout(t, func() { runDoctor(nil) })
+	for name, out := range map[string]string{"blk health": health, "blk doctor": doctor} {
+		if lineWith(out, errLLMRedirect.Error()) == "" {
+			t.Errorf("%s does not report the redirect:\n%s", name, out)
+		}
+	}
+
+	// The /models panel and the model picker show it too.
+	m := newKeyModel(t)
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = nm.(model)
+	m.overlay = newModelsPanel(m.prefs, "")
+	nm, _ = m.Update(fetchModelsCmd())
+	if v := nm.(model).View(); !strings.Contains(v, "redirected") {
+		t.Errorf("the /models panel does not report the redirect:\n%s", v)
+	}
+	m.overlay = nil
+	nm, _ = m.Update(m.openModelPickerCmd()())
+	if v := nm.(model).View(); !strings.Contains(v, "redirected") {
+		t.Errorf("the model picker does not report the redirect:\n%s", v)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 0 {
+		t.Errorf("the redirect target got %d requests, want none", hits)
 	}
 }

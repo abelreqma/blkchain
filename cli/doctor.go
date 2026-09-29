@@ -87,7 +87,7 @@ func printDoctorServices(h *serviceHealth, cfg ragconfig.Config, llmBase string)
 	}
 	fmt.Printf("%s llm %s\n", check(h.LLM), Meta.Render("("+llmBase+")"))
 	if !h.LLM {
-		fmt.Printf("  %s\n", Meta.Render("start the LLM server at "+llmBase))
+		fmt.Printf("  %s\n", Meta.Render(llmDownHint(h, llmBase)))
 	}
 }
 

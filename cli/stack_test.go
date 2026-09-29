@@ -229,14 +229,17 @@ func init() {
 	}
 }
 
-// startSleeper starts the test's own child with exactly the argument vector
-// argv, so it reads like whatever process argv names. It returns the child,
-// already waited on in the background.
-func startSleeper(t *testing.T, argv ...string) (*exec.Cmd, <-chan struct{}) {
+// startSleeper starts the test's own child from the file exe ("" for the test
+// binary) with exactly the argument vector argv, so it reads like whatever
+// process argv names. It returns the child, already waited on in the
+// background.
+func startSleeper(t *testing.T, exe string, argv ...string) (*exec.Cmd, <-chan struct{}) {
 	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
+	if exe == "" {
+		var err error
+		if exe, err = os.Executable(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	c := &exec.Cmd{Path: exe, Args: argv, Env: append(os.Environ(), sleeperEnv+"=1")}
 	if err := c.Start(); err != nil {
@@ -246,6 +249,24 @@ func startSleeper(t *testing.T, argv ...string) (*exec.Cmd, <-chan struct{}) {
 	go func() { c.Wait(); close(done) }()
 	t.Cleanup(func() { c.Process.Kill(); <-done })
 	return c, done
+}
+
+// fakeVenv makes root/.venv/bin/python a symlink to the test binary, the way a
+// real venv python is a symlink to its interpreter, and returns its path.
+func fakeVenv(t *testing.T, root string) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	py := venvPython(root)
+	if err := os.MkdirAll(filepath.Dir(py), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(exe, py); err != nil {
+		t.Fatal(err)
+	}
+	return py
 }
 
 // fakePkill puts a pkill on PATH that records any call, so a test can prove the
@@ -313,8 +334,9 @@ func liveHealthPort(t *testing.T) int {
 
 func TestStopServiceSignalsTheRecordedMatchingPid(t *testing.T) {
 	root := t.TempDir()
+	py := fakeVenv(t, root)
 	svc := testSvc(deadPort(t))
-	c, done := startSleeper(t, venvPython(root), "-m", svc.module)
+	c, done := startSleeper(t, py, py, "-m", svc.module)
 	writePidFile(t, root, svc.name, c.Process.Pid)
 
 	out := captureStdout(t, func() { stopService(root, svc) })
@@ -358,8 +380,13 @@ func TestStopServiceNeverSignalsAnotherProcess(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
+			py := fakeVenv(t, root)
 			svc := testSvc(deadPort(t))
-			c, done := startSleeper(t, argv(root)...)
+			exe := ""
+			if argv(root)[0] == py {
+				exe = py
+			}
+			c, done := startSleeper(t, exe, argv(root)...)
 			writePidFile(t, root, svc.name, c.Process.Pid)
 
 			out := captureStdout(t, func() { stopService(root, svc) })
@@ -392,8 +419,9 @@ func TestStopServiceRefusesInvalidPidFiles(t *testing.T) {
 	}
 
 	root := t.TempDir()
+	py := fakeVenv(t, root)
 	svc := testSvc(deadPort(t))
-	c, done := startSleeper(t, venvPython(root), "-m", svc.module)
+	c, done := startSleeper(t, py, py, "-m", svc.module)
 	target := filepath.Join(t.TempDir(), "elsewhere.pid")
 	if err := os.WriteFile(target, []byte(strconv.Itoa(c.Process.Pid)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -461,7 +489,7 @@ func TestNoPidFileButPortAnswersPointsToLsof(t *testing.T) {
 	}
 
 	// With a valid pid file, status says nothing about lsof.
-	c, _ := startSleeper(t, venvPython(root), "-m", svc.module)
+	c, _ := startSleeper(t, "", venvPython(root), "-m", svc.module)
 	writePidFile(t, root, svc.name, c.Process.Pid)
 	if out := captureStdout(t, func() { printServiceStatus(root, svc) }); strings.Contains(out, "lsof") {
 		t.Errorf("status with a valid pid file = %q, want no lsof hint", out)
@@ -480,5 +508,90 @@ func TestHTTPGetBoundsTheBody(t *testing.T) {
 	}
 	if len(body) > maxHealthBodyBytes || !strings.HasPrefix(body, "qdrant") {
 		t.Errorf("body is %d bytes, want the start of it, at most %d", len(body), maxHealthBodyBytes)
+	}
+}
+
+// The project root reached through a symlink at blk down, and by its real path
+// at blk up, still names the same venv python, so the service stops.
+func TestStopServiceMatchesThroughASymlinkedRoot(t *testing.T) {
+	real := t.TempDir()
+	py := fakeVenv(t, real)
+	link := filepath.Join(t.TempDir(), "root")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	svc := testSvc(deadPort(t))
+	c, done := startSleeper(t, py, py, "-m", svc.module)
+	writePidFile(t, link, svc.name, c.Process.Pid)
+
+	out := captureStdout(t, func() { stopService(link, svc) })
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the service was not stopped through the symlinked root: %q", out)
+	}
+	if !strings.Contains(out, "embed_server: stopped") {
+		t.Errorf("output = %q, want stopped", out)
+	}
+}
+
+// A valid pid file whose process is not the service: while the port answers
+// the file is kept, nothing is signaled, and the unmanaged line says how to
+// find the process; with the port dead the stale file is removed.
+func TestStopServiceMismatchKeepsThePidFileWhileThePortAnswers(t *testing.T) {
+	log := fakePkill(t)
+	for _, live := range []bool{true, false} {
+		root := t.TempDir()
+		fakeVenv(t, root)
+		port := deadPort(t)
+		if live {
+			port = liveHealthPort(t)
+		}
+		svc := testSvc(port)
+		c, done := startSleeper(t, "", venvPython(root), "-m", "some.other_module")
+		writePidFile(t, root, svc.name, c.Process.Pid)
+
+		out := captureStdout(t, func() { stopService(root, svc) })
+		select {
+		case <-done:
+			t.Fatal("a process that is not the service was signaled")
+		case <-time.After(300 * time.Millisecond):
+		}
+		_, err := os.Stat(pidFilePath(root, svc.name))
+		lsof := fmt.Sprintf("lsof -nP -iTCP:%d -sTCP:LISTEN", port)
+		if live {
+			if err != nil {
+				t.Errorf("port answering: the pid file was removed (%v)", err)
+			}
+			if !strings.Contains(out, "not managed by this blk") || !strings.Contains(out, lsof) || strings.Count(strings.TrimRight(out, "\n"), "\n") != 0 {
+				t.Errorf("port answering: output = %q, want the one unmanaged line with %q", out, lsof)
+			}
+		} else {
+			if !os.IsNotExist(err) {
+				t.Errorf("port dead: the stale pid file is still there (%v)", err)
+			}
+			if !strings.Contains(out, "embed_server: not running") {
+				t.Errorf("port dead: output = %q, want not running", out)
+			}
+		}
+	}
+	if b, _ := os.ReadFile(log); len(b) > 0 {
+		t.Errorf("pkill was run: %q", b)
+	}
+}
+
+// isService needs the exact argv and the executable to be the venv python.
+func TestIsServiceChecksTheExecutablePath(t *testing.T) {
+	root := t.TempDir()
+	py := fakeVenv(t, root)
+	args := []string{py, "-m", embedServerSvc.module}
+	if !isService(root, py, args, embedServerSvc.module) {
+		t.Error("the venv python running the module does not match")
+	}
+	if isService(root, "/usr/bin/true", args, embedServerSvc.module) {
+		t.Error("another executable with the same argv matched")
+	}
+	if isService(root, py, []string{"", py, "-m"}, embedServerSvc.module) {
+		t.Error("an empty argv[0] matched")
 	}
 }

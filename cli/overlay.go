@@ -42,6 +42,7 @@ type openModelPickerMsg struct {
 	current   string
 	reasoning string
 	allHidden bool
+	listErr   error // the model list failed in a way worth saying (a redirect)
 }
 
 // reasoningLevels are the reasoning-effort choices, low to high.

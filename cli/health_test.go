@@ -153,7 +153,7 @@ func TestProbeLLMUpSendsKeyAndUsesModelsPath(t *testing.T) {
 		w.Write([]byte(`{"data":[]}`))
 	}))
 	defer srv.Close()
-	if !probeLLM(srv.URL+"/v1", "s3cret", healthProbeTimeout) {
+	if probeLLM(srv.URL+"/v1", "s3cret", healthProbeTimeout) != nil {
 		t.Fatal("probeLLM = false against a healthy server")
 	}
 	if gotPath != "/v1/models" || gotAuth != "Bearer s3cret" {
@@ -167,7 +167,7 @@ func TestProbeLLMNoKeyNoAuthHeader(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 	}))
 	defer srv.Close()
-	if !probeLLM(srv.URL, "", healthProbeTimeout) {
+	if probeLLM(srv.URL, "", healthProbeTimeout) != nil {
 		t.Fatal("probeLLM = false")
 	}
 	if gotAuth != "" {
@@ -176,14 +176,14 @@ func TestProbeLLMNoKeyNoAuthHeader(t *testing.T) {
 }
 
 func TestProbeLLMDownAndNon2xx(t *testing.T) {
-	if probeLLM(deadLoopbackURL(t), "", healthProbeTimeout) {
+	if probeLLM(deadLoopbackURL(t), "", healthProbeTimeout) == nil {
 		t.Error("dead port reported up")
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-	if probeLLM(srv.URL, "", healthProbeTimeout) {
+	if probeLLM(srv.URL, "", healthProbeTimeout) == nil {
 		t.Error("HTTP 500 reported up")
 	}
 }
@@ -200,7 +200,7 @@ func TestProbeLLMCapsBodyRead(t *testing.T) {
 	}))
 	defer srv.Close()
 	start := time.Now()
-	if !probeLLM(srv.URL, "", healthProbeTimeout) {
+	if probeLLM(srv.URL, "", healthProbeTimeout) != nil {
 		t.Fatal("probeLLM = false for an endless 200 body")
 	}
 	if d := time.Since(start); d > 3*time.Second {
@@ -219,7 +219,7 @@ func TestProbeLLMTimeout(t *testing.T) {
 	defer srv.Close()
 	defer close(release)
 	start := time.Now()
-	if probeLLM(srv.URL, "", 150*time.Millisecond) {
+	if probeLLM(srv.URL, "", 150*time.Millisecond) == nil {
 		t.Fatal("hung server reported up")
 	}
 	if d := time.Since(start); d > 2*time.Second {

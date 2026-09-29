@@ -9,10 +9,13 @@ package ragconfig
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,6 +32,9 @@ type Config struct {
 	AnswerMaxTokens       int      `json:"answer_max_tokens"`
 	GradeMaxTokens        int      `json:"grade_max_tokens"`
 	SynthTemperature      float64  `json:"synth_temperature"`
+	SynthTopP             float64  `json:"synth_top_p"`
+	SynthTopK             int      `json:"synth_top_k"`
+	SynthPresencePenalty  float64  `json:"synth_presence_penalty"`
 	GradeTemperature      float64  `json:"grade_temperature"`
 	RequestTimeoutSeconds int      `json:"request_timeout_seconds"`
 	DefaultModel          string   `json:"default_model"`
@@ -56,7 +62,10 @@ func builtinDefaults() Config {
 		ContextCharsPerChunk:  1200,
 		AnswerMaxTokens:       700,
 		GradeMaxTokens:        200,
-		SynthTemperature:      0.2,
+		SynthTemperature:      0.7,
+		SynthTopP:             0.95,
+		SynthTopK:             64,
+		SynthPresencePenalty:  0.5,
 		GradeTemperature:      0.0,
 		RequestTimeoutSeconds: 300,
 		DefaultModel:          "supergemma4-26b-uncensored-mlx-4bit-v2",
@@ -123,7 +132,8 @@ func findContractFile() (string, bool) {
 }
 
 // envOverrides applies BLKCHAIN_*/OMLX_*/QDRANT_* environment variables onto
-// cfg in place, ignoring unset or unparsable values.
+// cfg in place, ignoring unset or unparsable values. An unparsable synthesis
+// sampling value also writes a note.
 func envOverrides(cfg *Config) {
 	if v, ok := os.LookupEnv("BLKCHAIN_ANSWER_MAX_CHUNKS"); ok {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -169,10 +179,80 @@ func envOverrides(cfg *Config) {
 			cfg.RequestTimeoutSeconds = n
 		}
 	}
+	envFloat("BLKCHAIN_SYNTH_TEMPERATURE", &cfg.SynthTemperature)
+	envFloat("BLKCHAIN_SYNTH_TOP_P", &cfg.SynthTopP)
+	if v, ok := os.LookupEnv("BLKCHAIN_SYNTH_TOP_K"); ok && v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.SynthTopK = n
+		} else {
+			warnf("ignoring BLKCHAIN_SYNTH_TOP_K=%q: not a whole number", v)
+		}
+	}
+	envFloat("BLKCHAIN_SYNTH_PRESENCE_PENALTY", &cfg.SynthPresencePenalty)
+}
+
+// envFloat sets *dst from the float in environment variable name. An empty or
+// unset variable is skipped; an unparsable one is ignored with a note.
+func envFloat(name string, dst *float64) {
+	v, ok := os.LookupEnv(name)
+	if !ok || v == "" {
+		return
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		warnf("ignoring %s=%q: not a number", name, v)
+		return
+	}
+	*dst = f
+}
+
+// validateSampling replaces each synthesis sampling value that is out of range
+// with its built-in default, with a note. NaN and Inf fail every range check.
+func validateSampling(cfg *Config) {
+	def := builtinDefaults()
+	reset := func(key string, v *float64, ok bool, fallback float64) {
+		if !ok {
+			warnf("ignoring %s=%v: out of range, using %v", key, *v, fallback)
+			*v = fallback
+		}
+	}
+	c := *cfg
+	reset("synth_temperature", &cfg.SynthTemperature,
+		c.SynthTemperature >= 0 && c.SynthTemperature <= 2, def.SynthTemperature)
+	reset("synth_top_p", &cfg.SynthTopP,
+		c.SynthTopP > 0 && c.SynthTopP <= 1, def.SynthTopP)
+	reset("synth_presence_penalty", &cfg.SynthPresencePenalty,
+		c.SynthPresencePenalty >= -2 && c.SynthPresencePenalty <= 2, def.SynthPresencePenalty)
+	if k := cfg.SynthTopK; k < 0 || k > 1000 {
+		warnf("ignoring synth_top_k=%d: out of range, using %d", k, def.SynthTopK)
+		cfg.SynthTopK = def.SynthTopK
+	}
+}
+
+// warnOut receives the load notes; tests swap it.
+var warnOut io.Writer = os.Stderr
+
+var (
+	warnMu sync.Mutex
+	warned = map[string]bool{}
+)
+
+// warnf writes one note line to warnOut, once per process for each distinct
+// line, since the config is loaded more than once per run.
+func warnf(format string, args ...any) {
+	line := "blk: " + fmt.Sprintf(format, args...)
+	warnMu.Lock()
+	defer warnMu.Unlock()
+	if warned[line] {
+		return
+	}
+	warned[line] = true
+	fmt.Fprintln(warnOut, line)
 }
 
 // Load returns the effective Config: built-in defaults, overlaid by
-// blkchain/contract/rag.json when found, overlaid by environment variables.
+// blkchain/contract/rag.json when found, overlaid by environment variables,
+// with any out-of-range sampling value reset to its default.
 func Load() Config {
 	cfg := builtinDefaults()
 	if path, ok := findContractFile(); ok {
@@ -181,6 +261,7 @@ func Load() Config {
 		}
 	}
 	envOverrides(&cfg)
+	validateSampling(&cfg)
 	return cfg
 }
 

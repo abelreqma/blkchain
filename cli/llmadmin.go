@@ -31,16 +31,18 @@ const (
 	modelUnloadTimeout = 30 * time.Second
 )
 
-// localHTTP is the one client for short calls to the local services: the
-// health probes and the model lists. Each call bounds itself with a context
-// deadline.
+// localHTTP is the one client for short calls to the local services that
+// carry no key: the qdrant and embed_server probes. Each call bounds itself
+// with a context deadline.
 var localHTTP = &http.Client{}
 
-// llmAdminHTTP is the client for the LLM admin API. It never follows a
-// redirect, so the API key goes only to the origin of OMLX_BASE_URL. Each call
-// bounds itself with a context deadline.
-var llmAdminHTTP = &http.Client{
-	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+// llmHTTP is the client for every short LLM server call that carries the API
+// key: the admin API, the model list, and the health probe. It never follows a
+// redirect, so the key goes only to OMLX_BASE_URL; a redirect fails the call
+// with errLLMRedirect. Each call bounds itself with a context deadline. The
+// streaming chat client is separate (see newOMLX).
+var llmHTTP = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error { return errLLMRedirect },
 }
 
 var (
@@ -107,7 +109,10 @@ func llmAdminDo(ctx context.Context, method, path string) ([]byte, error) {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	warnInsecureKey(omlxBaseURL(), key)
-	resp, err := llmAdminHTTP.Do(req)
+	resp, err := llmHTTP.Do(req)
+	if errors.Is(err, errLLMRedirect) {
+		return nil, errLLMRedirect
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return nil, fmt.Errorf("LLM server at %s did not answer in time", llmAdminBase())
 	}
@@ -130,11 +135,9 @@ func llmAdminDo(ctx context.Context, method, path string) ([]byte, error) {
 	case resp.StatusCode >= 300 && resp.StatusCode <= 399:
 		return nil, errLLMRedirect
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
-		text := string(body)
-		if key != "" {
-			text = strings.ReplaceAll(text, key, "[redacted]")
-		}
-		detail := ellipsize(strings.Join(strings.Fields(sanitizeTerminal(text)), " "), 120)
+		// Sanitize first, so a key split by an escape sequence is whole again
+		// when it is redacted, and redact the finished line once more.
+		detail := redactKey(ellipsize(strings.Join(strings.Fields(redactKey(sanitizeTerminal(string(body)), key)), " "), 120), key)
 		return nil, fmt.Errorf("LLM server error %d: %s", resp.StatusCode, detail)
 	}
 	return body, nil
@@ -161,7 +164,10 @@ func fetchChatModels(ctx context.Context) (models []chatModel, admin bool, err e
 		err = errLLMUnsupported // answered, but not with the oMLX admin shape
 	}
 	if errors.Is(err, errLLMUnsupported) {
-		ids, _ := modeleval.ListModels(ctx, llmAdminHTTP, omlxBaseURL(), omlxAPIKey())
+		ids, lerr := modeleval.ListModels(ctx, llmHTTP, omlxBaseURL(), omlxAPIKey())
+		if errors.Is(lerr, errLLMRedirect) {
+			return nil, false, errLLMRedirect
+		}
 		for _, id := range ids {
 			models = append(models, chatModel{ID: id})
 		}
@@ -180,6 +186,14 @@ func fetchChatModels(ctx context.Context) (models []chatModel, admin bool, err e
 		})
 	}
 	return models, true, nil
+}
+
+// redactKey replaces every occurrence of key in s with [redacted].
+func redactKey(s, key string) string {
+	if key == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, key, "[redacted]")
 }
 
 // llmModelAction asks the LLM server to "load" or "unload" a model. The id is

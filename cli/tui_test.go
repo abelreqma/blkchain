@@ -285,13 +285,13 @@ func helpText(bs []key.Binding) string {
 
 func TestFooterFollowsState(t *testing.T) {
 	m := newKeyModel(t)
-	idle := helpText(m.footerKeys().ShortHelp())
+	idle := helpText(m.footerKeys().short)
 	if strings.Contains(idle, "cancel") || !strings.Contains(idle, "enter") {
 		t.Errorf("idle footer = %q, want the normal hints without cancel", idle)
 	}
 
 	m.working = true
-	working := helpText(m.footerKeys().ShortHelp())
+	working := helpText(m.footerKeys().short)
 	if !strings.Contains(working, "ctrl+c cancel") {
 		t.Errorf("working footer = %q, want ctrl+c cancel", working)
 	}
@@ -304,7 +304,7 @@ func TestFooterFollowsState(t *testing.T) {
 	for name, ov := range overlays {
 		m2 := newKeyModel(t)
 		m2.overlay = ov
-		got := helpText(m2.footerKeys().ShortHelp())
+		got := helpText(m2.footerKeys().short)
 		if !strings.Contains(got, "esc") || strings.Contains(got, "newline") {
 			t.Errorf("%s overlay footer = %q, want overlay keys with esc and no input hints", name, got)
 		}
@@ -313,13 +313,13 @@ func TestFooterFollowsState(t *testing.T) {
 	m3 := newKeyModel(t)
 	m3.ta.SetValue("/")
 	m3 = m3.refreshPalette()
-	if got := helpText(m3.footerKeys().ShortHelp()); !strings.Contains(got, "esc") || strings.Contains(got, "newline") {
+	if got := helpText(m3.footerKeys().short); !strings.Contains(got, "esc") || strings.Contains(got, "newline") {
 		t.Errorf("palette footer = %q, want palette keys with esc", got)
 	}
 
 	m4 := newKeyModel(t)
 	m4.rsearch.open = true
-	if got := helpText(m4.footerKeys().ShortHelp()); !strings.Contains(got, "esc") {
+	if got := helpText(m4.footerKeys().short); !strings.Contains(got, "esc") {
 		t.Errorf("reverse search footer = %q, want esc", got)
 	}
 }
@@ -1229,7 +1229,7 @@ func TestResumeConfirmFooterKeysDoWhatTheyList(t *testing.T) {
 	count := func() int { metas, _ := listSessions(); return len(metas) }
 
 	// The footer lists exactly these hints.
-	hints := helpText(confirming().footerKeys().ShortHelp())
+	hints := helpText(confirming().footerKeys().short)
 	if want := "y confirm delete | ctrl+d quit | any other key cancel"; hints != want {
 		t.Fatalf("confirm footer = %q, want %q", hints, want)
 	}
@@ -1504,7 +1504,7 @@ func TestKeyPanelScrollsToEveryBinding(t *testing.T) {
 
 func TestKeyPanelFooterSaysHowToClose(t *testing.T) {
 	m := openKeyPanel(t, layoutModel(t, 100, 24))
-	if got := helpText(m.footerKeys().ShortHelp()); !strings.Contains(got, "esc") || !strings.Contains(got, "close") {
+	if got := helpText(m.footerKeys().short); !strings.Contains(got, "esc") || !strings.Contains(got, "close") {
 		t.Errorf("panel footer = %q, want a close hint", got)
 	}
 }
@@ -1805,11 +1805,11 @@ func TestFirstDownProbePrintsOneHint(t *testing.T) {
 
 func TestKeyPanelFooterOffersScrollOnlyWhenCut(t *testing.T) {
 	tall := openKeyPanel(t, layoutModel(t, 80, 40))
-	if got := helpText(tall.footerKeys().ShortHelp()); strings.Contains(got, "scroll") {
+	if got := helpText(tall.footerKeys().short); strings.Contains(got, "scroll") {
 		t.Errorf("a panel that fits needs no scroll hint: %q", got)
 	}
 	short := openKeyPanel(t, layoutModel(t, 40, 10))
-	if got := helpText(short.footerKeys().ShortHelp()); !strings.Contains(got, "scroll") {
+	if got := helpText(short.footerKeys().short); !strings.Contains(got, "scroll") {
 		t.Errorf("a cut panel needs the scroll hint: %q", got)
 	}
 }
@@ -1885,11 +1885,11 @@ func TestEveryFooterKeepsItsWayOut(t *testing.T) {
 			{"reverse search", rsearch, "esc/ctrl+c cancel"},
 			{"palette", pal, "esc/ctrl+c close"},
 			{"resume", with(newResumePicker(manySessions(2), "", w)), "esc/ctrl+c close"},
-			{"resume confirm", with(confirm), "ctrl+d quit"},
+			{"resume confirm", with(confirm), "y confirm delete"},
 			{"model picker", with(newModelPicker(manyModels(2), "model-00", "low", w)), "esc/ctrl+c close"},
 			{"file picker", with(newFilePicker(t.TempDir(), w)), "esc/ctrl+c close"},
 			{"models panel", panelModel(t, w, 30), "esc/ctrl+c close"},
-			{"models panel, unload armed", armed, "ctrl+d quit"},
+			{"models panel, unload armed", armed, "u confirm unload"},
 		}
 		for _, c := range cases {
 			f := c.m.footer()
@@ -1915,5 +1915,59 @@ func TestEveryFooterKeepsItsWayOut(t *testing.T) {
 	}
 	if b := welcomeBanner(32); !strings.Contains(b, "/ cmds") || !strings.Contains(b, "ctrl+d quit") {
 		t.Errorf("32 columns: banner %q should shorten the other hints before dropping them", b)
+	}
+}
+
+// In a confirm state the pending confirmation matters most: the confirm hint
+// is kept longest, then the cancel hint, then quit.
+func TestConfirmFootersKeepTheConfirmKey(t *testing.T) {
+	noColor(t)
+	for _, w := range []int{24, 32, 40, 80} {
+		confirm := newResumePicker(manySessions(2), "", w)
+		confirm.confirm = true
+		resume := newKeyModel(t)
+		nm, _ := resume.Update(tea.WindowSizeMsg{Width: w, Height: 30})
+		resume = nm.(model)
+		resume.overlay = confirm
+		armed, _ := step(t, panelModel(t, w, 30), keyRunes("u"))
+		for name, c := range map[string]struct {
+			m       model
+			confirm string
+		}{"resume delete": {resume, "y confirm delete"}, "armed unload": {armed, "u confirm unload"}} {
+			f := c.m.footer()
+			has := func(s string) bool { return strings.Contains(f, s) }
+			if !has(c.confirm) {
+				t.Errorf("%d columns, %s: footer %q lacks %q", w, name, f, c.confirm)
+			}
+			if has("ctrl+d quit") && !has("any other key cancel") {
+				t.Errorf("%d columns, %s: footer %q keeps quit over cancel", w, name, f)
+			}
+			if w == 80 && (!has("any other key cancel") || !has("ctrl+d quit")) {
+				t.Errorf("80 columns, %s: footer %q should show every hint", name, f)
+			}
+			if lipgloss.Width(f) > w {
+				t.Errorf("%d columns, %s: footer %q is too wide", w, name, f)
+			}
+		}
+	}
+}
+
+// The idle footer drops ctrl+j newline first, then enter ask, then ? keys,
+// and ctrl+d quit last: ? keys opens the full key list.
+func TestIdleFooterKeepsTheKeysHint(t *testing.T) {
+	noColor(t)
+	order := []string{"ctrl+d quit", "? keys", "enter ask", "ctrl+j newline"}
+	for _, w := range []int{24, 32, 40} {
+		m := newKeyModel(t)
+		nm, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: 30})
+		f := nm.(model).footer()
+		if !strings.Contains(f, "? keys") || !strings.Contains(f, "ctrl+d quit") {
+			t.Errorf("%d columns: idle footer %q lacks ? keys or ctrl+d quit", w, f)
+		}
+		for i := 1; i < len(order); i++ {
+			if strings.Contains(f, order[i]) && !strings.Contains(f, order[i-1]) {
+				t.Errorf("%d columns: idle footer %q keeps %q but dropped %q", w, f, order[i], order[i-1])
+			}
+		}
 	}
 }

@@ -792,11 +792,9 @@ func TestActiveModelIsTheFirstListedModel(t *testing.T) {
 	if got := m.activeModel(); got != "" {
 		t.Errorf("activeModel before the list loads = %q, want none", got)
 	}
-	pm := openPanel(m)
-	for _, name := range []string{"a-model", "b-model"} {
-		if st := rowState(t, pm, name); strings.Contains(st, "active") {
-			t.Errorf("before the list loads, %s is %q", name, st)
-		}
+	pm, _ := tuiSlash(t, m, "/models")
+	if p := panelOf(t, pm); p.active != "" {
+		t.Errorf("the panel opened before the list loads protects %q", p.active)
 	}
 
 	// The list loads.
@@ -845,5 +843,52 @@ func TestActiveModelIsTheFirstListedModel(t *testing.T) {
 	m.ragModel = "a-model"
 	if got := m.activeModel(); got != "a-model" {
 		t.Errorf("activeModel with a pick = %q", got)
+	}
+}
+
+// With the LLM server down at startup and up by the time /models opens, the
+// panel's list resolves the model a turn uses: it is marked active, and one u
+// on it only asks for confirmation.
+func TestModelsPanelResolvesTheActiveModelWhenTheListLoadsLate(t *testing.T) {
+	useDeadServices(t)
+	t.Setenv("OMLX_MODEL", "")
+	m := newKeyModel(t)
+	m.cfg.DefaultModel = "a-model"
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = nm.(model)
+	if msg := resolveModelCmd(); msg != nil {
+		t.Fatalf("resolution with the server down = %#v, want nothing", msg)
+	}
+
+	var mu sync.Mutex
+	var unloads []string
+	adminServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/models":
+			fmt.Fprint(w, `{"data":[{"id":"b-model"},{"id":"a-model"}]}`)
+		case r.Method == http.MethodPost:
+			mu.Lock()
+			unloads = append(unloads, r.URL.Path)
+			mu.Unlock()
+		default:
+			fmt.Fprint(w, `{"models":[{"id":"a-model","loaded":true},{"id":"b-model","loaded":true}]}`)
+		}
+	})
+	m, _ = tuiSlash(t, m, "/models")
+	nm, _ = m.Update(fetchModelsCmd())
+	m = nm.(model)
+	if st := rowState(t, m, "b-model"); !strings.HasPrefix(st, "active") {
+		t.Errorf("b-model state = %q, want active once the list loads", st)
+	}
+	if got := m.activeModel(); got != "b-model" {
+		t.Errorf("activeModel = %q, want b-model", got)
+	}
+	m = selectRow(t, m, "b-model")
+	m, _ = step(t, m, keyRunes("u"))
+	mu.Lock()
+	n := len(unloads)
+	mu.Unlock()
+	if n != 0 || !strings.Contains(m.View(), "press u again") {
+		t.Errorf("one u on the model a turn uses: %d unloads, view:\n%s", n, m.View())
 	}
 }

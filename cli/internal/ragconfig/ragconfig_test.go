@@ -1,9 +1,11 @@
 package ragconfig
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,4 +87,149 @@ func TestRequestTimeoutIsAlwaysBounded(t *testing.T) {
 			t.Errorf("RequestTimeout(%d) = %s, want %s", secs, got, want)
 		}
 	}
+}
+
+// captureWarnings points the load notes at a buffer and forgets the notes
+// already written, so a test sees exactly the lines its own loads write.
+func captureWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut, prevSeen := warnOut, warned
+	warnOut, warned = &buf, map[string]bool{}
+	t.Cleanup(func() { warnOut, warned = prevOut, prevSeen })
+	return &buf
+}
+
+// Each synthesis sampling variable wins over rag.json and the default.
+func TestSamplingEnvOverridesWinOverFile(t *testing.T) {
+	warn := captureWarnings(t)
+	t.Setenv("BLKCHAIN_SYNTH_TEMPERATURE", "1.2")
+	t.Setenv("BLKCHAIN_SYNTH_TOP_P", "0.8")
+	t.Setenv("BLKCHAIN_SYNTH_TOP_K", "40")
+	t.Setenv("BLKCHAIN_SYNTH_PRESENCE_PENALTY", "-1.5")
+	c := Load()
+	if c.SynthTemperature != 1.2 || c.SynthTopP != 0.8 || c.SynthTopK != 40 || c.SynthPresencePenalty != -1.5 {
+		t.Errorf("got temperature %v top_p %v top_k %v presence_penalty %v, want 1.2 0.8 40 -1.5",
+			c.SynthTemperature, c.SynthTopP, c.SynthTopK, c.SynthPresencePenalty)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("valid values wrote a note: %q", warn.String())
+	}
+}
+
+// samplingOf reads one sampling field of c by its rag.json key.
+func samplingOf(c Config, key string) float64 {
+	switch key {
+	case "synth_temperature":
+		return c.SynthTemperature
+	case "synth_top_p":
+		return c.SynthTopP
+	case "synth_top_k":
+		return float64(c.SynthTopK)
+	}
+	return c.SynthPresencePenalty
+}
+
+// assertOneNote checks that two loads wrote exactly one line, naming want.
+func assertOneNote(t *testing.T, warn *bytes.Buffer, want ...string) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(warn.String(), "\n"), "\n")
+	if warn.Len() == 0 || len(lines) != 1 {
+		t.Fatalf("notes = %q, want exactly one line", warn.String())
+	}
+	for _, w := range want {
+		if !strings.Contains(lines[0], w) {
+			t.Errorf("note %q does not name %q", lines[0], w)
+		}
+	}
+}
+
+// An unparsable value is ignored, so the rag.json value stays, and one note is
+// written however often the config loads.
+func TestSamplingEnvUnparsableIsIgnoredWithOneNote(t *testing.T) {
+	for env, key := range map[string]string{
+		"BLKCHAIN_SYNTH_TEMPERATURE":      "synth_temperature",
+		"BLKCHAIN_SYNTH_TOP_P":            "synth_top_p",
+		"BLKCHAIN_SYNTH_TOP_K":            "synth_top_k",
+		"BLKCHAIN_SYNTH_PRESENCE_PENALTY": "synth_presence_penalty",
+	} {
+		t.Run(env, func(t *testing.T) {
+			warn := captureWarnings(t)
+			t.Setenv(env, "abc")
+			Load()
+			c := Load()
+			if got, want := samplingOf(c, key), samplingOf(builtinDefaults(), key); got != want {
+				t.Errorf("%s = %v, want %v", key, got, want)
+			}
+			assertOneNote(t, warn, env, "abc")
+		})
+	}
+}
+
+// A value out of range, NaN, or Inf is replaced by the built-in default, with
+// one note naming the field and the rejected value.
+func TestSamplingEnvOutOfRangeFallsBackWithOneNote(t *testing.T) {
+	cases := []struct{ env, key, value string }{
+		{"BLKCHAIN_SYNTH_TEMPERATURE", "synth_temperature", "2.5"},
+		{"BLKCHAIN_SYNTH_TEMPERATURE", "synth_temperature", "-0.1"},
+		{"BLKCHAIN_SYNTH_TEMPERATURE", "synth_temperature", "NaN"},
+		{"BLKCHAIN_SYNTH_TEMPERATURE", "synth_temperature", "Inf"},
+		{"BLKCHAIN_SYNTH_TOP_P", "synth_top_p", "0"},
+		{"BLKCHAIN_SYNTH_TOP_P", "synth_top_p", "1.01"},
+		{"BLKCHAIN_SYNTH_TOP_P", "synth_top_p", "NaN"},
+		{"BLKCHAIN_SYNTH_TOP_P", "synth_top_p", "+Inf"},
+		{"BLKCHAIN_SYNTH_TOP_K", "synth_top_k", "-1"},
+		{"BLKCHAIN_SYNTH_TOP_K", "synth_top_k", "1001"},
+		{"BLKCHAIN_SYNTH_PRESENCE_PENALTY", "synth_presence_penalty", "2.5"},
+		{"BLKCHAIN_SYNTH_PRESENCE_PENALTY", "synth_presence_penalty", "-Inf"},
+		{"BLKCHAIN_SYNTH_PRESENCE_PENALTY", "synth_presence_penalty", "nan"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.env+"="+tc.value, func(t *testing.T) {
+			warn := captureWarnings(t)
+			t.Setenv(tc.env, tc.value)
+			Load()
+			c := Load()
+			if got, want := samplingOf(c, tc.key), samplingOf(builtinDefaults(), tc.key); got != want {
+				t.Errorf("%s = %v, want the default %v", tc.key, got, want)
+			}
+			assertOneNote(t, warn, tc.key)
+		})
+	}
+}
+
+// The edges of each range are accepted.
+func TestSamplingRangeEdgesAreAccepted(t *testing.T) {
+	warn := captureWarnings(t)
+	c := Config{SynthTemperature: 2, SynthTopP: 1, SynthTopK: 1000, SynthPresencePenalty: -2}
+	validateSampling(&c)
+	if c.SynthTemperature != 2 || c.SynthTopP != 1 || c.SynthTopK != 1000 || c.SynthPresencePenalty != -2 {
+		t.Errorf("edges changed: %+v", c)
+	}
+	c = Config{SynthTemperature: 0, SynthTopP: 1e-9, SynthTopK: 0, SynthPresencePenalty: 2}
+	validateSampling(&c)
+	if c.SynthTemperature != 0 || c.SynthTopP != 1e-9 || c.SynthTopK != 0 || c.SynthPresencePenalty != 2 {
+		t.Errorf("edges changed: %+v", c)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("edges wrote a note: %q", warn.String())
+	}
+}
+
+// A value out of range in rag.json is replaced by the built-in default too.
+func TestSamplingFileOutOfRangeFallsBack(t *testing.T) {
+	warn := captureWarnings(t)
+	path := filepath.Join(t.TempDir(), "rag.json")
+	if err := os.WriteFile(path, []byte(`{"synth_top_p": 1.5}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := loadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateSampling(&c)
+	if c.SynthTopP != builtinDefaults().SynthTopP {
+		t.Errorf("synth_top_p = %v, want the default", c.SynthTopP)
+	}
+	assertOneNote(t, warn, "synth_top_p", "1.5")
 }
