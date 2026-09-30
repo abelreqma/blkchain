@@ -50,6 +50,7 @@ const (
 	rowEmbedder
 	rowReranker
 	rowWeb
+	rowRag
 )
 
 // modelRow is one /models row: its group heading, name, state words, and
@@ -116,6 +117,10 @@ func modelRows(d modelsData, p modelPrefs, active string, loading map[string]boo
 	if !p.Rerank {
 		rerank = "off"
 	}
+	rag := "on"
+	if !p.Rag {
+		rag = "off"
+	}
 	web, webDetail := "off", []string(nil)
 	switch {
 	case !d.webSet:
@@ -126,6 +131,7 @@ func modelRows(d modelsData, p modelPrefs, active string, loading map[string]boo
 	return append(rows,
 		modelRow{kind: rowEmbedder, group: "RETRIEVAL", name: "embedder", state: embed},
 		modelRow{kind: rowReranker, group: "RETRIEVAL", name: "reranker", state: rerank},
+		modelRow{kind: rowRag, group: "RETRIEVAL", name: "rag", state: rag},
 		modelRow{kind: rowWeb, group: "WEB", name: "web search", state: web, detail: webDetail},
 	)
 }
@@ -228,6 +234,12 @@ func setModelSwitch(p modelPrefs, kind rowKind, id string, on bool, active strin
 			return p, "web search on", nil
 		}
 		return p, "web search off: answers never search the web", nil
+	case rowRag:
+		p.Rag = on
+		if on {
+			return p, "rag on", nil
+		}
+		return p, "rag off: answers never query the local knowledge base", nil
 	}
 	if on {
 		return p.withHidden(id, false), id + " is shown in the model picker", nil
@@ -273,7 +285,7 @@ func parseModelsArgs(arg string) (verb, name string, err error) {
 		return "", "", errModelsUsage
 	}
 	if name == "" {
-		return "", "", fmt.Errorf("models %s: name a model: a chat model id, reranker, or web", verb)
+		return "", "", fmt.Errorf("models %s: name a model: a chat model id, reranker, rag, or web", verb)
 	}
 	return verb, name, nil
 }
@@ -327,6 +339,8 @@ func runModelsArgs(verb, name, active string) (string, *modelSwitch, error) {
 		kind = rowReranker
 	case "web":
 		kind = rowWeb
+	case "rag":
+		kind = rowRag
 	}
 	id := ""
 	var admin bool
@@ -579,6 +593,8 @@ func (p modelsPanel) key(k string) (overlayModel, tea.Cmd) {
 			on = !p.prefs.Rerank
 		case rowWeb:
 			on = !p.prefs.Web
+		case rowRag:
+			on = !p.prefs.Rag
 		}
 		np, note, err := setModelSwitch(p.prefs, r.kind, r.id, on, p.active, p.data.webSet)
 		if err != nil {
@@ -659,6 +675,8 @@ func (p modelsPanel) hints(closeKey key.Binding) []key.Binding {
 		out = append(out, hint("embedder", "always on for retrieval"))
 	case rowReranker:
 		out = append(out, onOff(p.prefs.Rerank))
+	case rowRag:
+		out = append(out, onOff(p.prefs.Rag))
 	case rowWeb:
 		if p.data.webSet {
 			out = append(out, onOff(p.prefs.Web))

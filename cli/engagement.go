@@ -58,6 +58,7 @@ type Task struct {
 	Objective string
 	Status    TaskStatus
 	DependsOn []string
+	BasisIDs  []string
 }
 
 // Stage is the pipeline position of the active work, for the live bar.

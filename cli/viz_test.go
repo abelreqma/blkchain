@@ -200,3 +200,121 @@ func TestVizRunnerWithoutBinaryErrors(t *testing.T) {
 		t.Fatal("empty path should error")
 	}
 }
+
+// vizForceTier sets the package color/unicode globals so plCurrentTier returns
+// the wanted tier, and restores them afterward.
+func vizForceTier(t *testing.T, tier plTier) {
+	t.Helper()
+	prevColor, prevUnicode := useColor, useUnicode
+	t.Cleanup(func() { useColor, useUnicode = prevColor, prevUnicode })
+	t.Setenv("BLKCHAIN_POWERLINE", "")
+	if tier == plUnicode {
+		t.Setenv("BLKCHAIN_POWERLINE", "0")
+	}
+	useColor, useUnicode = tier != plASCII, tier != plASCII
+	if got := plCurrentTier(); got != tier {
+		t.Fatalf("tier = %v; want %v", got, tier)
+	}
+}
+
+func vizNodeLine(t *testing.T, mermaid, id string) string {
+	t.Helper()
+	for _, ln := range strings.Split(mermaid, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(ln), id+"[") {
+			return ln
+		}
+	}
+	t.Fatalf("no node line for %q in %q", id, mermaid)
+	return ""
+}
+
+func basisEngagement(tasks ...Task) Engagement {
+	return Engagement{Revision: 1, Name: "acme", Tasks: tasks}
+}
+
+func TestVizMermaidBasisEdgeEmitted(t *testing.T) {
+	m := vizMermaid(basisEngagement(
+		Task{ID: "t1", Kind: "recon", Objective: "scan"},
+		Task{ID: "t2", Kind: "web", Objective: "probe", BasisIDs: []string{"t1"}},
+	))
+	if !strings.Contains(m, "t1 -.-> t2") {
+		t.Fatalf("missing basis edge: %q", m)
+	}
+}
+
+func TestVizMermaidBasisDedupsAgainstDependsOn(t *testing.T) {
+	m := vizMermaid(basisEngagement(
+		Task{ID: "t1", Kind: "recon", Objective: "scan"},
+		Task{ID: "t2", Kind: "web", Objective: "probe", DependsOn: []string{"t1"}, BasisIDs: []string{"t1"}},
+	))
+	if strings.Count(m, "t1 --> t2") != 1 {
+		t.Fatalf("want exactly one solid edge: %q", m)
+	}
+	if strings.Contains(m, "-.->") {
+		t.Fatalf("dotted edge duplicates a dep edge: %q", m)
+	}
+}
+
+func TestVizMermaidBasisUnknownAndSelfDropped(t *testing.T) {
+	m := vizMermaid(basisEngagement(
+		Task{ID: "t1", Kind: "recon", Objective: "scan", BasisIDs: []string{"t1"}},
+		Task{ID: "t2", Kind: "web", Objective: "probe", BasisIDs: []string{"nope", "bad id\n-->x"}},
+	))
+	if strings.Contains(m, "-.->") {
+		t.Fatalf("unknown or self basis produced an edge: %q", m)
+	}
+}
+
+func TestVizMermaidDomainIconNerdTier(t *testing.T) {
+	vizForceTier(t, plNerd)
+	m := vizMermaid(basisEngagement(
+		Task{ID: "a", Kind: "recon", Objective: "scan"},
+		Task{ID: "b", Kind: " Web ", Objective: "probe"},
+		Task{ID: "c", Kind: "mystery", Objective: "x"},
+		Task{ID: "d", Kind: "local", Objective: "privesc"},
+		Task{ID: "e", Kind: "target-analysis", Objective: "parse"},
+	))
+	for id, glyph := range map[string]string{"a": "\U000F2B10", "b": "\U000F2B11", "c": "\U000F2B17", "d": "\U000F2B18", "e": "\U000F2B19"} {
+		if ln := vizNodeLine(t, m, id); !strings.Contains(ln, "["+glyph+" ") {
+			t.Fatalf("node %s missing glyph %U: %q", id, []rune(glyph)[0], ln)
+		}
+	}
+}
+
+func TestVizMermaidDomainIconAbsentOutsideNerd(t *testing.T) {
+	for _, tier := range []plTier{plASCII, plUnicode} {
+		vizForceTier(t, tier)
+		m := vizMermaid(basisEngagement(
+			Task{ID: "a", Kind: "recon", Objective: "scan"},
+			Task{ID: "b", Kind: "web", Objective: "probe"},
+		))
+		for _, r := range m {
+			if r >= 0xF2B00 && r <= 0xF2BFF {
+				t.Fatalf("tier %v leaked glyph %U: %q", tier, r, m)
+			}
+		}
+		if ln := vizNodeLine(t, m, "a"); !strings.Contains(ln, "[recon: scan]") {
+			t.Fatalf("tier %v label not plain: %q", tier, ln)
+		}
+	}
+}
+
+func TestVizMultipleActiveNodesStyledWarn(t *testing.T) {
+	vizForceColor(t)
+	vizForceTier(t, plNerd)
+	e := basisEngagement(
+		Task{ID: "a", Kind: "recon", Objective: "scan", Status: TaskActive},
+		Task{ID: "b", Kind: "web", Objective: "SQLi", Status: TaskActive},
+	)
+	m := vizMermaid(e)
+	if !strings.Contains(m, "a[") || !strings.Contains(m, "b[") {
+		t.Fatalf("both active nodes must render: %q", m)
+	}
+	fr := &fakeRunner{out: "| \U000F2B10 recon: scan |   | \U000F2B11 web: SQLi |"}
+	block := newVizRenderer(fr).blockFor(context.Background(), e)
+	for _, label := range []string{"recon: scan", "web: SQLi"} {
+		if !strings.Contains(block, vizStatusStyle(TaskActive).Render(label)) {
+			t.Fatalf("%q not styled Warn: %q", label, block)
+		}
+	}
+}

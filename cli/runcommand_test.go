@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,11 +45,11 @@ func autoGate(t *testing.T) *secgate.Gate {
 // countingConfirmer records Confirm calls and returns ok.
 type countingConfirmer struct {
 	ok    bool
-	calls int
+	calls atomic.Int32
 }
 
 func (c *countingConfirmer) Confirm(ctx context.Context, cmd secgate.Command) bool {
-	c.calls++
+	c.calls.Add(1)
 	return c.ok
 }
 
@@ -86,8 +87,8 @@ func TestRunCommandPipelineConfirmsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cc.calls != 1 {
-		t.Errorf("Confirm called %d times, want exactly 1 for the whole pipeline", cc.calls)
+	if cc.calls.Load() != 1 {
+		t.Errorf("Confirm called %d times, want exactly 1 for the whole pipeline", cc.calls.Load())
 	}
 	if callCount != 1 {
 		t.Errorf("execPipeline called %d times, want 1", callCount)
@@ -115,8 +116,8 @@ func TestRunCommandPipelineConfirmRefusedAborts(t *testing.T) {
 	if called {
 		t.Fatal("execPipeline must NOT run when the pipeline confirmation is refused")
 	}
-	if cc.calls != 1 {
-		t.Errorf("Confirm called %d times, want 1", cc.calls)
+	if cc.calls.Load() != 1 {
+		t.Errorf("Confirm called %d times, want 1", cc.calls.Load())
 	}
 	if !strings.Contains(strings.ToLower(out), "denied") {
 		t.Errorf("want a denial message, got %q", out)
@@ -148,8 +149,8 @@ func TestRunCommandPipelineLocalAutoConfirmsOnce(t *testing.T) {
 	if _, err := tool.Call(context.Background(), threeStagePipeline); err != nil {
 		t.Fatal(err)
 	}
-	if cc.calls != 1 {
-		t.Errorf("Confirm called %d times, want exactly 1 (local /auto confirms once per pipeline)", cc.calls)
+	if cc.calls.Load() != 1 {
+		t.Errorf("Confirm called %d times, want exactly 1 (local /auto confirms once per pipeline)", cc.calls.Load())
 	}
 	if callCount != 1 {
 		t.Errorf("execPipeline called %d times, want 1", callCount)

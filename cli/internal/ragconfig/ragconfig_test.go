@@ -80,6 +80,26 @@ func repoRootForTest() (string, error) {
 
 // A turn is always bounded: a timeout that is not positive falls back to the
 // built-in default.
+func TestRouterDefaults(t *testing.T) {
+	cfg := builtinDefaults()
+	if cfg.RouteMaxTokens != 8 {
+		t.Errorf("RouteMaxTokens = %d, want 8", cfg.RouteMaxTokens)
+	}
+	want := []string{"github.com", "nvd.nist.gov", "exploit-db.com"}
+	if !reflect.DeepEqual(cfg.PocDomains, want) {
+		t.Errorf("PocDomains = %v, want %v", cfg.PocDomains, want)
+	}
+}
+
+func TestRouteMaxTokensEnvOverride(t *testing.T) {
+	t.Setenv("BLKCHAIN_ROUTE_MAX_TOKENS", "16")
+	cfg := builtinDefaults()
+	envOverrides(&cfg)
+	if cfg.RouteMaxTokens != 16 {
+		t.Errorf("RouteMaxTokens = %d, want 16", cfg.RouteMaxTokens)
+	}
+}
+
 func TestRequestTimeoutIsAlwaysBounded(t *testing.T) {
 	def := time.Duration(builtinDefaults().RequestTimeoutSeconds) * time.Second
 	for secs, want := range map[int]time.Duration{30: 30 * time.Second, 0: def, -5: def} {

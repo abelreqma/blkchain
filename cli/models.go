@@ -70,6 +70,11 @@ func renderModelsText(reports []modeleval.ModelReport, p modelPrefs, webSet bool
 		}
 		b.WriteString(line + "\n")
 	}
+	ragLine := "on"
+	if !p.Rag {
+		ragLine = "off: answers never query the local knowledge base"
+	}
+	fmt.Fprintf(&b, " %s %s\n", Key.Render(fmt.Sprintf("%-7s", "rag")), Meta.Render(ragLine))
 	web := "not configured (set TAVILY_SETUP_TOKEN)"
 	if webSet {
 		web = "off"
@@ -184,6 +189,7 @@ func emitReportsJSON(w io.Writer, reports []modeleval.ModelReport, p modelPrefs,
 		}
 		out = append(out, jr)
 	}
+	out = append(out, jsonReport{Model: "rag", Ready: true, Enabled: p.Rag})
 	out = append(out, jsonReport{Model: "web", Ready: webSet, Enabled: p.Web})
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {

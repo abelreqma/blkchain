@@ -360,6 +360,126 @@ func TestDestructiveDenialIsAudited(t *testing.T) {
 	}
 }
 
+// File-materialization tools (cp, mv, tee, install, ln, nft -f) writing to a
+// sensitive system path are denied in the local profile, both by systemPathWrite
+// / DestructiveViolation directly and through the full Authorize pipeline
+// (audited deny:destructive). This is defense-in-depth: LOCAL already confirms
+// every command with a human.
+func TestDestructiveSystemWriteDenied(t *testing.T) {
+	denied := []Command{
+		cmd("tee", "/etc/passwd"),
+		cmd("tee", "-a", "/etc/crontab"),
+		cmd("cp", "payload", "/usr/bin/helper"),
+		cmd("cp", "payload", "/etc/cron.d/job"),
+		cmd("cp", "-t", "/sbin", "src"),
+		cmd("cp", "--target-directory=/usr/lib", "src"),
+		cmd("mv", "x", "/etc/passwd"),
+		cmd("install", "-m", "4755", "sh", "/usr/local/bin/rootsh"),
+		cmd("ln", "-sf", "/bin/sh", "/etc/cron.hourly/x"),
+		cmd("ln", "-s", "x", "/usr/bin/y"),
+		cmd("nft", "-f", "/etc/nftables.conf"),
+		// Value-taking option AFTER the destination: getopt_long permutes argv,
+		// so the option's separate value must not be mistaken for the last
+		// operand. The true system-path destination sits verbatim in argv.
+		cmd("install", "sh", "/usr/local/bin/rootsh", "-m", "4755"),
+		cmd("cp", "payload", "/etc/cron.d/job", "-S", ".bak"),
+		cmd("mv", "x", "/etc/passwd", "-S", ".bak"),
+		cmd("ln", "-s", "/bin/sh", "/etc/cron.hourly/x", "-S", ".bak"),
+		cmd("install", "sh", "/usr/bin/evil", "-o", "root"),
+		// A value-taking option BEFORE the destination still leaves it last.
+		cmd("cp", "-S", ".bak", "payload", "/etc/cron.d/job"),
+		// Long option consuming the trailing value, glued and separate.
+		cmd("cp", "payload", "/etc/cron.d/job", "--suffix=.bak"),
+		cmd("cp", "payload", "/etc/cron.d/job", "--suffix", ".bak"),
+		cmd("install", "-o", "root", "sh", "/usr/bin/evil"),
+		cmd("install", "sh", "/usr/bin/evil", "-o", "root", "-g", "wheel"),
+		cmd("ln", "-S", ".bak", "-s", "/bin/sh", "/etc/cron.hourly/x"),
+		// Required-argument long options whose SEPARATE value would otherwise be
+		// mistaken for the destination: cp --no-preserve and install --strip-program.
+		cmd("cp", "payload", "/etc/cron.d/job", "--no-preserve", "mode"),
+		cmd("install", "sh", "/usr/bin/evil", "--strip-program", "foo"),
+		// The glued forms were already denied (glued value consumes no token).
+		cmd("cp", "payload", "/etc/cron.d/job", "--no-preserve=mode"),
+		cmd("install", "sh", "/usr/bin/evil", "--strip-program=foo"),
+	}
+	for _, c := range denied {
+		if _, bad := systemPathWrite(c); !bad {
+			t.Errorf("systemPathWrite must flag %v", c)
+		}
+		if err := DestructiveViolation(c); err == nil {
+			t.Errorf("DestructiveViolation must deny %v", c)
+		}
+		g := localGate(t, "local\n")
+		var actions []string
+		g.Audit = func(a, d string) { actions = append(actions, a) }
+		if d := g.Authorize(context.Background(), c); d.Allowed {
+			t.Errorf("Authorize must deny %v in local mode", c)
+		} else if len(actions) != 1 || actions[0] != "deny:destructive" {
+			t.Errorf("%v must be denied by the destructive layer, audit = %v (%q)", c, actions, d.Reason)
+		}
+	}
+}
+
+// Writes to /tmp, /var/tmp, /dev/shm, the writable /dev sinks, home, and
+// relative paths are allowed: no over-denial of legitimate post-access tooling.
+// Reading a system-path SOURCE is allowed (the destination is what is checked).
+func TestDestructiveSystemWriteAllowed(t *testing.T) {
+	allowed := []Command{
+		cmd("cp", "payload", "/tmp/out"),
+		cmd("cp", "payload", "/var/tmp/out"),
+		cmd("tee", "/dev/shm/log"),
+		cmd("tee", "/dev/null"),
+		cmd("cp", "/etc/passwd", "/tmp/passwd.copy"),
+		cmd("cp", "payload", "./out"),
+		cmd("tee", "out.txt"),
+		cmd("mv", "a", "b"),
+		cmd("ln", "-s", "a", "b"),
+		cmd("nft", "-f", "/tmp/rules.nft"),
+		cmd("install", "sh", "/home/user/bin/x"),
+		// A trailing value-taking option must not turn a safe /tmp destination
+		// into an over-denial: its value is skipped, the /tmp dest stays last.
+		cmd("cp", "payload", "/tmp/out", "-S", ".bak"),
+		cmd("install", "sh", "/tmp/x", "-m", "4755"),
+	}
+	for _, c := range allowed {
+		if p, bad := systemPathWrite(c); bad {
+			t.Errorf("systemPathWrite must allow %v, flagged %q", c, p)
+		}
+		if err := DestructiveViolation(c); err != nil {
+			t.Errorf("DestructiveViolation must allow %v: %v", c, err)
+		}
+		g := localGate(t, "local\n")
+		if d := g.Authorize(context.Background(), c); !d.Allowed {
+			t.Errorf("Authorize must allow %v in local mode: %q", c, d.Reason)
+		}
+	}
+}
+
+// The system-path write denial runs only in the local profile. An external gate
+// never audits deny:destructive for these commands (DestructiveViolation is
+// called only in the local branch of Authorize).
+func TestSystemPathWriteNotAppliedInExternalProfile(t *testing.T) {
+	var actions []string
+	g := &Gate{
+		Mode:  Auto,
+		Scope: okScope(t),
+		Allow: NewAllowlist("cp", "mv", "tee", "install", "ln", "nft"),
+		Audit: func(a, d string) { actions = append(actions, a) },
+	}
+	for _, c := range []Command{
+		cmd("tee", "/etc/passwd"),
+		cmd("cp", "payload", "/usr/bin/helper"),
+		cmd("nft", "-f", "/etc/nftables.conf"),
+	} {
+		g.Authorize(context.Background(), c)
+	}
+	for _, a := range actions {
+		if a == "deny:destructive" {
+			t.Fatalf("external profile must not run the destructive denylist: %v", actions)
+		}
+	}
+}
+
 // The destructive denylist runs only in the local profile. The external
 // profile is unchanged: a destructive binary that an operator put on the
 // allowlist is not denied by this layer.

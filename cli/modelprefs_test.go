@@ -20,7 +20,7 @@ func prefsFile(t *testing.T) string {
 
 func TestPrefsDefaultsWhenMissingOrCorrupt(t *testing.T) {
 	isolateUserDirs(t)
-	want := modelPrefs{Rerank: true, Web: true, Viz: true}
+	want := modelPrefs{Rerank: true, Web: true, Rag: true, Viz: true}
 	if got := loadPrefs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("missing file: got %+v, want %+v", got, want)
 	}
@@ -41,7 +41,7 @@ func TestPrefsDefaultsWhenMissingOrCorrupt(t *testing.T) {
 
 func TestPrefsRoundTripAndMode(t *testing.T) {
 	isolateUserDirs(t)
-	in := modelPrefs{Hidden: []string{"a", "b/c"}, Rerank: false, Web: true, Viz: true}
+	in := modelPrefs{Hidden: []string{"a", "b/c"}, Rerank: false, Web: true, Rag: true, Viz: true}
 	if err := savePrefs(in); err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestPrefsSaveIsAtomicAndDoesNotFollowSymlinks(t *testing.T) {
 	if err := os.Symlink(outside, path); err != nil {
 		t.Fatal(err)
 	}
-	if err := savePrefs(modelPrefs{Rerank: true, Web: false, Viz: true}); err != nil {
+	if err := savePrefs(modelPrefs{Rerank: true, Web: false, Rag: true, Viz: true}); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(outside); string(b) != "keep" {
@@ -150,5 +150,11 @@ func TestPrefsVizDefaultsTrueAndSurvivesMissingKey(t *testing.T) {
 	}
 	if !p.Viz {
 		t.Fatalf("viz should stay true when the key is absent, got false")
+	}
+}
+
+func TestDefaultPrefsRagOn(t *testing.T) {
+	if !defaultPrefs().Rag {
+		t.Error("defaultPrefs().Rag = false, want true")
 	}
 }

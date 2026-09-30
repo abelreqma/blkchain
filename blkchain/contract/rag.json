@@ -19,5 +19,7 @@
   "qdrant_grpc_url": "127.0.0.1:6334",
   "embed_server_url": "http://127.0.0.1:8100",
   "tavily_max_results": 5,
-  "reputable_domains": ["nvd.nist.gov", "cve.mitre.org", "cwe.mitre.org", "attack.mitre.org", "owasp.org", "exploit-db.com", "portswigger.net"]
+  "reputable_domains": ["nvd.nist.gov", "cve.mitre.org", "cwe.mitre.org", "attack.mitre.org", "owasp.org", "exploit-db.com", "portswigger.net"],
+  "route_max_tokens": 8,
+  "poc_domains": ["github.com", "nvd.nist.gov", "exploit-db.com"]
 }

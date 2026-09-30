@@ -13,6 +13,40 @@ func TestExecutorPreambleAllowsGatedCommands(t *testing.T) {
 	}
 }
 
+func TestLocalDomainRegistered(t *testing.T) {
+	d := domainFor("local")
+	if d.Name != "local" {
+		t.Fatalf("domainFor(\"local\").Name = %q, want local", d.Name)
+	}
+	for _, bad := range []string{"-exec", "-delete", "chmod -R"} {
+		if strings.Contains(d.Prompt, bad) {
+			t.Errorf("local prompt contains destructive guidance %q", bad)
+		}
+	}
+	for _, want := range []string{"sudo -l", "-perm -4000", "getcap", "basis_ids"} {
+		if !strings.Contains(d.Prompt, want) {
+			t.Errorf("local prompt missing %q", want)
+		}
+	}
+}
+
+func TestTargetAnalysisDomain(t *testing.T) {
+	d := domainFor("target-analysis")
+	if d.Name != "target-analysis" {
+		t.Fatalf("domainFor(\"target-analysis\").Name = %q", d.Name)
+	}
+	for _, want := range []string{"file", "ldd", "strings", "readelf", "getcap", "GTFOBins"} {
+		if !strings.Contains(d.Prompt, want) {
+			t.Errorf("target-analysis prompt missing %q", want)
+		}
+	}
+	for _, bad := range []string{"-exec", "-delete"} {
+		if strings.Contains(d.Prompt, bad) {
+			t.Errorf("target-analysis prompt contains destructive guidance %q", bad)
+		}
+	}
+}
+
 func TestReconPromptCoversEnumerationSurfaces(t *testing.T) {
 	prompt := domainFor("recon").Prompt
 	for _, want := range []string{"DNS", "SMB", "LDAP", "SNMP"} {
@@ -40,6 +74,84 @@ func TestDomainForKnownAndUnknown(t *testing.T) {
 	}
 	if d := domainFor("web"); strings.TrimSpace(d.Prompt) == "" {
 		t.Error("web domain has empty prompt")
+	}
+}
+
+func TestLocalFindingChainsToTargetAnalysis(t *testing.T) {
+	st := openStore(t) // openStore + plan_add harness from plantools_test.go, same package
+	add := newPlanAddTool(st)
+	ctx := context.Background()
+
+	// The originating local enumeration task.
+	if _, err := add.Call(ctx, `{"id":"t1","kind":"local","target":"host","objective":"enumerate privesc"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	// An exploitable SUID binary finding chains into a target-analysis task whose
+	// target names the binary path and whose basis_ids carry the local task's id.
+	out, err := add.Call(ctx, `{"id":"t2","kind":"target-analysis","target":"/usr/bin/find","objective":"assess SUID find as a privesc vector","basis_ids":["t1"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "rejected") {
+		t.Fatalf("chained target-analysis task was rejected: %q", out)
+	}
+	got, err := st.GetTask("t2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != "target-analysis" {
+		t.Errorf("Kind = %q, want target-analysis", got.Kind)
+	}
+	if got.Target != "/usr/bin/find" {
+		t.Errorf("Target = %q, want the binary path /usr/bin/find", got.Target)
+	}
+	if len(got.BasisIDs) != 1 || got.BasisIDs[0] != "t1" {
+		t.Errorf("BasisIDs = %v, want [t1]", got.BasisIDs)
+	}
+	// Provenance is not a scheduling dependency.
+	if len(got.DependsOn) != 0 {
+		t.Errorf("DependsOn = %v, basis_ids must not create a scheduling dependency", got.DependsOn)
+	}
+	// The follow-on kind routes to the intended domain.
+	if d := domainFor(got.Kind); d.Name != "target-analysis" {
+		t.Errorf("domainFor(%q).Name = %q, want target-analysis", got.Kind, d.Name)
+	}
+}
+
+func TestLocalCredentialFindingChainsToAuth(t *testing.T) {
+	st := openStore(t)
+	add := newPlanAddTool(st)
+	ctx := context.Background()
+
+	if _, err := add.Call(ctx, `{"id":"t1","kind":"local","target":"host","objective":"enumerate privesc"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	// A discovered credential chains into an auth task carrying the origin as basis.
+	out, err := add.Call(ctx, `{"id":"t2","kind":"auth","target":"host","objective":"reuse discovered credential","basis_ids":["t1"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "rejected") {
+		t.Fatalf("chained auth task was rejected: %q", out)
+	}
+	got, err := st.GetTask("t2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != "auth" {
+		t.Errorf("Kind = %q, want auth", got.Kind)
+	}
+	if len(got.BasisIDs) != 1 || got.BasisIDs[0] != "t1" {
+		t.Errorf("BasisIDs = %v, want [t1]", got.BasisIDs)
+	}
+	if len(got.DependsOn) != 0 {
+		t.Errorf("DependsOn = %v, basis_ids must not create a scheduling dependency", got.DependsOn)
+	}
+	// There is no auth domain in this task; the kind falls back to generic.
+	if d := domainFor(got.Kind); d.Name != "generic" {
+		t.Errorf("domainFor(%q).Name = %q, want generic (no auth domain exists)", got.Kind, d.Name)
 	}
 }
 

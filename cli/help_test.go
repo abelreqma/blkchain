@@ -1080,16 +1080,19 @@ func TestSharedCommandWordingHasOneSource(t *testing.T) {
 func TestModeCommandsShareOneWording(t *testing.T) {
 	noColor(t)
 	repl := collapse(captureStdout(t, replHelp))
-	for name, want := range map[string]string{
-		"mode":  "switch between knowledge-base answers and the Hermes agent (also /agent, /rag)",
-		"agent": "use the Hermes agent for questions",
-		"rag":   "answer from the knowledge base",
+	// replRow is the plain-REPL /help row name, which carries the args hint (it
+	// is hardcoded in replGroups, not derived from the registry). The registry
+	// desc stays the single source and is pinned unchanged.
+	for _, tc := range []struct{ name, replRow, want string }{
+		{"mode", "/mode", "switch between knowledge-base answers and the Hermes agent (also /agent, /rag)"},
+		{"agent", "/agent", "use the Hermes agent for questions"},
+		{"rag", "/rag [on|off|question]", "answer from the knowledge base"},
 	} {
-		if c, _ := slashCommand(name); c.desc != want {
-			t.Errorf("/%s registry text = %q, want %q", name, c.desc, want)
+		if c, _ := slashCommand(tc.name); c.desc != tc.want {
+			t.Errorf("/%s registry text = %q, want %q", tc.name, c.desc, tc.want)
 		}
-		if !strings.Contains(repl, "/"+name+" "+want) {
-			t.Errorf("the plain REPL /help lacks /%s %q:\n%s", name, want, repl)
+		if !strings.Contains(repl, tc.replRow+" "+tc.want) {
+			t.Errorf("the plain REPL /help lacks %s %q:\n%s", tc.replRow, tc.want, repl)
 		}
 	}
 	if block := collapse(helpBlock(200)); !strings.Contains(block, "/mode switch between knowledge-base answers") {

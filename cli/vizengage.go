@@ -39,6 +39,7 @@ func convertEngagement(e eng.Engagement) Engagement {
 			Target:    t.Target,
 			Objective: t.Objective,
 			DependsOn: t.DependsOn,
+			BasisIDs:  t.BasisIDs,
 			Status:    taskStatusFromStore(string(t.Status)),
 		})
 	}

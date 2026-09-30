@@ -69,7 +69,7 @@ func TestTUIReadsConfigOnceAtStart(t *testing.T) {
 	nm.(model).cancel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_ = m.streamCmd(ctx, "q", "", time.Now())()
+	_ = m.streamCmd(ctx, "q", "", time.Now(), false)()
 	if calls != 1 {
 		t.Errorf("frames, a dispatched turn, and the answer loop read the config %d more times, want 0", calls-1)
 	}

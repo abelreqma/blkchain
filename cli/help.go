@@ -174,7 +174,7 @@ func commandSpecs() []cmdSpec {
 			desc: "check each model's readiness and speed",
 			long: "Checks the chat, embedding, and rerank models and shows whether each is ready and how fast it is, each on its own so one being down does not hide the others. " +
 				"It can take up to a minute when a model is slow to load. " +
-				"It also shows the switches set with /models in blk: the reranker when it is off, web search, and the chat models hidden from the model picker. " +
+				"It also shows the switches set with /models in blk: the reranker when it is off, web search, the rag switch for local retrieval, and the chat models hidden from the model picker. " +
 				"With --json each entry has an enabled field, the chat entry lists the hidden models, and a web entry reports web search.",
 			flags:    func(fs *flag.FlagSet) { defineModelsFlags(fs, new(bool)) },
 			examples: []string{"blk models", "blk models --json"},

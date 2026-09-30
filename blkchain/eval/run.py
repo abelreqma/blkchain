@@ -165,8 +165,8 @@ def blk_search(query: str, top_k: int, collection: str | None = None,
 
 
 def blk_answer(query: str, collection: str | None = None, timeout: float = _ANSWER_TIMEOUT) -> dict:
-    """`blk ask --json`: {answer, citations, used_web, results}, fields normalized."""
-    obj = _run_blk_json(["ask", "--json", "--", query], timeout, collection)
+    """`blk ask --json --rag`: {answer, citations, used_web, results}, fields normalized. Grounding forced for deterministic scoring."""
+    obj = _run_blk_json(["ask", "--json", "--rag", "--", query], timeout, collection)
     answer = obj.get("answer")
     return {
         "answer": answer if isinstance(answer, str) else "",

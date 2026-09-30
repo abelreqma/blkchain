@@ -424,8 +424,8 @@ func TestModelsPanelLayout(t *testing.T) {
 	}
 	// A short terminal keeps every row before the title, and says when rows
 	// are scrolled off.
-	if v := panelModel(t, 40, 16).View(); !strings.Contains(v, "web search") || strings.Contains(v, "MODELS") {
-		t.Errorf("40x16 should drop the title to keep every row:\n%s", v)
+	if v := panelModel(t, 40, 17).View(); !strings.Contains(v, "web search") || strings.Contains(v, "MODELS") {
+		t.Errorf("40x17 should drop the title to keep every row:\n%s", v)
 	}
 	if v := panelModel(t, 80, 10).View(); !strings.Contains(v, "more lines, up/down to scroll") {
 		t.Errorf("80x10 should say rows are scrolled off:\n%s", v)
@@ -890,5 +890,33 @@ func TestModelsPanelResolvesTheActiveModelWhenTheListLoadsLate(t *testing.T) {
 	mu.Unlock()
 	if n != 0 || !strings.Contains(m.View(), "press u again") {
 		t.Errorf("one u on the model a turn uses: %d unloads, view:\n%s", n, m.View())
+	}
+}
+
+func TestSetModelSwitchRag(t *testing.T) {
+	p := modelPrefs{Rag: true}
+	got, _, err := setModelSwitch(p, rowRag, "", false, "active", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Rag {
+		t.Error("rag should be off")
+	}
+	got, _, err = setModelSwitch(got, rowRag, "", true, "active", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Rag {
+		t.Error("rag should be on")
+	}
+}
+
+func TestRunModelsArgsRagKind(t *testing.T) {
+	_, sw, err := runModelsArgs("off", "rag", "active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sw == nil || sw.kind != rowRag || sw.on {
+		t.Errorf("switch = %+v, want rowRag off", sw)
 	}
 }

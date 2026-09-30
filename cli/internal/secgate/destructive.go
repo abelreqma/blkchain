@@ -2,6 +2,7 @@ package secgate
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -17,9 +18,12 @@ import (
 // because the command is structured argv (Task 1 keeps shells, interpreters,
 // exec-wrappers, find exec predicates, and raw shell metacharacters out, so the
 // binary and flags are always inspectable) and it is backstopped by the /safe
-// human confirmation of every command. Known residual gaps: mv, cp, ln, tee, and
-// install can overwrite a file, and chmod, chown, and chgrp on a single absolute
-// path (not recursive) are allowed.
+// human confirmation of every command. Writes to SYSTEM paths by mv, cp, ln,
+// tee, and install are now denied (best-effort and value-aware, see
+// systemPathWrite); the remaining residual there is a relative or ".."-bearing
+// destination (not evaluated here, HITL-gated) and an unknown value-taking
+// option whose value it fails to skip. chmod, chown, and chgrp on a single
+// absolute path (not recursive) are still allowed.
 //
 // Two strategies keep it consistent across spellings:
 //   - a binary that is destructive in every form (rm, dd, mkfs.*, kill,
@@ -122,6 +126,9 @@ func DestructiveViolation(c Command) error {
 			hasLong(args, "zero", 2) {
 			return deny("changes the firewall rules")
 		}
+	}
+	if p, bad := systemPathWrite(c); bad {
+		return deny("writes to " + p)
 	}
 	return nil
 }
@@ -283,4 +290,210 @@ func recursiveSystemPath(args []string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// sensitiveWritePrefixes are the absolute path roots where a materialized file
+// would tamper with the system: account and auth data, binaries and libraries,
+// boot and kernel state, and the audit and cron surface. A destination equal to
+// one of these or under it (prefix + "/") is a destructive write.
+var sensitiveWritePrefixes = []string{
+	"/etc", "/bin", "/sbin", "/usr", "/lib", "/lib64", "/boot",
+	"/sys", "/proc", "/dev", "/root", "/var/log", "/var/spool/cron",
+}
+
+// devWriteExempt are the writable /dev pseudo-files a legitimate post-access
+// command targets (discard and capture sinks). They, and the /dev/shm tmpfs
+// subtree, are allowed even though /dev is a sensitive prefix.
+var devWriteExempt = set("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/zero")
+
+// systemPathWrite reports the destination of a file-materialization command
+// (cp, mv, tee, install, ln, or nft -f) that writes to a sensitive system path.
+// It is a best-effort defense-in-depth denial, backstopped like the rest of
+// DestructiveViolation by the mandatory LOCAL human confirmation of every
+// command, so it errs toward NOT over-denying: it guards WRITES, not reads, so a
+// system-path SOURCE (cp /etc/passwd /tmp/x) is allowed while a system-path
+// DESTINATION (cp x /usr/bin/y, tee /etc/passwd) is denied, and writes to /tmp,
+// /var/tmp, /dev/shm, the writable /dev sinks, home, and relative or scratch
+// paths are allowed. It closes the residual where these tools could materialize
+// a file at a system path (tee /etc/passwd, ln -sf x /etc/cron.d/y).
+func systemPathWrite(c Command) (string, bool) {
+	name := strings.ToLower(baseName(strings.TrimSpace(c.Binary)))
+	args := c.Args
+	var dests []string
+	switch name {
+	case "tee":
+		// Every non-flag operand is a write target.
+		dests = nonFlagOperands(args)
+	case "cp", "mv", "install", "ln":
+		// The destination is the -t/--target-directory value if present, else
+		// the last operand. Operand extraction is value-aware: getopt_long
+		// permutes argv, so a value-taking option after the destination (cp x
+		// /etc/passwd -S .bak) would otherwise make its value the "last operand"
+		// and hide the real target. Source operands are reads, not checked.
+		if t, ok := optValue(args, "-t", "--target-directory"); ok {
+			dests = []string{t}
+		} else {
+			vt := valueTakingOpts[name]
+			if ops := operandsSkippingValues(args, vt.short, vt.long); len(ops) > 0 {
+				dests = ops[len(ops)-1:]
+			}
+		}
+	case "nft":
+		// A ruleset load (-f/--file) into a sensitive path is a config write.
+		if v, ok := optValue(args, "-f", "--file"); ok {
+			dests = []string{v}
+		}
+	default:
+		return "", false
+	}
+	for _, d := range dests {
+		if sensitiveWriteDest(d) {
+			return d, true
+		}
+	}
+	return "", false
+}
+
+// valueTakingOpts lists, per file-materialization tool, the options whose
+// SEPARATE form consumes the next token (getopt_long required-argument options).
+// operandsSkippingValues uses these to skip an option's value so the true
+// destination is the last operand even when a value-taking option follows it.
+// Only required-argument options belong here: options with an OPTIONAL argument
+// (cp --backup, --reflink, --context) do not consume a separate token in
+// getopt_long, and an "="-glued value never consumes a next token. -t and
+// --target-directory appear here and are also read directly by optValue.
+var valueTakingOpts = map[string]struct {
+	short string
+	long  map[string]bool
+}{
+	"cp":      {"tS", set("target-directory", "suffix", "sparse", "no-preserve")},
+	"mv":      {"tS", set("target-directory", "suffix")},
+	"ln":      {"tS", set("target-directory", "suffix")},
+	"install": {"mogtS", set("mode", "owner", "group", "target-directory", "suffix", "strip-program")},
+}
+
+// operandsSkippingValues returns the operand tokens of args for a value-aware
+// tool. Like nonFlagOperands, but it also skips the SEPARATE value of each
+// value-taking option so the last operand is the true destination even when a
+// value-taking option is permuted after it. shortVals is the set of short
+// letters whose separate form consumes the next token; a value-taking letter at
+// the end of a bundle (-vS .bak) consumes the next token, while a value-taking
+// letter followed by more characters (-S.bak, -Sbak inside a bundle) takes those
+// as its glued value and consumes nothing more. longVals is the set of long
+// option names whose separate form (--suffix .bak) consumes the next token;
+// "="-glued (--suffix=.bak) consumes nothing. Tokens after a bare "--" are all
+// operands, and a lone "-" is an operand.
+func operandsSkippingValues(args []string, shortVals string, longVals map[string]bool) []string {
+	var operands []string
+	endOpts := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case endOpts:
+			operands = append(operands, a)
+		case a == "--":
+			endOpts = true
+		case strings.HasPrefix(a, "--"):
+			// A long option. --name value consumes the next token when name takes
+			// a value; --name=value is glued and consumes nothing.
+			name, _, hasEq := strings.Cut(a[2:], "=")
+			if !hasEq && longVals[name] && i+1 < len(args) {
+				i++
+			}
+		case len(a) >= 2 && a[0] == '-':
+			// A short option or bundle. The first value-taking letter takes a
+			// value: the rest of the bundle if any follows, else the next token.
+			s := a[1:]
+			for j := 0; j < len(s); j++ {
+				if strings.IndexByte(shortVals, s[j]) < 0 {
+					continue
+				}
+				if j == len(s)-1 && i+1 < len(args) {
+					i++
+				}
+				break
+			}
+		default:
+			// an operand ("-" alone is stdin/stdout, an operand).
+			operands = append(operands, a)
+		}
+	}
+	return operands
+}
+
+// nonFlagOperands returns the operand tokens of args: a token that is not an
+// option. A bare "--" ends option parsing, so every token after it is an
+// operand (mirrors recursiveSystemPath). A flag's separate value is not
+// distinguished from an operand, which is safe for its only caller (tee), where
+// every operand is a write target. The copy and link tools use
+// operandsSkippingValues instead, which is value-aware.
+func nonFlagOperands(args []string) []string {
+	var operands []string
+	endOpts := false
+	for _, a := range args {
+		switch {
+		case endOpts:
+			operands = append(operands, a)
+		case a == "--":
+			endOpts = true
+		case len(a) >= 2 && a[0] == '-':
+			// an option; skip it ("-" alone is stdin/stdout, an operand).
+		default:
+			operands = append(operands, a)
+		}
+	}
+	return operands
+}
+
+// optValue returns the value of the first occurrence of an option given by its
+// short form (e.g. "-t") or long form (e.g. "--target-directory"), in the
+// separate ("-t v"), glued ("-tv"), and "=value" spellings. Tokens after a bare
+// "--" are operands and end the scan.
+func optValue(args []string, short, long string) (string, bool) {
+	for i, a := range args {
+		switch {
+		case a == "--":
+			return "", false
+		case a == short || a == long:
+			if i+1 < len(args) {
+				return args[i+1], true
+			}
+			return "", false
+		case len(short) == 2 && strings.HasPrefix(a, short) && !strings.HasPrefix(a, "--"):
+			return a[len(short):], true
+		case strings.HasPrefix(a, long+"="):
+			return a[len(long)+1:], true
+		}
+	}
+	return "", false
+}
+
+// sensitiveWriteDest reports whether a materialization destination is an
+// absolute path under a sensitive system prefix. Relative and ".."-bearing
+// destinations are NOT evaluated by this check (cmd.Dir sets the working
+// directory but does not OS-confine a ".." escape); they are never denied here
+// and are backstopped by the mandatory LOCAL human confirmation of every
+// command, with harness-artifact paths additionally covered by
+// SensitivePathViolation. The writable /dev sinks and the /dev/shm, /tmp, and
+// /var/tmp trees are exempt, and their exemption is applied before the /dev
+// sensitive-prefix match.
+func sensitiveWriteDest(dest string) bool {
+	if dest == "" || !strings.HasPrefix(dest, "/") {
+		return false
+	}
+	clean := filepath.Clean(dest)
+	if devWriteExempt[clean] {
+		return false
+	}
+	for _, ex := range []string{"/dev/shm", "/tmp", "/var/tmp"} {
+		if clean == ex || strings.HasPrefix(clean, ex+"/") {
+			return false
+		}
+	}
+	for _, p := range sensitiveWritePrefixes {
+		if clean == p || strings.HasPrefix(clean, p+"/") {
+			return true
+		}
+	}
+	return false
 }

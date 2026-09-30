@@ -80,6 +80,8 @@ type answerResponse struct {
 	// not one the server reported back.
 	Model   string             `json:"model"`
 	Results []retrieval.Result `json:"results,omitempty"`
+	// Route is the retrieval decision for this answer: "skip", "rag", or "web".
+	Route string `json:"route,omitempty"`
 }
 
 // serviceHealth is one probe of the services an answer needs.
@@ -412,12 +414,19 @@ type askOpts struct {
 	json    bool
 	sources bool
 	agent   bool
+	rag     bool
+}
+
+// askRoutes builds the router's enabled-route set from the saved model prefs.
+func askRoutes(p modelPrefs) enabledRoutes {
+	return enabledRoutes{Local: p.Rag, Web: p.Web}
 }
 
 func defineAskFlags(fs *flag.FlagSet, o *askOpts) {
 	fs.BoolVar(&o.json, "json", false, "print the answer as JSON instead of formatted text")
 	fs.BoolVar(&o.sources, "sources", false, "also print the retrieved passages")
 	fs.BoolVar(&o.agent, "agent", false, "answer with the Hermes agent instead of the knowledge base alone")
+	fs.BoolVar(&o.rag, "rag", false, "force a grounded answer from the knowledge base, skipping adaptive routing")
 }
 
 func runAsk(args []string) error { return askWith(nil, args) }
@@ -463,9 +472,10 @@ func askWith(rc *retrieval.Client, args []string) error {
 		// Tokens are untrusted LLM output: strip control sequences before they
 		// reach the terminal. termStream holds back a sequence split across tokens.
 		var full strings.Builder
-		_, cits, usedWeb, _, _, err := AnswerLoop(context.Background(), rc, cfg, query, AnswerOpts{
+		p := loadPrefs()
+		_, cits, usedWeb, _, _, _, err := adaptiveAnswerFn(context.Background(), rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{
 			Stream: newAskStream(os.Stdout, &full),
-			NoWeb:  !loadPrefs().Web,
+			NoWeb:  !p.Web,
 		})
 		if errors.Is(err, ErrNoResults) {
 			return reportNoResults(os.Stderr, false, "")
@@ -487,7 +497,8 @@ func askWith(rc *retrieval.Client, args []string) error {
 	// Resolve the model once, up front, so the id in the JSON is the id the
 	// answer loop was asked to use.
 	model := resolveModel(cfg)
-	answer, cits, usedWeb, results, _, err := AnswerLoop(context.Background(), rc, cfg, query, AnswerOpts{Model: model, NoWeb: !loadPrefs().Web})
+	p := loadPrefs()
+	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(context.Background(), rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Model: model, NoWeb: !p.Web})
 	if errors.Is(err, ErrNoResults) {
 		return reportNoResults(os.Stderr, *jsonOut, model)
 	}
@@ -500,6 +511,7 @@ func askWith(rc *retrieval.Client, args []string) error {
 		UsedWeb:   usedWeb,
 		Model:     model,
 		Results:   results,
+		Route:     route,
 	}
 
 	if *jsonOut {

@@ -42,10 +42,35 @@ func vizSanitizeLabel(s string) string {
 	return ellipsize(s, vizLabelMax)
 }
 
+// vizDomainIcons maps a lowercase domain name to its Plane-15 private-use
+// glyph. The codepoints are shared with the font graft, so keep them exact.
+var vizDomainIcons = map[string]string{
+	"recon":           "\U000F2B10",
+	"web":             "\U000F2B11",
+	"ad":              "\U000F2B12",
+	"cloud":           "\U000F2B13",
+	"k8s":             "\U000F2B14",
+	"wifi":            "\U000F2B15",
+	"exploit-dev":     "\U000F2B16",
+	"generic":         "\U000F2B17",
+	"local":           "\U000F2B18",
+	"target-analysis": "\U000F2B19",
+}
+
+// domainIcon returns the node glyph for a task kind, generic when unknown.
+func domainIcon(kind string) string {
+	if g, ok := vizDomainIcons[strings.ToLower(strings.TrimSpace(kind))]; ok {
+		return g
+	}
+	return vizDomainIcons["generic"]
+}
+
 // vizMermaid builds a flowchart TD from the DAG. Edges to unknown ids are
 // dropped, and so are tasks whose id is not a plain identifier (an id is
 // emitted raw, so it must never carry Mermaid syntax). Node label is
-// "kind: objective", sanitized. It only reads e.
+// "kind: objective", sanitized, with a leading domain glyph in the nerd tier.
+// A task's basis ids become dotted edges unless a dependency edge already
+// covers the pair. It only reads e.
 func vizMermaid(e Engagement) string {
 	known := make(map[string]bool, len(e.Tasks))
 	for _, t := range e.Tasks {
@@ -53,6 +78,7 @@ func vizMermaid(e Engagement) string {
 			known[t.ID] = true
 		}
 	}
+	nerd := plCurrentTier() == plNerd
 	var b strings.Builder
 	b.WriteString("flowchart TD\n")
 	for _, t := range e.Tasks {
@@ -60,8 +86,14 @@ func vizMermaid(e Engagement) string {
 			continue
 		}
 		label := vizSanitizeLabel(t.Kind + ": " + t.Objective)
+		if nerd {
+			// The glyph is a compiled-in constant, never task data, so it is
+			// added after the sanitizer on purpose.
+			label = domainIcon(t.Kind) + " " + label
+		}
 		fmt.Fprintf(&b, "  %s[%s]\n", t.ID, label)
 	}
+	emitted := map[string]bool{}
 	for _, t := range e.Tasks {
 		if !known[t.ID] {
 			continue
@@ -69,6 +101,18 @@ func vizMermaid(e Engagement) string {
 		for _, dep := range t.DependsOn {
 			if known[dep] {
 				fmt.Fprintf(&b, "  %s --> %s\n", dep, t.ID)
+				emitted[dep+"\x00"+t.ID] = true
+			}
+		}
+	}
+	for _, t := range e.Tasks {
+		if !known[t.ID] {
+			continue
+		}
+		for _, basis := range t.BasisIDs {
+			if known[basis] && basis != t.ID && !emitted[basis+"\x00"+t.ID] {
+				fmt.Fprintf(&b, "  %s -.-> %s\n", basis, t.ID)
+				emitted[basis+"\x00"+t.ID] = true
 			}
 		}
 	}

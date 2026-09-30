@@ -74,6 +74,46 @@ func TestDeriveDomain(t *testing.T) {
 	}
 }
 
+func TestDeriveDomainLocal(t *testing.T) {
+	for _, in := range []struct{ name, desc string }{
+		{"linux-privesc", "privilege escalation on Linux hosts"},
+		{"gtfobins", "abuse SUID and sudo via GTFOBins"},
+		{"sudo-abuse", "enumerate sudo -l rights"},
+	} {
+		if got := DeriveDomain(in.name, in.desc); got != "local" {
+			t.Errorf("DeriveDomain(%q,%q) = %q, want local", in.name, in.desc, got)
+		}
+	}
+	// Must not steal existing-domain matches:
+	if got := DeriveDomain("recon", "osint and scanning"); got != "recon" {
+		t.Errorf("recon skill misrouted to %q", got)
+	}
+	if got := DeriveDomain("web app", "sqli and xss testing"); got != "web" {
+		t.Errorf("web skill misrouted to %q", got)
+	}
+}
+
+func TestDeriveDomainTargetAnalysis(t *testing.T) {
+	for _, in := range []struct{ name, desc string }{
+		{"binary-analysis", "analyze an executable as a privesc vector"},
+		{"elf-inspection", "inspect ELF binary symbols and mitigations"},
+	} {
+		if got := DeriveDomain(in.name, in.desc); got != "target-analysis" {
+			t.Errorf("DeriveDomain(%q,%q) = %q, want target-analysis", in.name, in.desc, got)
+		}
+	}
+	// Order regression guards: privesc still -> local; exploit still -> exploit-dev; plain gtfobins -> local.
+	if got := DeriveDomain("linux-privesc", "privilege escalation and suid"); got != "local" {
+		t.Errorf("privesc misrouted to %q", got)
+	}
+	if got := DeriveDomain("exploit", "shellcode and buffer overflow"); got != "exploit-dev" {
+		t.Errorf("exploit-dev misrouted to %q", got)
+	}
+	if got := DeriveDomain("gtfobins", "abuse SUID and sudo via GTFOBins"); got != "local" {
+		t.Errorf("plain gtfobins misrouted to %q", got)
+	}
+}
+
 func TestDeriveDomainWordBoundary(t *testing.T) {
 	// Short keywords must not false-match inside unrelated words.
 	generic := []string{

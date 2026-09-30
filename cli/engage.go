@@ -10,7 +10,9 @@ import (
 )
 
 // routingSystemPrompt makes retrieval adaptive: the model decides per question
-// whether to call a kb tool.
+// whether to call a kb tool. The deterministic guardrails it complements
+// (CVE/PoC and arithmetic) live in route.go (routeGuard), shared with the ask
+// path so both surfaces classify the same way.
 const routingSystemPrompt = `You are a security research assistant with access to a local knowledge base through two tools: kb_search and kb_answer.
 
 Answer general-knowledge and pure-reasoning questions directly, without calling any kb tool. This includes math, coding logic, and creative writing.

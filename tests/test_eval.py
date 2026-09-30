@@ -240,7 +240,7 @@ class BlkAnswerTest(FakeBlkTestCase):
         self.assertTrue(out["used_web"])
         self.assertEqual(out["citations"][0]["source"], "s")
         call = json.loads(self.log.read_text())
-        self.assertEqual(call["argv"], ["ask", "--json", "--", "why"])
+        self.assertEqual(call["argv"], ["ask", "--json", "--rag", "--", "why"])
         self.assertEqual(call["coll"], "altcol")
 
     def test_fields_are_defensive(self):

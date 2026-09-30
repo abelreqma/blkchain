@@ -621,3 +621,105 @@ func TestAnswerLoopOmitsZeroSampling(t *testing.T) {
 		t.Errorf("answer body sampling = %v, want %v", answer, want)
 	}
 }
+
+func TestAnswerLoopNoLocalSkipsSearch(t *testing.T) {
+	srv := fakeLLM(t, []string{`{"sufficient":false,"rewrite":"","use_web":true}`}, "web answer [1]")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	t.Setenv("TAVILY_SETUP_TOKEN", "tvly-test")
+
+	oldWeb := webSearch
+	webSearch = func(_ context.Context, _, _ string, _ int, _ []string) ([]retrieval.Result, error) {
+		return []retrieval.Result{chunk(webSource, "https://x/y", "T", "web text")}, nil
+	}
+	defer func() { webSearch = oldWeb }()
+
+	rs := &recSearcher{results: []retrieval.Result{chunk("wstg", "a.md", "s", "local")}}
+	_, _, usedWeb, _, _, err := AnswerLoop(context.Background(), rs, answerCfg(2), "q", AnswerOpts{NoLocal: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rs.query != "" {
+		t.Errorf("NoLocal must not call Search, got query %q", rs.query)
+	}
+	if !usedWeb {
+		t.Error("NoLocal grounding should have used web")
+	}
+}
+
+func TestAnswerLoopNoLocalNoWebIsNoResults(t *testing.T) {
+	srv := fakeLLM(t, []string{`{"sufficient":false,"rewrite":"","use_web":true}`}, "")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	t.Setenv("TAVILY_SETUP_TOKEN", "") // no web configured
+
+	rs := &recSearcher{results: []retrieval.Result{chunk("wstg", "a.md", "s", "local")}}
+	_, _, _, _, _, err := AnswerLoop(context.Background(), rs, answerCfg(2), "q", AnswerOpts{NoLocal: true})
+	if !errors.Is(err, ErrNoResults) {
+		t.Errorf("err = %v, want ErrNoResults", err)
+	}
+	if rs.query != "" {
+		t.Errorf("NoLocal must not call Search, got query %q", rs.query)
+	}
+}
+
+func TestAnswerLoopCVEUsesPocDomains(t *testing.T) {
+	srv := fakeLLM(t, []string{`{"sufficient":false,"rewrite":"","use_web":true}`}, "poc answer [1]")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	t.Setenv("TAVILY_SETUP_TOKEN", "tvly-test")
+
+	var gotDomains []string
+	var gotQuery string
+	oldWeb := webSearch
+	webSearch = func(_ context.Context, _, query string, _ int, domains []string) ([]retrieval.Result, error) {
+		gotDomains, gotQuery = domains, query
+		return []retrieval.Result{chunk(webSource, "https://github.com/nomi-sec/PoC-in-GitHub", "T", "poc")}, nil
+	}
+	defer func() { webSearch = oldWeb }()
+
+	cfg := answerCfg(2)
+	cfg.PocDomains = []string{"github.com", "nvd.nist.gov"}
+	rs := &recSearcher{}
+	_, _, _, _, _, err := AnswerLoop(context.Background(), rs, cfg, "CVE-2024-1234 exploit", AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotDomains) == 0 || gotDomains[0] != "github.com" {
+		t.Errorf("web domains = %v, want PocDomains (github.com first)", gotDomains)
+	}
+	if !strings.Contains(gotQuery, "nomi-sec/PoC-in-GitHub") {
+		t.Errorf("web query = %q, want PoC-repo hint", gotQuery)
+	}
+}
+
+func TestAnswerLoopNonCVEUsesReputableDomains(t *testing.T) {
+	srv := fakeLLM(t, []string{`{"sufficient":false,"rewrite":"","use_web":true}`}, "answer [1]")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	t.Setenv("TAVILY_SETUP_TOKEN", "tvly-test")
+
+	var gotDomains []string
+	oldWeb := webSearch
+	webSearch = func(_ context.Context, _, _ string, _ int, domains []string) ([]retrieval.Result, error) {
+		gotDomains = domains
+		return []retrieval.Result{chunk(webSource, "https://owasp.org/x", "T", "t")}, nil
+	}
+	defer func() { webSearch = oldWeb }()
+
+	cfg := answerCfg(2)
+	cfg.ReputableDomains = []string{"owasp.org"}
+	cfg.PocDomains = []string{"github.com"}
+	rs := &recSearcher{results: []retrieval.Result{chunk("wstg", "a.md", "s", "local")}}
+	_, _, _, _, _, err := AnswerLoop(context.Background(), rs, cfg, "how does clickjacking work", AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotDomains) != 1 || gotDomains[0] != "owasp.org" {
+		t.Errorf("web domains = %v, want ReputableDomains", gotDomains)
+	}
+}

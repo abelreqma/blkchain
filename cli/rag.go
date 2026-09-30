@@ -10,6 +10,7 @@ import (
 	"blkchain/cli/internal/retrieval"
 
 	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/llms/openai"
 )
 
 // noResultsAnswer is the plain-text statement that nothing was found. AnswerLoop
@@ -84,11 +85,16 @@ func nextAction(g grade, hasTavily, looksCVE bool, results int) string {
 // the stage constants); nil is a no-op. It runs on the AnswerLoop goroutine.
 // NoWeb turns the web-search fallback off (the /models web switch): the loop
 // then rewrites and re-retrieves where it would have searched the web.
+// NoLocal disables local KB retrieval (the /models rag switch off). The loop
+// never calls rc.Search; grounding comes from web only. When false (default),
+// AnswerLoop behavior is unchanged.
 type AnswerOpts struct {
 	Model, Preface string
 	Stream         func([]byte)
 	Stage          func(stage string)
 	NoWeb          bool
+	NoLocal        bool
+	llm            *openai.LLM // reuse this client if set; nil builds one
 }
 
 // AnswerLoop is the bounded, code-orchestrated RAG answer loop: retrieval
@@ -102,15 +108,20 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 		}
 	}
 
-	stage(stageRetrieving)
-	results, err = rc.Search(ctx, question, cfg.TopK, nil)
-	if err != nil {
-		return "", nil, false, nil, 0, err
+	if !opts.NoLocal {
+		stage(stageRetrieving)
+		results, err = rc.Search(ctx, question, cfg.TopK, nil)
+		if err != nil {
+			return "", nil, false, nil, 0, err
+		}
 	}
 
-	l, err := newOMLX(cfg, opts.Model)
-	if err != nil {
-		return "", nil, false, results, 0, err
+	l := opts.llm
+	if l == nil {
+		l, err = newOMLX(cfg, opts.Model)
+		if err != nil {
+			return "", nil, false, results, 0, err
+		}
 	}
 
 	searchQuery := question
@@ -135,8 +146,13 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 			if webQuery == "" {
 				webQuery = searchQuery
 			}
+			domains := cfg.ReputableDomains
+			if looksCVE {
+				domains = cfg.PocDomains
+				webQuery = webQuery + " nomi-sec/PoC-in-GitHub"
+			}
 			stage(stageWeb)
-			webResults, werr := webSearch(ctx, tavilyKey(), webQuery, cfg.TavilyMaxResults, cfg.ReputableDomains)
+			webResults, werr := webSearch(ctx, tavilyKey(), webQuery, cfg.TavilyMaxResults, domains)
 			if werr == nil && len(webResults) > 0 {
 				results = append(results, webResults...)
 				usedWeb = true
@@ -146,15 +162,17 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 			// re-retrieve below.
 		}
 
-		if g.Rewrite != "" {
-			searchQuery = g.Rewrite
-			stage(stageRewriting)
-		} else {
-			stage(stageRetrieving)
-		}
-		retried, rerr := rc.Search(ctx, searchQuery, cfg.TopK, nil)
-		if rerr == nil && len(retried) > 0 {
-			results = retried
+		if !opts.NoLocal {
+			if g.Rewrite != "" {
+				searchQuery = g.Rewrite
+				stage(stageRewriting)
+			} else {
+				stage(stageRetrieving)
+			}
+			retried, rerr := rc.Search(ctx, searchQuery, cfg.TopK, nil)
+			if rerr == nil && len(retried) > 0 {
+				results = retried
+			}
 		}
 	}
 

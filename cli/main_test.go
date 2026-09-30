@@ -312,3 +312,14 @@ func TestOpenWebURLPrintsNoticeAndNeverLaunches(t *testing.T) {
 		}
 	}
 }
+
+func TestAnswerResponseHasRouteField(t *testing.T) {
+	resp := answerResponse{Answer: "a", Citations: []citation{}, Route: "skip"}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"route":"skip"`) {
+		t.Errorf("json = %s, want route field", data)
+	}
+}

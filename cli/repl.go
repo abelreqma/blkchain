@@ -114,8 +114,17 @@ func plainREPL() error {
 			mode = "agent"
 			fmt.Println(Meta.Render("mode: agent"))
 		case "rag":
-			mode = "rag"
-			fmt.Println(Meta.Render("mode: rag"))
+			if toggle, on, q := ragArg(rest); toggle {
+				p := loadPrefs()
+				p.Rag = on
+				_ = savePrefs(p)
+				fmt.Println(Meta.Render("rag " + boolOnOff(on)))
+			} else if q != "" {
+				printErr(replForceAsk(q, &rc))
+			} else {
+				mode = "rag"
+				fmt.Println(Meta.Render("mode: rag"))
+			}
 		case "search", "s":
 			last = replSearch(rest, last, &rc)
 		case "ask", "a":
@@ -137,6 +146,40 @@ func plainREPL() error {
 			plainVizSnapshot(os.Stdout, vz, eng)
 		}
 	}
+}
+
+// ragArg classifies a /rag argument. An empty argument is the mode select
+// (handled by the caller). "on"/"off" (trimmed, case-folded) set the rag
+// toggle. Any other argument is a question to force-ground.
+func ragArg(arg string) (setToggle bool, on bool, question string) {
+	a := strings.TrimSpace(arg)
+	if a == "" {
+		return false, false, ""
+	}
+	if strings.EqualFold(a, "on") {
+		return true, true, ""
+	}
+	if strings.EqualFold(a, "off") {
+		return true, false, ""
+	}
+	return false, false, a
+}
+
+func boolOnOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
+}
+
+// replForceAsk forces grounding for one query (the /rag <question> form),
+// bypassing the router and the rag toggle.
+func replForceAsk(query string, c *replClient) error {
+	rc, err := c.get()
+	if err != nil {
+		return err
+	}
+	return askWith(rc, []string{"--rag", query})
 }
 
 // plainVizSnapshot writes the current DAG block once, for output that has no
@@ -289,7 +332,7 @@ func replGroups() []rowGroup {
 			{"/hermes <prompt>", replSpecDesc("hermes")},
 			{"/mode", replSlashDesc("mode")},
 			{"/agent", replSlashDesc("agent")},
-			{"/rag", replSlashDesc("rag")},
+			{"/rag [on|off|question]", replSlashDesc("rag")},
 		}},
 		{hgSetup, []helpRow{
 			{"/viz [on|off]", replSlashDesc("viz")},

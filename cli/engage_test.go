@@ -108,3 +108,15 @@ func TestEngageAnswerHonorsWebSwitch(t *testing.T) {
 		}
 	}
 }
+
+func TestRoutingGuardShared(t *testing.T) {
+	// The engage routing prompt and the ask-path guardrail agree that a CVE
+	// question is a grounding question.
+	if kind, forced := routeGuard("CVE-2024-1234"); !forced || kind != routeGround {
+		t.Error("routeGuard must force ground for a CVE question")
+	}
+	// The engage routing system prompt still instructs adaptive tool use.
+	if !strings.Contains(routingSystemPrompt, "kb_search") {
+		t.Error("routingSystemPrompt should reference kb_search")
+	}
+}

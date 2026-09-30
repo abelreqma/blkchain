@@ -22,11 +22,12 @@ type modelPrefs struct {
 	Hidden []string `json:"hidden,omitempty"`
 	Rerank bool     `json:"rerank"`
 	Web    bool     `json:"web"`
+	Rag    bool     `json:"rag"`
 	Viz    bool     `json:"viz"`
 }
 
 // defaultPrefs hides nothing and runs the reranker and the web fallback.
-func defaultPrefs() modelPrefs { return modelPrefs{Rerank: true, Web: true, Viz: true} }
+func defaultPrefs() modelPrefs { return modelPrefs{Rerank: true, Web: true, Rag: true, Viz: true} }
 
 // prefsPath is models.json in the config directory the CLI already uses for the
 // saved project root and the history, created private if needed.

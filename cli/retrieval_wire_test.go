@@ -272,7 +272,8 @@ func TestAskJSONGolden(t *testing.T) {
         "cwe_class": "ssrf"
       }
     }
-  ]
+  ],
+  "route": "rag"
 }
 `
 	if out != want {

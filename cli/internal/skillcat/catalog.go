@@ -107,7 +107,9 @@ var domainRules = []domainRule{
 	{"k8s", []string{"kubernetes", "k8s", "eks", "gke", "aks", "container", "docker"}},
 	{"web", []string{"web", "http", "xss", "sqli", "sql injection", "oauth", "jwt", "ssrf", "idor", "graphql", "api", "request smuggling"}},
 	{"wifi", []string{"wifi", "wireless", "bluetooth", "zigbee", "lorawan", "wpa"}},
+	{"target-analysis", []string{"target analysis", "binary analysis", "executable analysis", "elf", "gtfobins binary"}},
 	{"exploit-dev", []string{"exploit", "shellcode", "buffer overflow", "crash", "fuzzing", "mitigation"}},
+	{"local", []string{"privilege escalation", "privesc", "suid", "sgid", "gtfobins", "sudo", "post exploitation", "local privilege"}},
 	{"recon", []string{"recon", "osint", "enumeration", "scanning"}},
 }
 

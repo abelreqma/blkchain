@@ -45,6 +45,8 @@ type Config struct {
 	EmbedServerURL        string   `json:"embed_server_url"`
 	TavilyMaxResults      int      `json:"tavily_max_results"`
 	ReputableDomains      []string `json:"reputable_domains"`
+	RouteMaxTokens        int      `json:"route_max_tokens"`
+	PocDomains            []string `json:"poc_domains"`
 }
 
 // contractRelPath is where rag.json lives relative to the project root.
@@ -79,6 +81,8 @@ func builtinDefaults() Config {
 			"nvd.nist.gov", "cve.mitre.org", "cwe.mitre.org", "attack.mitre.org",
 			"owasp.org", "exploit-db.com", "portswigger.net",
 		},
+		RouteMaxTokens: 8,
+		PocDomains:     []string{"github.com", "nvd.nist.gov", "exploit-db.com"},
 	}
 }
 
@@ -189,6 +193,24 @@ func envOverrides(cfg *Config) {
 		}
 	}
 	envFloat("BLKCHAIN_SYNTH_PRESENCE_PENALTY", &cfg.SynthPresencePenalty)
+	if v, ok := os.LookupEnv("BLKCHAIN_ROUTE_MAX_TOKENS"); ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.RouteMaxTokens = n
+		}
+	}
+	if v, ok := os.LookupEnv("BLKCHAIN_POC_DOMAINS"); ok && v != "" {
+		parts := strings.Split(v, ",")
+		domains := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				domains = append(domains, p)
+			}
+		}
+		if len(domains) > 0 {
+			cfg.PocDomains = domains
+		}
+	}
 }
 
 // envFloat sets *dst from the float in environment variable name. An empty or

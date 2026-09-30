@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -1790,6 +1791,28 @@ func TestStatusLineShowsTheRetrievalModels(t *testing.T) {
 	}
 }
 
+func TestStatusLineShowsRagSwitch(t *testing.T) {
+	noColor(t)
+	m := layoutModel(t, 200, 24)
+	m.prefs = defaultPrefs() // Rag on by default: implied by rag mode, not labeled
+	if line := m.statusLine(); strings.Contains(line, "rag off") {
+		t.Errorf("rag on (the default) should not surface a rag-off label: %q", line)
+	}
+	m.prefs.Rag = false
+	if line := m.statusLine(); !strings.Contains(line, "rag off") {
+		t.Errorf("rag off should show when grounding is switched off: %q", line)
+	}
+	// Agent mode uses a separate status line with no retrieval group, so the
+	// rag switch never shows there.
+	am := layoutModel(t, 200, 24)
+	am.mode, am.agentXport, am.agentChecked = "agent", "gateway", true
+	am.prefs = defaultPrefs()
+	am.prefs.Rag = false
+	if line := am.statusLine(); strings.Contains(line, "rag off") {
+		t.Errorf("agent mode must not show the rag switch: %q", line)
+	}
+}
+
 func TestFirstDownProbePrintsOneHint(t *testing.T) {
 	noColor(t)
 	t.Setenv("OMLX_BASE_URL", "http://user:hunter2@127.0.0.1:8000/v1?token=abc")
@@ -2333,5 +2356,41 @@ func TestVizCommandIsRegisteredAndInReplHelp(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("plain REPL help has no /viz row")
+	}
+}
+
+// The TUI's rag-mode turn goes through the adaptive router, with the enabled
+// routes from the saved switches and the one-shot force flag.
+func TestStreamCmdUsesAdaptiveRouter(t *testing.T) {
+	useDeadServices(t)
+	old := adaptiveAnswerFn
+	var gotEnabled enabledRoutes
+	var gotForce bool
+	called := false
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, enabled enabledRoutes, force bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		gotEnabled, gotForce, called = enabled, force, true
+		if opts.Stream != nil {
+			opts.Stream([]byte("hi"))
+		}
+		return "hi", nil, false, nil, 1, "skip", nil
+	}
+	defer func() { adaptiveAnswerFn = old }()
+
+	m := frameModel(t)
+	cmd := m.streamCmd(context.Background(), "q", "", time.Now(), true)
+	if cmd == nil {
+		t.Fatal("streamCmd returned nil")
+	}
+	if _, ok := cmd().(streamDoneMsg); !ok {
+		t.Error("streamCmd did not finish with a streamDoneMsg")
+	}
+	if !called {
+		t.Fatal("streamCmd did not call the adaptive router")
+	}
+	if !gotForce {
+		t.Error("force not threaded into the router")
+	}
+	if !gotEnabled.Local {
+		t.Error("enabled.Local should reflect the default rag switch")
 	}
 }

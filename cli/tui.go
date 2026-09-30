@@ -452,6 +452,10 @@ type model struct {
 	rc    *retrieval.Client
 	rcErr error
 
+	// forceRag makes the next rag-mode turn ground unconditionally (the
+	// /rag <question> form). It is a one-shot: consumed and cleared per turn.
+	forceRag bool
+
 	// liveCache holds live's incremental wrap, so a frame never re-wraps the
 	// whole stream. nil works too, rendering from scratch.
 	liveCache *liveCache
@@ -1242,6 +1246,14 @@ func (m model) activeModel() string {
 		}
 		return "unknown"
 	}
+	return m.ragTurnModel()
+}
+
+// ragTurnModel is the model a grounded turn uses, independent of mode:
+// streamCmd serves forced grounded turns even in agent mode, so it must not
+// use the agent model. "" until a model is known, so streamCmd's resolve
+// fallback applies.
+func (m model) ragTurnModel() string {
 	if s := strings.TrimSpace(m.ragModel); s != "" {
 		return s
 	}
@@ -1398,8 +1410,26 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.mode = "agent"
 		return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
 	case "rag":
-		m.mode = "rag"
-		return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
+		toggle, on, question := ragArg(arg)
+		switch {
+		case toggle:
+			m.prefs.Rag = on
+			_ = savePrefs(m.prefs)
+			return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render("rag "+boolOnOff(on))))
+		case question != "":
+			// A force-ground question is a turn: while one runs, queue the raw
+			// input (dequeueMsg replays it through dispatchInput). Otherwise set
+			// the one-shot and run it as an ask.
+			if m.working {
+				m.queue = append(m.queue, q)
+				return m, tea.Println("   " + Meta.Render(fmt.Sprintf("%s queued (%d in queue)", Glyph(GlyphBullet), len(m.queue))))
+			}
+			m.forceRag = true
+			return m.dispatchInput("/ask " + question)
+		default:
+			m.mode = "rag"
+			return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
+		}
 	case "copy":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(m.doCopy()))
 	case "resume":
@@ -1477,7 +1507,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.firstTokAt = time.Time{}
 		var ctx context.Context
 		var cancel context.CancelFunc
-		if verb == "ask" && m.mode == "agent" {
+		if verb == "ask" && m.mode == "agent" && !m.forceRag {
 			// Agent turns can run for a long time (multi-step tool use) and
 			// StreamAgent assumes a long-lived ctx; only Ctrl-C should end one,
 			// not the RAG client's HTTP timeout.
@@ -1495,15 +1525,17 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			m.pendingQ = arg    // the operator's question, recorded to the session
 			// AGENT mode: a full agentic turn via the gateway (or subprocess
 			// fallback), streaming into the same live buffer.
-			if m.mode == "agent" {
+			if m.mode == "agent" && !m.forceRag {
 				message := arg
 				if preface != "" {
 					message = preface + "\n\n" + arg
 				}
 				return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.agentStreamCmd(ctx, message))
 			}
-			// RAG mode: stream the full AnswerLoop synthesis directly from oMLX.
-			return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.streamCmd(ctx, arg, preface, m.turnStart))
+			// RAG mode: route through the adaptive router (skip/ground/web).
+			force := m.forceRag
+			m.forceRag = false
+			return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.streamCmd(ctx, arg, preface, m.turnStart, force))
 		}
 		return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.dispatchCmd(ctx, verb, arg, m.turnStart))
 	}
@@ -1821,13 +1853,14 @@ func (m model) dispatchCmd(ctx context.Context, verb, arg string, start time.Tim
 	}
 }
 
-// streamCmd runs AnswerLoop in a goroutine (tea.Cmd), pushing each token back
-// as a chunkMsg via the stored *tea.Program. AnswerLoop is the full bounded
-// loop (grade, optional web fallback or rewrite, then synthesis); a cancel
-// returns a canceledMsg.
-func (m model) streamCmd(ctx context.Context, question, preface string, start time.Time) tea.Cmd {
+// streamCmd runs the adaptive answer in a goroutine (tea.Cmd), pushing each
+// token back as a chunkMsg via the stored *tea.Program. The router picks skip,
+// ground, or web; force grounds unconditionally. The grounded path is the full
+// bounded AnswerLoop (grade, optional web fallback or rewrite, then synthesis);
+// a cancel returns a canceledMsg.
+func (m model) streamCmd(ctx context.Context, question, preface string, start time.Time, force bool) tea.Cmd {
 	prog := m.prog
-	turnModel := m.activeModel()
+	turnModel := m.ragTurnModel()
 	return func() tea.Msg {
 		if turnModel == "" {
 			// The list has not loaded yet: resolve the model here, and keep it
@@ -1842,10 +1875,11 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 		}
 		cfg := m.cfg
 		streamed := false
-		full, cits, usedWeb, _, tokens, err := AnswerLoop(ctx, rc, cfg, question, AnswerOpts{
+		p := loadPrefs()
+		full, cits, usedWeb, _, tokens, _, err := adaptiveAnswerFn(ctx, rc, cfg, question, askRoutes(p), force, AnswerOpts{
 			Model:   turnModel,
 			Preface: preface,
-			NoWeb:   !loadPrefs().Web,
+			NoWeb:   !p.Web,
 			Stream: func(b []byte) {
 				streamed = true
 				if prog != nil {
@@ -2283,6 +2317,13 @@ func (m model) statusLine() string {
 		}
 	}
 	var retrieval []string
+	// rag is the KB-grounding switch (adaptive-RAG). On is the default and is
+	// already implied by being in rag mode, so only the off state is surfaced,
+	// where it changes behavior (the answer path stops querying the local KB).
+	// This keeps the common case uncluttered and preserves the width budget.
+	if !m.prefs.Rag {
+		retrieval = append(retrieval, "rag off")
+	}
 	if m.health != nil {
 		embed := "embed down"
 		if m.health.EmbedServer {

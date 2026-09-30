@@ -6,6 +6,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"blkchain/cli/internal/ragconfig"
+	"blkchain/cli/internal/retrieval"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestPlainClarifyNumberedChoice(t *testing.T) {
@@ -71,5 +77,119 @@ func TestPlainVizSnapshotSilentOnError(t *testing.T) {
 	plainVizSnapshot(&out, newVizRenderer(&fakeRunner{out: "x"}), failingView{})
 	if out.Len() != 0 {
 		t.Fatalf("view error should write nothing; got %q", out.String())
+	}
+}
+
+func TestRagArg(t *testing.T) {
+	cases := []struct {
+		arg      string
+		toggle   bool
+		on       bool
+		question string
+	}{
+		{"", false, false, ""},
+		{"on", true, true, ""},
+		{"off", true, false, ""},
+		{" ON ", true, true, ""},
+		{"Off", true, false, ""},
+		{"what is ssrf", false, false, "what is ssrf"},
+		{"on the wire protocol", false, false, "on the wire protocol"},
+	}
+	for _, c := range cases {
+		toggle, on, q := ragArg(c.arg)
+		if toggle != c.toggle || on != c.on || q != c.question {
+			t.Errorf("ragArg(%q) = (%v,%v,%q), want (%v,%v,%q)", c.arg, toggle, on, q, c.toggle, c.on, c.question)
+		}
+	}
+}
+
+// ragTurnCall is what the adaptive router stub saw.
+type ragTurnCall struct {
+	force           bool
+	question, model string
+}
+
+// runRagQuestionTurn dispatches "/rag foo" from the given mode, runs the turn
+// cmd, and returns the model after dispatch plus what the router received.
+func runRagQuestionTurn(t *testing.T, mode string) (model, ragTurnCall) {
+	t.Helper()
+	useDeadServices(t)
+	old := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = old })
+	calls := make(chan ragTurnCall, 1)
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, q string, _ enabledRoutes, force bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		calls <- ragTurnCall{force: force, question: q, model: opts.Model}
+		return "hi", nil, false, nil, 1, "ground", nil
+	}
+
+	m := frameModel(t)
+	m.mode = mode
+	m.ragModel = "ragmodel"
+	m.agentModel = "agentmodel"
+	nm, cmd := m.dispatchInput("/rag foo")
+	got := nm.(model)
+	if !got.working {
+		t.Fatalf("/rag <question> did not start a turn in %s mode", mode)
+	}
+	if cmd == nil {
+		t.Fatal("dispatchInput returned no command")
+	}
+	// The turn cmd is a tea.Batch; run each member so streamCmd reaches the
+	// router. Ticks and pollers are harmless here and end on their own.
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatal("turn cmd did not produce a tea.BatchMsg")
+	}
+	for _, c := range batch {
+		if c != nil {
+			go c()
+		}
+	}
+	select {
+	case c := <-calls:
+		return got, c
+	case <-time.After(5 * time.Second):
+		t.Fatal("the adaptive router was never reached (agent path taken?)")
+	}
+	return got, ragTurnCall{}
+}
+
+// In agent mode /rag <question> runs a forced grounded RAG turn for that one
+// question: it reaches the adaptive router with force=true (not the agent
+// path) on the RAG model (not the agent model), the persistent mode stays
+// agent, and the one-shot forceRag is consumed rather than leaked.
+func TestTUIRagQuestionInAgentModeForceGroundsWithoutLeak(t *testing.T) {
+	got, c := runRagQuestionTurn(t, "agent")
+	if got.forceRag {
+		t.Error("forceRag leaked: it must be consumed by the forced turn")
+	}
+	if got.mode != "agent" {
+		t.Errorf("mode = %q; want agent (no persistent mode change)", got.mode)
+	}
+	if !c.force {
+		t.Error("router was reached with force=false; /rag <question> must force grounding")
+	}
+	if c.question != "foo" {
+		t.Errorf("router question = %q; want foo", c.question)
+	}
+	if c.model != "ragmodel" {
+		t.Errorf("router model = %q; want ragmodel (not the agent model or unknown)", c.model)
+	}
+}
+
+// In rag mode /rag <question> runs a forced turn for exactly that question.
+func TestTUIRagQuestionInRagModeStartsForcedTurn(t *testing.T) {
+	got, c := runRagQuestionTurn(t, "rag")
+	if got.forceRag {
+		t.Error("forceRag leaked after the forced turn")
+	}
+	if !c.force {
+		t.Error("router was reached with force=false; /rag <question> must force grounding")
+	}
+	if c.question != "foo" {
+		t.Errorf("router question = %q; want foo", c.question)
+	}
+	if c.model != "ragmodel" {
+		t.Errorf("router model = %q; want ragmodel", c.model)
 	}
 }
