@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -35,5 +36,33 @@ func TestDefaultAllowlistExcludesClassifierDeniedBinaries(t *testing.T) {
 				t.Errorf("default allowlist should not contain classifier-denied %q", bad)
 			}
 		}
+	}
+}
+
+func TestEngageLoadsCatalogFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	// one valid skill
+	sk := dir + "/attacking-oauth"
+	if err := os.MkdirAll(sk, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sk+"/SKILL.md", []byte("---\nname: attacking-oauth\ndescription: oauth jwt web\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BLKCHAIN_SKILLS_DIR", dir)
+	cat, err := loadEngageCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cat.Len() != 1 {
+		t.Errorf("catalog len = %d, want 1", cat.Len())
+	}
+}
+
+func TestEngageCatalogUnsetIsEmpty(t *testing.T) {
+	t.Setenv("BLKCHAIN_SKILLS_DIR", "")
+	cat, err := loadEngageCatalog()
+	if err != nil || cat.Len() != 0 {
+		t.Errorf("unset skills dir: err=%v len=%d", err, cat.Len())
 	}
 }

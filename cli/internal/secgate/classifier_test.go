@@ -166,3 +166,85 @@ func TestClassifyCrackerBoundsAreSplit(t *testing.T) {
 		t.Errorf("hashcat suggestion = %q", d.Suggestion)
 	}
 }
+
+func TestClassifyDeniesCodeExecutionFlags(t *testing.T) {
+	denied := []Command{
+		{Binary: "nmap", Args: []string{"--script", "http-vuln", "10.0.0.5"}},
+		{Binary: "nmap", Args: []string{"--script=x", "10.0.0.5"}},
+		{Binary: "nmap", Args: []string{"-p", "80", "--script-args", "a=b", "--script", "x", "10.0.0.5"}},
+		{Binary: "nmap", Args: []string{"-p", "80", "--script-args-file", "f", "10.0.0.5"}},
+		{Binary: "nmap", Args: []string{"-p", "80", "-script", "x", "10.0.0.5"}},
+		{Binary: "nmap", Args: []string{"-p", "80", "--scr=x", "10.0.0.5"}},
+		{Binary: "/usr/bin/nmap", Args: []string{"-p", "80", "--script=x", "10.0.0.5"}},
+		{Binary: "nc", Args: []string{"-e", "/bin/sh", "10.0.0.5"}},
+		{Binary: "nc", Args: []string{"-e/bin/sh", "10.0.0.5"}},
+		{Binary: "nc", Args: []string{"-ve", "/bin/sh", "10.0.0.5"}},
+		{Binary: "nc", Args: []string{"-c", "id", "10.0.0.5"}},
+		{Binary: "ncat", Args: []string{"--exec", "/bin/sh", "10.0.0.5"}},
+		{Binary: "ncat", Args: []string{"--exec=/bin/sh", "10.0.0.5"}},
+		{Binary: "ncat", Args: []string{"--sh-exec", "id", "10.0.0.5"}},
+		{Binary: "ncat", Args: []string{"-c", "id", "10.0.0.5"}},
+		{Binary: "ncat", Args: []string{"--lua-exec", "x", "10.0.0.5"}},
+		{Binary: "ncat", Args: []string{"--sh-e", "id", "10.0.0.5"}},
+	}
+	for _, c := range denied {
+		d := Classify(c)
+		if d.Allowed || !strings.Contains(d.Reason, "runs arbitrary code") {
+			t.Errorf("Classify(%q %v) = %+v, want a code-execution denial", c.Binary, c.Args, d)
+		}
+	}
+	allowed := []Command{
+		{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.5"}},
+		{Binary: "nmap", Args: []string{"-p", "80", "-sV", "10.0.0.5"}},
+		{Binary: "nmap", Args: []string{"-p", "80", "-sS", "-Pn", "--open", "10.0.0.5"}},
+		{Binary: "nc", Args: []string{"10.0.0.5", "22"}},
+		{Binary: "nc", Args: []string{"-vz", "-w", "3", "10.0.0.5", "22"}},
+		{Binary: "ncat", Args: []string{"10.0.0.5", "22"}},
+		{Binary: "ncat", Args: []string{"--ssl", "10.0.0.5", "443"}},
+	}
+	for _, c := range allowed {
+		if d := Classify(c); !d.Allowed {
+			t.Errorf("Classify(%q %v) denied a non-exec command: %q", c.Binary, c.Args, d.Reason)
+		}
+	}
+}
+
+func TestClassifyDeniesIPNetnsAndNmapDatadir(t *testing.T) {
+	denied := []Command{
+		{Binary: "ip", Args: []string{"netns", "add", "p"}},
+		{Binary: "ip", Args: []string{"netns", "exec", "p", "/bin/sh"}},
+		{Binary: "ip", Args: []string{"net", "exec", "p", "id"}},
+		{Binary: "ip", Args: []string{"-s", "netns", "list"}},
+		{Binary: "ip", Args: []string{"vrf", "exec", "v", "id"}},
+		{Binary: "ip", Args: []string{"-batch", "cmds"}},
+		{Binary: "ip", Args: []string{"-b", "cmds"}},
+		{Binary: "nmap", Args: []string{"--datadir", ".", "-sC", "10.0.0.5"}},
+		{Binary: "nmap", Args: []string{"--datadir=/tmp", "-sC", "10.0.0.5"}},
+		{Binary: "nmap", Args: []string{"--datad", ".", "10.0.0.5"}},
+		{Binary: "nmap", Args: []string{"-datadir", ".", "10.0.0.5"}},
+		{Binary: "curl", Args: []string{"--unix-socket", "/var/run/docker.sock", "http://localhost/"}},
+	}
+	for _, c := range denied {
+		d := Classify(c)
+		if d.Allowed || !strings.Contains(d.Reason, "runs arbitrary code") {
+			t.Errorf("Classify(%q %v) = %+v, want a code-execution denial", c.Binary, c.Args, d)
+		}
+	}
+	allowed := []Command{
+		{Binary: "ip", Args: []string{"addr"}},
+		{Binary: "ip", Args: []string{"route"}},
+		{Binary: "ip", Args: []string{"-s", "link"}},
+		{Binary: "ip", Args: []string{"neigh"}},
+		{Binary: "ip", Args: []string{"-4", "addr", "show", "dev", "eth0"}},
+		{Binary: "nmap", Args: []string{"-p", "80", "-sC", "10.0.0.5"}},
+		{Binary: "nmap", Args: []string{"-p", "80", "-A", "10.0.0.5"}},
+		{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.5"}},
+		{Binary: "nmap", Args: []string{"-p", "80", "--data-length", "10", "10.0.0.5"}},
+		{Binary: "curl", Args: []string{"http://h.example.com/"}},
+	}
+	for _, c := range allowed {
+		if d := Classify(c); !d.Allowed {
+			t.Errorf("Classify(%q %v) denied a non-exec command: %q", c.Binary, c.Args, d.Reason)
+		}
+	}
+}

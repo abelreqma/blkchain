@@ -5,13 +5,16 @@ import (
 	"errors"
 
 	"blkchain/cli/internal/ragconfig"
+	"blkchain/cli/internal/retrieval"
+	"blkchain/cli/internal/skillcat"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// mcp.go is blkChain's MCP stdio server (`blk mcp`). It exposes two tools,
-// kb_search and kb_answer, over the official modelcontextprotocol/go-sdk, using
-// the in-process retrieval.Client and AnswerLoop.
+// mcp.go is blkChain's MCP stdio server (`blk mcp`). It exposes three tools,
+// kb_search, kb_answer, and route_skill, over the official
+// modelcontextprotocol/go-sdk, using the in-process retrieval.Client and
+// AnswerLoop plus the read-only skill catalog.
 
 // mcpSearchIn is kb_search's tool input. TopK is a pointer so "not provided"
 // (nil) is distinguishable from an explicit 0.
@@ -26,9 +29,14 @@ type mcpAnswerIn struct {
 	Query string `json:"query" jsonschema:"the question to answer"`
 }
 
-// runMCP starts the MCP stdio server exposing kb_search and kb_answer. It runs
-// in-process against the Go retrieval client and answer loop, so embed_server
-// and Qdrant must be up.
+// mcpRouteIn is route_skill's tool input.
+type mcpRouteIn struct {
+	Domain string `json:"domain" jsonschema:"the engagement domain to route a skill for: generic, recon, web, ad, cloud, k8s, wifi, exploit-dev"`
+}
+
+// runMCP starts the MCP stdio server exposing kb_search, kb_answer, and
+// route_skill. It runs in-process against the Go retrieval client and answer
+// loop, so embed_server and Qdrant must be up.
 func runMCP(_ []string) error {
 	cfg := loadConfig()
 	rc, err := newRetrievalClient(cfg)
@@ -37,6 +45,19 @@ func runMCP(_ []string) error {
 	}
 	defer rc.Close()
 
+	cat, err := loadEngageCatalog()
+	if err != nil {
+		return err
+	}
+
+	s := newMCPServer(rc, cfg, cat)
+	return s.Run(context.Background(), &mcp.StdioTransport{MaxLineLength: 1 << 20})
+}
+
+// newMCPServer builds the blkchain MCP server and registers all three tools.
+// runMCP and the round-trip test both use it, so the test covers the real
+// registration.
+func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Catalog) *mcp.Server {
 	v, _, _, _ := versionInfo()
 	s := mcp.NewServer(&mcp.Implementation{Name: "blkchain", Version: v}, nil)
 
@@ -67,7 +88,36 @@ func runMCP(_ []string) error {
 		return nil, out, nil
 	})
 
-	return s.Run(context.Background(), &mcp.StdioTransport{MaxLineLength: 1 << 20})
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "route_skill",
+		Description: "Get the playbook for an engagement domain. Provide one domain (generic, recon, web, ad, cloud, k8s, wifi, exploit-dev); the harness selects the skill deterministically and returns its playbook. You cannot choose a specific skill by name; an unknown domain returns the generic playbook or a clear no-skill message.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in mcpRouteIn) (*mcp.CallToolResult, any, error) {
+		return nil, mcpRouteResult(cat, in.Domain), nil
+	})
+
+	return s
+}
+
+// mcpRouteResult is route_skill's read-only handler body, factored out for
+// direct testing. It calls the shared routeSkillFor selection, records no
+// receipt, and opens no file.
+func mcpRouteResult(cat *skillcat.Catalog, domain string) map[string]any {
+	sk, ok := routeSkillFor(cat, domain)
+	if !ok {
+		return map[string]any{"found": false, "domain": domainFor(domain).Name}
+	}
+	body := sk.Body
+	if r := []rune(body); len(r) > routeSkillBodyCap {
+		body = string(r[:routeSkillBodyCap])
+	}
+	return map[string]any{
+		"found":       true,
+		"skill":       sk.Name,
+		"domain":      sk.Domain,
+		"description": sk.Description,
+		"body":        body,
+		"digest":      sk.Digest,
+	}
 }
 
 // kbAnswer runs the answer loop for the kb_answer tool. Finding nothing is a

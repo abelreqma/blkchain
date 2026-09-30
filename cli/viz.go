@@ -158,16 +158,20 @@ func (r *vizRenderer) Block(ctx context.Context, v EngagementView) (string, bool
 	if err != nil {
 		return "", false, err
 	}
-	body, rerr := r.run.Render(ctx, vizMermaid(e), plCurrentTier() == plASCII)
-	body = sanitizeTerminal(body) // renderer output is data: no escapes reach the screen
-	var block string
-	if rerr != nil || strings.TrimSpace(body) == "" {
-		block = vizFallbackList(e)
-	} else {
-		block = vizFrame(e, vizColorize(body, e))
-	}
+	block := r.blockFor(ctx, e)
 	r.lastRev, r.lastOut, r.have = rev, block, true
 	return block, true, nil
+}
+
+// blockFor renders one snapshot to a framed DAG block, or the plain list when
+// the renderer fails or returns nothing. It does no caching and no polling.
+func (r *vizRenderer) blockFor(ctx context.Context, e Engagement) string {
+	body, rerr := r.run.Render(ctx, vizMermaid(e), plCurrentTier() == plASCII)
+	body = sanitizeTerminal(body) // renderer output is data: no escapes reach the screen
+	if rerr != nil || strings.TrimSpace(body) == "" {
+		return vizFallbackList(e)
+	}
+	return vizFrame(e, vizColorize(body, e))
 }
 
 func vizStatusStyle(s TaskStatus) lipgloss.Style {

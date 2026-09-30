@@ -77,7 +77,7 @@ func newRunCommandTool(g *secgate.Gate, capBytes int, timeout time.Duration, wor
 				if g.Audit != nil {
 					g.Audit("deny:fileaccess", secgate.Signature(cmd))
 				}
-				return "run_command denied: file path outside the working directory is not allowed: " + arg, nil
+				return "run_command denied: file path outside the working directory, or a config-file option, is not allowed: " + arg, nil
 			}
 			if g.Audit != nil {
 				g.Audit("exec", secgate.Signature(cmd))

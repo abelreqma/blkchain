@@ -10,6 +10,7 @@ import (
 	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/secgate"
+	"blkchain/cli/internal/skillcat"
 	"blkchain/cli/internal/tooldef"
 
 	"github.com/tmc/langchaingo/llms"
@@ -29,6 +30,13 @@ type engageDeps struct {
 	// WorkDir is the working directory run_command executes in (a per-engagement
 	// scratch dir). Empty inherits the process's own cwd.
 	WorkDir string
+	// Catalog is the loaded skill catalog; nil or empty is safe and yields no
+	// routable skills.
+	Catalog *skillcat.Catalog
+	// Progress, when set, is called after each committed plan mutation with the
+	// new revision and a fresh snapshot, for a live view of the engagement. It is
+	// nil-safe (nil disables it) and must not mutate the store.
+	Progress func(rev int64, snap engagement.Engagement)
 }
 
 var orchestratorSystemPrompt = "You are the orchestrator of an authorized, single-user, offline security-testing engagement. " +
@@ -86,20 +94,21 @@ func runExecutor(ctx context.Context, d engageDeps, taskID string) (string, erro
 	dom := domainFor(task.Kind)
 
 	reg := tooldef.NewRegistry()
+	activeTask := func() string {
+		snap, err := d.Store.Snapshot(ctx)
+		if err != nil {
+			return ""
+		}
+		return snap.ActiveID
+	}
 	tools := []tooldef.Tool{
 		newKBSearchTool(d.RC, d.Cfg),
 		newKBAnswerTool(d.RC, d.Cfg, !d.Prefs.Web),
 		newPlanAddTool(d.Store),
 		newPlanUpdateTool(d.Store),
+		newRouteSkillTool(d.Catalog, d.Store, activeTask),
 	}
 	if d.Gate != nil && d.Runs != nil {
-		activeTask := func() string {
-			snap, err := d.Store.Snapshot(ctx)
-			if err != nil {
-				return ""
-			}
-			return snap.ActiveID
-		}
 		tools = append(tools,
 			newRunCommandTool(d.Gate, runCommandCapBytes, runCommandTimeout, d.WorkDir, activeTask, d.Runs.Add),
 			newVerifiedRecordEvidenceTool(d.Store, d.Runs.Contains),
@@ -129,6 +138,10 @@ func runExecutor(ctx context.Context, d engageDeps, taskID string) (string, erro
 
 // runOrchestrator runs the top-level engagement loop for a goal.
 func runOrchestrator(ctx context.Context, d engageDeps, goal string) (string, error) {
+	if d.Progress != nil {
+		d.Store.SetOnApply(d.Progress)
+		defer d.Store.SetOnApply(nil)
+	}
 	reg := tooldef.NewRegistry()
 	// Evidence is verified against the shared per-episode capture when present,
 	// so the orchestrator cannot record a quote no executor actually captured.

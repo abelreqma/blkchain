@@ -1,0 +1,106 @@
+package skillcat
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func writeSkill(t *testing.T, dir, name, body string) {
+	t.Helper()
+	d := filepath.Join(dir, name)
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadCatalogAndDomains(t *testing.T) {
+	dir := t.TempDir()
+	writeSkill(t, dir, "abusing-adcs", "---\nname: abusing-adcs\ndescription: AD CS and kerberos abuse\n---\nbody\n")
+	writeSkill(t, dir, "attacking-oauth", "---\nname: attacking-oauth\ndescription: OAuth and JWT web attacks\n---\nbody\n")
+	writeSkill(t, dir, "broken", "no frontmatter\n")                            // excluded
+	writeSkill(t, dir, "dup", "---\nname: abusing-adcs\ndescription: x\n---\n") // duplicate name -> excluded
+
+	c, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Len() != 2 {
+		t.Errorf("Len = %d, want 2 (2 valid, 2 excluded)", c.Len())
+	}
+	if len(c.Errors()) != 2 {
+		t.Errorf("want 2 exclusion errors, got %d", len(c.Errors()))
+	}
+	if _, ok := c.Get("abusing-adcs"); !ok {
+		t.Error("abusing-adcs should be present")
+	}
+	ad := c.ForDomain("ad")
+	if len(ad) != 1 || ad[0].Name != "abusing-adcs" {
+		t.Errorf("ad domain = %v", ad)
+	}
+	web := c.ForDomain("web")
+	if len(web) != 1 || web[0].Name != "attacking-oauth" {
+		t.Errorf("web domain = %v", web)
+	}
+}
+
+func TestLoadEmptyDirIsNotError(t *testing.T) {
+	c, err := Load("")
+	if err != nil || c.Len() != 0 {
+		t.Errorf("empty dir: err=%v len=%d", err, c.Len())
+	}
+	c2, err := Load(filepath.Join(t.TempDir(), "does-not-exist"))
+	if err != nil || c2.Len() != 0 {
+		t.Errorf("missing dir should be empty catalog, no error: err=%v len=%d", err, c2.Len())
+	}
+}
+
+func TestDeriveDomain(t *testing.T) {
+	cases := map[string]string{
+		"active directory kerberos": "ad",
+		"aws s3 iam":                "cloud",
+		"kubernetes eks":            "k8s",
+		"oauth jwt xss":             "web",
+		"buffer overflow shellcode": "exploit-dev",
+		"random unrelated text":     "generic",
+	}
+	for desc, want := range cases {
+		if got := DeriveDomain("x", desc); got != want {
+			t.Errorf("DeriveDomain(%q) = %q, want %q", desc, got, want)
+		}
+	}
+}
+
+func TestDeriveDomainWordBoundary(t *testing.T) {
+	// Short keywords must not false-match inside unrelated words.
+	generic := []string{
+		"it breaks under load",  // must not hit k8s via "eks"/"aks"
+		"many weeks of testing", // must not hit k8s via "eks"
+		"the laws of physics",   // must not hit cloud via "aws"
+		"measure the diameter",  // must not hit cloud via "iam"
+		"see a therapist",       // must not hit web via "api"
+		"the capital city",      // must not hit web via "api"
+	}
+	for _, desc := range generic {
+		if got := DeriveDomain("x", desc); got != "generic" {
+			t.Errorf("DeriveDomain(desc=%q) = %q, want generic", desc, got)
+		}
+	}
+	// Hyphenated names must match multi-word keywords.
+	if got := DeriveDomain("request-smuggling", ""); got != "web" {
+		t.Errorf("request-smuggling name = %q, want web", got)
+	}
+	if got := DeriveDomain("active-directory-recon", ""); got != "ad" {
+		t.Errorf("active-directory name = %q, want ad", got)
+	}
+	// Real tokens still classify.
+	if got := DeriveDomain("eks-privesc", "attack EKS clusters"); got != "k8s" {
+		t.Errorf("eks = %q, want k8s", got)
+	}
+	if got := DeriveDomain("s3-enum", "enumerate s3 buckets"); got != "cloud" {
+		t.Errorf("s3 = %q, want cloud", got)
+	}
+}

@@ -194,6 +194,11 @@ func (s *Store) Apply(d Delta) (newRev int64, err error) {
 		return 0, err
 	}
 	committed = true
+	if s.onApply != nil {
+		if e, snapErr := s.Snapshot(context.Background()); snapErr == nil {
+			s.onApply(newRev, e)
+		}
+	}
 	return newRev, nil
 }
 

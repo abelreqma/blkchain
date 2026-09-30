@@ -57,10 +57,84 @@ func Classify(c Command) Decision {
 	if name := strings.ToLower(baseName(strings.TrimSpace(c.Binary))); deniedBinaries[name] {
 		return Decision{Allowed: false, Reason: name + " is a shell, interpreter, or exec-wrapper and is not permitted directly"}
 	}
+	if name := strings.ToLower(baseName(strings.TrimSpace(c.Binary))); name != "" {
+		if flag, bad := execFlag(name, c.Args); bad {
+			return Decision{Allowed: false, Reason: name + " " + flag + " runs arbitrary code and is not permitted"}
+		}
+	}
 	if d, tripped := classifyUnbounded(c); tripped {
 		return d
 	}
 	return Decision{Allowed: true}
+}
+
+// ncExecLong are the long options of nc/ncat that run a program or command.
+var ncExecLong = []string{"exec", "sh-exec", "lua-exec"}
+
+// execFlag reports the first argument that is a code-execution flag of a
+// default-allowlist binary: nmap --script and its relatives (NSE runs arbitrary
+// Lua, including os.execute), nmap --datadir (loads the NSE core from a
+// model-writable directory), nc/ncat -e, -c, --exec, --sh-exec, --lua-exec (run
+// a program on connect), curl --unix-socket (reaches local daemons such as
+// docker.sock), and ip netns / ip vrf / ip -batch (netns exec and vrf exec run
+// a program; a batch file can hold either). These bypass the shell and
+// interpreter denials above, so they are structural denials too. Matching
+// follows getopt: nmap uses getopt_long_only, so the flag may have one or two
+// dashes, may be abbreviated (--scr), and may carry =value; nc/ncat long
+// options may be abbreviated, and the short -e/-c may sit in a bundle (-ve) or
+// be glued to a value (-e/bin/sh). Matching errs toward denial.
+//
+// This covers the default-allowlist binaries only. A binary an operator adds
+// with an `allow` line that has its own exec flags needs its own review.
+func execFlag(name string, args []string) (string, bool) {
+	for _, a := range args {
+		if name == "ip" {
+			if f, bad := ipExecArg(a); bad {
+				return f, true
+			}
+		}
+		if len(a) < 2 || a[0] != '-' {
+			continue
+		}
+		double := strings.HasPrefix(a, "--")
+		fname, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		switch name {
+		case "nmap":
+			if strings.HasPrefix(fname, "script") || (len(fname) >= 3 && strings.HasPrefix("script", fname)) {
+				return a, true
+			}
+			// --datadir loads nse_main.lua and the NSE library from a directory
+			// the model can write, so it is the same RCE as --script.
+			if fname == "datadir" || (len(fname) >= 5 && strings.HasPrefix("datadir", fname)) || fname == "interactive" {
+				return a, true
+			}
+		case "curl":
+			// A unix socket reaches local daemons (docker.sock) that run code.
+			if fname == "unix-socket" || fname == "abstract-unix-socket" {
+				return a, true
+			}
+		case "nc", "ncat", "netcat":
+			if double {
+				for _, f := range ncExecLong {
+					if fname != "" && strings.HasPrefix(f, fname) {
+						return a, true
+					}
+				}
+				continue
+			}
+			run := fname
+			for i := 0; i < len(fname); i++ {
+				if c := fname[i]; !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+					run = fname[:i]
+					break
+				}
+			}
+			if strings.ContainsAny(run, "ec") {
+				return a, true
+			}
+		}
+	}
+	return "", false
 }
 
 // firstMetaToken returns the first forbidden token found in s, or "".
@@ -107,4 +181,28 @@ func hasAnyFlag(args []string, flags ...string) bool {
 		}
 	}
 	return false
+}
+
+// ipExecArg reports whether one argument of `ip` selects a code-execution
+// feature. iproute2 accepts any prefix of an object name, so `ip netns exec`
+// may be written `ip net exec`, and `ip vrf exec` as `ip v exec`. `ip -batch
+// FILE` runs commands read from a file, which could include either. Enumeration
+// objects (addr, route, link, neigh) and their flags are not matched.
+func ipExecArg(a string) (string, bool) {
+	if a == "" {
+		return "", false
+	}
+	if a[0] == '-' {
+		f := strings.TrimLeft(a, "-")
+		f, _, _ = strings.Cut(f, "=")
+		if f == "b" || (len(f) >= 2 && strings.HasPrefix("batch", f)) {
+			return a, true
+		}
+		return "", false
+	}
+	t := strings.ToLower(a)
+	if (len(t) >= 3 && strings.HasPrefix("netns", t)) || strings.HasPrefix("vrf", t) {
+		return a, true
+	}
+	return "", false
 }

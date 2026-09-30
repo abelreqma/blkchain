@@ -12,6 +12,7 @@ import (
 	"blkchain/cli/internal/askuser"
 	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/secgate"
+	"blkchain/cli/internal/skillcat"
 )
 
 // defaultEngageAllowlist is the base allowlist merged with the scope's allow
@@ -26,6 +27,12 @@ func defaultEngageAllowlist() []string {
 		"id", "whoami", "uname", "hostname", "ps", "ls", "cat", "head", "tail", "grep",
 		"stat", "getcap", "ss", "netstat", "ip", "ifconfig",
 	}
+}
+
+// loadEngageCatalog loads the skill catalog from BLKCHAIN_SKILLS_DIR. An
+// unset or empty dir yields an empty catalog and no error.
+func loadEngageCatalog() (*skillcat.Catalog, error) {
+	return skillcat.Load(os.Getenv("BLKCHAIN_SKILLS_DIR"))
 }
 
 // engageOpts holds `blk engage`'s flags.
@@ -84,6 +91,14 @@ func runEngage(args []string) error {
 	mode := secgate.Safe
 	if o.auto {
 		mode = secgate.Auto
+	}
+
+	cat, err := loadEngageCatalog()
+	if err != nil {
+		return fmt.Errorf("engage: %w", err)
+	}
+	if len(cat.Errors()) > 0 {
+		fmt.Fprintf(os.Stderr, "skill catalog: %d skill(s) excluded\n", len(cat.Errors()))
 	}
 
 	cfg := loadConfig()
@@ -150,16 +165,19 @@ func runEngage(args []string) error {
 	}
 	defer rc.Close()
 
+	r := newVizRenderer(newMmdfluxRunner())
 	deps := engageDeps{
-		Model:   model,
-		RC:      rc,
-		Cfg:     cfg,
-		Prefs:   prefs,
-		Store:   ws.Store,
-		Asker:   asker,
-		Gate:    gate,
-		Runs:    NewRunOutputs(),
-		WorkDir: scratch,
+		Model:    model,
+		RC:       rc,
+		Cfg:      cfg,
+		Prefs:    prefs,
+		Store:    ws.Store,
+		Asker:    asker,
+		Gate:     gate,
+		Runs:     NewRunOutputs(),
+		WorkDir:  scratch,
+		Catalog:  cat,
+		Progress: makeEngageProgress(os.Stdout, r, prefs.Viz),
 	}
 
 	final, err := runOrchestrator(context.Background(), deps, goal)

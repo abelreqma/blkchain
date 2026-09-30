@@ -15,6 +15,18 @@ import (
 // Store is a handle on one engagement database.
 type Store struct {
 	db *sql.DB
+	// onApply, when set, is called after each Apply that commits, with the new
+	// revision and a fresh snapshot. It is best-effort progress notification for
+	// a live view; a snapshot read error skips the call. Access is not
+	// synchronized: the engagement run drives the store sequentially.
+	onApply func(rev int64, e Engagement)
+}
+
+// SetOnApply registers a callback invoked after each committed Apply, with the
+// new revision and a fresh snapshot. Passing nil clears it. It is intended for a
+// live progress view and must not mutate the store.
+func (s *Store) SetOnApply(fn func(rev int64, e Engagement)) {
+	s.onApply = fn
 }
 
 const schema = `
