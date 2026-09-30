@@ -198,7 +198,7 @@ func TestMCPServerRoundTrip(t *testing.T) {
 	for _, tl := range tools.Tools {
 		have[tl.Name] = true
 	}
-	for _, want := range []string{"kb_search", "kb_answer", "route_skill"} {
+	for _, want := range []string{"kb_search", "kb_answer", "route_skill", "engage"} {
 		if !have[want] {
 			t.Errorf("tool %q not listed; have %v", want, have)
 		}

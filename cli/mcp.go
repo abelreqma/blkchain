@@ -95,6 +95,8 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 		return nil, mcpRouteResult(cat, in.Domain), nil
 	})
 
+	registerEngageTool(s, defaultEngageService(rc, cfg, cat))
+
 	return s
 }
 
