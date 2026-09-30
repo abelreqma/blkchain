@@ -35,3 +35,17 @@
 {"query": "commmand injektion via unsanitized shell input", "expected_substrings": ["command injection"], "difficulty": "hard", "notes": "typo obfuscation of command injection"}
 {"query": "after pulling temporary IAM keys from the metadata service, use them to execute actions in the cloud account", "expected_substrings": ["iam", "credentials"], "difficulty": "hard", "notes": "multi-hop SSRF->creds->cloud use"}
 {"query": "turn an unrestricted file upload into remote code execution via a web shell", "expected_substrings": ["upload", "shell"], "difficulty": "hard", "notes": "multi-hop file upload -> RCE"}
+{"query": "kerberoasting a service account to crack its ticket offline", "expected_substrings": ["kerberoast"], "notes": "AD: request TGS for SPN accounts, crack offline"}
+{"query": "AS-REP roasting accounts that lack Kerberos pre-authentication", "expected_substrings": ["asreproast", "as-rep"], "notes": "AD: DONT_REQ_PREAUTH accounts yield crackable AS-REP"}
+{"query": "DCSync attack to dump domain account hashes", "expected_substrings": ["dcsync"], "notes": "AD: replicate directory changes to pull secrets"}
+{"query": "pass-the-hash to move laterally with an NTLM hash", "expected_substrings": ["pass-the-hash"], "notes": "lateral movement: authenticate with NT hash, no plaintext"}
+{"query": "abuse a vulnerable AD CS certificate template to escalate privileges", "expected_substrings": ["certificate template", "adcs"], "notes": "ADCS ESC family: misconfigured template enrollment to DA"}
+{"query": "AWS IAM privilege escalation using iam:PassRole", "expected_substrings": ["iam:passrole", "passrole"], "notes": "cloud: PassRole + a compute create/invoke is a classic AWS privesc"}
+{"query": "abuse a kubernetes service account token from a pod", "expected_substrings": ["service account token"], "notes": "k8s: mounted SA token to reach the API server"}
+{"query": "escape a privileged container via a hostPath mount", "expected_substrings": ["hostpath"], "notes": "container escape: hostPath volume to read/write host filesystem"}
+{"query": "capture and crack the WPA2 four-way handshake", "expected_substrings": ["four-way handshake"], "notes": "wifi: EAPOL handshake capture then offline PSK crack"}
+{"query": "bypass Windows User Account Control to elevate", "expected_substrings": ["uac"], "notes": "windows privesc: UAC bypass to full admin token"}
+{"query": "crack NTLM hashes with hashcat", "expected_substrings": ["hashcat"], "notes": "cracking: hashcat NTLM mode on dumped hashes"}
+{"query": "use a return-oriented programming chain to bypass DEP", "expected_substrings": ["return-oriented", "rop"], "notes": "exploit dev: ROP gadget chain vs non-executable stack"}
+{"query": "trick wifi clients into joining my fake access point to capture credentials", "expected_substrings": ["evil twin"], "difficulty": "hard", "notes": "paraphrase of evil twin / rogue AP"}
+{"query": "request encrypted service tickets for accounts and crack them offline to recover passwords", "expected_substrings": ["kerberoast"], "difficulty": "hard", "notes": "paraphrase of kerberoasting without the term"}

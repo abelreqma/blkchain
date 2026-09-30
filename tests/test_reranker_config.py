@@ -29,14 +29,14 @@ class TestRerankerPathWiring(unittest.TestCase):
         self.assertEqual(kind, "qwen3")
         self.assertEqual(name, "Qwen3-Reranker-0.6B-4bit")
 
-    def test_bare_default_is_qwen3(self):
+    def test_bare_default_is_modernbert(self):
         env = {k: v for k, v in os.environ.items()
                if k not in ("BLKCHAIN_RERANKER_KIND", "BLKCHAIN_RERANKER_PATH")}
         r = subprocess.run([sys.executable, "-c", _CODE], capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
         kind, name = r.stdout.strip().splitlines()[-2:]
-        self.assertEqual(kind, "qwen3")
-        self.assertEqual(name, "Qwen3-Reranker-0.6B-4bit")
+        self.assertEqual(kind, "modernbert")
+        self.assertEqual(name, "gte-reranker-modernbert-base-mlx")
 
     def test_modernbert_still_selectable(self):
         kind, name = _run({"BLKCHAIN_RERANKER_KIND": "modernbert"})

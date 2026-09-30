@@ -98,6 +98,7 @@ class BuildIndexResumeTest(unittest.TestCase):
 
         class FakeClient:
             def __init__(self, *a, **k): pass
+            def collection_exists(self, name): return True
             def upsert(self, collection_name, points): upserted.extend(points)
 
         class FakeSparse:

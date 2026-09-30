@@ -260,6 +260,7 @@ def build_index(
         chunks = ingest.iter_chunks()
 
     client = QdrantClient(url=config.QDRANT_URL)
+    ensure_collection(collection)  # create on a fresh Qdrant before scrolling for existing hashes
     sparse_model = SparseTextEmbedding(model_name=config.SPARSE_MODEL)
     existing = _existing_hashes(client, collection) if resume else {}
 

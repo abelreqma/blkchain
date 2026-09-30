@@ -570,7 +570,7 @@ func TestFormatNoResultsIsWarningNotSuccess(t *testing.T) {
 func TestNoResultsMsgEndsTurnAsWarning(t *testing.T) {
 	noColor(t)
 	m := model{working: true, live: "stale", workingVerb: "answering", ta: textarea.New(),
-		openTargets: []string{"old.md"}, lastAnswer: "prev"}
+		openTargets: []openTarget{{Path: "old.md"}}, lastAnswer: "prev"}
 	nm, cmd := m.Update(noResultsMsg{})
 	got := nm.(model)
 	if got.working || got.live != "" || got.workingVerb != "" || len(got.openTargets) != 0 {
@@ -611,7 +611,7 @@ func TestFormatAnswerTagsWebCitations(t *testing.T) {
 
 func TestOpenWebTargetPrintsURLAndDoesNotOpen(t *testing.T) {
 	noColor(t)
-	m := model{openTargets: []string{"docs/a.md", "https://example.com/p?q=1\x1b]0;x\x07"}}
+	m := model{openTargets: []openTarget{{Path: "docs/a.md"}, {Path: "https://example.com/p?q=1\x1b]0;x\x07", Section: "Heading"}}}
 	for _, arg := range []string{"2", "https://example.com/p?q=1"} {
 		out := printed(t, m.openCmd(arg))
 		if !strings.Contains(out, "web results are not opened automatically") || !strings.Contains(out, "https://example.com/p?q=1") {
@@ -619,6 +619,57 @@ func TestOpenWebTargetPrintsURLAndDoesNotOpen(t *testing.T) {
 		}
 		if strings.ContainsRune(out, 0x1b) || strings.ContainsRune(out, 0x07) || strings.Count(out, "\n") > 1 {
 			t.Errorf("/open %s: output not sanitized or not one line: %q", arg, out)
+		}
+	}
+}
+
+func TestOpenTargetsCarrySections(t *testing.T) {
+	cits := []citation{{Path: "a.md", Section: "A > B"}, {Path: "https://x.test/p"}}
+	got := citationTargets(cits)
+	if len(got) != 2 || got[0] != (openTarget{Path: "a.md", Section: "A > B"}) || got[1].Section != "" {
+		t.Errorf("citationTargets = %+v", got)
+	}
+	var r retrieval.Result
+	r.Payload.Path, r.Payload.Section = "b.md", "page 3"
+	rt := resultTargets([]retrieval.Result{r})
+	if len(rt) != 1 || rt[0] != (openTarget{Path: "b.md", Section: "page 3"}) {
+		t.Errorf("resultTargets = %+v", rt)
+	}
+}
+
+func TestOpenNumberJumpsToCitedSection(t *testing.T) {
+	dir := t.TempDir()
+	doc := filepath.Join(dir, "doc.md")
+	if err := os.WriteFile(doc, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeLess(t)
+	got := captureViewer(t)
+	m := model{openTargets: []openTarget{{Path: doc, Section: "SSRF > Blind SSRF"}, {Path: doc}}}
+
+	path, section, done := m.openAction("1")
+	if done != nil {
+		t.Fatal("unexpected notice for a local target")
+	}
+	if err := openFile(path, section, false); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"+/Blind SSRF", "--", doc}; strings.Join(*got, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("/open 1 argv = %q, want %q", *got, want)
+	}
+
+	// No section on the target, and a literal path: open at the top.
+	for _, arg := range []string{"2", doc} {
+		path, section, done = m.openAction(arg)
+		if done != nil || section != "" {
+			t.Fatalf("/open %s: section %q notice %v", arg, section, done != nil)
+		}
+		*got = nil
+		if err := openFile(path, section, false); err != nil {
+			t.Fatal(err)
+		}
+		if len(*got) != 1 || (*got)[0] != doc {
+			t.Errorf("/open %s argv = %q", arg, *got)
 		}
 	}
 }

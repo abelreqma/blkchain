@@ -391,7 +391,7 @@ type model struct {
 	prefs modelPrefs
 
 	lastAnswer  string
-	openTargets []string // paths for /open N (from the last answer or search)
+	openTargets []openTarget // files for /open N (from the last answer or search)
 
 	// cfg is the RAG config, read once when the session starts. rc is the
 	// session's one retrieval client, closed when the session ends; rcErr is why
@@ -772,7 +772,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Println(b.String())
 		}
 		m.lastAnswer = full
-		m.openTargets = citationPaths(msg.citations)
+		m.openTargets = citationTargets(msg.citations)
 		m.servicesOK, m.servicesChecked = true, true
 		m.recordTurn(full)
 		m.lastCost, m.lastCostSet = cost, true
@@ -786,7 +786,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel()
 			m.cancel = nil
 		}
-		m.openTargets = resultPaths(msg.results)
+		m.openTargets = resultTargets(msg.results)
 		m.markRetrievalOK()
 		return m, m.finish(tea.Println(strings.TrimRight(formatResults(msg.query, msg.results, msg.elapsed, m.renderWidth()), "\n")))
 
@@ -2024,27 +2024,38 @@ func execFuncCmd(fn func() error) tea.Cmd {
 }
 
 func (m model) openCmd(arg string) tea.Cmd {
+	path, section, done := m.openAction(arg)
+	if done != nil {
+		return done
+	}
+	return execFuncCmd(func() error { return openFile(path, section, false) })
+}
+
+// openAction resolves a /open argument to the file and cited section to open.
+// A non-nil cmd means there is nothing to open: it prints the error or the web
+// notice instead. A literal path has no section.
+func (m model) openAction(arg string) (path, section string, done tea.Cmd) {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
-		return tea.Println(styleErr(errors.New("open: give a number (e.g. /open 2) or a path")))
+		return "", "", tea.Println(styleErr(errors.New("open: give a number (e.g. /open 2) or a path")))
 	}
 	if n, err := strconv.Atoi(arg); err == nil {
 		if n < 1 || n > len(m.openTargets) {
-			return tea.Println(styleErr(fmt.Errorf("open: no item %d (have %d)", n, len(m.openTargets))))
+			return "", "", tea.Println(styleErr(fmt.Errorf("open: no item %d (have %d)", n, len(m.openTargets))))
 		}
-		path := m.openTargets[n-1]
-		if path == "" {
-			return tea.Println(styleErr(fmt.Errorf("open: item %d has no file path", n)))
+		t := m.openTargets[n-1]
+		if t.Path == "" {
+			return "", "", tea.Println(styleErr(fmt.Errorf("open: item %d has no file path", n)))
 		}
-		if isWebURL(path) {
-			return tea.Println(openWebNotice(path))
+		if isWebURL(t.Path) {
+			return "", "", tea.Println(openWebNotice(t.Path))
 		}
-		return execFuncCmd(func() error { return openFile(path, false) })
+		return t.Path, t.Section, nil
 	}
 	if isWebURL(arg) {
-		return tea.Println(openWebNotice(arg))
+		return "", "", tea.Println(openWebNotice(arg))
 	}
-	return execFuncCmd(func() error { return openFile(arg, false) })
+	return arg, "", nil
 }
 
 // isWebURL reports whether a source path is an http(s) URL (a web citation or an
@@ -2760,20 +2771,26 @@ func ellipsis() string {
 	return "..."
 }
 
-func citationPaths(cits []citation) []string {
-	paths := make([]string, len(cits))
-	for i, c := range cits {
-		paths[i] = c.Path
-	}
-	return paths
+// openTarget is a file /open N can open, with the cited section to jump to.
+type openTarget struct {
+	Path    string
+	Section string
 }
 
-func resultPaths(results []retrieval.Result) []string {
-	paths := make([]string, len(results))
-	for i, r := range results {
-		paths[i] = r.Payload.Path
+func citationTargets(cits []citation) []openTarget {
+	targets := make([]openTarget, len(cits))
+	for i, c := range cits {
+		targets[i] = openTarget{Path: c.Path, Section: c.Section}
 	}
-	return paths
+	return targets
+}
+
+func resultTargets(results []retrieval.Result) []openTarget {
+	targets := make([]openTarget, len(results))
+	for i, r := range results {
+		targets[i] = openTarget{Path: r.Payload.Path, Section: r.Payload.Section}
+	}
+	return targets
 }
 
 func isUnreachable(err error) bool {

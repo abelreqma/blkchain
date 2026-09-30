@@ -94,10 +94,12 @@ func commandSpecs() []cmdSpec {
 			desc: "open a cited source in your pager or editor",
 			long: "Opens a source that a search or answer cited, in your pager (less unless PAGER is set) or, with --edit, in your editor (EDITOR, then VISUAL, then vi). " +
 				"A relative path is looked up from the current folder first, then from the project folder, so a path printed by blk search works as printed. " +
+				"With --section and less as the pager, it opens at that heading instead of the top; in the TUI, /open N does this for the cited section. " +
 				"A web address is printed, not opened.",
-			flags: func(fs *flag.FlagSet) { defineOpenFlags(fs, new(bool)) },
+			flags: func(fs *flag.FlagSet) { defineOpenFlags(fs, new(bool), new(string)) },
 			examples: []string{
 				"blk open sources/notes/ssrf.md",
+				`blk open sources/wstg/sqli.md --section "Testing for SQL Injection"`,
 				"blk open --edit ./my-notes.md",
 			},
 			run: runOpen,

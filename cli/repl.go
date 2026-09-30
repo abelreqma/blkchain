@@ -190,9 +190,9 @@ func replOpen(arg string, last []retrieval.Result) error {
 		if path == "" {
 			return fmt.Errorf("open: result %d has no file path", n)
 		}
-		return openFile(path, false)
+		return openFile(path, last[n-1].Payload.Section, false)
 	}
-	return openFile(arg, false)
+	return openFile(arg, "", false)
 }
 
 // replSpecDesc is a command's shared one-line description.

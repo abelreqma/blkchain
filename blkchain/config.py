@@ -90,8 +90,15 @@ def _embedder_path() -> Path:
 EMBEDDER_PATH = _embedder_path()
 EMBED_DIM = 1024  # Qwen3-Embedding-0.6B native dim (MRL-truncatable later)
 
-# Reranker models are selected through configuration.
-RERANKER_KIND = os.environ.get("BLKCHAIN_RERANKER_KIND", "qwen3").strip().lower()
+# Reranker is pluggable. "modernbert" (default) = gte-reranker-modernbert-base
+
+
+# causal-LM reranker (Apache-2.0): instruction-aware, ~one 0.6B forward per
+
+# queries. "jina" = jina-reranker-v3 listwise (CC-BY-NC-4.0, non-commercial).
+# Each model must be downloaded to use it. All expose rerank_documents(query,
+# documents) via blkchain.reranker.
+RERANKER_KIND = os.environ.get("BLKCHAIN_RERANKER_KIND", "modernbert").strip().lower()
 
 
 def _reranker_path() -> Path:
@@ -142,7 +149,7 @@ CONTENT_FILE_MAX_LINES = 2000
 # Single source of truth for WHAT to ingest. No module hardcodes a document
 # path; ingestion iterates CORPUS_SOURCES, all derived from the paths above.
 # kind drives the chunking strategy (implemented in the ingest module):
-#   markdown_vault | markdown | pdf | payloads | skills | seclists
+#   markdown_vault | markdown | pdf | payloads | skills | seclists | json
 from dataclasses import dataclass, field  # noqa: E402
 
 
@@ -168,6 +175,11 @@ _CORPUS: list[SourceSpec] = [
     SourceSpec("arc-pi-taxonomy", SOURCES_DIR / "arc_pi_taxonomy", "markdown", exclude=("docs", "LICENSE.md")),
     SourceSpec("wstg", WSTG_PDF, "pdf"),
     SourceSpec("ai-pentest-pdf", AI_PENTEST_DIR / "AI_ML_LLM_pentesting_resources.pdf", "pdf"),
+    SourceSpec("arsenal-json", SOURCES_DIR / "arsenal" / "curated-en", "json"),
+    SourceSpec("arsenal-checklists", SOURCES_DIR / "arsenal" / "checklists-en", "markdown"),
+    SourceSpec("violin-skills", SOURCES_DIR / "violin-skills", "skills"),
+    SourceSpec("offensive-skills", SOURCES_DIR / "skills", "skills"),
+    SourceSpec("cai", SOURCES_DIR / "cai", "markdown"),
 ]
 # Optional corpora: included only when their location is configured (else skipped).
 if SKILLS_DIR is not None:

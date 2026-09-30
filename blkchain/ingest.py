@@ -7,6 +7,7 @@ implements.
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -425,6 +426,44 @@ def _chunk_seclists(spec: config.SourceSpec) -> Iterator[Chunk]:
         yield from _chunk_seclists_file(file_path, source, spec.path)
 
 
+def _chunk_arsenal_json(spec: config.SourceSpec) -> Iterator[Chunk]:
+    source = _source_name(spec)
+    for file_path in _iter_files(spec.path, {".json"}, spec.exclude):
+        try:
+            data = json.loads(file_path.read_text(encoding="utf-8", errors="ignore"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+            continue
+        path_str = _rel_path(file_path)
+        cwe = _cwe_class_from_path(file_path.stem.replace("-", " ").replace("_", " "))
+        category = data.get("category", "")
+        idx = 0
+        for entry in data["entries"]:
+            if not isinstance(entry, dict):
+                continue
+            title = entry.get("title") or ""
+            body = entry.get("body") or ""
+            if not body.strip():
+                body = (entry.get("meta") or {}).get("caption") or ""
+            if not title.strip() and not body.strip():
+                continue
+            text = f"{title}\n\n{body}".strip()
+            section = f"{category} > {entry.get('subcategory', '')}".strip()
+            section = section.removesuffix(">").strip()
+            yield Chunk(
+                id=chunk_id(path_str, str(idx)),
+                text=text,
+                source=source,
+                path=path_str,
+                section=section,
+                type="technique",
+                identifiers=_extract_identifiers(text),
+                cwe_class=cwe,
+            )
+            idx += 1
+
+
 _DISPATCH = {
     "markdown_vault": _chunk_markdown_dir,
     "markdown": _chunk_markdown_dir,
@@ -432,6 +471,7 @@ _DISPATCH = {
     "pdf": _chunk_pdf,
     "skills": _chunk_skills,
     "seclists": _chunk_seclists,
+    "json": _chunk_arsenal_json,
 }
 
 
