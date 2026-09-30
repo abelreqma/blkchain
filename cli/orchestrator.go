@@ -9,6 +9,7 @@ import (
 	"blkchain/cli/internal/askuser"
 	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/ragconfig"
+	"blkchain/cli/internal/secgate"
 	"blkchain/cli/internal/tooldef"
 
 	"github.com/tmc/langchaingo/llms"
@@ -23,6 +24,11 @@ type engageDeps struct {
 	Prefs modelPrefs
 	Store *engagement.Store
 	Asker askuser.Asker
+	Gate  *secgate.Gate // command-execution gate for executors; nil disables run_command
+	Runs  *RunOutputs   // per-episode captured command output for evidence verification
+	// WorkDir is the working directory run_command executes in (a per-engagement
+	// scratch dir). Empty inherits the process's own cwd.
+	WorkDir string
 }
 
 var orchestratorSystemPrompt = "You are the orchestrator of an authorized, single-user, offline security-testing engagement. " +
@@ -80,13 +86,28 @@ func runExecutor(ctx context.Context, d engageDeps, taskID string) (string, erro
 	dom := domainFor(task.Kind)
 
 	reg := tooldef.NewRegistry()
-	for _, t := range []tooldef.Tool{
+	tools := []tooldef.Tool{
 		newKBSearchTool(d.RC, d.Cfg),
 		newKBAnswerTool(d.RC, d.Cfg, !d.Prefs.Web),
 		newPlanAddTool(d.Store),
 		newPlanUpdateTool(d.Store),
-		newRecordEvidenceTool(d.Store),
-	} {
+	}
+	if d.Gate != nil && d.Runs != nil {
+		activeTask := func() string {
+			snap, err := d.Store.Snapshot(ctx)
+			if err != nil {
+				return ""
+			}
+			return snap.ActiveID
+		}
+		tools = append(tools,
+			newRunCommandTool(d.Gate, runCommandCapBytes, runCommandTimeout, d.WorkDir, activeTask, d.Runs.Add),
+			newVerifiedRecordEvidenceTool(d.Store, d.Runs.Contains),
+		)
+	} else {
+		tools = append(tools, newRecordEvidenceTool(d.Store))
+	}
+	for _, t := range tools {
 		if err := reg.Register(t); err != nil {
 			return "", err
 		}
@@ -109,13 +130,19 @@ func runExecutor(ctx context.Context, d engageDeps, taskID string) (string, erro
 // runOrchestrator runs the top-level engagement loop for a goal.
 func runOrchestrator(ctx context.Context, d engageDeps, goal string) (string, error) {
 	reg := tooldef.NewRegistry()
+	// Evidence is verified against the shared per-episode capture when present,
+	// so the orchestrator cannot record a quote no executor actually captured.
+	recordEvidence := newRecordEvidenceTool(d.Store)
+	if d.Runs != nil {
+		recordEvidence = newVerifiedRecordEvidenceTool(d.Store, d.Runs.Contains)
+	}
 	for _, t := range []tooldef.Tool{
 		newKBSearchTool(d.RC, d.Cfg),
 		newKBAnswerTool(d.RC, d.Cfg, !d.Prefs.Web),
 		newPlanAddTool(d.Store),
 		newPlanUpdateTool(d.Store),
 		newPlanCompleteTool(d.Store),
-		newRecordEvidenceTool(d.Store),
+		recordEvidence,
 		newAskUserTool(d.Asker),
 		newDispatchAgentTool(d),
 	} {

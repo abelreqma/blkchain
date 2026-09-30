@@ -122,3 +122,41 @@ func TestParseScopeAcceptsNonHexLookalikes(t *testing.T) {
 		}
 	}
 }
+
+func TestScopeLocalAndAllowDirectives(t *testing.T) {
+	src := "local\nallow nmap\nallow /usr/bin/find\n10.0.0.0/24\n"
+	s, err := ParseScope(strings.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.Local() {
+		t.Error("local directive not parsed")
+	}
+	bins := s.AllowedBins()
+	if len(bins) != 2 || bins[0] != "nmap" || bins[1] != "find" {
+		t.Errorf("AllowedBins = %v, want [nmap find] (base names)", bins)
+	}
+	if !s.InScope("10.0.0.9") {
+		t.Error("target line still in scope")
+	}
+}
+
+func TestScopeLocalOnlyIsValidNonEmptyForAuto(t *testing.T) {
+	s, err := ParseScope(strings.NewReader("local\nallow id\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.Local() {
+		t.Fatal("expected local")
+	}
+	// Empty() is about TARGET entries; a local-only scope has none.
+	if !s.Empty() {
+		t.Error("a local-only scope has no target entries, so Empty() is true")
+	}
+}
+
+func TestScopeAllowEmptyBaseNameIsError(t *testing.T) {
+	if _, err := ParseScope(strings.NewReader("local\nallow /\n")); err == nil {
+		t.Error("allow with an empty base name must be a parse error")
+	}
+}

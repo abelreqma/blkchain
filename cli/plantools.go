@@ -55,6 +55,9 @@ func newPlanAddTool(st *engagement.Store) tooldef.Tool {
 			if err := json.Unmarshal([]byte(argsJSON), &a); err != nil {
 				return "plan_add: invalid arguments: " + err.Error(), nil
 			}
+			if strings.EqualFold(strings.TrimSpace(a.Status), string(engagement.StatusDone)) {
+				return "plan_add: cannot set status done directly; record_evidence then plan_complete", nil
+			}
 			rev, err := st.Apply(engagement.Delta{
 				Upserts: []engagement.Task{planTaskFromArgs(a)},
 				Kind:    "plan_add",
@@ -75,6 +78,9 @@ func newPlanUpdateTool(st *engagement.Store) tooldef.Tool {
 			var a planTaskArgs
 			if err := json.Unmarshal([]byte(argsJSON), &a); err != nil {
 				return "plan_update: invalid arguments: " + err.Error(), nil
+			}
+			if strings.EqualFold(strings.TrimSpace(a.Status), string(engagement.StatusDone)) {
+				return "plan_update: cannot set status done directly; record_evidence then plan_complete", nil
 			}
 			cur, err := st.GetTask(a.ID)
 			if errors.Is(err, engagement.ErrNotFound) {
@@ -125,6 +131,13 @@ func newPlanCompleteTool(st *engagement.Store) tooldef.Tool {
 			if strings.TrimSpace(a.ID) == "" {
 				return "plan_complete: invalid arguments: id is required", nil
 			}
+			ev, err := st.EvidenceFor(a.ID)
+			if err != nil {
+				return "plan_complete: " + err.Error(), nil
+			}
+			if len(ev) == 0 {
+				return "plan_complete: cannot complete " + a.ID + " without recorded evidence; run the task, then record_evidence an exact quote of its output first", nil
+			}
 			rev, err := st.Apply(engagement.Delta{Completes: []string{a.ID}, Kind: "plan_complete", Detail: a.ID})
 			if err != nil {
 				return "plan_complete: rejected: " + err.Error(), nil
@@ -144,6 +157,31 @@ func newRecordEvidenceTool(st *engagement.Store) tooldef.Tool {
 			}
 			if strings.TrimSpace(a.TaskID) == "" || strings.TrimSpace(a.Quote) == "" {
 				return "record_evidence: invalid arguments: task_id and quote are required", nil
+			}
+			id, err := st.RecordEvidence(a.TaskID, a.Quote)
+			if err != nil {
+				return "record_evidence: " + err.Error(), nil
+			}
+			return fmt.Sprintf("recorded evidence %d for task %s", id, a.TaskID), nil
+		})
+}
+
+// newVerifiedRecordEvidenceTool is record_evidence that accepts only a quote
+// verify() confirms is a real substring of captured command output for the task.
+func newVerifiedRecordEvidenceTool(st *engagement.Store, verify func(taskID, quote string) bool) tooldef.Tool {
+	return newStoreTool("record_evidence",
+		"Store an exact quote of real tool or command output as evidence for a task. The quote must appear verbatim in output run_command produced for that task.",
+		recordEvidenceArgs{},
+		func(ctx context.Context, argsJSON string) (string, error) {
+			var a recordEvidenceArgs
+			if err := json.Unmarshal([]byte(argsJSON), &a); err != nil {
+				return "record_evidence: invalid arguments: " + err.Error(), nil
+			}
+			if strings.TrimSpace(a.TaskID) == "" || strings.TrimSpace(a.Quote) == "" {
+				return "record_evidence: invalid arguments: task_id and quote are required", nil
+			}
+			if verify != nil && !verify(a.TaskID, a.Quote) {
+				return "record_evidence: rejected: the quote must be an exact quote of real command output for this task; run_command first and quote its output verbatim", nil
 			}
 			id, err := st.RecordEvidence(a.TaskID, a.Quote)
 			if err != nil {

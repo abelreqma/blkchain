@@ -108,13 +108,17 @@ func hasASCIILetter(s string) bool {
 
 // Scope is a parsed engagement scope: in-scope and out-of-scope target matchers.
 type Scope struct {
-	in  []scopeMatcher
-	out []scopeMatcher
+	in        []scopeMatcher
+	out       []scopeMatcher
+	local     bool
+	allowBins []string
 }
 
 // ParseScope reads a line-based scope file. Blank lines and lines beginning with
 // '#' are ignored. A line beginning '!' is an out-of-scope exclusion; any other
-// non-blank line is an in-scope entry. A malformed entry is an error (fail
+// non-blank line is an in-scope entry. The line "local" (case-insensitive)
+// authorizes local commands, and "allow <binary>" adds a binary to the scope's
+// allow-list. A malformed entry is an error (fail
 // closed: a broken scope file never yields a permissive scope).
 func ParseScope(r io.Reader) (*Scope, error) {
 	s := &Scope{}
@@ -124,6 +128,18 @@ func ParseScope(r io.Reader) (*Scope, error) {
 		line++
 		raw := strings.TrimSpace(sc.Text())
 		if raw == "" || strings.HasPrefix(raw, "#") {
+			continue
+		}
+		if strings.EqualFold(raw, "local") {
+			s.local = true
+			continue
+		}
+		if f := strings.Fields(raw); len(f) == 2 && strings.EqualFold(f[0], "allow") {
+			b := baseName(f[1])
+			if b == "" {
+				return nil, fmt.Errorf("scope line %d: allow needs a binary name", line)
+			}
+			s.allowBins = append(s.allowBins, b)
 			continue
 		}
 		out := false
@@ -165,3 +181,10 @@ func (s *Scope) InScope(target string) bool {
 
 // Empty reports whether the scope has no in-scope entries.
 func (s *Scope) Empty() bool { return len(s.in) == 0 }
+
+// Local reports whether the scope authorizes running commands on the local host
+// (a local engagement), which permits commands with no network target.
+func (s *Scope) Local() bool { return s.local }
+
+// AllowedBins returns the base names from `allow <binary>` scope lines.
+func (s *Scope) AllowedBins() []string { return append([]string(nil), s.allowBins...) }

@@ -55,6 +55,9 @@ func TestPlanCompleteMarksDone(t *testing.T) {
 	if _, err := newPlanAddTool(st).Call(context.Background(), `{"id":"t1","kind":"recon"}`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := newRecordEvidenceTool(st).Call(context.Background(), `{"task_id":"t1","quote":"port 22 open"}`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := newPlanCompleteTool(st).Call(context.Background(), `{"id":"t1"}`); err != nil {
 		t.Fatal(err)
 	}
@@ -128,5 +131,91 @@ func TestPlanUpdateUnknownTaskSoft(t *testing.T) {
 	}
 	if _, err := st.GetTask("nope"); !errors.Is(err, engagement.ErrNotFound) {
 		t.Errorf("GetTask err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPlanCompleteRequiresEvidence(t *testing.T) {
+	st := openStore(t)
+	if _, err := newPlanAddTool(st).Call(context.Background(), `{"id":"t1","kind":"recon"}`); err != nil {
+		t.Fatal(err)
+	}
+	// No evidence yet -> complete is soft-rejected and the task stays not-done.
+	out, err := newPlanCompleteTool(st).Call(context.Background(), `{"id":"t1"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(out), "evidence") {
+		t.Errorf("expected an evidence-required message, got %q", out)
+	}
+	got, _ := st.GetTask("t1")
+	if got.Status == engagement.StatusDone {
+		t.Error("task must not be done without evidence")
+	}
+	// With evidence, complete succeeds.
+	if _, err := newRecordEvidenceTool(st).Call(context.Background(), `{"task_id":"t1","quote":"port 22 open"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newPlanCompleteTool(st).Call(context.Background(), `{"id":"t1"}`); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = st.GetTask("t1")
+	if got.Status != engagement.StatusDone {
+		t.Errorf("status = %q, want done after evidence", got.Status)
+	}
+}
+
+func TestVerifiedRecordEvidenceRejectsFabricated(t *testing.T) {
+	st := openStore(t)
+	if _, err := newPlanAddTool(st).Call(context.Background(), `{"id":"t1","kind":"recon"}`); err != nil {
+		t.Fatal(err)
+	}
+	verify := func(task, quote string) bool { return task == "t1" && quote == "real output" }
+	tool := newVerifiedRecordEvidenceTool(st, verify)
+	// A fabricated quote is rejected and stored nothing.
+	out, err := tool.Call(context.Background(), `{"task_id":"t1","quote":"made up"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(out), "exact quote") {
+		t.Errorf("want a real-quote-required message, got %q", out)
+	}
+	if ev, _ := st.EvidenceFor("t1"); len(ev) != 0 {
+		t.Error("fabricated evidence must not be stored")
+	}
+	// A real quote is stored.
+	if _, err := tool.Call(context.Background(), `{"task_id":"t1","quote":"real output"}`); err != nil {
+		t.Fatal(err)
+	}
+	if ev, _ := st.EvidenceFor("t1"); len(ev) != 1 {
+		t.Error("verified evidence should be stored")
+	}
+}
+
+func TestPlanAddAndUpdateRefuseDoneStatus(t *testing.T) {
+	st := openStore(t)
+	out, err := newPlanAddTool(st).Call(context.Background(), `{"id":"t1","kind":"recon","status":"done"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(out), "done") {
+		t.Errorf("plan_add should refuse status done, got %q", out)
+	}
+	if _, err := st.GetTask("t1"); err == nil {
+		t.Error("plan_add with status done must not create the task")
+	}
+	// plan_update likewise.
+	if _, err := newPlanAddTool(st).Call(context.Background(), `{"id":"t2","kind":"recon"}`); err != nil {
+		t.Fatal(err)
+	}
+	out2, err := newPlanUpdateTool(st).Call(context.Background(), `{"id":"t2","status":"done"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(out2), "done") {
+		t.Errorf("plan_update should refuse status done, got %q", out2)
+	}
+	got, _ := st.GetTask("t2")
+	if got.Status == engagement.StatusDone {
+		t.Error("plan_update must not set done directly")
 	}
 }

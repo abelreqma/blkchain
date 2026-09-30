@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"blkchain/cli/internal/askuser"
 	"blkchain/cli/internal/engagement"
@@ -104,7 +105,8 @@ func TestRunOrchestratorPlansThenDispatches(t *testing.T) {
 	model := &scriptModel{resps: []*llms.ContentResponse{
 		toolCallResp("c1", "plan_add", `{"id":"t1","kind":"recon","target":"10.0.0.5","objective":"enumerate"}`),
 		toolCallResp("c2", "dispatch_agent", `{"task_id":"t1"}`),
-		// executor turn (runs within dispatch_agent):
+		// executor turn (runs within dispatch_agent): record evidence, then finish.
+		toolCallResp("c2e", "record_evidence", `{"task_id":"t1","quote":"22/tcp open ssh"}`),
 		finalResp("executor: found ssh on 22"),
 		// back in the orchestrator:
 		toolCallResp("c3", "plan_complete", `{"id":"t1"}`),
@@ -124,5 +126,68 @@ func TestRunOrchestratorPlansThenDispatches(t *testing.T) {
 	}
 	if got.Status != engagement.StatusDone {
 		t.Errorf("t1 status = %q, want done", got.Status)
+	}
+}
+
+func TestExecutorRunsCommandAndRecordsEvidence(t *testing.T) {
+	d := testDeps(t, nil)
+	// seed an active task
+	name, active := "eng", "t1"
+	stage := engagement.Stage{Label: "dispatch", Tool: "recon"}
+	if _, err := d.Store.Apply(engagement.Delta{
+		Upserts: []engagement.Task{{ID: "t1", Kind: "recon", Target: "10.0.0.5", Objective: "scan", Status: engagement.StatusActive}},
+		SetName: &name, SetActiveID: &active, SetStage: &stage, Kind: "init",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d.Gate = autoGate(t)
+	d.Runs = NewRunOutputs()
+	withStubExec(t, func(ctx context.Context, bin string, args []string, dir string, capBytes int, timeout time.Duration) runResult {
+		return runResult{Output: "22/tcp open ssh"}
+	})
+	// executor: run_command, then record_evidence a real quote, then finish.
+	exec := &scriptModel{resps: []*llms.ContentResponse{
+		toolCallResp("c1", "run_command", `{"binary":"nmap","args":["-p","22","10.0.0.5"]}`),
+		toolCallResp("c2", "record_evidence", `{"task_id":"t1","quote":"22/tcp open"}`),
+		finalResp("found ssh"),
+	}}
+	d.Model = exec
+	out, err := runExecutor(context.Background(), d, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "ssh") {
+		t.Errorf("executor final: %q", out)
+	}
+	ev, _ := d.Store.EvidenceFor("t1")
+	if len(ev) != 1 {
+		t.Errorf("evidence rows = %d, want 1 (verified real quote)", len(ev))
+	}
+}
+
+func TestOrchestratorRejectsFabricatedEvidenceWithRuns(t *testing.T) {
+	d := testDeps(t, nil)
+	d.Gate = autoGate(t)
+	d.Runs = NewRunOutputs()
+	// The orchestrator invents a quote no executor captured, then tries to
+	// complete the task. Both must fail.
+	d.Model = &scriptModel{resps: []*llms.ContentResponse{
+		toolCallResp("c1", "plan_add", `{"id":"t1","kind":"recon","target":"10.0.0.5","objective":"enumerate"}`),
+		toolCallResp("c2", "record_evidence", `{"task_id":"t1","quote":"made up ssh banner"}`),
+		toolCallResp("c3", "plan_complete", `{"id":"t1"}`),
+		finalResp("stopped"),
+	}}
+	if _, err := runOrchestrator(context.Background(), d, "assess 10.0.0.5"); err != nil {
+		t.Fatal(err)
+	}
+	if ev, _ := d.Store.EvidenceFor("t1"); len(ev) != 0 {
+		t.Errorf("fabricated evidence stored: %v", ev)
+	}
+	got, err := d.Store.GetTask("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == engagement.StatusDone {
+		t.Error("task must not complete without real evidence")
 	}
 }

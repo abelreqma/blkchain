@@ -229,6 +229,21 @@ func commandSpecs() []cmdSpec {
 			run:      runMCP,
 		},
 		{
+			name: "engage", args: "<goal...>", group: hgAgent,
+			desc: "run a gated, multi-step engagement against a goal",
+			long: "Runs a bounded, gated engagement: the orchestrator plans tasks and hands each to a domain-specialized executor, which can run allowlisted commands against in-scope targets. " +
+				"In /safe, the default, every command needs your confirmation; --auto skips confirmation but requires --scope, so an autonomous run stays bounded. " +
+				`A scope file lists in-scope targets (hostnames, IPs, or CIDRs), the line "local" to permit commands with no network target, and "allow <binary>" lines to extend the allowlist; a hostname target also needs its resolved IP or CIDR listed, since the gate re-checks the resolved address at run time. ` +
+				"Every gate decision and the engagement's plan and evidence are recorded under its workspace directory.",
+			flags: func(fs *flag.FlagSet) { defineEngageFlags(fs, &engageOpts{}) },
+			examples: []string{
+				`blk engage --scope scope.txt "enumerate 10.0.0.5 and report open ports"`,
+				`blk engage --auto --scope scope.txt "run recon against the scope"`,
+				`blk engage --workspace ~/engagements/acme "assess the acme staging host"`,
+			},
+			run: runEngage,
+		},
+		{
 			name: "install", group: hgSetup,
 			desc: "put blk on your PATH (run once, from the project)",
 			long: "Copies this blk binary onto your PATH and remembers the project folder, so blk works from any directory. " +

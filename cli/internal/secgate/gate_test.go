@@ -238,3 +238,67 @@ func TestApprovedCommandStillScopeChecked(t *testing.T) {
 		t.Errorf("want deny:scope, got %q", got)
 	}
 }
+
+func TestAutoLocalScopeAllowsNoTargetCommand(t *testing.T) {
+	s, _ := ParseScope(strings.NewReader("local\n"))
+	g := &Gate{Mode: Auto, Scope: s, Allow: NewAllowlist("id")}
+	if err := g.Start(); err != nil {
+		t.Fatalf("Auto with a local scope must start: %v", err)
+	}
+	d := g.Authorize(context.Background(), Command{Binary: "id"})
+	if !d.Allowed {
+		t.Errorf("a no-target local command should be allowed: %q", d.Reason)
+	}
+}
+
+func TestAutoLocalStillDeniesOutOfScopeNetworkTarget(t *testing.T) {
+	s, _ := ParseScope(strings.NewReader("local\n10.0.0.0/24\n"))
+	g := &Gate{Mode: Auto, Scope: s, Allow: NewAllowlist("curl")}
+	g.Start()
+	d := g.Authorize(context.Background(), Command{Binary: "curl", Args: []string{"http://8.8.8.8/"}})
+	if d.Allowed {
+		t.Error("local mode must NOT allow an out-of-scope network target")
+	}
+}
+
+func TestAutoNonLocalStillDeniesNoTarget(t *testing.T) {
+	s, _ := ParseScope(strings.NewReader("10.0.0.0/24\n"))
+	g := &Gate{Mode: Auto, Scope: s, Allow: NewAllowlist("id")}
+	g.Start()
+	if g.Authorize(context.Background(), Command{Binary: "id"}).Allowed {
+		t.Error("a non-local scope must still deny a no-target command")
+	}
+}
+
+func TestAutoLocalDeniesNetworkBinaryWithSingleLabelHost(t *testing.T) {
+	s, _ := ParseScope(strings.NewReader("local\n"))
+	g := &Gate{Mode: Auto, Scope: s, Allow: NewAllowlist("curl", "nc", "id", "uname", "socat")}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	denied := []Command{
+		{Binary: "curl", Args: []string{"intranet"}},
+		{Binary: "/usr/bin/curl", Args: []string{"intranet"}},
+		{Binary: "nc", Args: []string{"internal-host", "22"}},
+		// socat is not a known local tool; an operator allowlisting it must not
+		// bypass the target check via a single-label (no-extracted-target) host.
+		// This is the positive-check regression test: the old denylist let an
+		// allowlisted-but-unlisted binary like socat through here.
+		{Binary: "socat", Args: []string{"internal-host"}},
+	}
+	for _, c := range denied {
+		if d := g.Authorize(ctx, c); d.Allowed {
+			t.Errorf("%v must be denied in local mode (not a known local tool, no in-scope target)", c)
+		}
+	}
+	allowed := []Command{
+		{Binary: "id"},
+		{Binary: "uname", Args: []string{"-a"}},
+	}
+	for _, c := range allowed {
+		if d := g.Authorize(ctx, c); !d.Allowed {
+			t.Errorf("%v must be allowed in local mode: %q", c, d.Reason)
+		}
+	}
+}

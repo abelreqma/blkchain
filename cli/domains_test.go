@@ -27,6 +27,9 @@ func TestProjectionTextShowsCoverageAndDiscoveries(t *testing.T) {
 	if _, err := newPlanAddTool(st).Call(context.Background(), `{"id":"t2","kind":"web","target":"10.0.0.5","objective":"login flow"}`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := newRecordEvidenceTool(st).Call(context.Background(), `{"task_id":"t1","quote":"port 22 open"}`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := newPlanCompleteTool(st).Call(context.Background(), `{"id":"t1"}`); err != nil {
 		t.Fatal(err)
 	}
