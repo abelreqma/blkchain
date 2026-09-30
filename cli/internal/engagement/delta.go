@@ -74,6 +74,11 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 				return 0, fmt.Errorf("engagement: task %q depends on itself", t.ID)
 			}
 		}
+		for _, b := range t.BasisIDs {
+			if b == t.ID {
+				return 0, fmt.Errorf("engagement: task %q lists itself as a basis", t.ID)
+			}
+		}
 	}
 
 	// Ids that exist after this delta: every id already stored plus the upserts.
@@ -102,6 +107,13 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 		for _, dep := range t.DependsOn {
 			if !known[dep] {
 				return 0, fmt.Errorf("engagement: task %q depends on unknown task %q", t.ID, dep)
+			}
+		}
+		// basis_ids is provenance only: validated as known ids, never a
+		// scheduling gate and never part of the cycle check.
+		for _, b := range t.BasisIDs {
+			if !known[b] {
+				return 0, fmt.Errorf("engagement: task %q has unknown basis task %q", t.ID, b)
 			}
 		}
 	}

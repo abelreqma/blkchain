@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -16,9 +18,38 @@ import (
 )
 
 const (
-	runCommandTimeout  = 60 * time.Second
-	runCommandCapBytes = 1 << 20
+	runCommandTimeout  = 300 * time.Second
+	runCommandCapBytes = 4 << 20
+
+	runTimeoutMinSec = 5
+	runTimeoutMaxSec = 1800
+	runCapMinBytes   = 64 << 10
+	runCapMaxBytes   = 64 << 20
 )
+
+// resolveRunCaps returns the per-command timeout and output byte cap, from
+// BLKCHAIN_RUN_TIMEOUT (seconds) and BLKCHAIN_RUN_MAX_BYTES. A parsable value
+// outside the allowed range is clamped; an unset or unparsable value uses the
+// default. The Episode wall-clock and command caps remain the hard backstop.
+func resolveRunCaps() (timeout time.Duration, capBytes int) {
+	secs := clampEnvInt("BLKCHAIN_RUN_TIMEOUT", int(runCommandTimeout/time.Second), runTimeoutMinSec, runTimeoutMaxSec)
+	capBytes = clampEnvInt("BLKCHAIN_RUN_MAX_BYTES", runCommandCapBytes, runCapMinBytes, runCapMaxBytes)
+	return time.Duration(secs) * time.Second, capBytes
+}
+
+func clampEnvInt(name string, def, lo, hi int) int {
+	v, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
+	if err != nil {
+		return def
+	}
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
 
 type runCommandArgs struct {
 	Binary string   `json:"binary" desc:"the command binary (a bare name, no path; resolved via PATH)"`

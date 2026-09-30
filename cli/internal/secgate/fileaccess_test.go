@@ -39,8 +39,8 @@ func TestFileAccessViolation(t *testing.T) {
 			false,
 		},
 		{
-			"ffuf -w input read (allowed)",
-			Command{Binary: "ffuf", Args: []string{"-w", "/usr/share/wordlists/x"}},
+			"ffuf -w relative wordlist (allowed; an absolute path is bounded, see httpenum_test.go)",
+			Command{Binary: "ffuf", Args: []string{"-w", "wordlists/x"}},
 			false,
 		},
 		{

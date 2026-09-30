@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,6 +50,14 @@ func testDeps(t *testing.T, model toolLoopModel) engageDeps {
 		Prefs: modelPrefs{Web: false},
 		Store: openStore(t),
 		Asker: askuser.AutoAsker{},
+	}
+}
+
+func TestOrchestratorPromptMentionsReconFirstBatchAndBasisIDs(t *testing.T) {
+	for _, want := range []string{"dispatch_batch", "basis_ids", "recon", "breadth"} {
+		if !strings.Contains(orchestratorSystemPrompt, want) {
+			t.Errorf("orchestratorSystemPrompt missing %q:\n%s", want, orchestratorSystemPrompt)
+		}
 	}
 }
 
@@ -162,6 +172,105 @@ func TestExecutorRunsCommandAndRecordsEvidence(t *testing.T) {
 	ev, _ := d.Store.EvidenceFor("t1")
 	if len(ev) != 1 {
 		t.Errorf("evidence rows = %d, want 1 (verified real quote)", len(ev))
+	}
+}
+
+func TestNewExecutorScratchDirDistinctPerCall(t *testing.T) {
+	root := t.TempDir()
+	dir1, cleanup1, err := newExecutorScratchDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup1()
+	dir2, cleanup2, err := newExecutorScratchDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup2()
+	if dir1 == dir2 {
+		t.Fatalf("scratch dirs collide: %q", dir1)
+	}
+	if _, err := os.Stat(dir1); err != nil {
+		t.Errorf("dir1 missing: %v", err)
+	}
+	if _, err := os.Stat(dir2); err != nil {
+		t.Errorf("dir2 missing: %v", err)
+	}
+}
+
+func TestNewExecutorScratchDirEmptyRootNoScratch(t *testing.T) {
+	dir, cleanup, err := newExecutorScratchDir("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if dir != "" {
+		t.Errorf("dir = %q, want empty when root is empty", dir)
+	}
+}
+
+func TestNewExecutorScratchDirConcurrentDistinct(t *testing.T) {
+	root := t.TempDir()
+	const n = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	dirs := make(map[string]bool)
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			dir, cleanup, err := newExecutorScratchDir(root)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer cleanup()
+			mu.Lock()
+			dirs[dir] = true
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	if len(dirs) != n {
+		t.Errorf("got %d distinct scratch dirs, want %d", len(dirs), n)
+	}
+}
+
+func TestMarkTaskActiveSetsStatusPreservesFields(t *testing.T) {
+	task := engagement.Task{ID: "t1", Kind: "recon", Target: "10.0.0.5", Objective: "scan", Status: engagement.StatusTodo}
+	got := markTaskActive(task)
+	if got.Status != engagement.StatusActive {
+		t.Errorf("Status = %q, want active", got.Status)
+	}
+	if got.ID != task.ID || got.Kind != task.Kind || got.Target != task.Target || got.Objective != task.Objective {
+		t.Errorf("markTaskActive changed unrelated fields: %+v", got)
+	}
+}
+
+func TestDispatchAgentSetsTaskStatusActive(t *testing.T) {
+	d := testDeps(t, nil)
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{ID: "t1", Kind: "web", Target: "10.0.0.5", Objective: "login", Status: engagement.StatusTodo}}}); err != nil {
+		t.Fatal(err)
+	}
+	// Executor never completes the task, so its status reflects dispatch alone.
+	exec := &scriptModel{resps: []*llms.ContentResponse{
+		finalResp("executor summary: nothing to report"),
+	}}
+	d.Model = exec
+	if _, err := newDispatchAgentTool(d).Call(context.Background(), `{"task_id":"t1"}`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.Store.GetTask("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != engagement.StatusActive {
+		t.Errorf("Status = %q, want active", got.Status)
 	}
 }
 

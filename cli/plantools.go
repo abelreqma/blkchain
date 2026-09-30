@@ -19,6 +19,7 @@ type planTaskArgs struct {
 	DoneWhen  string   `json:"done_when,omitempty" desc:"the observable condition that completes the task"`
 	Status    string   `json:"status,omitempty" desc:"todo, active, done, na, or blocked; defaults to todo"`
 	DependsOn []string `json:"depends_on,omitempty" desc:"ids of tasks that must finish first"`
+	BasisIDs  []string `json:"basis_ids,omitempty" desc:"ids of the task(s) or finding(s) this task was derived from (provenance; not a scheduling dependency)"`
 }
 
 type planCompleteArgs struct {
@@ -43,6 +44,7 @@ func planTaskFromArgs(a planTaskArgs) engagement.Task {
 		DoneWhen:  a.DoneWhen,
 		Status:    status,
 		DependsOn: a.DependsOn,
+		BasisIDs:  a.BasisIDs,
 	}
 }
 

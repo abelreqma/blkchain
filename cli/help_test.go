@@ -27,6 +27,7 @@ import (
 var wordingDescs = map[string]string{
 	"ask":        "answer a question, with cited sources",
 	"search":     "find the most relevant source passages for a query",
+	"sources":    "list indexed sources, with chunk counts",
 	"open":       "open a cited source in your pager or editor",
 	"add":        "add your own files, folders, or a web page",
 	"up":         "start the local services",
@@ -39,6 +40,7 @@ var wordingDescs = map[string]string{
 	"hermes":     "run one Hermes agent turn with the knowledge base",
 	"gateway":    "set up and start the Hermes gateway for agent mode",
 	"mcp":        "serve the knowledge base to Hermes over MCP (stdio)",
+	"engage":     "run a gated, multi-step engagement against a goal",
 	"analyze":    "generate schema-validated JSON from the LLM",
 	"install":    "put blk on your PATH (run once, from the project)",
 	"completion": "print a bash or zsh completion script",
@@ -47,9 +49,9 @@ var wordingDescs = map[string]string{
 }
 
 var wordingGroups = [][]string{
-	{"ask", "search", "open", "add"},
+	{"ask", "search", "sources", "open", "add"},
 	{"up", "down", "status", "health", "doctor", "models", "logs"},
-	{"hermes", "gateway", "mcp", "analyze"},
+	{"hermes", "gateway", "mcp", "engage", "analyze"},
 	{"install", "completion", "version", "help"},
 }
 
@@ -150,6 +152,49 @@ func TestSpecsUseTheSharedWording(t *testing.T) {
 	}
 }
 
+// The shared-wording tables (wordingDescs, wordingGroups) must name every
+// grouped command, so a new command cannot be added to commandSpecs without
+// also pinning its verbatim wording (which TestSpecsUseTheSharedWording then
+// checks across the usage, per-command help, completion, and the REPL). A
+// command with no group (repl) is a hidden entry point and is left out on
+// purpose. This closes the drift where a registered command silently skips the
+// wording tables.
+func TestWordingTablesCoverEveryGroupedCommand(t *testing.T) {
+	grouped := map[string]bool{}
+	for _, c := range commandSpecs() {
+		if c.group != "" {
+			grouped[c.name] = true
+		}
+	}
+	for name := range grouped {
+		if _, ok := wordingDescs[name]; !ok {
+			t.Errorf("grouped command %q is missing from wordingDescs; add its verbatim wording", name)
+		}
+	}
+	for name := range wordingDescs {
+		if !grouped[name] {
+			t.Errorf("wordingDescs names %q, which is not a grouped command", name)
+		}
+	}
+	inGroups := map[string]bool{}
+	for _, names := range wordingGroups {
+		for _, name := range names {
+			if inGroups[name] {
+				t.Errorf("wordingGroups lists %q more than once", name)
+			}
+			inGroups[name] = true
+			if !grouped[name] {
+				t.Errorf("wordingGroups names %q, which is not a grouped command", name)
+			}
+		}
+	}
+	for name := range grouped {
+		if !inGroups[name] {
+			t.Errorf("grouped command %q is missing from wordingGroups", name)
+		}
+	}
+}
+
 // Dispatch is table driven, so a command cannot be added without a spec. This
 // guards a return to a hand-written switch: every string case in dispatch must
 // resolve to a spec.
@@ -184,6 +229,57 @@ func TestDispatchCasesAllHaveSpecs(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("dispatch function not found in main.go")
+	}
+}
+
+// caseStringsInFunc returns the set of string-literal case values inside the
+// named function in file, using the same AST walk as TestDispatchCasesAllHaveSpecs.
+func caseStringsInFunc(t *testing.T, file, fn string) map[string]bool {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]bool{}
+	found := false
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != fn {
+			continue
+		}
+		found = true
+		ast.Inspect(fd, func(n ast.Node) bool {
+			cc, ok := n.(*ast.CaseClause)
+			if !ok {
+				return true
+			}
+			for _, e := range cc.List {
+				if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					cases[strings.Trim(lit.Value, `"`)] = true
+				}
+			}
+			return true
+		})
+	}
+	if !found {
+		t.Fatalf("function %q not found in %s", fn, file)
+	}
+	return cases
+}
+
+// Every registered slash command must have a handler case in the TUI's
+// dispatchInput switch. An unrecognized verb falls through to "ask" and is sent
+// to the LLM as a question, so a slash command listed in the palette and help
+// but never wired would misbehave with no error. This catches that at build
+// time. The plain REPL (repl.go) is deliberately a subset (see
+// TestPlainREPLHelpAndBanner), so it is not required to handle every verb.
+func TestEverySlashCommandHasATUIHandler(t *testing.T) {
+	cases := caseStringsInFunc(t, "tui.go", "dispatchInput")
+	for _, c := range slashCommands() {
+		if !cases[c.name] {
+			t.Errorf("/%s is in slashCommands() but has no case in tui.go dispatchInput; it would fall through to ask", c.name)
+		}
 	}
 }
 

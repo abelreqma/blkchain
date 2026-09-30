@@ -39,6 +39,33 @@ func TestDefaultAllowlistExcludesClassifierDeniedBinaries(t *testing.T) {
 	}
 }
 
+func TestDefaultAllowlistIncludesAuditedSMBEnumTools(t *testing.T) {
+	al := secgate.NewAllowlist(defaultEngageAllowlist()...)
+	for _, b := range []string{"smbclient", "rpcclient", "nbtscan", "showmount"} {
+		if !al.Permits(b) {
+			t.Errorf("%s should be in the default allowlist", b)
+		}
+	}
+}
+
+func TestDefaultAllowlistIncludesAuditedLDAPSNMPHTTPEnumTools(t *testing.T) {
+	al := secgate.NewAllowlist(defaultEngageAllowlist()...)
+	for _, b := range []string{"ldapsearch", "snmpwalk", "onesixtyone", "gobuster", "ffuf", "nikto"} {
+		if !al.Permits(b) {
+			t.Errorf("%s should be in the default allowlist", b)
+		}
+	}
+}
+
+func TestDefaultAllowlistIncludesAuditedDNSEnumTools(t *testing.T) {
+	al := secgate.NewAllowlist(defaultEngageAllowlist()...)
+	for _, b := range []string{"host", "nslookup", "dnsrecon"} {
+		if !al.Permits(b) {
+			t.Errorf("%s should be in the default allowlist", b)
+		}
+	}
+}
+
 func TestEngageLoadsCatalogFromEnv(t *testing.T) {
 	dir := t.TempDir()
 	// one valid skill

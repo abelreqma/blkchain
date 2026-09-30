@@ -65,7 +65,189 @@ func Classify(c Command) Decision {
 	if d, tripped := classifyUnbounded(c); tripped {
 		return d
 	}
+	if strings.ToLower(baseName(strings.TrimSpace(c.Binary))) == "dnsrecon" {
+		if a, bad := dnsreconGluedFlag(c.Args); bad {
+			return Decision{
+				Allowed:    false,
+				Reason:     "dnsrecon " + a + " glues or bundles a short flag with its value, which hides a target from the scope check",
+				Suggestion: "give each short flag its value as a separate argument, e.g. -d example.com",
+			}
+		}
+	}
+	if name := strings.ToLower(baseName(strings.TrimSpace(c.Binary))); enumConfigDeny[name].letters != "" {
+		if a, bad := enumConfigFlag(name, c.Args); bad {
+			return Decision{Allowed: false, Reason: name + " " + a + configOptionNote, Suggestion: enumConfigHint[name]}
+		}
+		if a, bad := enumGluedHostFlag(name, c.Args); bad {
+			return Decision{
+				Allowed:    false,
+				Reason:     name + " " + a + " glues or bundles a host flag with its value, which hides a target from the scope check",
+				Suggestion: "give the host flag its value as a separate argument, e.g. -I 10.0.0.5",
+			}
+		}
+	}
+	if d, bad := enumAudit(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); bad {
+		return d
+	}
 	return Decision{Allowed: true}
+}
+
+// smbArgLetters are the single-letter smbclient and rpcclient options that
+// certainly take a value (-I -M -L host flags, -t -m -D -b -p -d -l -R -n -W -U
+// -i -O). The first one in a bundle consumes the rest of the bundle as its
+// value, so letters after it are data, not flags. Each letter takes a value in
+// every binary where it is valid, so one shared set is safe for both tools.
+const smbArgLetters = "IMLtmDbpdlRnWUiO"
+
+// enumDeny lists, for one enumeration binary, the short letters (matched inside
+// a bundle, up to the first letter in takesArg) and long names (matched with
+// unambiguous-prefix abbreviation, errs toward denial) denied outright because
+// they read a config, credential, or target file, or open a file channel the
+// arg layer cannot bound.
+type enumDeny struct {
+	letters  string
+	longs    []string
+	takesArg string
+}
+
+// smbDeny is shared by smbclient and rpcclient. -T/--tar names a local tar file
+// as a positional argument, -A/--authentication-file reads credentials,
+// -s/--configfile and --option load or set smb.conf parameters,
+// --use-krb5-ccache names a credential cache, -P/--machine-pass reads the local
+// machine secret. -c/--command is denied separately by execFlag.
+var smbDeny = enumDeny{
+	letters: "TAsP",
+	longs: []string{
+		"tar", "authentication-file", "configfile", "option",
+		"use-krb5-ccache", "machine-pass",
+	},
+	takesArg: smbArgLetters,
+}
+
+// ldapArgLetters are the single-letter ldapsearch options that take a value.
+const ldapArgLetters = "abDEefFhHlOopPRsSTUwXyYzd"
+
+// snmpArgLetters are the single-letter snmpwalk options that take a value (-D
+// takes an optional glued token list, so it ends a bundle too).
+const snmpArgLetters = "vcaAeElnuxXZrtDmMPOILC"
+
+// enumConfigDeny maps an enumeration binary to its outright denials. nbtscan -f
+// and onesixtyone -i read the scan targets from a file, which the scope check
+// never sees. ldapsearch: -y reads the bind password from a file, -t/-tt write
+// values into a temp directory the caller does not choose, -C chases referrals
+// to hosts the scope check never sees, and -h names the server outside a URI
+// (deprecated for -H, and a single-label value would skip the scope check).
+// snmpwalk: -L opens a log file, and -m/-M load MIB files and directories from
+// arbitrary paths (a parse error prints part of the file). dig: -f reads a batch
+// file whose lines are full dig command lines with their own @server (a resolver
+// the scope check never sees), -k reads a TSIG key file, and -y puts the TSIG
+// secret on the command line. dig has no long options; its value-taking letters
+// besides those are b c p q t x, so the rest of a bundle after one of them is data.
+var enumConfigDeny = map[string]enumDeny{
+	"dig":         {letters: "fky", takesArg: "bcpqtx"},
+	"smbclient":   smbDeny,
+	"rpcclient":   smbDeny,
+	"nbtscan":     {letters: "f", longs: []string{"file"}},
+	"ldapsearch":  {letters: "yhtC", takesArg: ldapArgLetters},
+	"snmpwalk":    {letters: "LMm", takesArg: snmpArgLetters},
+	"onesixtyone": {letters: "i", takesArg: "ciow"},
+}
+
+// enumConfigHint is the suggestion shown with an outright denial.
+var enumConfigHint = map[string]string{
+	"dig":        "give the query and @server on the command line; -f, -k, and -y are not permitted",
+	"ldapsearch": "pass the server as -H ldap://host; -h, -y, -t, and -C are not permitted",
+}
+
+// enumHostFlags maps a binary to the short flags whose value is a target host.
+var enumHostFlags = map[string]string{"smbclient": "ILMB", "rpcclient": "I", "ldapsearch": "H"}
+
+// enumFlagMatch reports whether a is one of the short letters (anywhere in a
+// bundle before a letter in takesArg ends it) or one of the long names
+// (including an abbreviation and a =value form).
+func enumFlagMatch(a, letters string, longs []string, takesArg string) bool {
+	if len(a) < 2 || a[0] != '-' {
+		return false
+	}
+	if a[1] == '-' {
+		fname, _, _ := strings.Cut(a[2:], "=")
+		if fname == "" {
+			return false
+		}
+		for _, l := range longs {
+			if strings.HasPrefix(l, fname) {
+				return true
+			}
+		}
+		return false
+	}
+	for i := 1; i < len(a); i++ {
+		if strings.IndexByte(letters, a[i]) >= 0 {
+			return true
+		}
+		if strings.IndexByte(takesArg, a[i]) >= 0 {
+			return false
+		}
+	}
+	return false
+}
+
+// enumConfigFlag reports the first argument that matches the binary's outright
+// denials in enumConfigDeny.
+func enumConfigFlag(name string, args []string) (string, bool) {
+	d := enumConfigDeny[name]
+	for _, a := range args {
+		if enumFlagMatch(a, d.letters, d.longs, d.takesArg) {
+			return a, true
+		}
+	}
+	return "", false
+}
+
+// enumGluedHostFlag reports the first single-dash argument in which a
+// host-carrying short flag (-I, -L, -M, -B, ldapsearch -H) has its value glued
+// or bundled after it (-Ievil.com, -NL8.8.8.8). ExtractTargets skips a dash-led
+// token that has no '=', so that host would never be scope-checked. A separate
+// value token, and the long form --ip-address=host, are seen by the extractor
+// and stay allowed.
+func enumGluedHostFlag(name string, args []string) (string, bool) {
+	carriers := enumHostFlags[name]
+	if carriers == "" {
+		return "", false
+	}
+	takesArg := enumConfigDeny[name].takesArg
+	for _, a := range args {
+		if len(a) < 3 || a[0] != '-' || a[1] == '-' {
+			continue
+		}
+		for i := 1; i < len(a); i++ {
+			if strings.IndexByte(carriers, a[i]) >= 0 {
+				if i+1 < len(a) {
+					return a, true
+				}
+				break
+			}
+			if strings.IndexByte(takesArg, a[i]) >= 0 {
+				break
+			}
+		}
+	}
+	return "", false
+}
+
+func dnsreconGluedFlag(args []string) (string, bool) {
+	return gluedShortFlag(args, "-iL")
+}
+
+// gluedShortFlag reports the first single-dash argument longer than two
+// characters, other than the exact token exempt.
+func gluedShortFlag(args []string, exempt string) (string, bool) {
+	for _, a := range args {
+		if len(a) > 2 && a[0] == '-' && a[1] != '-' && a != exempt {
+			return a, true
+		}
+	}
+	return "", false
 }
 
 // ncExecLong are the long options of nc/ncat that run a program or command.
@@ -77,7 +259,9 @@ var ncExecLong = []string{"exec", "sh-exec", "lua-exec"}
 // model-writable directory), nc/ncat -e, -c, --exec, --sh-exec, --lua-exec (run
 // a program on connect), curl --unix-socket (reaches local daemons such as
 // docker.sock), and ip netns / ip vrf / ip -batch (netns exec and vrf exec run
-// a program; a batch file can hold either). These bypass the shell and
+// a program; a batch file can hold either), ffuf -input-cmd/-input-shell, and
+// nikto -Option/-Plugins (nikto.conf overrides and plugin selection). These
+// bypass the shell and
 // interpreter denials above, so they are structural denials too. Matching
 // follows getopt: nmap uses getopt_long_only, so the flag may have one or two
 // dashes, may be abbreviated (--scr), and may carry =value; nc/ncat long
@@ -106,6 +290,26 @@ func execFlag(name string, args []string) (string, bool) {
 			// --datadir loads nse_main.lua and the NSE library from a directory
 			// the model can write, so it is the same RCE as --script.
 			if fname == "datadir" || (len(fname) >= 5 && strings.HasPrefix("datadir", fname)) || fname == "interactive" {
+				return a, true
+			}
+		case "smbclient", "rpcclient":
+			// -c/--command is an unbounded command channel (get and put touch
+			// local files), the same class as nc -e.
+			if enumFlagMatch(a, "c", []string{"command"}, smbArgLetters) {
+				return a, true
+			}
+		case "ffuf":
+			// -input-cmd runs a command to produce the wordlist, through the shell
+			// named by -input-shell. Go's flag package matches names exactly.
+			if l := strings.ToLower(fname); l == "input-cmd" || l == "input-shell" {
+				return a, true
+			}
+		case "nikto":
+			// -Option overrides any nikto.conf setting (PLUGINDIR names Perl code
+			// that nikto loads) and -Plugins selects plugins. Getopt::Long accepts
+			// any unique prefix, so match a prefix of two or more letters. The
+			// audited-spelling list in enumAudit denies the rest of the surface.
+			if l := strings.ToLower(fname); len(l) >= 2 && (strings.HasPrefix("option", l) || strings.HasPrefix("plugins", l)) {
 				return a, true
 			}
 		case "curl":

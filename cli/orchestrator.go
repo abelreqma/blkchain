@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"sort"
 	"strings"
+	"sync"
 
 	"blkchain/cli/internal/askuser"
 	"blkchain/cli/internal/engagement"
@@ -42,13 +45,44 @@ type engageDeps struct {
 var orchestratorSystemPrompt = "You are the orchestrator of an authorized, single-user, offline security-testing engagement. " +
 	"You own the task plan. Use plan_add, plan_update, and plan_complete to shape a task DAG over the store; " +
 	"use kb_search and kb_answer to ground your reasoning when it helps. " +
-	"Select one open task at a time and hand it to a specialized executor with dispatch_agent (pass its task_id); " +
+	"Start recon-first and breadth-first: before deeper work, seed one recon task per in-scope target or surface, " +
+	"then run that batch of open task_ids concurrently with dispatch_batch. dispatch_batch is bounded to a few " +
+	"executors at a time and they share this engagement's command budget and gate, so pass a small list, not the " +
+	"whole plan. Use dispatch_agent for a single deep task once breadth is covered (pass its task_id); " +
 	"the executor works the task and returns evidence, which you fold back into the plan. " +
+	"When a finding opens new work, fold it in with plan_add and set basis_ids to the id(s) of the task or finding " +
+	"it came from, so the plan keeps provenance from evidence to the task it produced. " +
 	"You do not run commands against targets. Complete a task only when exact-quote evidence exists for it. " +
 	"Domains available for tasks: " + strings.Join(domainNames(), ", ") + "."
 
 type dispatchArgs struct {
 	TaskID string `json:"task_id" desc:"id of the open task to hand to a specialized executor"`
+}
+
+// markTaskActive returns a copy of task with Status set to active, for
+// inclusion in an Apply Delta's Upserts. It does not call Store.Apply
+// itself, so a caller dispatching several tasks at once (dispatch_batch) can
+// collect one markTaskActive result per task into a single atomic Apply.
+func markTaskActive(task engagement.Task) engagement.Task {
+	task.Status = engagement.StatusActive
+	return task
+}
+
+// newExecutorScratchDir creates a fresh per-executor scratch subdirectory
+// under root, the engagement's scratch root (kept outside the workspace).
+// Concurrent calls with the same root each get a distinct directory, since
+// os.MkdirTemp is safe under concurrent use. An empty root means run_command
+// is disabled, so no scratch dir is created; the returned cleanup is always
+// safe to call.
+func newExecutorScratchDir(root string) (dir string, cleanup func(), err error) {
+	if root == "" {
+		return "", func() {}, nil
+	}
+	dir, err = os.MkdirTemp(root, "exec-")
+	if err != nil {
+		return "", func() {}, err
+	}
+	return dir, func() { os.RemoveAll(dir) }, nil
 }
 
 // newDispatchAgentTool builds the orchestrator-only dispatch_agent tool.
@@ -74,12 +108,165 @@ func newDispatchAgentTool(d engageDeps) tooldef.Tool {
 			if _, err := d.Store.Apply(engagement.Delta{
 				Kind:        "dispatch",
 				Detail:      task.ID,
+				Upserts:     []engagement.Task{markTaskActive(task)},
 				SetActiveID: &activeID,
 				SetStage:    &stage,
 			}); err != nil {
 				return "dispatch_agent: could not set stage: " + err.Error(), nil
 			}
 			return runExecutor(ctx, d, task.ID)
+		})
+}
+
+const (
+	maxBatchTasks       = 16
+	engageParallelDef   = 3
+	engageParallelMin   = 1
+	engageParallelMax   = 8
+	engageParallelEnv   = "BLKCHAIN_ENGAGE_PARALLEL"
+	batchErrTaskDone    = "already done"
+	batchErrTaskNA      = "marked not applicable"
+	batchErrTaskUnknown = "not found"
+)
+
+// engageParallel returns the cap on concurrently running executors in one
+// dispatch_batch call, from BLKCHAIN_ENGAGE_PARALLEL clamped to 1..8. An unset
+// or unparsable value gives the default of 3.
+func engageParallel() int {
+	return clampEnvInt(engageParallelEnv, engageParallelDef, engageParallelMin, engageParallelMax)
+}
+
+type dispatchBatchArgs struct {
+	TaskIDs []string `json:"task_ids" desc:"ids of the open tasks to run concurrently, each on its own specialized executor (at most 16)"`
+}
+
+// batchResult is the outcome of one executor in a batch.
+type batchResult struct {
+	TaskID string
+	Result string
+	Err    error
+}
+
+// runBatch runs exec once per id, at most engageParallel() at a time, and
+// returns the results sorted by task id so the aggregate does not depend on
+// completion order. A panic in exec or a canceled context is recorded as that
+// task's error; it never aborts the other tasks. All executors share d, so the
+// engagement-wide Gate and Episode budget is not multiplied by concurrency.
+func runBatch(ctx context.Context, d engageDeps, ids []string, exec func(ctx context.Context, d engageDeps, taskID string) (string, error)) []batchResult {
+	sem := make(chan struct{}, engageParallel())
+	results := make([]batchResult, len(ids))
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		results[i].TaskID = id
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			results[i].Err = ctx.Err()
+			continue
+		}
+		wg.Add(1)
+		go func(i int, id string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer func() {
+				if r := recover(); r != nil {
+					results[i].Err = fmt.Errorf("executor panic: %v", r)
+				}
+			}()
+			results[i].Result, results[i].Err = exec(ctx, d, id)
+		}(i, id)
+	}
+	wg.Wait()
+	sortBatchResults(results)
+	return results
+}
+
+func sortBatchResults(rs []batchResult) {
+	sort.Slice(rs, func(a, b int) bool { return rs[a].TaskID < rs[b].TaskID })
+}
+
+// newDispatchBatchTool builds the orchestrator-only dispatch_batch tool, which
+// runs several open tasks concurrently on the shared store, gate, and run
+// captures.
+func newDispatchBatchTool(d engageDeps) tooldef.Tool {
+	return newDispatchBatchToolWith(d, runExecutor)
+}
+
+func newDispatchBatchToolWith(d engageDeps, exec func(ctx context.Context, d engageDeps, taskID string) (string, error)) tooldef.Tool {
+	return newStoreTool("dispatch_batch",
+		"Hand several independent open tasks to specialized executors that run concurrently (bounded). Returns one labeled result per task, sorted by task id. Use dispatch_agent for a single task.",
+		dispatchBatchArgs{},
+		func(ctx context.Context, argsJSON string) (string, error) {
+			var a dispatchBatchArgs
+			if err := json.Unmarshal([]byte(argsJSON), &a); err != nil {
+				return "dispatch_batch: invalid arguments: " + err.Error(), nil
+			}
+			if len(a.TaskIDs) == 0 {
+				return "dispatch_batch: invalid arguments: task_ids is required", nil
+			}
+			if len(a.TaskIDs) > maxBatchTasks {
+				return fmt.Sprintf("dispatch_batch: too many task_ids (%d, max %d)", len(a.TaskIDs), maxBatchTasks), nil
+			}
+
+			var valid []string
+			var skipped []batchResult
+			var upserts []engagement.Task
+			seen := map[string]bool{}
+			for _, id := range a.TaskIDs {
+				id = strings.TrimSpace(id)
+				if id == "" || seen[id] {
+					continue
+				}
+				seen[id] = true
+				task, err := d.Store.GetTask(id)
+				if err != nil {
+					skipped = append(skipped, batchResult{TaskID: id, Result: "skipped: task " + batchErrTaskUnknown})
+					continue
+				}
+				if task.Status == engagement.StatusDone {
+					skipped = append(skipped, batchResult{TaskID: id, Result: "skipped: task is " + batchErrTaskDone})
+					continue
+				}
+				if task.Status == engagement.StatusNA {
+					skipped = append(skipped, batchResult{TaskID: id, Result: "skipped: task is " + batchErrTaskNA})
+					continue
+				}
+				valid = append(valid, id)
+				upserts = append(upserts, markTaskActive(task))
+			}
+
+			var results []batchResult
+			if len(valid) > 0 {
+				stage := engagement.Stage{Label: "dispatch", Tool: "batch"}
+				if _, err := d.Store.Apply(engagement.Delta{
+					Kind:     "dispatch_batch",
+					Detail:   strings.Join(valid, ","),
+					Upserts:  upserts,
+					SetStage: &stage,
+				}); err != nil {
+					return "dispatch_batch: could not mark tasks active: " + err.Error(), nil
+				}
+				results = runBatch(ctx, d, valid, exec)
+			}
+			results = append(results, skipped...)
+			sortBatchResults(results)
+
+			var b strings.Builder
+			for i, r := range results {
+				if i > 0 {
+					b.WriteString("\n\n")
+				}
+				fmt.Fprintf(&b, "== %s ==\n", r.TaskID)
+				if r.Err != nil {
+					fmt.Fprintf(&b, "error: %v", r.Err)
+					if r.Result != "" {
+						b.WriteString("\n" + r.Result)
+					}
+					continue
+				}
+				b.WriteString(r.Result)
+			}
+			return b.String(), nil
 		})
 }
 
@@ -94,13 +281,8 @@ func runExecutor(ctx context.Context, d engageDeps, taskID string) (string, erro
 	dom := domainFor(task.Kind)
 
 	reg := tooldef.NewRegistry()
-	activeTask := func() string {
-		snap, err := d.Store.Snapshot(ctx)
-		if err != nil {
-			return ""
-		}
-		return snap.ActiveID
-	}
+
+	activeTask := func() string { return taskID }
 	tools := []tooldef.Tool{
 		newKBSearchTool(d.RC, d.Cfg),
 		newKBAnswerTool(d.RC, d.Cfg, !d.Prefs.Web),
@@ -109,8 +291,14 @@ func runExecutor(ctx context.Context, d engageDeps, taskID string) (string, erro
 		newRouteSkillTool(d.Catalog, d.Store, activeTask),
 	}
 	if d.Gate != nil && d.Runs != nil {
+		runTimeout, runCap := resolveRunCaps()
+		execDir, cleanup, err := newExecutorScratchDir(d.WorkDir)
+		if err != nil {
+			return "", err
+		}
+		defer cleanup()
 		tools = append(tools,
-			newRunCommandTool(d.Gate, runCommandCapBytes, runCommandTimeout, d.WorkDir, activeTask, d.Runs.Add),
+			newRunCommandTool(d.Gate, runCap, runTimeout, execDir, activeTask, d.Runs.Add),
 			newVerifiedRecordEvidenceTool(d.Store, d.Runs.Contains),
 		)
 	} else {
@@ -158,6 +346,7 @@ func runOrchestrator(ctx context.Context, d engageDeps, goal string) (string, er
 		recordEvidence,
 		newAskUserTool(d.Asker),
 		newDispatchAgentTool(d),
+		newDispatchBatchTool(d),
 	} {
 		if err := reg.Register(t); err != nil {
 			return "", err

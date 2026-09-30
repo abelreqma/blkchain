@@ -32,6 +32,36 @@ func autoGate(t *testing.T) *secgate.Gate {
 	return g
 }
 
+func TestResolveRunCaps(t *testing.T) {
+	cases := []struct {
+		name        string
+		timeout     string
+		maxBytes    string
+		wantTimeout time.Duration
+		wantBytes   int
+	}{
+		{"defaults when unset", "", "", 300 * time.Second, 4 << 20},
+		{"valid values", "120", "2097152", 120 * time.Second, 2097152},
+		{"timeout clamped up", "1", "1", 5 * time.Second, 64 << 10},
+		{"timeout clamped down", "99999", "999999999", 1800 * time.Second, 64 << 20},
+		{"unparsable falls back", "abc", "xyz", 300 * time.Second, 4 << 20},
+		{"negative clamped", "-5", "-5", 5 * time.Second, 64 << 10},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("BLKCHAIN_RUN_TIMEOUT", c.timeout)
+			t.Setenv("BLKCHAIN_RUN_MAX_BYTES", c.maxBytes)
+			gotT, gotB := resolveRunCaps()
+			if gotT != c.wantTimeout {
+				t.Errorf("timeout = %v, want %v", gotT, c.wantTimeout)
+			}
+			if gotB != c.wantBytes {
+				t.Errorf("capBytes = %d, want %d", gotB, c.wantBytes)
+			}
+		})
+	}
+}
+
 func TestRunCommandDeniedDoesNotExec(t *testing.T) {
 	called := false
 	withStubExec(t, func(ctx context.Context, bin string, args []string, dir string, capBytes int, timeout time.Duration) runResult {

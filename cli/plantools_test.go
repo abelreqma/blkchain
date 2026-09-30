@@ -219,3 +219,79 @@ func TestPlanAddAndUpdateRefuseDoneStatus(t *testing.T) {
 		t.Error("plan_update must not set done directly")
 	}
 }
+
+func TestPlanAddBasisIDsPersisted(t *testing.T) {
+	st := openStore(t)
+	tool := newPlanAddTool(st)
+	if _, err := tool.Call(context.Background(), `{"id":"t1","kind":"recon"}`); err != nil {
+		t.Fatal(err)
+	}
+	out, err := tool.Call(context.Background(), `{"id":"t2","kind":"web","basis_ids":["t1"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "rejected") {
+		t.Fatalf("plan_add with a known basis id was rejected: %q", out)
+	}
+	got, err := st.GetTask("t2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.BasisIDs) != 1 || got.BasisIDs[0] != "t1" {
+		t.Errorf("BasisIDs = %v, want [t1]", got.BasisIDs)
+	}
+	if len(got.DependsOn) != 0 {
+		t.Errorf("DependsOn = %v, basis_ids must not create a dependency", got.DependsOn)
+	}
+}
+
+func TestPlanAddBasisUnknownRejected(t *testing.T) {
+	st := openStore(t)
+	out, err := newPlanAddTool(st).Call(context.Background(), `{"id":"t2","kind":"web","basis_ids":["ghost"]}`)
+	if err != nil {
+		t.Fatalf("unknown basis must be a soft rejection: %v", err)
+	}
+	if !strings.Contains(out, "rejected") || !strings.Contains(out, "ghost") {
+		t.Errorf("result %q should reject unknown basis id ghost", out)
+	}
+	if _, err := st.GetTask("t2"); !errors.Is(err, engagement.ErrNotFound) {
+		t.Errorf("t2 must not be stored, GetTask err = %v", err)
+	}
+}
+
+func TestPlanAddBasisSelfRejected(t *testing.T) {
+	st := openStore(t)
+	out, err := newPlanAddTool(st).Call(context.Background(), `{"id":"t1","kind":"web","basis_ids":["t1"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "rejected") || !strings.Contains(out, "itself") {
+		t.Errorf("result %q should reject a self basis", out)
+	}
+}
+
+func TestPlanAddBasisDoesNotBlockScheduling(t *testing.T) {
+	st := openStore(t)
+	add := newPlanAddTool(st)
+	if _, err := add.Call(context.Background(), `{"id":"t1","kind":"recon"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := add.Call(context.Background(), `{"id":"t2","kind":"web","basis_ids":["t1"]}`); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := newPlanUpdateTool(st).Call(context.Background(), `{"id":"t2","status":"active"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "rejected") {
+		t.Fatalf("activating a task whose basis is todo was rejected: %q", out)
+	}
+	got, _ := st.GetTask("t2")
+	if got.Status != engagement.StatusActive {
+		t.Errorf("status = %q, want active", got.Status)
+	}
+	if len(got.BasisIDs) != 1 || got.BasisIDs[0] != "t1" {
+		t.Errorf("BasisIDs = %v after update, want [t1] preserved", got.BasisIDs)
+	}
+}

@@ -304,6 +304,32 @@ func TestApplyRejectsCycleAcrossStoredAndUpsert(t *testing.T) {
 	}
 }
 
+func TestApplyBasisIDsValidated(t *testing.T) {
+	s := mustOpen(t)
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "a", Status: StatusTodo}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "b", Status: StatusTodo, BasisIDs: []string{"a"}}}}); err != nil {
+		t.Fatalf("known basis rejected: %v", err)
+	}
+	if _, err := s.Apply(Delta{Upserts: []Task{
+		{ID: "c", Status: StatusTodo},
+		{ID: "d", Status: StatusTodo, BasisIDs: []string{"c"}},
+	}}); err != nil {
+		t.Fatalf("basis on same-batch upsert rejected: %v", err)
+	}
+	rev, _ := s.Revision(context.Background())
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "e", Status: StatusTodo, BasisIDs: []string{"ghost"}}}}); err == nil {
+		t.Fatal("want error for unknown basis id")
+	}
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "f", Status: StatusTodo, BasisIDs: []string{"f"}}}}); err == nil {
+		t.Fatal("want error for self basis")
+	}
+	if got, _ := s.Revision(context.Background()); got != rev {
+		t.Errorf("revision = %d after rejected basis, want %d", got, rev)
+	}
+}
+
 func TestApplyRejectsDoneToTodo(t *testing.T) {
 	s := mustOpen(t)
 	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "t1", Status: StatusDone}}}); err != nil {

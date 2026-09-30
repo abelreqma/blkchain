@@ -20,6 +20,37 @@ var writeFlags = map[string][]string{
 	"nc":   {"-o"},
 	"ncat": {"-o", "--output", "-x", "--hex-dump"},
 	"nmap": {"-oN", "-oX", "-oG", "-oA", "-oS", "-oJ", "--stylesheet", "--resume"},
+	// dnsrecon: -x/-c/-j/--db write result files. -D/--dictionary and
+	// -iL/--input-list read a file whose lines become DNS queries (a read and
+	// exfiltrate primitive). argparse also accepts -i as an abbreviation of -iL.
+	"dnsrecon": {
+		"-x", "--xml", "-c", "--csv", "-j", "--json", "--db",
+		"-D", "--dictionary", "-iL", "--input-list", "-i",
+	},
+	// smbclient and rpcclient: -l/--log-basename writes log files. nbtscan -O
+	// writes a log file. Their exec, config, credential, and file-target flags
+	// are denied outright by Classify.
+	"smbclient": {"-l", "--log-basename"},
+	"rpcclient": {"-l", "--log-basename"},
+	"nbtscan":   {"-O"},
+	// ldapsearch: -f reads the operations from a file, -T names the directory
+	// that -t writes into (-t itself is denied by Classify).
+	"ldapsearch": {"-f", "-T"},
+	// onesixtyone: -c reads the community strings from a file and sends them to
+	// the target, -o writes a log. -i (targets from a file) is denied by Classify.
+	"onesixtyone": {"-c", "-o"},
+	// gobuster: -o writes; -w, -p, and -X read files whose lines are sent to the
+	// target; the client certificate files are read for TLS.
+	"gobuster": {
+		"-o", "--output", "-w", "--wordlist", "-p", "--pattern",
+		"-X", "--extensions-file", "--client-cert-file", "--client-cert-key",
+		"--client-cert-pfx",
+	},
+	// ffuf: -o, -od, -of, and -debug-log write; -w, -cc, -ck, and -scraperfile
+	// read. -config and -request are denied outright (denyFlags).
+	"ffuf": {"-o", "-od", "-of", "-debug-log", "-w", "-cc", "-ck", "-scraperfile"},
+	// nikto: -o/-output and -Save write; -key and -RSAcert read certificate files.
+	"nikto": {"-o", "-output", "-Save", "-key", "-RSAcert"},
 }
 
 // dataFlags maps a binary base name to the flags whose value may carry an
@@ -40,7 +71,15 @@ var dataFlags = map[string][]string{
 var denyFlags = map[string][]string{
 	"curl": {"-K", "--config"},
 	"wget": {"--config", "-e", "--execute", "--use-askpass"},
+	// ffuf -config loads options from a file; -request reads a raw request file
+	// whose Host header is the target, which the scope check never sees.
+	"ffuf": {"-config", "-request"},
 }
+
+// goFlagBins lists binaries that parse options with Go's flag package (ffuf) or
+// Getopt::Long (nikto), where --name and -name are the same option, so `--o`
+// reaches -o.
+var goFlagBins = map[string]bool{"ffuf": true, "nikto": true}
 
 // shortArgLetters lists, per binary, the single-letter short flags that take
 // an argument. It is needed to parse bundles such as `curl -so ../x`, where
@@ -52,11 +91,26 @@ var shortArgLetters = map[string]string{
 	"ss":   "DFNA",
 	"nc":   "oeciIpPqsTVwWxXm",
 	"ncat": "oxeciIpPqsTVwWXm",
+	// dnsrecon (argparse): -d -r -n -D -t -c -j -x -i take a value.
+	"dnsrecon": "drnDtcjxi",
+	// smbclient/rpcclient (popt): the value-taking short options.
+	"smbclient": smbArgLetters + "cTAs",
+	"rpcclient": smbArgLetters + "cTAs",
+	"nbtscan":   "fstbmpO",
+	// ldapsearch (getopt) and onesixtyone (getopt): the value-taking letters.
+	"ldapsearch":  ldapArgLetters,
+	"onesixtyone": "ciow",
+	// gobuster (pflag): only letters that take a value in every mode. -c, -d,
+	// and -r are booleans in some modes, and leaving them out errs toward denial.
+	"gobuster": "opwtaHmPUuxXsbB",
 }
 
-// abbrevBins lists binaries whose long options accept unambiguous prefixes
-// (getopt_long), so `--dir=/x` means --directory-prefix.
-var abbrevBins = map[string]bool{"wget": true}
+// abbrevMin lists binaries whose long options accept unambiguous prefixes
+// (getopt_long, argparse), so `--dir=/x` means --directory-prefix. The value is
+// the shortest matched argument length, dashes included. wget needs three
+// letters after the dashes. argparse accepts a single letter, so `--j` and
+// `--x` reach dnsrecon's --json and --xml.
+var abbrevMin = map[string]int{"wget": 5, "dnsrecon": 3, "smbclient": 3, "rpcclient": 3}
 
 // configOptionNote is the reason attached to an outright-denied flag.
 const configOptionNote = " (option not permitted: unvalidatable config or command indirection)"
@@ -78,11 +132,16 @@ const configOptionNote = " (option not permitted: unvalidatable config or comman
 // file.
 //
 // Coverage: this is a per-flag policy for the default-allowlist binaries only
-// (curl, wget, nmap). Binaries an operator adds with an `allow` line are NOT
-// covered and must be reviewed for their own write, data, and config flags
-// before being allowed. Input-only read flags (-w/--wordlist, -iL,
-// -i/--input-file) are not restricted: reading a wordlist or input list is a
-// legitimate, low-risk operation. Code-execution flags (nmap --script and
+// (curl, wget, nmap, ss, nc, ncat, dnsrecon, smbclient, rpcclient, nbtscan,
+// ldapsearch, onesixtyone, gobuster, ffuf, nikto). host, nslookup, showmount,
+// snmpwalk, and dig have no bounded file flag (the file and credential options
+// of snmpwalk and dig are denied by Classify), so they need no entry. Binaries an operator adds with an
+// `allow` line are NOT covered and must be reviewed for their own write, data,
+// and config flags before being allowed. Input-only read flags of other tools
+// (-w/--wordlist, -iL, -i/--input-file) are not restricted: reading a wordlist
+// or input list is a legitimate, low-risk operation. dnsrecon is the exception:
+// its -D/--dictionary and -iL/--input-list turn file lines into DNS queries, so
+// they are bounded like a write flag. Code-execution flags (nmap --script and
 // --datadir, nc/ncat -e, ip netns) are denied separately by Classify.
 func FileAccessViolation(c Command) (arg string, bad bool) {
 	name := strings.ToLower(baseName(strings.TrimSpace(c.Binary)))
@@ -118,6 +177,9 @@ func flagOccurrence(name string, args []string, i int, flags []string) (flag, va
 	if !strings.HasPrefix(a, "-") {
 		return "", "", false
 	}
+	if goFlagBins[name] && strings.HasPrefix(a, "--") {
+		a = a[1:]
+	}
 	next := func() string {
 		if i+1 < len(args) {
 			return args[i+1]
@@ -139,7 +201,7 @@ func flagOccurrence(name string, args []string, i int, flags []string) (flag, va
 			if !long {
 				continue
 			}
-			if n == f || (abbrevBins[name] && len(n) >= 5 && strings.HasPrefix(f, n)) {
+			if n == f || (abbrevMin[name] > 0 && len(n) >= abbrevMin[name] && strings.HasPrefix(f, n)) {
 				if hasEq {
 					return f, v, true
 				}

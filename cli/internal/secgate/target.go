@@ -39,6 +39,14 @@ var (
 // not a target.
 func ExtractTargets(c Command) ([]string, bool) {
 	e := &extractor{seen: map[string]bool{}, ok: true}
+	switch strings.ToLower(baseName(strings.TrimSpace(c.Binary))) {
+	case "smbclient", "rpcclient":
+		e.unc = true
+	case "dig":
+		// With an explicit @server, the queried name (and -t/-x/-q values) is data
+		// sent to that resolver, not a connection target.
+		e.skipNames = hasAtServer(c.Args)
+	}
 	for _, a := range c.Args {
 		e.arg(a)
 	}
@@ -49,6 +57,22 @@ type extractor struct {
 	seen map[string]bool
 	out  []string
 	ok   bool
+	unc  bool // extract the host of a //host or \\host token (smbclient, rpcclient)
+	// skipNames drops positional tokens (not led by '-', '+', or '@') so a dig
+	// query name is not scope-checked when an @server names the resolver.
+	skipNames bool
+}
+
+// hasAtServer reports whether any whitespace field of args is an '@'-led token.
+func hasAtServer(args []string) bool {
+	for _, a := range args {
+		for _, f := range strings.Fields(a) {
+			if f[0] == '@' {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (e *extractor) add(h string) {
@@ -74,6 +98,9 @@ func (e *extractor) arg(a string) {
 		e.ok = false
 	}
 	for _, f := range strings.Fields(a) {
+		if e.skipNames && !strings.Contains(f, "://") && f[0] != '-' && f[0] != '+' && f[0] != '@' {
+			continue
+		}
 		e.token(f)
 	}
 }
@@ -122,6 +149,20 @@ func (e *extractor) token(t string) {
 	if strings.Contains(t, "://") {
 		return // scan already handled it
 	}
+	if h, ok := uncHost(t); ok && e.unc {
+		// A UNC host is unambiguous, so a single-label name counts too (host()
+		// would skip it as an ordinary word).
+		h = strings.TrimSuffix(h, ".")
+		if len(h) > 2 && h[0] == '[' && h[len(h)-1] == ']' {
+			h = h[1 : len(h)-1]
+		}
+		if validHost(h) {
+			e.add(h)
+		} else {
+			e.ok = false
+		}
+		return
+	}
 	if i := strings.Index(t, "="); i >= 0 {
 		e.token(t[i+1:])
 	}
@@ -129,6 +170,30 @@ func (e *extractor) token(t string) {
 		return
 	}
 	e.host(t)
+}
+
+// uncHost returns the host of a UNC-style token such as //host/share or
+// \\host\share (smbclient and rpcclient accept any mix of '/' and '\' for the
+// leading and the following separators, and extra leading separators are
+// harmless to them). Without this the host would fall through host() as a
+// filesystem path and escape the scope check. It reports ok=false when t starts
+// with fewer than two separators. A token of three or more separators and no
+// host returns ("", true), which the caller treats as unverifiable. The
+// extractor applies this to smbclient and rpcclient only; for other tools a
+// //x token is a path or payload.
+func uncHost(t string) (string, bool) {
+	rest := strings.TrimLeft(t, "/\\")
+	n := len(t) - len(rest)
+	if n < 2 {
+		return "", false
+	}
+	if rest == "" {
+		return "", n >= 3 // "///" carries no host: unverifiable, not a path
+	}
+	if i := strings.IndexAny(rest, "/\\"); i >= 0 {
+		rest = rest[:i]
+	}
+	return rest, true
 }
 
 // host resolves a token as CIDR/range, [user@]host[:port|:path][/path|?q|#f],

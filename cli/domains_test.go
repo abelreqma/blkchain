@@ -7,6 +7,30 @@ import (
 	"testing"
 )
 
+func TestExecutorPreambleAllowsGatedCommands(t *testing.T) {
+	if strings.Contains(executorPreamble, "cannot run commands against targets in this phase") {
+		t.Errorf("executorPreamble still contains the stale no-commands sentence: %q", executorPreamble)
+	}
+}
+
+func TestReconPromptCoversEnumerationSurfaces(t *testing.T) {
+	prompt := domainFor("recon").Prompt
+	for _, want := range []string{"DNS", "SMB", "LDAP", "SNMP"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("recon prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestReconPromptMentionsChainedFollowOnTasks(t *testing.T) {
+	prompt := domainFor("recon").Prompt
+	for _, want := range []string{"plan_add", "basis_ids", "follow-on"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("recon prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestDomainForKnownAndUnknown(t *testing.T) {
 	if d := domainFor("web"); d.Name != "web" {
 		t.Errorf("domainFor(web).Name = %q", d.Name)

@@ -26,6 +26,21 @@ func defaultEngageAllowlist() []string {
 		"nmap", "curl", "wget", "dig", "whois", "nc", "ncat",
 		"id", "whoami", "uname", "hostname", "ps", "ls", "cat", "head", "tail", "grep",
 		"stat", "getcap", "ss", "netstat", "ip", "ifconfig",
+		// DNS enumeration. Each has a flag audit in secgate (see
+		// secgate/dnsenum_test.go); host and nslookup have no file, exec, or
+		// config flag, dnsrecon's file flags are bounded in FileAccessViolation.
+		"host", "nslookup", "dnsrecon",
+		// SMB, RPC, NetBIOS, and NFS enumeration. Audited in
+		// secgate/smbenum_test.go: -c/--command, config and credential files, and
+		// nbtscan -f are denied, log paths are bounded, glued host flags are
+		// denied, and a UNC host is scope-checked.
+		"smbclient", "rpcclient", "nbtscan", "showmount",
+		// LDAP, SNMP, and HTTP discovery. Audited in secgate/netenum_test.go and
+		// secgate/httpenum_test.go: exec and plugin flags, config and credential
+		// files, and file-of-targets flags are denied, output and wordlist paths
+		// are bounded, glued target flags are denied, and every target flag value
+		// must resolve to a host the scope check can see.
+		"ldapsearch", "snmpwalk", "onesixtyone", "gobuster", "ffuf", "nikto",
 	}
 }
 
