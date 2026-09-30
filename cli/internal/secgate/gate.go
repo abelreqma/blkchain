@@ -4,25 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 )
-
-// localBins are known local-only enumeration tools: binaries that only ever
-// inspect this host and never need a network target. In a local engagement a
-// command with no extracted target is allowed ONLY when its binary is one of
-// these. This is a positive (allowlist) check, not a denylist: an unlisted or
-// unknown binary with no target (socat, a network tool, anything else) is
-// denied even in local mode, so an operator allowlisting an arbitrary binary
-// cannot bypass the target check by pairing it with a single-label host that
-// extracts no target. sudo, find, env, and the shells are already denied
-// outright by the classifier, so they are intentionally left out here.
-var localBins = map[string]bool{
-	"id": true, "whoami": true, "uname": true, "hostname": true,
-	"ps": true, "ls": true, "cat": true, "head": true, "tail": true,
-	"grep": true, "stat": true, "getcap": true, "ss": true, "netstat": true,
-	"ip": true, "ifconfig": true, "w": true, "who": true,
-}
 
 // Gate composes every security layer. It performs no execution.
 type Gate struct {
@@ -34,6 +17,9 @@ type Gate struct {
 	Approvals *SessionApprovals           // nil remembers no repeats
 	Episode   *Episode                    // nil gets a default-caps episode
 	Audit     func(action, detail string) // nil is a no-op
+
+	Protected []string
+	Scratch   string
 }
 
 // Start validates the gate for its mode. Auto refuses without a non-empty scope.
@@ -63,8 +49,46 @@ func (g *Gate) audit(action, detail string) {
 // Authorize runs the fail-closed pipeline for one command and audits the
 // outcome. Order: episode caps and breaker, classifier, allowlist, scope
 // (every extracted target in scope), confirmation (Safe, unless already
-// session-approved). It never executes anything.
+// session-approved). A scope with a local directive selects the LOCAL profile
+// instead: the classifier is ClassifyLocal (enforceability denials only) and
+// there is no binary allowlist. Because the LOCAL profile drops the allowlist,
+// it requires per-command human confirmation in EVERY mode, including Auto: the
+// human is the positive control that bounds arbitrary code execution, and with
+// no confirmer available a local command fails closed (deny). EXTERNAL /auto is
+// unchanged and does not prompt. It never executes anything.
+//
+// The human confirmation (g.Confirm.Confirm) runs OUTSIDE g.mu: the mutex is
+// released for the duration of the prompt and re-acquired afterward, so a slow
+// human approving one command does not serialize concurrent Authorize calls
+// behind the prompt and a bounded-parallel executor pool cannot deadlock. Every
+// Episode, Approvals, and audit access stays under g.mu.
 func (g *Gate) Authorize(ctx context.Context, c Command) Decision {
+	g.mu.Lock()
+	if g.Episode == nil {
+		g.Episode = NewEpisode(Caps{}, nil)
+	}
+	if g.Mode != Safe && g.Mode != Auto {
+		d := g.deny("mode", c, "unknown mode", "")
+		g.mu.Unlock()
+		return d
+	}
+	if d := g.checkLocked(c); !d.Allowed {
+		g.mu.Unlock()
+		return d
+	}
+	// Deny-layers passed. Run the confirmation tail, which releases g.mu for the
+	// human prompt and re-acquires it before touching Approvals or the audit log.
+	return g.confirmTailLocked(ctx, c)
+}
+
+// Check runs only the deny-layers for one command (episode caps and breaker, the
+// classifier, allowlist, and scope checks of the selected profile) and returns
+// the Decision WITHOUT confirming and WITHOUT auditing an allow. Like Authorize
+// it consumes one budget slot per call, so a 3-stage pipeline that calls Check
+// once per stage consumes 3 slots. A pipeline uses Check to clear every stage's
+// deny-layers and then confirms ONCE via ConfirmCommand, so /safe prompts once
+// per pipeline instead of once per stage.
+func (g *Gate) Check(ctx context.Context, c Command) Decision {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.Episode == nil {
@@ -73,36 +97,77 @@ func (g *Gate) Authorize(ctx context.Context, c Command) Decision {
 	if g.Mode != Safe && g.Mode != Auto {
 		return g.deny("mode", c, "unknown mode", "")
 	}
+	return g.checkLocked(c)
+}
+
+// ConfirmCommand runs only the confirmation tail for one command: in Safe it
+// asks g.Confirm (outside g.mu) unless c is already session-approved, remembers
+// an approval, and audits the final allow or deny; in Auto it is a no-op that
+// audits allow. It runs no deny-layer and consumes no budget slot. A pipeline
+// calls it once with a synthetic command that stands for the whole pipeline,
+// after Check has cleared every stage, so a /safe pipeline prompts once.
+func (g *Gate) ConfirmCommand(ctx context.Context, c Command) Decision {
+	g.mu.Lock()
+	return g.confirmTailLocked(ctx, c)
+}
+
+// checkLocked runs the fail-closed deny-layers for c and audits any denial. It
+// assumes g.mu is held. A returned Decision{Allowed:true} means every deny-layer
+// passed; the command is NOT yet confirmed and no "allow" is audited. It touches
+// only g.mu-protected state (the Episode budget and the audit log).
+func (g *Gate) checkLocked(c Command) Decision {
 	// 1. caps and circuit breaker
 	if ok, reason := g.Episode.AllowCommand(); !ok {
 		return g.deny("cap", c, reason, "")
 	}
-	// 2. structural classifier
-	if d := Classify(c); !d.Allowed {
-		return g.deny("classifier", c, d.Reason, d.Suggestion)
-	}
-	// 3. binary allowlist
-	if g.Allow == nil || !g.Allow.Permits(c.Binary) {
-		return g.deny("allowlist", c, fmt.Sprintf("binary %q is not on the allowlist", c.Binary), "")
-	}
-	// 4. scope. Auto without a usable scope is denied even if Start was skipped.
-	if g.Mode == Auto && (g.Scope == nil || (g.Scope.Empty() && !g.Scope.Local())) {
-		return g.deny("scope", c, "auto mode requires a non-empty scope", "")
-	}
-	if g.Scope != nil {
-		targets, ok := ExtractTargets(c)
-		if !ok {
-			return g.deny("scope", c, "command has an unverifiable target (cannot confirm it is in scope)", "")
+	if g.Scope != nil && g.Scope.Local() {
+		// LOCAL profile: no binary allowlist. Only the structural denials that
+		// keep gating enforceable (raw-shell metacharacters, shells,
+		// interpreters, exec-wrappers, find exec predicates).
+		if d := ClassifyLocal(c); !d.Allowed {
+			return g.deny("classifier", c, d.Reason, d.Suggestion)
 		}
-		if len(targets) == 0 {
-			if !g.Scope.Local() {
+		if err := DestructiveViolation(c); err != nil {
+			return g.deny("destructive", c, err.Error(), "")
+		}
+		if arg, bad := SensitivePathViolation(c, g.Protected, g.Scratch); bad {
+			return g.deny("sensitive-path", c, "argument references a protected harness path: "+arg, "")
+		}
+		// A local command has no remote target to scope. A scope that also lists
+		// in-scope network targets still scopes a command that names one.
+		if !g.Scope.Empty() {
+			targets, ok := ExtractTargets(c)
+			if !ok {
+				return g.deny("scope", c, "command has an unverifiable target (cannot confirm it is in scope)", "")
+			}
+			for _, tgt := range targets {
+				if !g.Scope.InScope(tgt) {
+					return g.deny("scope", c, "target out of scope: "+tgt, "")
+				}
+			}
+		}
+	} else {
+		// EXTERNAL profile.
+		// 2. structural classifier
+		if d := Classify(c); !d.Allowed {
+			return g.deny("classifier", c, d.Reason, d.Suggestion)
+		}
+		// 3. binary allowlist
+		if g.Allow == nil || !g.Allow.Permits(c.Binary) {
+			return g.deny("allowlist", c, fmt.Sprintf("binary %q is not on the allowlist", c.Binary), "")
+		}
+		// 4. scope. Auto without a usable scope is denied even if Start was skipped.
+		if g.Mode == Auto && (g.Scope == nil || g.Scope.Empty()) {
+			return g.deny("scope", c, "auto mode requires a non-empty scope", "")
+		}
+		if g.Scope != nil {
+			targets, ok := ExtractTargets(c)
+			if !ok {
+				return g.deny("scope", c, "command has an unverifiable target (cannot confirm it is in scope)", "")
+			}
+			if len(targets) == 0 {
 				return g.deny("scope", c, "no verifiable target to check against the scope", "")
 			}
-			if !localBins[strings.ToLower(baseName(c.Binary))] {
-				return g.deny("scope", c, "a command with no in-scope target is only allowed in local mode for known local tools", "")
-			}
-			// local engagement, known local-only tool: runs on this host.
-		} else {
 			for _, tgt := range targets {
 				if !g.Scope.InScope(tgt) {
 					return g.deny("scope", c, "target out of scope: "+tgt, "")
@@ -110,18 +175,36 @@ func (g *Gate) Authorize(ctx context.Context, c Command) Decision {
 			}
 		}
 	}
-	// 5. confirmation (every mode except Auto, so an unknown mode fails strict)
-	if g.Mode != Auto {
-		if g.Approvals == nil || !g.Approvals.Approved(c) {
-			if g.Confirm == nil || !g.Confirm.Confirm(ctx, c) {
-				return g.deny("confirm", c, "command not confirmed by the operator", "")
-			}
-			if g.Approvals != nil {
-				g.Approvals.Remember(c)
-			}
-		}
+	return Decision{Allowed: true}
+}
+
+// confirmTailLocked runs the confirmation step and audits the final decision. It
+// is called with g.mu HELD and unlocks it on every return path. The ONLY work
+// done outside the lock is the g.Confirm.Confirm call: needConfirm is decided
+// under the lock (Approvals is g.mu-protected), the lock is released for the
+// human prompt, then re-acquired before Remember and the audit. In Auto no
+// confirmation is needed and it audits allow directly.
+func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
+	localProfile := g.Scope != nil && g.Scope.Local()
+	needConfirm := (g.Mode != Auto || localProfile) && (g.Approvals == nil || !g.Approvals.Approved(c))
+	if !needConfirm {
+		g.audit("allow", Signature(c))
+		g.mu.Unlock()
+		return Decision{Allowed: true}
+	}
+	g.mu.Unlock()
+	ok := g.Confirm != nil && g.Confirm.Confirm(ctx, c)
+	g.mu.Lock()
+	if !ok {
+		d := g.deny("confirm", c, "command not confirmed by the operator", "")
+		g.mu.Unlock()
+		return d
+	}
+	if g.Approvals != nil {
+		g.Approvals.Remember(c)
 	}
 	g.audit("allow", Signature(c))
+	g.mu.Unlock()
 	return Decision{Allowed: true}
 }
 

@@ -69,6 +69,12 @@ func parseEngageInput(in mcpEngageIn) (engageParsed, error) {
 	if confirm != "elicit" && confirm != "auto" {
 		return engageParsed{}, fmt.Errorf(`engage: confirm must be "elicit" or "auto", got %q`, in.Confirm)
 	}
+	// A local/post-access scope requires per-command approval, which confirm="auto"
+	// (no per-command approval) cannot provide: the gate would deny every command.
+	// Reject the combination up front so a local run must elicit.
+	if scope.Local() && confirm == "auto" {
+		return engageParsed{}, fmt.Errorf(`engage: local/post-access scope requires confirm="elicit" (per-command approval); "auto" is not permitted for local`)
+	}
 	return engageParsed{Goal: goal, Scope: scope, Confirm: confirm, Model: in.Model}, nil
 }
 
@@ -257,6 +263,19 @@ func (svc engageService) handle(ctx context.Context, ss *mcp.ServerSession, in m
 			_ = ws.AuditLine("secgate", action, detail)
 		},
 	}
+	// LOCAL profile only: guard the engagement's own artifacts from an executor's
+	// file arguments, mirroring `blk engage`. ws.Dir is the absolute workspace
+	// dir, so these resolve to the same absolute paths the sensitive-path check
+	// compares against, and scratch is run_command's cwd for relative arguments.
+	protMD, protJSON := reportPaths(ws.Dir)
+	gate.Protected = []string{
+		filepath.Join(ws.Dir, "engagement.db"),
+		filepath.Join(ws.Dir, "audit.jsonl"),
+		ws.EvidenceDir(),
+		protMD,
+		protJSON,
+	}
+	gate.Scratch = scratch
 	if err := gate.Start(); err != nil {
 		return nil, fmt.Errorf("engage: %w", err)
 	}

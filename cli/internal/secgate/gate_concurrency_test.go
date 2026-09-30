@@ -18,10 +18,13 @@ func TestConcurrentAuthorizeSharedBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	const capN, n = 40, 100
+	// Local scope requires per-command confirmation; an approving confirmer lets
+	// commands through so the episode budget (the subject here) is what bounds them.
 	g := &Gate{
 		Mode:    Auto,
 		Scope:   s,
 		Allow:   NewAllowlist("id"),
+		Confirm: stubConfirmer{true},
 		Episode: NewEpisode(Caps{MaxCommands: capN}, nil),
 	}
 	if err := g.Start(); err != nil {

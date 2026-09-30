@@ -137,8 +137,17 @@ func runEngage(args []string) error {
 
 	tty := isTerminalFile(os.Stdin)
 	var confirm secgate.Confirmer
-	if mode == secgate.Safe && tty {
+	// The mmdflux viz session replaces this with its widget confirmer by assigning confirm here before the gate is built.
+	// A local/post-access engagement requires per-command confirmation in every
+	// mode (the human is the positive control), so a terminal confirmer is
+	// provided for /auto local too, not only /safe.
+	if tty && (mode == secgate.Safe || (scope != nil && scope.Local())) {
 		confirm = newTerminalConfirmer(os.Stdin, os.Stdout)
+	}
+	// Fail closed: a local engagement with no way to confirm cannot run, because
+	// every local command needs human approval and none is available off a TTY.
+	if scope != nil && scope.Local() && confirm == nil {
+		return fmt.Errorf("engage: local/post-access engagements require interactive confirmation; run on a TTY (or over MCP with confirm=elicit)")
 	}
 
 	gate := &secgate.Gate{
@@ -165,6 +174,20 @@ func runEngage(args []string) error {
 	}
 	defer os.RemoveAll(scratch)
 
+	// LOCAL profile only: guard the engagement's own artifacts from an
+	// executor's file arguments. ws.Dir is the absolute workspace dir, so these
+	// resolve to the same absolute paths the sensitive-path check compares
+	// against. reportPaths and EvidenceDir are the code's own path builders.
+	protMD, protJSON := reportPaths(ws.Dir)
+	gate.Protected = []string{
+		filepath.Join(ws.Dir, "engagement.db"),
+		filepath.Join(ws.Dir, "audit.jsonl"),
+		ws.EvidenceDir(),
+		protMD,
+		protJSON,
+	}
+	gate.Scratch = scratch
+
 	var asker askuser.Asker = askuser.AutoAsker{}
 	if mode == secgate.Safe && tty {
 		asker = newTerminalAsker(os.Stdin, os.Stdout)
@@ -182,17 +205,18 @@ func runEngage(args []string) error {
 
 	r := newVizRenderer(newMmdfluxRunner())
 	deps := engageDeps{
-		Model:    model,
-		RC:       rc,
-		Cfg:      cfg,
-		Prefs:    prefs,
-		Store:    ws.Store,
-		Asker:    asker,
-		Gate:     gate,
-		Runs:     NewRunOutputs(),
-		WorkDir:  scratch,
-		Catalog:  cat,
-		Progress: makeEngageProgress(os.Stdout, r, prefs.Viz),
+		Model:     model,
+		RC:        rc,
+		Cfg:       cfg,
+		Prefs:     prefs,
+		Store:     ws.Store,
+		Asker:     asker,
+		Gate:      gate,
+		Confirmer: confirm,
+		Runs:      NewRunOutputs(),
+		WorkDir:   scratch,
+		Catalog:   cat,
+		Progress:  makeEngageProgress(os.Stdout, r, prefs.Viz),
 	}
 
 	// Resumable engagement report: a projection of the store written to the

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,14 @@ func withStubExec(t *testing.T, fn func(ctx context.Context, bin string, args []
 	t.Cleanup(func() { execRunner = prev })
 }
 
+// stubbed execPipeline for hermetic tests.
+func withStubPipeline(t *testing.T, fn func(ctx context.Context, stages []pipelineStage, dir string, capBytes int, timeout time.Duration) runResult) {
+	t.Helper()
+	prev := execPipeline
+	execPipeline = fn
+	t.Cleanup(func() { execPipeline = prev })
+}
+
 func autoGate(t *testing.T) *secgate.Gate {
 	t.Helper()
 	s, err := secgate.ParseScope(strings.NewReader("10.0.0.0/24\n"))
@@ -30,6 +39,121 @@ func autoGate(t *testing.T) *secgate.Gate {
 		t.Fatal(err)
 	}
 	return g
+}
+
+// countingConfirmer records Confirm calls and returns ok.
+type countingConfirmer struct {
+	ok    bool
+	calls int
+}
+
+func (c *countingConfirmer) Confirm(ctx context.Context, cmd secgate.Command) bool {
+	c.calls++
+	return c.ok
+}
+
+// safeLocalGate builds a Safe-mode gate on a local scope with the given
+// confirmer, so pipeline stages of ordinary binaries pass the deny-layers and
+// confirmation is exercised.
+func safeLocalGate(t *testing.T, confirm secgate.Confirmer) *secgate.Gate {
+	t.Helper()
+	s, err := secgate.ParseScope(strings.NewReader("local\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &secgate.Gate{Mode: secgate.Safe, Scope: s, Confirm: confirm, Approvals: secgate.NewSessionApprovals()}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+const threeStagePipeline = `{"pipeline":[{"binary":"id"},{"binary":"grep","args":["uid"]},{"binary":"head","args":["-n","1"]}]}`
+
+// TestRunCommandPipelineConfirmsOnce: a /safe 3-stage pipeline whose stages all
+// pass the deny-layers prompts the human EXACTLY once, not once per stage, then
+// runs.
+func TestRunCommandPipelineConfirmsOnce(t *testing.T) {
+	cc := &countingConfirmer{ok: true}
+	callCount := 0
+	withStubPipeline(t, func(ctx context.Context, stages []pipelineStage, dir string, capBytes int, timeout time.Duration) runResult {
+		callCount++
+		return runResult{Output: "a"}
+	})
+	g := safeLocalGate(t, cc)
+	tool := newRunCommandTool(g, 1000, time.Second, "", func() string { return "t1" }, func(string, string) {})
+	out, err := tool.Call(context.Background(), threeStagePipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cc.calls != 1 {
+		t.Errorf("Confirm called %d times, want exactly 1 for the whole pipeline", cc.calls)
+	}
+	if callCount != 1 {
+		t.Errorf("execPipeline called %d times, want 1", callCount)
+	}
+	if !strings.Contains(out, "UNTRUSTED command BEGIN") {
+		t.Errorf("output not wrapped:\n%s", out)
+	}
+}
+
+// TestRunCommandPipelineConfirmRefusedAborts: a refusing confirmer aborts the
+// pipeline before any execution.
+func TestRunCommandPipelineConfirmRefusedAborts(t *testing.T) {
+	cc := &countingConfirmer{ok: false}
+	called := false
+	withStubPipeline(t, func(ctx context.Context, stages []pipelineStage, dir string, capBytes int, timeout time.Duration) runResult {
+		called = true
+		return runResult{Output: "must not run"}
+	})
+	g := safeLocalGate(t, cc)
+	tool := newRunCommandTool(g, 1000, time.Second, "", func() string { return "t1" }, func(string, string) {})
+	out, err := tool.Call(context.Background(), threeStagePipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("execPipeline must NOT run when the pipeline confirmation is refused")
+	}
+	if cc.calls != 1 {
+		t.Errorf("Confirm called %d times, want 1", cc.calls)
+	}
+	if !strings.Contains(strings.ToLower(out), "denied") {
+		t.Errorf("want a denial message, got %q", out)
+	}
+	if strings.Contains(out, "UNTRUSTED") {
+		t.Errorf("a refused pipeline must not wrap output, got %q", out)
+	}
+}
+
+// TestRunCommandPipelineLocalAutoConfirmsOnce: a local /auto pipeline requires
+// human confirmation (the LOCAL profile forces HITL in every mode) but still
+// only once per pipeline, via ConfirmCommand, then runs.
+func TestRunCommandPipelineLocalAutoConfirmsOnce(t *testing.T) {
+	cc := &countingConfirmer{ok: true}
+	callCount := 0
+	withStubPipeline(t, func(ctx context.Context, stages []pipelineStage, dir string, capBytes int, timeout time.Duration) runResult {
+		callCount++
+		return runResult{Output: "a"}
+	})
+	s, err := secgate.ParseScope(strings.NewReader("local\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &secgate.Gate{Mode: secgate.Auto, Scope: s, Confirm: cc, Approvals: secgate.NewSessionApprovals()}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	tool := newRunCommandTool(g, 1000, time.Second, "", func() string { return "t1" }, func(string, string) {})
+	if _, err := tool.Call(context.Background(), threeStagePipeline); err != nil {
+		t.Fatal(err)
+	}
+	if cc.calls != 1 {
+		t.Errorf("Confirm called %d times, want exactly 1 (local /auto confirms once per pipeline)", cc.calls)
+	}
+	if callCount != 1 {
+		t.Errorf("execPipeline called %d times, want 1", callCount)
+	}
 }
 
 func TestResolveRunCaps(t *testing.T) {
@@ -281,6 +405,170 @@ func TestRunCommandAuditsAllowDenyAndExecDistinctly(t *testing.T) {
 	}
 	if len(actions) != 2 || actions[0] != "allow" || actions[1] != "deny:resolve" {
 		t.Fatalf("want [allow deny:resolve], got %v", actions)
+	}
+}
+
+func TestRunCommandPipelineDeniedStageDoesNotExec(t *testing.T) {
+	// A denied stage ANYWHERE aborts the whole pipeline before any exec. Prove it
+	// for a middle stage and for the last stage, not only the first.
+	cases := []struct {
+		name      string
+		args      string
+		wantStage string
+	}{
+		{
+			"middle stage denied",
+			`{"pipeline":[{"binary":"curl","args":["10.0.0.5"]},{"binary":"sh","args":["-c","id"]},{"binary":"curl","args":["10.0.0.5"]}]}`,
+			"stage 2",
+		},
+		{
+			"last stage denied",
+			`{"pipeline":[{"binary":"curl","args":["10.0.0.5"]},{"binary":"nmap","args":["-p","22","10.0.0.5"]},{"binary":"bash","args":["-c","id"]}]}`,
+			"stage 3",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			called := false
+			withStubPipeline(t, func(ctx context.Context, stages []pipelineStage, dir string, capBytes int, timeout time.Duration) runResult {
+				called = true
+				return runResult{Output: "must not run"}
+			})
+			g := autoGate(t)
+			tool := newRunCommandTool(g, 1000, time.Second, "", func() string { return "" }, func(string, string) {})
+			out, err := tool.Call(context.Background(), c.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if called {
+				t.Fatal("execPipeline must NOT be called when any stage is denied")
+			}
+			if !strings.Contains(out, c.wantStage) {
+				t.Errorf("want the denied stage index %q in the message, got %q", c.wantStage, out)
+			}
+			if !strings.Contains(strings.ToLower(out), "denied") {
+				t.Errorf("want a denial message, got %q", out)
+			}
+			if strings.Contains(out, "UNTRUSTED") {
+				t.Errorf("a denied pipeline must not wrap output, got %q", out)
+			}
+		})
+	}
+}
+
+func TestRunCommandPipelineValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		args string
+		want string
+	}{
+		{"one stage", `{"pipeline":[{"binary":"nmap","args":["10.0.0.5"]}]}`, "at least 2"},
+		{"too many stages", `{"pipeline":[{"binary":"nmap","args":["10.0.0.5"]},{"binary":"curl","args":["10.0.0.5"]},{"binary":"nmap","args":["10.0.0.5"]},{"binary":"curl","args":["10.0.0.5"]}]}`, "at most"},
+		{"empty stage binary", `{"pipeline":[{"binary":"nmap","args":["10.0.0.5"]},{"binary":"  "}]}`, "empty binary"},
+		{"both binary and pipeline", `{"binary":"nmap","args":["10.0.0.5"],"pipeline":[{"binary":"curl","args":["10.0.0.5"]},{"binary":"nmap","args":["10.0.0.5"]}]}`, "not both"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			called := false
+			withStubPipeline(t, func(ctx context.Context, stages []pipelineStage, dir string, capBytes int, timeout time.Duration) runResult {
+				called = true
+				return runResult{}
+			})
+			g := autoGate(t)
+			tool := newRunCommandTool(g, 1000, time.Second, "", func() string { return "" }, func(string, string) {})
+			out, err := tool.Call(context.Background(), c.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if called {
+				t.Fatal("an invalid pipeline must not run")
+			}
+			if strings.Contains(out, "UNTRUSTED") {
+				t.Errorf("an invalid pipeline must not wrap output, got %q", out)
+			}
+			if !strings.Contains(out, c.want) {
+				t.Errorf("want %q in the message, got %q", c.want, out)
+			}
+		})
+	}
+}
+
+func TestRunCommandPipelineExecutesAndWraps(t *testing.T) {
+	var capturedTask, capturedOut string
+	callCount := 0
+	withStubPipeline(t, func(ctx context.Context, stages []pipelineStage, dir string, capBytes int, timeout time.Duration) runResult {
+		callCount++
+		if len(stages) != 2 {
+			t.Errorf("want 2 stages threaded to execPipeline, got %d", len(stages))
+		}
+		return runResult{Output: "22/tcp open"}
+	})
+	g := autoGate(t)
+	tool := newRunCommandTool(g, 1000, time.Second, "", func() string { return "tP" },
+		func(task, out string) { capturedTask, capturedOut = task, out })
+	out, err := tool.Call(context.Background(), `{"pipeline":[{"binary":"curl","args":["10.0.0.5"]},{"binary":"nmap","args":["-p","22","10.0.0.5"]}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if callCount != 1 {
+		t.Fatalf("execPipeline called %d times, want 1", callCount)
+	}
+	if !strings.Contains(out, "UNTRUSTED command BEGIN") {
+		t.Errorf("output not wrapped:\n%s", out)
+	}
+	if !strings.Contains(out, "22/tcp open") {
+		t.Errorf("output missing:\n%s", out)
+	}
+	if capturedTask != "tP" || !strings.Contains(capturedOut, "22/tcp open") {
+		t.Errorf("capture wrong: task=%q out=%q", capturedTask, capturedOut)
+	}
+}
+
+func TestRealExecPipelineFilters(t *testing.T) {
+	for _, bin := range []string{"printf", "grep"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not on PATH", bin)
+		}
+	}
+	// printf writes three lines; grep filters to the one line. The pipe wiring is
+	// the security-relevant mechanism, and there is no shell in the code path.
+	stages := []pipelineStage{
+		{Binary: "printf", Args: []string{"alpha\nsshd\nbravo\n"}},
+		{Binary: "grep", Args: []string{"sshd"}},
+	}
+	res := realExecPipeline(context.Background(), stages, "", 1<<20, 5*time.Second)
+	if res.TimedOut {
+		t.Fatalf("unexpected timeout: %+v", res)
+	}
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if got := strings.TrimSpace(res.Output); got != "sshd" {
+		t.Errorf("pipeline output = %q, want %q", got, "sshd")
+	}
+}
+
+func TestRealExecPipelineHeadEarlyClose(t *testing.T) {
+	for _, bin := range []string{"seq", "head"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not on PATH", bin)
+		}
+	}
+	// head exits after one line; the upstream seq gets SIGPIPE/EPIPE, which is
+	// normal and must NOT surface as a pipeline error.
+	stages := []pipelineStage{
+		{Binary: "seq", Args: []string{"1", "100000"}},
+		{Binary: "head", Args: []string{"-n", "1"}},
+	}
+	res := realExecPipeline(context.Background(), stages, "", 1<<20, 5*time.Second)
+	if res.TimedOut {
+		t.Fatalf("unexpected timeout: %+v", res)
+	}
+	if res.Err != nil {
+		t.Errorf("head-style early close surfaced an error: %v", res.Err)
+	}
+	if got := strings.TrimSpace(res.Output); got != "1" {
+		t.Errorf("pipeline output = %q, want %q", got, "1")
 	}
 }
 

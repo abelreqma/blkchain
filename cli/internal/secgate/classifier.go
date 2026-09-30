@@ -43,16 +43,8 @@ var unboundedRules = map[string]struct {
 // whether the binary is allowlisted. It fails closed. When a bounded form
 // exists, Decision.Suggestion names it.
 func Classify(c Command) Decision {
-	if strings.TrimSpace(c.Binary) == "" {
-		return Decision{Allowed: false, Reason: "empty binary"}
-	}
-	for _, tok := range c.Args {
-		if bad := firstMetaToken(tok); bad != "" {
-			return Decision{Allowed: false, Reason: "argument contains a forbidden shell metacharacter: " + bad}
-		}
-	}
-	if bad := firstMetaToken(c.Binary); bad != "" {
-		return Decision{Allowed: false, Reason: "binary contains a forbidden shell metacharacter: " + bad}
+	if d := metaDecision(c); !d.Allowed {
+		return d
 	}
 	if name := strings.ToLower(baseName(strings.TrimSpace(c.Binary))); deniedBinaries[name] {
 		return Decision{Allowed: false, Reason: name + " is a shell, interpreter, or exec-wrapper and is not permitted directly"}
@@ -88,6 +80,70 @@ func Classify(c Command) Decision {
 	}
 	if d, bad := enumAudit(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); bad {
 		return d
+	}
+	return Decision{Allowed: true}
+}
+
+// metaDecision denies an empty binary and any shell metacharacter in the binary
+// or an argument. It is the first structural check of both Classify and
+// ClassifyLocal.
+func metaDecision(c Command) Decision {
+	if strings.TrimSpace(c.Binary) == "" {
+		return Decision{Allowed: false, Reason: "empty binary"}
+	}
+	for _, tok := range c.Args {
+		if bad := firstMetaToken(tok); bad != "" {
+			return Decision{Allowed: false, Reason: "argument contains a forbidden shell metacharacter: " + bad}
+		}
+	}
+	if bad := firstMetaToken(c.Binary); bad != "" {
+		return Decision{Allowed: false, Reason: "binary contains a forbidden shell metacharacter: " + bad}
+	}
+	return Decision{Allowed: true}
+}
+
+// findExecPredicates are the find primaries that run a program or write a file.
+// Matching is case-insensitive, which errs toward denial.
+var findExecPredicates = map[string]bool{
+	"-exec": true, "-execdir": true, "-ok": true, "-okdir": true,
+	"-delete": true, "-fprintf": true, "-fprint": true, "-fprint0": true,
+	"-fls": true,
+}
+
+// findExecArg reports the first argument of find that is a code-exec or
+// file-writing predicate.
+func findExecArg(args []string) (string, bool) {
+	for _, a := range args {
+		if findExecPredicates[strings.ToLower(a)] {
+			return a, true
+		}
+	}
+	return "", false
+}
+
+// ClassifyLocal is the structural check of the local profile. It keeps only the
+// denials that make gating enforceable: shell metacharacters, shells,
+// interpreters and exec-wrappers, find code-exec predicates, and the known
+// per-binary code-exec flags (execFlag, the same check Classify applies). There
+// is no binary allowlist and no per-binary bound or enumeration audit; any other
+// native binary passes. find is the one deniedBinaries entry that may run, as
+// long as it carries no exec or file-writing predicate.
+func ClassifyLocal(c Command) Decision {
+	if d := metaDecision(c); !d.Allowed {
+		return d
+	}
+	name := strings.ToLower(baseName(strings.TrimSpace(c.Binary)))
+	if name == "find" {
+		if a, bad := findExecArg(c.Args); bad {
+			return Decision{Allowed: false, Reason: "find " + a + " runs arbitrary code or writes files and is not permitted"}
+		}
+		return Decision{Allowed: true}
+	}
+	if deniedBinaries[name] {
+		return Decision{Allowed: false, Reason: name + " is a shell, interpreter, or exec-wrapper and is not permitted directly"}
+	}
+	if flag, bad := execFlag(name, c.Args); bad {
+		return Decision{Allowed: false, Reason: name + " " + flag + " runs arbitrary code and is not permitted"}
 	}
 	return Decision{Allowed: true}
 }

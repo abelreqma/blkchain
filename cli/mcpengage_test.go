@@ -25,6 +25,8 @@ func TestParseEngageInput(t *testing.T) {
 		{"ok default confirm", mcpEngageIn{Goal: "enum 10.0.0.5", Scope: "10.0.0.5\n"}, "", "elicit"},
 		{"ok explicit auto", mcpEngageIn{Goal: "g", Scope: "10.0.0.5\n", Confirm: "auto"}, "", "auto"},
 		{"ok explicit elicit", mcpEngageIn{Goal: "g", Scope: "local\n", Confirm: "elicit"}, "", "elicit"},
+		{"ok local default elicit", mcpEngageIn{Goal: "g", Scope: "local\n"}, "", "elicit"},
+		{"local auto rejected", mcpEngageIn{Goal: "g", Scope: "local\n", Confirm: "auto"}, `requires confirm="elicit"`, ""},
 		{"missing goal", mcpEngageIn{Goal: "  ", Scope: "10.0.0.5\n"}, "goal is required", ""},
 		{"missing scope", mcpEngageIn{Goal: "g", Scope: "   "}, "scope is required", ""},
 		{"empty parsed scope", mcpEngageIn{Goal: "g", Scope: "# only a comment\n"}, "no in-scope targets", ""},
@@ -271,6 +273,69 @@ func TestEngageRoundTripAutoNoElicit(t *testing.T) {
 	}
 	if !ran || elicited != 0 || out["final"] != "allowed" {
 		t.Errorf("ran=%v elicited=%d final=%v, want true/0/allowed", ran, elicited, out["final"])
+	}
+}
+
+// TestEngageMCPLocalGuardsArtifacts: a local engagement over MCP builds a gate
+// whose Protected paths are populated, so SensitivePathViolation guards the
+// engagement's own artifacts. It asserts Protected is non-empty and that the
+// MCP-constructed gate denies reading audit.jsonl (a protected path).
+func TestEngageMCPLocalGuardsArtifacts(t *testing.T) {
+	var protectedLen int
+	var catDenied bool
+	captureRun := func(ctx context.Context, d engageDeps, _ string) (string, error) {
+		protectedLen = len(d.Gate.Protected)
+		var auditPath string
+		for _, p := range d.Gate.Protected {
+			if strings.HasSuffix(p, "audit.jsonl") {
+				auditPath = p
+			}
+		}
+		dec := d.Gate.Authorize(ctx, secgate.Command{Binary: "cat", Args: []string{auditPath}})
+		catDenied = !dec.Allowed
+		return "done", nil
+	}
+	svc := engageService{
+		cfg:      ragconfig.Config{},
+		run:      captureRun,
+		newModel: func(ragconfig.Config, string) (toolLoopModel, error) { return nil, nil },
+	}
+	srv := mcp.NewServer(&mcp.Implementation{Name: "blkchain-test", Version: "0"}, nil)
+	registerEngageTool(srv, svc)
+
+	ctx := context.Background()
+	st, ct := mcp.NewInMemoryTransports()
+	ss, err := srv.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+
+	opts := &mcp.ClientOptions{
+		ElicitationHandler: func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			return &mcp.ElicitResult{Action: "accept"}, nil
+		},
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, opts)
+	cs, err := client.Connect(ctx, ct, &mcp.ClientSessionOptions{ProtocolVersion: "2025-11-25"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "engage",
+		Arguments: map[string]any{"goal": "g", "scope": "local\n", "confirm": "elicit"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %v", res.StructuredContent)
+	}
+	if protectedLen == 0 {
+		t.Error("MCP local gate must populate Protected (SensitivePathViolation guard)")
+	}
+	if !catDenied {
+		t.Error("MCP local gate must deny reading a protected path (audit.jsonl)")
 	}
 }
 

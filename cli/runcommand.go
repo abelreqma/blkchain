@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +26,8 @@ const (
 	runTimeoutMaxSec = 1800
 	runCapMinBytes   = 64 << 10
 	runCapMaxBytes   = 64 << 20
+
+	maxPipelineStages = 3
 )
 
 // resolveRunCaps returns the per-command timeout and output byte cap, from
@@ -51,9 +54,16 @@ func clampEnvInt(name string, def, lo, hi int) int {
 	return v
 }
 
+type pipelineStage struct {
+	Binary        string   `json:"binary" desc:"the stage command binary (a bare name, no path; resolved via PATH)"`
+	Args          []string `json:"args,omitempty" desc:"the literal arguments for this stage; no shell, no metacharacters"`
+	DiscardStderr bool     `json:"discard_stderr,omitempty" desc:"discard this stage's stderr instead of capturing it"`
+}
+
 type runCommandArgs struct {
-	Binary string   `json:"binary" desc:"the command binary (a bare name, no path; resolved via PATH)"`
-	Args   []string `json:"args,omitempty" desc:"the literal arguments; no shell, no metacharacters"`
+	Binary   string          `json:"binary" desc:"the command binary (a bare name, no path; resolved via PATH)"`
+	Args     []string        `json:"args,omitempty" desc:"the literal arguments; no shell, no metacharacters"`
+	Pipeline []pipelineStage `json:"pipeline,omitempty" desc:"optional: run a shell-free pipeline of 2-3 stages, each stdout piped to the next stdin; every stage is authorized independently; provide either a single binary+args OR a pipeline, not both"`
 }
 
 // runResult is the captured output of one execution.
@@ -66,56 +76,168 @@ type runResult struct {
 // execRunner runs a shell-free command with a timeout and byte cap. Stubbed in tests.
 var execRunner = realExec
 
+// execPipeline runs a shell-free pipeline with a timeout and byte cap. Stubbed in tests.
+var execPipeline = realExecPipeline
+
+// authorizeCommand runs the gate + exec-time rechecks for one command. It
+// returns a non-empty deny message (already audited) when the command is not
+// allowed, or "" when it may run.
+func authorizeCommand(ctx context.Context, g *secgate.Gate, cmd secgate.Command) string {
+	if d := g.Authorize(ctx, cmd); !d.Allowed {
+		msg := "run_command denied: " + d.Reason
+		if d.Suggestion != "" {
+			msg += " Suggestion: " + d.Suggestion
+		}
+		return msg
+	}
+	if ip, ok := secgate.ScopeViolation(g.Scope, cmd); ok {
+		if g.Audit != nil {
+			g.Audit("deny:scope-recheck", secgate.Signature(cmd))
+		}
+		return "run_command denied: a target resolves to an out-of-scope address: " + ip
+	}
+	if host, ip, bad := secgate.ResolveScopeViolation(g.Scope, cmd); bad {
+		if g.Audit != nil {
+			g.Audit("deny:resolve", secgate.Signature(cmd))
+		}
+		if ip != "" {
+			return "run_command denied: " + host + " resolves to an out-of-scope address: " + ip
+		}
+		return "run_command denied: could not resolve " + host + " to verify it is in scope"
+	}
+	if arg, bad := secgate.FileAccessViolation(cmd); bad {
+		if g.Audit != nil {
+			g.Audit("deny:fileaccess", secgate.Signature(cmd))
+		}
+		return "run_command denied: file path outside the working directory, or a config-file option, is not allowed: " + arg
+	}
+	return ""
+}
+
+// checkCommand runs the gate's deny-layers (via g.Check, NO confirmation) plus
+// the same exec-time rechecks as authorizeCommand. It returns a non-empty deny
+// message (already audited) when the command is not allowed, or "" when its
+// deny-layers pass. A pipeline uses it to clear every stage without prompting,
+// then confirms ONCE for the whole pipeline via g.ConfirmCommand.
+func checkCommand(ctx context.Context, g *secgate.Gate, cmd secgate.Command) string {
+	if d := g.Check(ctx, cmd); !d.Allowed {
+		msg := "run_command denied: " + d.Reason
+		if d.Suggestion != "" {
+			msg += " Suggestion: " + d.Suggestion
+		}
+		return msg
+	}
+	if ip, ok := secgate.ScopeViolation(g.Scope, cmd); ok {
+		if g.Audit != nil {
+			g.Audit("deny:scope-recheck", secgate.Signature(cmd))
+		}
+		return "run_command denied: a target resolves to an out-of-scope address: " + ip
+	}
+	if host, ip, bad := secgate.ResolveScopeViolation(g.Scope, cmd); bad {
+		if g.Audit != nil {
+			g.Audit("deny:resolve", secgate.Signature(cmd))
+		}
+		if ip != "" {
+			return "run_command denied: " + host + " resolves to an out-of-scope address: " + ip
+		}
+		return "run_command denied: could not resolve " + host + " to verify it is in scope"
+	}
+	if arg, bad := secgate.FileAccessViolation(cmd); bad {
+		if g.Audit != nil {
+			g.Audit("deny:fileaccess", secgate.Signature(cmd))
+		}
+		return "run_command denied: file path outside the working directory, or a config-file option, is not allowed: " + arg
+	}
+	return ""
+}
+
 // newRunCommandTool builds the run_command tool. It executes ONLY when the gate
 // allows the command AND the exec-time scope re-check finds no out-of-scope
 // resolved address. activeTask names the task to attribute captured output to.
 func newRunCommandTool(g *secgate.Gate, capBytes int, timeout time.Duration, workDir string, activeTask func() string, capture func(taskID, output string)) tooldef.Tool {
 	return newStoreTool("run_command",
-		"Run a bounded, shell-free security tool command against an in-scope target. Provide a bare binary name and literal args (no shell, no pipes or redirection). Output is returned as untrusted data.",
+		"Run a bounded, shell-free security tool command against an in-scope target. Provide a bare binary name and literal args (no shell, no pipes or redirection). For a multi-stage filter, pass a structured `pipeline` of 2-3 stages (each a bare binary + literal args); stages are piped stdout to stdin with no shell, and every stage is authorized independently. Output is returned as untrusted data.",
 		runCommandArgs{},
 		func(ctx context.Context, argsJSON string) (string, error) {
 			var a runCommandArgs
 			if err := json.Unmarshal([]byte(argsJSON), &a); err != nil {
 				return "run_command: invalid arguments: " + err.Error(), nil
 			}
-			if strings.TrimSpace(a.Binary) == "" {
-				return "run_command: invalid arguments: binary is required", nil
+			hasBinary := strings.TrimSpace(a.Binary) != ""
+			if hasBinary && len(a.Pipeline) > 0 {
+				return "run_command: invalid arguments: provide either binary or pipeline, not both", nil
 			}
-			cmd := secgate.Command{Binary: a.Binary, Args: a.Args}
-			if d := g.Authorize(ctx, cmd); !d.Allowed {
-				msg := "run_command denied: " + d.Reason
-				if d.Suggestion != "" {
-					msg += " Suggestion: " + d.Suggestion
+
+			if len(a.Pipeline) == 0 {
+				if !hasBinary {
+					return "run_command: invalid arguments: binary is required", nil
 				}
-				return msg, nil
-			}
-			if ip, ok := secgate.ScopeViolation(g.Scope, cmd); ok {
+				cmd := secgate.Command{Binary: a.Binary, Args: a.Args}
+				if msg := authorizeCommand(ctx, g, cmd); msg != "" {
+					return msg, nil
+				}
 				if g.Audit != nil {
-					g.Audit("deny:scope-recheck", secgate.Signature(cmd))
+					g.Audit("exec", secgate.Signature(cmd))
 				}
-				return "run_command denied: a target resolves to an out-of-scope address: " + ip, nil
+				res := execRunner(ctx, cmd.Binary, cmd.Args, workDir, capBytes, timeout)
+				if res.TimedOut {
+					return "run_command: the command timed out and was terminated after " + timeout.String(), nil
+				}
+				if capture != nil {
+					capture(activeTask(), res.Output)
+				}
+				var b strings.Builder
+				if res.Err != nil {
+					fmt.Fprintf(&b, "(command exited with an error: %s)\n", res.Err.Error())
+				}
+				b.WriteString(secgate.WrapUntrusted("command", res.Output))
+				return b.String(), nil
 			}
-			if host, ip, bad := secgate.ResolveScopeViolation(g.Scope, cmd); bad {
-				if g.Audit != nil {
-					g.Audit("deny:resolve", secgate.Signature(cmd))
-				}
-				if ip != "" {
-					return "run_command denied: " + host + " resolves to an out-of-scope address: " + ip, nil
-				}
-				return "run_command denied: could not resolve " + host + " to verify it is in scope", nil
+
+			// Pipeline form.
+			if len(a.Pipeline) < 2 {
+				return "run_command: invalid arguments: a pipeline needs at least 2 stages; use binary/args for a single command", nil
 			}
-			if arg, bad := secgate.FileAccessViolation(cmd); bad {
-				if g.Audit != nil {
-					g.Audit("deny:fileaccess", secgate.Signature(cmd))
+			if len(a.Pipeline) > maxPipelineStages {
+				return "run_command: invalid arguments: a pipeline may have at most " + strconv.Itoa(maxPipelineStages) + " stages", nil
+			}
+			for i := range a.Pipeline {
+				if strings.TrimSpace(a.Pipeline[i].Binary) == "" {
+					return "run_command: invalid arguments: pipeline stage " + strconv.Itoa(i+1) + " has an empty binary", nil
 				}
-				return "run_command denied: file path outside the working directory, or a config-file option, is not allowed: " + arg, nil
+			}
+			// Check EVERY stage's deny-layers before running ANY: a denied stage
+			// anywhere aborts the whole pipeline with zero side effects (fail
+			// closed). checkCommand does NOT prompt; the whole pipeline is
+			// confirmed once below, so /safe asks the human a single time.
+			cmds := make([]secgate.Command, len(a.Pipeline))
+			stageStrs := make([]string, len(a.Pipeline))
+			for i := range a.Pipeline {
+				cmds[i] = secgate.Command{Binary: a.Pipeline[i].Binary, Args: a.Pipeline[i].Args}
+				if msg := checkCommand(ctx, g, cmds[i]); msg != "" {
+					reason := strings.TrimPrefix(msg, "run_command denied: ")
+					return "run_command denied (stage " + strconv.Itoa(i+1) + "): " + reason, nil
+				}
+				stageStrs[i] = strings.Join(append([]string{cmds[i].Binary}, cmds[i].Args...), " ")
+			}
+			// Confirm the whole pipeline once. The synthetic display command has
+			// binary "pipeline" and one arg per stage rendered as "bin arg1 arg2 ...",
+			// so its Signature is stable and an approval is remembered for an
+			// identical pipeline.
+			display := secgate.Command{Binary: "pipeline", Args: stageStrs}
+			if d := g.ConfirmCommand(ctx, display); !d.Allowed {
+				return "run_command denied: " + d.Reason, nil
 			}
 			if g.Audit != nil {
-				g.Audit("exec", secgate.Signature(cmd))
+				sigs := make([]string, len(cmds))
+				for i := range cmds {
+					sigs[i] = secgate.Signature(cmds[i])
+				}
+				g.Audit("exec", strings.Join(sigs, " | "))
 			}
-			res := execRunner(ctx, cmd.Binary, cmd.Args, workDir, capBytes, timeout)
+			res := execPipeline(ctx, a.Pipeline, workDir, capBytes, timeout)
 			if res.TimedOut {
-				return "run_command: the command timed out and was terminated after " + timeout.String(), nil
+				return "run_command: the pipeline timed out and was terminated after " + timeout.String(), nil
 			}
 			if capture != nil {
 				capture(activeTask(), res.Output)
@@ -163,6 +285,107 @@ func realExec(ctx context.Context, bin string, args []string, dir string, capByt
 	return runResult{Output: buf.String(), TimedOut: timedOut, Err: nonTimeoutErr(err, timedOut)}
 }
 
+// realExecPipeline runs a shell-free pipeline: each stage's stdout is wired to
+// the next stage's stdin through an explicit OS pipe, with NO shell and NO
+// metacharacter interpretation. Only the final stage's stdout is the pipeline
+// result; every non-discarded stderr is folded into the same capped buffer.
+// One timeout bounds the whole pipeline; on cancel every stage's process group
+// is killed. A broken pipe on an upstream stage (a downstream stage like head
+// exiting early) is normal and is not reported as an error.
+func realExecPipeline(ctx context.Context, stages []pipelineStage, dir string, capBytes int, timeout time.Duration) runResult {
+	ctx2, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var buf bytes.Buffer
+	lw := &lockedWriter{w: &cappedWriter{cap: capBytes, buf: &buf}}
+
+	n := len(stages)
+	cmds := make([]*exec.Cmd, n)
+	for i := range stages {
+		c := exec.CommandContext(ctx2, stages[i].Binary, stages[i].Args...)
+		c.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
+		if dir != "" {
+			c.Dir = dir
+		}
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		c.WaitDelay = 2 * time.Second
+		pc := c
+		c.Cancel = func() error {
+			if pc.Process == nil {
+				return nil
+			}
+			// Kill the whole process group (negative pid) so children die too.
+			_ = syscall.Kill(-pc.Process.Pid, syscall.SIGKILL)
+			return pc.Process.Kill()
+		}
+		if stages[i].DiscardStderr {
+			c.Stderr = io.Discard
+		} else {
+			c.Stderr = lw
+		}
+		cmds[i] = c
+	}
+
+	// Wire stdout -> stdin between consecutive stages via explicit OS pipes. The
+	// final stage's stdout is the pipeline result.
+	var parentFiles []*os.File
+	for i := 0; i < n-1; i++ {
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			for _, f := range parentFiles {
+				_ = f.Close()
+			}
+			return runResult{Err: err}
+		}
+		cmds[i].Stdout = pw
+		cmds[i+1].Stdin = pr
+		parentFiles = append(parentFiles, pr, pw)
+	}
+	cmds[n-1].Stdout = lw
+
+	// Start every stage, then close the parent's copies of the inter-stage pipe
+	// ends so a downstream stage sees EOF once its upstream exits.
+	var started []*exec.Cmd
+	var startErr error
+	for i := range cmds {
+		if err := cmds[i].Start(); err != nil {
+			startErr = err
+			break
+		}
+		started = append(started, cmds[i])
+	}
+	for _, f := range parentFiles {
+		_ = f.Close()
+	}
+	if startErr != nil {
+		for _, c := range started {
+			if c.Process != nil {
+				_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+			}
+		}
+		for _, c := range started {
+			_ = c.Wait()
+		}
+		return runResult{Output: buf.String(), Err: startErr}
+	}
+
+	// Wait in order; keep only the LAST stage's non-timeout error. An upstream
+	// stage dying on a broken pipe is normal and must not fail the pipeline.
+	var lastErr error
+	for i, c := range cmds {
+		err := c.Wait()
+		if c.Process != nil {
+			// Reap any daemonized grandchild left in the group after exit.
+			_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+		}
+		if i == n-1 {
+			lastErr = err
+		}
+	}
+	timedOut := ctx2.Err() == context.DeadlineExceeded
+	return runResult{Output: buf.String(), TimedOut: timedOut, Err: nonTimeoutErr(lastErr, timedOut)}
+}
+
 func nonTimeoutErr(err error, timedOut bool) error {
 	if timedOut {
 		return nil
@@ -190,3 +413,19 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 }
 
 var _ io.Writer = (*cappedWriter)(nil)
+
+// lockedWriter serializes concurrent writes to w. A pipeline folds several
+// stages' stderr into one shared capped buffer, and each stage's stderr copy
+// runs on its own goroutine, so the shared writer must be mutex-guarded.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+var _ io.Writer = (*lockedWriter)(nil)

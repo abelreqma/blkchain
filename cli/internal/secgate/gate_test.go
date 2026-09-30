@@ -4,7 +4,131 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
+
+// blockingConfirmer signals entered when Confirm is entered, then blocks until
+// release is closed. It models a slow human at the confirmation prompt.
+type blockingConfirmer struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b blockingConfirmer) Confirm(ctx context.Context, c Command) bool {
+	close(b.entered)
+	<-b.release
+	return true
+}
+
+// countingConfirmer records how many times Confirm was called and returns ok.
+type countingConfirmer struct {
+	ok    bool
+	calls int
+}
+
+func (c *countingConfirmer) Confirm(ctx context.Context, cmd Command) bool {
+	c.calls++
+	return c.ok
+}
+
+// TestSafeConfirmsOncePerCommand: a /safe command prompts exactly once; an
+// identical second Authorize is remembered (no second prompt); a refusing
+// confirmer denies with deny:confirm and Allowed=false.
+func TestSafeConfirmsOncePerCommand(t *testing.T) {
+	cc := &countingConfirmer{ok: true}
+	appr := NewSessionApprovals()
+	g := &Gate{Mode: Safe, Allow: NewAllowlist("nmap"), Confirm: cc, Approvals: appr}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	cmd := Command{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.5"}}
+	if d := g.Authorize(context.Background(), cmd); !d.Allowed {
+		t.Fatalf("first confirmed command should be allowed: %q", d.Reason)
+	}
+	if cc.calls != 1 {
+		t.Fatalf("Confirm called %d times on first authorize, want 1", cc.calls)
+	}
+	if d := g.Authorize(context.Background(), cmd); !d.Allowed {
+		t.Fatalf("remembered command should be allowed: %q", d.Reason)
+	}
+	if cc.calls != 1 {
+		t.Errorf("Confirm called %d times total, want 1 (second call must be remembered)", cc.calls)
+	}
+
+	var actions []string
+	deny := &countingConfirmer{ok: false}
+	g2 := recordingGate(&Gate{Mode: Safe, Allow: NewAllowlist("nmap"), Confirm: deny, Approvals: NewSessionApprovals()}, &actions)
+	g2.Start()
+	if d := g2.Authorize(context.Background(), cmd); d.Allowed {
+		t.Error("a refusing confirmer must deny")
+	}
+	if got := lastAction(t, actions); got != "deny:confirm" {
+		t.Errorf("want deny:confirm, got %q", got)
+	}
+}
+
+// TestConfirmRunsOutsideMutex proves Authorize does NOT hold g.mu across the
+// human confirmation: while one Authorize is blocked inside a slow Confirm, a
+// second Authorize that needs only the lock (an already-approved command, so no
+// confirm) must return promptly. If Confirm ran under g.mu the second call would
+// block on the mutex and the test would time out. It also checks the shared
+// episode budget counts both commands exactly once.
+func TestConfirmRunsOutsideMutex(t *testing.T) {
+	s, err := ParseScope(strings.NewReader("local\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bc := blockingConfirmer{entered: make(chan struct{}), release: make(chan struct{})}
+	appr := NewSessionApprovals()
+	cmdB := Command{Binary: "id", Args: []string{"b"}}
+	appr.Remember(cmdB) // cmdB is pre-approved: its Authorize needs only the lock, no confirm.
+	g := &Gate{
+		Mode:      Safe,
+		Scope:     s,
+		Confirm:   bc,
+		Approvals: appr,
+		Episode:   NewEpisode(Caps{MaxCommands: 10}, nil),
+	}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	// cmdA needs confirmation and blocks inside Confirm.
+	aDone := make(chan Decision, 1)
+	go func() {
+		aDone <- g.Authorize(context.Background(), Command{Binary: "id", Args: []string{"a"}})
+	}()
+	<-bc.entered // cmdA is now inside Confirm; if the lock is held, it is held now.
+
+	// cmdB needs only the lock. It must not be serialized behind cmdA's prompt.
+	bDone := make(chan Decision, 1)
+	go func() {
+		bDone <- g.Authorize(context.Background(), cmdB)
+	}()
+	select {
+	case d := <-bDone:
+		if !d.Allowed {
+			t.Fatalf("pre-approved cmdB should be allowed: %q", d.Reason)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cmdB blocked while cmdA was in Confirm: Authorize held g.mu across the human prompt")
+	}
+
+	close(bc.release) // let cmdA finish.
+	select {
+	case d := <-aDone:
+		if !d.Allowed {
+			t.Fatalf("confirmed cmdA should be allowed: %q", d.Reason)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cmdA never completed after release")
+	}
+
+	// Both commands consumed exactly one budget slot: no double-count, no loss.
+	if g.Episode.count != 2 {
+		t.Errorf("episode count = %d, want 2", g.Episode.count)
+	}
+}
 
 func okScope(t *testing.T) *Scope {
 	t.Helper()
@@ -240,14 +364,73 @@ func TestApprovedCommandStillScopeChecked(t *testing.T) {
 }
 
 func TestAutoLocalScopeAllowsNoTargetCommand(t *testing.T) {
+	// LOCAL scope requires per-command confirmation in every mode, so an /auto
+	// local command is allowed only once a confirmer approves it.
 	s, _ := ParseScope(strings.NewReader("local\n"))
-	g := &Gate{Mode: Auto, Scope: s, Allow: NewAllowlist("id")}
+	g := &Gate{Mode: Auto, Scope: s, Allow: NewAllowlist("id"), Confirm: stubConfirmer{true}, Approvals: NewSessionApprovals()}
 	if err := g.Start(); err != nil {
 		t.Fatalf("Auto with a local scope must start: %v", err)
 	}
 	d := g.Authorize(context.Background(), Command{Binary: "id"})
 	if !d.Allowed {
 		t.Errorf("a no-target local command should be allowed: %q", d.Reason)
+	}
+}
+
+// TestLocalAutoRequiresConfirm: LOCAL scope forces per-command confirmation even
+// in Auto. An allowed-by-denylists command is put to Confirm (once) and allowed
+// on approval; an identical second call is remembered (not re-prompted). With a
+// nil confirmer the command is denied (fail-closed). Contrast: an EXTERNAL /auto
+// command with a target and allowlist is NOT confirmed.
+func TestLocalAutoRequiresConfirm(t *testing.T) {
+	local, err := ParseScope(strings.NewReader("local\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := Command{Binary: "id"}
+
+	cc := &countingConfirmer{ok: true}
+	g := &Gate{Mode: Auto, Scope: local, Confirm: cc, Approvals: NewSessionApprovals()}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if d := g.Authorize(context.Background(), cmd); !d.Allowed {
+		t.Fatalf("local /auto command should be allowed on approval: %q", d.Reason)
+	}
+	if cc.calls != 1 {
+		t.Fatalf("Confirm called %d times on first authorize, want 1 (local /auto must confirm)", cc.calls)
+	}
+	if d := g.Authorize(context.Background(), cmd); !d.Allowed {
+		t.Fatalf("remembered local command should be allowed: %q", d.Reason)
+	}
+	if cc.calls != 1 {
+		t.Errorf("Confirm called %d times total, want 1 (second call must be remembered)", cc.calls)
+	}
+
+	// Fail closed: local /auto with no confirmer denies.
+	var actions []string
+	g2 := recordingGate(&Gate{Mode: Auto, Scope: local, Approvals: NewSessionApprovals()}, &actions)
+	if err := g2.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if d := g2.Authorize(context.Background(), cmd); d.Allowed {
+		t.Error("local /auto with no confirmer must fail closed (deny)")
+	}
+	if got := lastAction(t, actions); got != "deny:confirm" {
+		t.Errorf("want deny:confirm, got %q", got)
+	}
+
+	// Contrast: external /auto must NOT confirm.
+	ec := &countingConfirmer{ok: true}
+	g3 := &Gate{Mode: Auto, Scope: okScope(t), Allow: NewAllowlist("nmap"), Confirm: ec, Approvals: NewSessionApprovals()}
+	if err := g3.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if d := g3.Authorize(context.Background(), Command{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.5"}}); !d.Allowed {
+		t.Fatalf("external /auto in-scope command should be allowed: %q", d.Reason)
+	}
+	if ec.calls != 0 {
+		t.Errorf("external /auto must NOT confirm, but Confirm was called %d times", ec.calls)
 	}
 }
 
@@ -267,38 +450,5 @@ func TestAutoNonLocalStillDeniesNoTarget(t *testing.T) {
 	g.Start()
 	if g.Authorize(context.Background(), Command{Binary: "id"}).Allowed {
 		t.Error("a non-local scope must still deny a no-target command")
-	}
-}
-
-func TestAutoLocalDeniesNetworkBinaryWithSingleLabelHost(t *testing.T) {
-	s, _ := ParseScope(strings.NewReader("local\n"))
-	g := &Gate{Mode: Auto, Scope: s, Allow: NewAllowlist("curl", "nc", "id", "uname", "socat")}
-	if err := g.Start(); err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	denied := []Command{
-		{Binary: "curl", Args: []string{"intranet"}},
-		{Binary: "/usr/bin/curl", Args: []string{"intranet"}},
-		{Binary: "nc", Args: []string{"internal-host", "22"}},
-		// socat is not a known local tool; an operator allowlisting it must not
-		// bypass the target check via a single-label (no-extracted-target) host.
-		// This is the positive-check regression test: the old denylist let an
-		// allowlisted-but-unlisted binary like socat through here.
-		{Binary: "socat", Args: []string{"internal-host"}},
-	}
-	for _, c := range denied {
-		if d := g.Authorize(ctx, c); d.Allowed {
-			t.Errorf("%v must be denied in local mode (not a known local tool, no in-scope target)", c)
-		}
-	}
-	allowed := []Command{
-		{Binary: "id"},
-		{Binary: "uname", Args: []string{"-a"}},
-	}
-	for _, c := range allowed {
-		if d := g.Authorize(ctx, c); !d.Allowed {
-			t.Errorf("%v must be allowed in local mode: %q", c, d.Reason)
-		}
 	}
 }

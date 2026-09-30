@@ -288,10 +288,13 @@ func TestRunBatchSharesGateBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Local scope requires per-command confirmation; an approving confirmer lets
+	// commands through so the shared episode budget (the subject here) bounds them.
 	g := &secgate.Gate{
 		Mode:    secgate.Auto,
 		Scope:   s,
 		Allow:   secgate.NewAllowlist("id"),
+		Confirm: &countingConfirmer{ok: true},
 		Episode: secgate.NewEpisode(secgate.Caps{MaxCommands: 3}, nil),
 	}
 	if err := g.Start(); err != nil {

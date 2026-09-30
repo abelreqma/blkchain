@@ -30,6 +30,10 @@ type engageDeps struct {
 	Asker askuser.Asker
 	Gate  *secgate.Gate // command-execution gate for executors; nil disables run_command
 	Runs  *RunOutputs   // per-episode captured command output for evidence verification
+	// Confirmer is the optional human confirmer for /safe local mode; the mmdflux
+	// viz session sets this. When nil, engagecmd falls back to the terminal
+	// confirmer on a TTY.
+	Confirmer secgate.Confirmer
 	// WorkDir is the working directory run_command executes in (a per-engagement
 	// scratch dir). Empty inherits the process's own cwd.
 	WorkDir string
