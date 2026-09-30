@@ -15,22 +15,21 @@ type plTier int
 
 const (
 	plASCII   plTier = iota // NO_COLOR, dumb terminal, or piped: no fills, '>'/'<'
-	plUnicode               // default: filled triangles U+25B6/U+25C0, bg fills
-	plNerd                  // BLKCHAIN_POWERLINE=1: real powerline glyphs + icons
+	plUnicode               // BLKCHAIN_POWERLINE=0: filled triangles U+25B6/U+25C0, bg fills
+	plNerd                  // default with color+unicode: powerline glyphs + icons
 )
 
-// plCurrentTier layers the nerd opt-in over the existing color/unicode flags.
+// plCurrentTier picks the capability tier. Nerd is the default when color and
+// unicode are on; BLKCHAIN_POWERLINE=0 forces the plain unicode tier for
+// terminals without a Nerd Font. No color or unicode gives ascii.
 func plCurrentTier() plTier {
-	if !useColor {
+	if !useColor || !useUnicode {
 		return plASCII
 	}
-	if os.Getenv("BLKCHAIN_POWERLINE") == "1" && useUnicode {
-		return plNerd
-	}
-	if useUnicode {
+	if os.Getenv("BLKCHAIN_POWERLINE") == "0" {
 		return plUnicode
 	}
-	return plASCII
+	return plNerd
 }
 
 // plSegment is one ribbon cell. Icon is a leading glyph (nerd tier only); FG/BG
@@ -165,7 +164,7 @@ func plMeter(frac float64, cells int, t plTier) string {
 	if t == plASCII {
 		return "[" + strings.Repeat("#", filled) + strings.Repeat(".", cells-filled) + "]"
 	}
-	fill := lipgloss.NewStyle().Foreground(Success).Render(strings.Repeat("\u2588", filled))
-	rest := lipgloss.NewStyle().Foreground(Muted).Render(strings.Repeat("\u2591", cells-filled))
+	fill := lipgloss.NewStyle().Foreground(wMeterOn).Background(wBarBg).Render(strings.Repeat("\u2588", filled))
+	rest := lipgloss.NewStyle().Foreground(wMeterOff).Background(wBarBg).Render(strings.Repeat("\u2591", cells-filled))
 	return fill + rest
 }

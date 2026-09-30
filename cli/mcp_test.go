@@ -136,6 +136,9 @@ func TestMCPRouteResultFoundAndNotFound(t *testing.T) {
 	if d, _ := got["digest"].(string); d == "" {
 		t.Errorf("digest missing: %v", got)
 	}
+	if got["truncated"] != false {
+		t.Errorf("short body should not be truncated: %v", got["truncated"])
+	}
 
 	nf := mcpRouteResult(cat, "cloud")
 	if nf["found"] != false || nf["domain"] != "cloud" || len(nf) != 2 {
@@ -151,9 +154,13 @@ func TestMCPRouteResultTruncatesBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := mcpRouteResult(cat, "web")["body"].(string)
+	res := mcpRouteResult(cat, "web")
+	body, _ := res["body"].(string)
 	if n := len([]rune(body)); n != routeSkillBodyCap {
 		t.Errorf("body runes = %d, want %d", n, routeSkillBodyCap)
+	}
+	if res["truncated"] != true {
+		t.Errorf("cut body should be marked truncated: %v", res["truncated"])
 	}
 }
 

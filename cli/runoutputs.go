@@ -1,10 +1,14 @@
 package main
 
-import "strings"
+import (
+	"strings"
+	"sync"
+)
 
 // RunOutputs holds raw command outputs captured this episode, keyed by task id.
-// It is not goroutine-safe: tool calls run sequentially. Revisit if execution parallelizes.
+// It is goroutine-safe: mu guards byTask in Add and Contains.
 type RunOutputs struct {
+	mu     sync.Mutex
 	byTask map[string][]string
 }
 
@@ -16,6 +20,8 @@ func (r *RunOutputs) Add(taskID, output string) {
 	if taskID == "" {
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.byTask[taskID] = append(r.byTask[taskID], output)
 }
 
@@ -25,6 +31,8 @@ func (r *RunOutputs) Contains(taskID, quote string) bool {
 	if strings.TrimSpace(quote) == "" {
 		return false
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, out := range r.byTask[taskID] {
 		if strings.Contains(out, quote) {
 			return true

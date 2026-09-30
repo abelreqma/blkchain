@@ -21,6 +21,30 @@ type Delta struct {
 }
 
 func (s *Store) Apply(d Delta) (newRev int64, err error) {
+	s.wmu.Lock()
+	newRev, err = s.applyLocked(d)
+	s.wmu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	s.lmu.Lock()
+	fns := make([]func(rev int64, e Engagement), 0, len(s.listeners))
+	for _, fn := range s.listeners {
+		fns = append(fns, fn)
+	}
+	s.lmu.Unlock()
+	if len(fns) > 0 {
+		if e, snapErr := s.Snapshot(context.Background()); snapErr == nil {
+			for _, fn := range fns {
+				fn(e.Revision, e)
+			}
+		}
+	}
+	return newRev, nil
+}
+
+// applyLocked runs the Apply transaction. The caller must hold wmu.
+func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 	ctx := context.Background()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -194,11 +218,6 @@ func (s *Store) Apply(d Delta) (newRev int64, err error) {
 		return 0, err
 	}
 	committed = true
-	if s.onApply != nil {
-		if e, snapErr := s.Snapshot(context.Background()); snapErr == nil {
-			s.onApply(newRev, e)
-		}
-	}
 	return newRev, nil
 }
 

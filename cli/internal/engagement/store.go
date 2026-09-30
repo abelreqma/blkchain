@@ -8,25 +8,43 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 
 	_ "modernc.org/sqlite"
 )
 
 // Store is a handle on one engagement database.
 type Store struct {
-	db *sql.DB
-	// onApply, when set, is called after each Apply that commits, with the new
-	// revision and a fresh snapshot. It is best-effort progress notification for
-	// a live view; a snapshot read error skips the call. Access is not
-	// synchronized: the engagement run drives the store sequentially.
-	onApply func(rev int64, e Engagement)
+	db  *sql.DB
+	wmu sync.Mutex // serializes every writer (Apply/RecordEvidence/RecordReceipt/Audit); reads stay lock-free under WAL
+	// listeners are called after each Apply that commits, with the new revision
+	// and a fresh snapshot. They are best-effort progress notification; a
+	// snapshot read error skips the calls. They fire after the write lock is
+	// released, so under concurrent writers they may be invoked from multiple
+	// goroutines and revisions may arrive out of order. lmu guards the map.
+	lmu       sync.Mutex
+	listeners map[int]func(rev int64, e Engagement)
+	nextID    int
 }
 
-// SetOnApply registers a callback invoked after each committed Apply, with the
-// new revision and a fresh snapshot. Passing nil clears it. It is intended for a
-// live progress view and must not mutate the store.
-func (s *Store) SetOnApply(fn func(rev int64, e Engagement)) {
-	s.onApply = fn
+// AddOnApply registers a listener invoked after each committed Apply with the
+// new revision and a fresh snapshot. It returns a function that removes the
+// listener. Safe to call concurrently. Listeners fire outside the write lock;
+// keep them cheap and do not mutate the store from one.
+func (s *Store) AddOnApply(fn func(rev int64, e Engagement)) (remove func()) {
+	s.lmu.Lock()
+	defer s.lmu.Unlock()
+	if s.listeners == nil {
+		s.listeners = map[int]func(rev int64, e Engagement){}
+	}
+	id := s.nextID
+	s.nextID++
+	s.listeners[id] = fn
+	return func() {
+		s.lmu.Lock()
+		delete(s.listeners, id)
+		s.lmu.Unlock()
+	}
 }
 
 const schema = `

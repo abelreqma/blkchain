@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // localBins are known local-only enumeration tools: binaries that only ever
@@ -25,6 +26,7 @@ var localBins = map[string]bool{
 
 // Gate composes every security layer. It performs no execution.
 type Gate struct {
+	mu        sync.Mutex // serializes Authorize and Start: the Episode budget and Approvals are shared state
 	Mode      Mode
 	Scope     *Scope                      // may be nil in Safe; must be non-nil and non-empty in Auto
 	Allow     *Allowlist                  // nil permits nothing (fail closed)
@@ -36,6 +38,8 @@ type Gate struct {
 
 // Start validates the gate for its mode. Auto refuses without a non-empty scope.
 func (g *Gate) Start() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.Mode != Safe && g.Mode != Auto {
 		return fmt.Errorf("secgate: unknown mode %d", int(g.Mode))
 	}
@@ -61,6 +65,8 @@ func (g *Gate) audit(action, detail string) {
 // (every extracted target in scope), confirmation (Safe, unless already
 // session-approved). It never executes anything.
 func (g *Gate) Authorize(ctx context.Context, c Command) Decision {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.Episode == nil {
 		g.Episode = NewEpisode(Caps{}, nil)
 	}

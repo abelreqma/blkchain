@@ -12,6 +12,8 @@ const truncatedMarker = "...[truncated]"
 // new row id. It returns ErrNotFound when the task does not exist. A quote
 // longer than EvidenceCap runes is cut to EvidenceCap runes and marked.
 func (s *Store) RecordEvidence(taskID, quote string) (int64, error) {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
 	if _, err := s.GetTask(taskID); err != nil {
 		return 0, err
 	}

@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"fmt"
+	"sync"
+	"testing"
+)
 
 func TestRunOutputsContains(t *testing.T) {
 	r := NewRunOutputs()
@@ -19,5 +23,20 @@ func TestRunOutputsContains(t *testing.T) {
 	}
 	if r.Contains("t1", "") {
 		t.Error("empty quote must not verify")
+	}
+}
+
+func TestRunOutputsConcurrent(t *testing.T) {
+	r := NewRunOutputs()
+	const n = 100
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(2)
+		go func(i int) { defer wg.Done(); r.Add("t1", fmt.Sprintf("chunk-%d", i)) }(i)
+		go func() { defer wg.Done(); r.Contains("t1", "chunk") }()
+	}
+	wg.Wait()
+	if !r.Contains("t1", "chunk-0") && !r.Contains("t1", "chunk-99") {
+		t.Errorf("expected some chunk recorded")
 	}
 }

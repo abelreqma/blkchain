@@ -17,6 +17,8 @@ type Receipt struct {
 // content digest, and the store revision at delivery (context_gen). It returns
 // the new row id, or ErrNotFound when the task does not exist.
 func (s *Store) RecordReceipt(taskID, skill, bundleDigest string) (int64, error) {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
 	if _, err := s.GetTask(taskID); err != nil {
 		return 0, err
 	}

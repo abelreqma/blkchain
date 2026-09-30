@@ -1,44 +1,42 @@
 package engagement
 
-import "testing"
+import (
+	"sync"
+	"testing"
+)
 
-func TestSetOnApplyFiresWithRevisionAndSnapshot(t *testing.T) {
+func TestAddOnApplyFiresAllListeners(t *testing.T) {
 	s := mustOpen(t)
-	var gotRev int64
-	var gotTasks int
-	calls := 0
-	s.SetOnApply(func(rev int64, e Engagement) {
-		calls++
-		gotRev = rev
-		gotTasks = len(e.Tasks)
-	})
-	rev, err := s.Apply(Delta{Upserts: []Task{{ID: "t1", Status: StatusTodo}}, Kind: "init"})
-	if err != nil {
+	var mu sync.Mutex
+	a, b := 0, 0
+	remA := s.AddOnApply(func(rev int64, e Engagement) { mu.Lock(); a++; mu.Unlock() })
+	_ = s.AddOnApply(func(rev int64, e Engagement) { mu.Lock(); b++; mu.Unlock() })
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "t1", Status: StatusTodo}}, Kind: "init"}); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 {
-		t.Fatalf("onApply called %d times, want 1", calls)
+	if a != 1 || b != 1 {
+		t.Fatalf("listeners fired a=%d b=%d, want 1,1", a, b)
 	}
-	if gotRev != rev {
-		t.Errorf("onApply rev = %d, want %d", gotRev, rev)
+	remA() // remove the first listener
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "t2", Status: StatusTodo}}, Kind: "add"}); err != nil {
+		t.Fatal(err)
 	}
-	if gotTasks != 1 {
-		t.Errorf("onApply snapshot had %d tasks, want 1", gotTasks)
+	if a != 1 {
+		t.Errorf("removed listener still fired: a=%d, want 1", a)
+	}
+	if b != 2 {
+		t.Errorf("remaining listener count b=%d, want 2", b)
 	}
 }
 
-func TestSetOnApplyNilClears(t *testing.T) {
+func TestAddOnApplySnapshotMatchesRev(t *testing.T) {
 	s := mustOpen(t)
-	calls := 0
-	s.SetOnApply(func(rev int64, e Engagement) { calls++ })
-	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "a", Status: StatusTodo}}, Kind: "init"}); err != nil {
+	var gotRev, gotSnapRev int64
+	s.AddOnApply(func(rev int64, e Engagement) { gotRev = rev; gotSnapRev = e.Revision })
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "t1", Status: StatusTodo}}, Kind: "init"}); err != nil {
 		t.Fatal(err)
 	}
-	s.SetOnApply(nil)
-	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "b", Status: StatusTodo}}, Kind: "add"}); err != nil {
-		t.Fatal(err)
-	}
-	if calls != 1 {
-		t.Errorf("onApply called %d times, want 1 (cleared before second Apply)", calls)
+	if gotRev != gotSnapRev {
+		t.Errorf("listener rev %d != snapshot rev %d", gotRev, gotSnapRev)
 	}
 }

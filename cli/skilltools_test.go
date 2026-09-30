@@ -66,10 +66,11 @@ func TestRouteSkillNoSkillForDomain(t *testing.T) {
 }
 
 // TestRouteSkillGarbageDomainNeverSelectsNamedSkill is the security regression
-// guard: the model supplies only a domain, so a crafted domain (a skill name, a
-// path traversal string) must never deliver a specific named skill from another
-// bucket. It can only ever reach a domain bucket, and an unknown domain falls
-// back to generic.
+// guard: the model supplies only a domain or keyword, so a crafted string with
+// no keyword (a path traversal string, empty) must never deliver a specific
+// named skill from another bucket. It falls back to the generic bucket.
+// Keyword-bearing crafted strings are covered by
+// TestRouteSkillKeywordNeverPinsSkillByName.
 func TestRouteSkillGarbageDomainNeverSelectsNamedSkill(t *testing.T) {
 	dir := t.TempDir()
 	writeTestSkill(t, dir, "attacking-oauth", "---\nname: attacking-oauth\ndescription: oauth jwt web attacks\n---\nWEB PLAYBOOK BODY\n")
@@ -80,9 +81,9 @@ func TestRouteSkillGarbageDomainNeverSelectsNamedSkill(t *testing.T) {
 	}
 	st := openStore(t)
 	tool := newRouteSkillTool(cat, st, func() string { return "" })
-	// Each crafted domain must resolve to the generic bucket, never the named
-	// web skill.
-	for _, dom := range []string{"attacking-oauth", "../../etc/passwd", "web/../ad", "web\x00", ""} {
+	// Each crafted domain has no keyword, so it must resolve to the generic
+	// bucket, never the named web skill.
+	for _, dom := range []string{"../../etc/passwd", "zzznotathing", ""} {
 		args := `{"domain":` + jsonQuote(dom) + `}`
 		out, err := tool.Call(context.Background(), args)
 		if err != nil {
@@ -94,6 +95,94 @@ func TestRouteSkillGarbageDomainNeverSelectsNamedSkill(t *testing.T) {
 		if !strings.Contains(out, "zzz-generic") {
 			t.Errorf("domain=%q did not fall back to the generic skill: %q", dom, out)
 		}
+	}
+}
+
+// keywordCatalog loads one skill per domain, each named s-<domain>, so a routed
+// skill name identifies the bucket it came from.
+func keywordCatalog(t *testing.T) *skillcat.Catalog {
+	t.Helper()
+	dir := t.TempDir()
+	writeTestSkill(t, dir, "s-ad", "---\nname: s-ad\ndescription: kerberos notes\n---\nAD\n")
+	writeTestSkill(t, dir, "s-web", "---\nname: s-web\ndescription: web notes\n---\nWEB\n")
+	writeTestSkill(t, dir, "s-k8s", "---\nname: s-k8s\ndescription: kubernetes notes\n---\nK8S\n")
+	writeTestSkill(t, dir, "s-generic", "---\nname: s-generic\ndescription: unrelated notes\n---\nGENERIC\n")
+	cat, err := skillcat.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cat
+}
+
+func TestResolveDomain(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// exact domain names, case and space insensitive
+		{"ad", "ad"}, {"web", "web"}, {"generic", "generic"},
+		{"GENERIC", "generic"}, {" ad ", "ad"}, {"  Web ", "web"},
+		// vuln-class keywords fall back through DeriveDomain
+		{"kerberos", "ad"}, {"adcs", "ad"}, {"xss", "web"},
+		{"api", "web"}, {"oauth", "web"}, {"container", "k8s"},
+		// no keyword stays generic
+		{"../../etc/passwd", "generic"}, {"zzznotathing", "generic"}, {"random", "generic"}, {"", "generic"},
+	}
+	for _, c := range cases {
+		if got := resolveDomain(c.in); got != c.want {
+			t.Errorf("resolveDomain(%q) = %q; want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestRouteSkillForKeywordRoutesToDomainBucket(t *testing.T) {
+	cat := keywordCatalog(t)
+	cases := []struct{ in, want string }{
+		{"kerberos", "s-ad"}, {"adcs", "s-ad"}, {"xss", "s-web"},
+		{"container", "s-k8s"}, {"api", "s-web"},
+		{"ad", "s-ad"}, {"web", "s-web"}, {"generic", "s-generic"},
+		{"GENERIC", "s-generic"}, {" ad ", "s-ad"},
+		{"../../etc/passwd", "s-generic"}, {"zzznotathing", "s-generic"}, {"random", "s-generic"}, {"", "s-generic"},
+	}
+	for _, c := range cases {
+		sk, ok := routeSkillFor(cat, c.in)
+		if !ok || sk.Name != c.want {
+			t.Errorf("routeSkillFor(%q) = %q,%v; want %q,true", c.in, sk.Name, ok, c.want)
+		}
+	}
+}
+
+// TestRouteSkillKeywordNeverPinsSkillByName proves the no-pin invariant: a
+// caller passing a skill's own name (which carries a keyword) reaches only the
+// domain bucket and gets the name-sorted first skill, not the named one.
+func TestRouteSkillKeywordNeverPinsSkillByName(t *testing.T) {
+	dir := t.TempDir()
+	writeTestSkill(t, dir, "aaa-web", "---\nname: aaa-web\ndescription: web http attacks\n---\nABODY\n")
+	writeTestSkill(t, dir, "attacking-oauth", "---\nname: attacking-oauth\ndescription: oauth jwt web attacks\n---\nOBODY\n")
+	cat, err := skillcat.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dom := range []string{"attacking-oauth", "web/../ad", "web\x00"} {
+		sk, ok := routeSkillFor(cat, dom)
+		if !ok || sk.Name != "aaa-web" {
+			t.Errorf("routeSkillFor(%q) = %q,%v; want aaa-web,true (bucket first, never the named skill)", dom, sk.Name, ok)
+		}
+	}
+}
+
+// TestRouteSkillNoSkillMessageNamesResolvedDomain checks both not-found sites
+// report the resolved domain, not the raw keyword or a generic fallback.
+func TestRouteSkillNoSkillMessageNamesResolvedDomain(t *testing.T) {
+	cat, _ := skillcat.Load("") // empty
+	tool := newRouteSkillTool(cat, openStore(t), func() string { return "" })
+	out, err := tool.Call(context.Background(), `{"domain":"kerberos"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(out, "domain ad") {
+		t.Errorf("tool message should name resolved domain ad, got %q", out)
+	}
+	res := mcpRouteResult(cat, "kerberos")
+	if res["found"] != false || res["domain"] != "ad" {
+		t.Errorf("mcpRouteResult not-found should name resolved domain ad, got %v", res)
 	}
 }
 

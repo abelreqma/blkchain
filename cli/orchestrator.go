@@ -139,8 +139,8 @@ func runExecutor(ctx context.Context, d engageDeps, taskID string) (string, erro
 // runOrchestrator runs the top-level engagement loop for a goal.
 func runOrchestrator(ctx context.Context, d engageDeps, goal string) (string, error) {
 	if d.Progress != nil {
-		d.Store.SetOnApply(d.Progress)
-		defer d.Store.SetOnApply(nil)
+		remove := d.Store.AddOnApply(d.Progress)
+		defer remove()
 	}
 	reg := tooldef.NewRegistry()
 	// Evidence is verified against the shared per-episode capture when present,

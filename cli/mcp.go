@@ -31,7 +31,7 @@ type mcpAnswerIn struct {
 
 // mcpRouteIn is route_skill's tool input.
 type mcpRouteIn struct {
-	Domain string `json:"domain" jsonschema:"the engagement domain to route a skill for: generic, recon, web, ad, cloud, k8s, wifi, exploit-dev"`
+	Domain string `json:"domain" jsonschema:"an engagement domain (generic, recon, web, ad, cloud, k8s, wifi, exploit-dev) or a kind/vuln-class keyword such as kerberos, xss, or adcs, to route a skill for"`
 }
 
 // runMCP starts the MCP stdio server exposing kb_search, kb_answer, and
@@ -90,7 +90,7 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "route_skill",
-		Description: "Get the playbook for an engagement domain. Provide one domain (generic, recon, web, ad, cloud, k8s, wifi, exploit-dev); the harness selects the skill deterministically and returns its playbook. You cannot choose a specific skill by name; an unknown domain returns the generic playbook or a clear no-skill message.",
+		Description: "Get the playbook for an engagement domain. Provide one domain (generic, recon, web, ad, cloud, k8s, wifi, exploit-dev) or a kind/vuln-class keyword (for example kerberos, xss, adcs); the harness selects the skill deterministically and returns its playbook. You cannot choose a specific skill by name; an unrecognized domain returns the generic playbook or a clear no-skill message.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, in mcpRouteIn) (*mcp.CallToolResult, any, error) {
 		return nil, mcpRouteResult(cat, in.Domain), nil
 	})
@@ -104,11 +104,13 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 func mcpRouteResult(cat *skillcat.Catalog, domain string) map[string]any {
 	sk, ok := routeSkillFor(cat, domain)
 	if !ok {
-		return map[string]any{"found": false, "domain": domainFor(domain).Name}
+		return map[string]any{"found": false, "domain": resolveDomain(domain)}
 	}
 	body := sk.Body
+	truncated := false
 	if r := []rune(body); len(r) > routeSkillBodyCap {
 		body = string(r[:routeSkillBodyCap])
+		truncated = true
 	}
 	return map[string]any{
 		"found":       true,
@@ -116,6 +118,7 @@ func mcpRouteResult(cat *skillcat.Catalog, domain string) map[string]any {
 		"domain":      sk.Domain,
 		"description": sk.Description,
 		"body":        body,
+		"truncated":   truncated,
 		"digest":      sk.Digest,
 	}
 }

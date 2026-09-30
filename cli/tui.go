@@ -2329,28 +2329,32 @@ func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, mode
 	queued := m.queuedIndicator()
 	build := func(model string, l statusLayout) string {
 		left := []plSegment{
-			{Text: mode, FG: Heading, BG: Surface},
-			{Text: "model " + model, FG: Heading, BG: Surface},
+			{Text: mode, FG: wSageFg, BG: wSageBg, Icon: "\U000F2B00"},
+			{Text: "model " + model, FG: wHeadFg, BG: wSegBg, Icon: "\U000F2B01"},
 		}
 		if l.reasoning {
-			left = append(left, plSegment{Text: "reasoning " + m.reasoning, FG: Muted, BG: Surface})
+			left = append(left, plSegment{Text: "reasoning " + m.reasoning, FG: wMutedFg, BG: wSegBg2, Icon: "\U000F2B02"})
 		}
 		var right []plSegment
 		if l.retrieval {
 			for _, r := range retrieval {
-				right = append(right, plSegment{Text: r, FG: Muted, BG: Surface})
+				right = append(right, plSegment{Text: r, FG: wMutedFg, BG: wSegBg2})
 			}
 		}
 		h := shortHealth
 		if l.longHealth {
 			h = health
 		}
-		right = append(right, plSegment{Text: h, FG: Surface, BG: tone})
+		hFG, hBG := wSageFg, wSageBg
+		if tone == Err {
+			hFG, hBG = wRoseFg, wRoseBg
+		}
+		right = append(right, plSegment{Text: h, FG: hFG, BG: hBG, Icon: "\U000F2B03"})
 		if l.reasoning && mode == "rag" {
 			if m.prefs.Viz {
-				right = append(right, plSegment{Text: "viz", FG: Surface, BG: Warn})
+				right = append(right, plSegment{Text: "viz", FG: wTanFg, BG: wTanBg, Icon: "\U000F2B04"})
 			} else {
-				right = append(right, plSegment{Text: "viz off", FG: Muted, BG: Surface})
+				right = append(right, plSegment{Text: "viz off", FG: wMutedFg, BG: wSegBg2, Icon: "\U000F2B04"})
 			}
 		}
 		line := " " + dot + " " + plRenderRibbon(left, right, plCurrentTier(), 0)
@@ -2507,19 +2511,24 @@ func (m model) vizBar() string {
 	if e.Stage.Tool != "" {
 		right += " " + sanitizeTerminal(e.Stage.Tool)
 	}
-	label := lipgloss.NewStyle().Foreground(Accent).Render(sanitizeTerminal(e.Stage.Label))
-	line := " " + label + "  " + meter + "  " + Meta.Render(right)
+	// Each piece carries the bar background itself: an inner style's reset would
+	// otherwise cut the outer background short.
+	on := func(fg lipgloss.Color) lipgloss.Style { return lipgloss.NewStyle().Foreground(fg).Background(wBarBg) }
+	gap := on(wBarBg).Render(" ")
+	label := on(wOffWhite).Render(sanitizeTerminal(e.Stage.Label))
+	accent := on(wMeterOn).Render("\u258e")
+	spinner := on(wMeterOn).Render("\u283f")
+	line := accent + gap + spinner + gap + label + gap + gap + meter + gap + gap + on(wMutedFg).Render(right)
 	if !m.firstTokAt.IsZero() && m.liveTokens > 0 {
 		tps := modeleval.TokensPerSec(m.liveTokens, time.Since(m.firstTokAt))
-		sage := lipgloss.NewStyle().Foreground(Success)
 		bolt := ""
 		if plCurrentTier() == plNerd {
-			bolt = sage.Render("\uf0e7") + " "
+			bolt = on(wMeterOn).Render("\U000F2B02") + gap
 		}
-		line += Meta.Render(" "+Glyph(GlyphBar)+" ") + bolt + sage.Render(fmt.Sprintf("%.0f", tps)) + Meta.Render(" tok/s")
+		line += on(wMutedFg).Render(" "+Glyph(GlyphBar)+" ") + bolt + on(wSageFg).Render(fmt.Sprintf("%.0f", tps)) + on(wMutedFg).Render(" tok/s")
 	}
 	w, _ := m.termSize()
-	return lipgloss.NewStyle().MaxWidth(w).Render(line)
+	return lipgloss.NewStyle().Background(wBarBg).MaxWidth(w).Render(line)
 }
 
 func liveReadout(tokens int, since time.Duration, unicode bool) string {

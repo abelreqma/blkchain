@@ -2055,17 +2055,20 @@ func TestStatusRibbonShowsViz(t *testing.T) {
 
 // The colored ribbon (unicode tier) fits the width, carries the segment
 // content, and uses both hard arrows and thin separators.
-func TestStatusRibbonColorTier(t *testing.T) {
+func colorStatusLine(t *testing.T, powerline string) string {
+	t.Helper()
 	oldC, oldU := useColor, useUnicode
 	useColor, useUnicode = true, true
-	defer func() { useColor, useUnicode = oldC, oldU }()
-	t.Setenv("BLKCHAIN_POWERLINE", "")
+	t.Cleanup(func() { useColor, useUnicode = oldC, oldU })
+	t.Setenv("BLKCHAIN_POWERLINE", powerline)
 
 	m := newTestModel(t)
 	m.width = 120
 	m.ragModel = "gemma"
 	m.reasoning = "medium"
 	m.servicesChecked, m.servicesOK = true, true
+	// The embed and rerank segments share a fill, so they join with a thin separator.
+	m.health, m.rerankUp = &serviceHealth{EmbedServer: true}, true
 	m.prefs = defaultPrefs()
 	line := m.statusLine()
 	if w := lipgloss.Width(line); w > 120 {
@@ -2076,11 +2079,36 @@ func TestStatusRibbonColorTier(t *testing.T) {
 			t.Errorf("colored status %q lacks %q", line, want)
 		}
 	}
+	return line
+}
+
+func TestStatusRibbonColorTier(t *testing.T) {
+	line := colorStatusLine(t, "0")
 	if !strings.Contains(line, "\u25B6") {
-		t.Errorf("colored status lacks a hard arrow: %q", line)
+		t.Errorf("unicode status lacks a hard arrow: %q", line)
 	}
 	if !strings.Contains(line, "\u2502") {
-		t.Errorf("colored status lacks a thin separator: %q", line)
+		t.Errorf("unicode status lacks a thin separator: %q", line)
+	}
+	if strings.Contains(line, "\U000F2B00") || strings.Contains(line, "\U000F2B03") {
+		t.Errorf("unicode status carries nerd icons: %q", line)
+	}
+}
+
+func TestStatusRibbonNerdTier(t *testing.T) {
+	for _, env := range []string{"", "1"} {
+		line := colorStatusLine(t, env)
+		for name, want := range map[string]string{
+			"separator": "\ue0b0", "mode database icon": "\U000F2B00", "model icon": "\U000F2B01",
+			"reasoning icon": "\U000F2B02", "services heartbeat icon": "\U000F2B03", "viz icon": "\U000F2B04",
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("POWERLINE=%q nerd status lacks %s %q: %q", env, name, want, line)
+			}
+		}
+		if strings.Contains(line, "\u25B6") {
+			t.Errorf("POWERLINE=%q nerd status uses the unicode arrow: %q", env, line)
+		}
 	}
 }
 

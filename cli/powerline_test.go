@@ -15,36 +15,24 @@ func TestPLCurrentTier(t *testing.T) {
 		useUnicode = origUnicode
 	}()
 
-	// Case 1: !useColor -> always plASCII regardless of powerline env.
-	useColor = false
-	useUnicode = true
-	t.Setenv("BLKCHAIN_POWERLINE", "1")
-	if got := plCurrentTier(); got != plASCII {
-		t.Errorf("!useColor: got %v, want plASCII", got)
+	cases := []struct {
+		name       string
+		color, uni bool
+		env        string
+		want       plTier
+	}{
+		{"default nerd", true, true, "", plNerd},
+		{"powerline 0 unicode", true, true, "0", plUnicode},
+		{"powerline 1 nerd", true, true, "1", plNerd},
+		{"no color ascii", false, true, "1", plASCII},
+		{"no unicode ascii", true, false, "", plASCII},
 	}
-
-	// Case 2: BLKCHAIN_POWERLINE=1 && useUnicode -> plNerd.
-	useColor = true
-	useUnicode = true
-	t.Setenv("BLKCHAIN_POWERLINE", "1")
-	if got := plCurrentTier(); got != plNerd {
-		t.Errorf("powerline=1 && useUnicode: got %v, want plNerd", got)
-	}
-
-	// Case 3: useUnicode (no powerline env) -> plUnicode.
-	useColor = true
-	useUnicode = true
-	t.Setenv("BLKCHAIN_POWERLINE", "")
-	if got := plCurrentTier(); got != plUnicode {
-		t.Errorf("useUnicode no powerline: got %v, want plUnicode", got)
-	}
-
-	// Case 4: !useUnicode && useColor -> plASCII.
-	useColor = true
-	useUnicode = false
-	t.Setenv("BLKCHAIN_POWERLINE", "")
-	if got := plCurrentTier(); got != plASCII {
-		t.Errorf("!useUnicode && useColor: got %v, want plASCII", got)
+	for _, c := range cases {
+		useColor, useUnicode = c.color, c.uni
+		t.Setenv("BLKCHAIN_POWERLINE", c.env)
+		if got := plCurrentTier(); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 

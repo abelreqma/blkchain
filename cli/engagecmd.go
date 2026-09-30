@@ -180,11 +180,37 @@ func runEngage(args []string) error {
 		Progress: makeEngageProgress(os.Stdout, r, prefs.Viz),
 	}
 
+	// Resumable engagement report: a projection of the store written to the
+	// workspace, refreshed on each commit and rebuilt from the store on resume.
+	modeStr := "safe"
+	if o.auto {
+		modeStr = "auto"
+	}
+	scopeDesc := o.scope
+	if scopeDesc == "" {
+		scopeDesc = "(none)"
+	}
+	rw := newReportWriter(ws.Store, wsDir, goal, scopeDesc, modeStr)
+	if err := rw.Flush("in-progress"); err != nil {
+		fmt.Fprintf(os.Stderr, "report: initial write failed: %v\n", err)
+	}
+	stopReport := rw.Start()
+	defer stopReport()
+
 	final, err := runOrchestrator(context.Background(), deps, goal)
+	stopReport() // stop the live render loop before the terminal flush (idempotent)
 	if err != nil {
+		if ferr := rw.Flush("interrupted"); ferr != nil {
+			fmt.Fprintf(os.Stderr, "report: final write failed: %v\n", ferr)
+		}
 		return fmt.Errorf("engage: %w", err)
 	}
+	if ferr := rw.Flush("complete"); ferr != nil {
+		fmt.Fprintf(os.Stderr, "report: final write failed: %v\n", ferr)
+	}
 	fmt.Fprintln(os.Stdout, final)
+	mdPath, jsonPath := reportPaths(wsDir)
+	fmt.Fprintf(os.Stdout, "\nReport: %s\n        %s\n", mdPath, jsonPath)
 	return nil
 }
 

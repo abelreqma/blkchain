@@ -74,6 +74,8 @@ func (s *Store) CoverageIndex() (Coverage, error) {
 
 // Audit appends one row to the append-only audit log.
 func (s *Store) Audit(actor, action, detail string) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
 	_, err := s.db.Exec(
 		`INSERT INTO audit (at, actor, action, detail) VALUES (?, ?, ?, ?)`,
 		time.Now().UTC().Format(time.RFC3339), actor, action, detail)
