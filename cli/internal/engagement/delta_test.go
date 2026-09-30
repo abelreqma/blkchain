@@ -1,6 +1,7 @@
 package engagement
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -37,7 +38,7 @@ func TestApplyAddsTasksBumpsRevision(t *testing.T) {
 	s := openTemp(t)
 	seedAB(t, s)
 
-	if rev, _ := s.Revision(); rev != 1 {
+	if rev, _ := s.Revision(context.Background()); rev != 1 {
 		t.Fatalf("Revision = %d, want 1", rev)
 	}
 	a, err := s.GetTask("A")
@@ -73,7 +74,7 @@ func TestApplyDanglingDependsOnRollsBack(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for dangling depends_on")
 	}
-	if rev, _ := s.Revision(); rev != 1 {
+	if rev, _ := s.Revision(context.Background()); rev != 1 {
 		t.Fatalf("Revision = %d, want 1", rev)
 	}
 	if _, err := s.GetTask("C"); err != ErrNotFound {
@@ -94,7 +95,7 @@ func TestApplyRejectsInvalidStatusAndUnknownComplete(t *testing.T) {
 	if _, err := s.Apply(Delta{Completes: []string{"ghost"}}); err == nil {
 		t.Fatal("expected error for unknown complete id")
 	}
-	if rev, _ := s.Revision(); rev != 1 {
+	if rev, _ := s.Revision(context.Background()); rev != 1 {
 		t.Fatalf("Revision = %d, want 1", rev)
 	}
 }
@@ -181,7 +182,145 @@ func TestApplyConcurrentNoBusy(t *testing.T) {
 			t.Fatalf("missing revision %d in %v", r, revs)
 		}
 	}
-	if got, _ := s.Revision(); got != n {
+	if got, _ := s.Revision(context.Background()); got != n {
 		t.Fatalf("Revision = %d, want %d", got, n)
+	}
+}
+
+func TestApplyStageOnlyBumpsRevisionAndSnapshot(t *testing.T) {
+	s, err := Open(t.TempDir() + "/e.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	name := "acme-web"
+	active := "t1"
+	stage := Stage{Label: "dispatch", Step: 1, Total: 3, Tool: "web"}
+	rev, err := s.Apply(Delta{Kind: "stage", Detail: "start", SetName: &name, SetActiveID: &active, SetStage: &stage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev != 1 {
+		t.Fatalf("rev = %d, want 1", rev)
+	}
+
+	snap, err := s.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Revision != 1 {
+		t.Errorf("snap.Revision = %d, want 1", snap.Revision)
+	}
+	if snap.Name != name || snap.ActiveID != active {
+		t.Errorf("snap Name/ActiveID = %q/%q, want %q/%q", snap.Name, snap.ActiveID, name, active)
+	}
+	if snap.Stage != stage {
+		t.Errorf("snap.Stage = %+v, want %+v", snap.Stage, stage)
+	}
+
+	// One transition row for this revision.
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM transition WHERE rev = 1`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("transition rows at rev 1 = %d, want 1", n)
+	}
+}
+
+func TestApplyNilMetaLeavesPriorValues(t *testing.T) {
+	s, err := Open(t.TempDir() + "/e.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	name := "acme-web"
+	if _, err := s.Apply(Delta{Kind: "init", SetName: &name}); err != nil {
+		t.Fatal(err)
+	}
+	// A later delta that does not set the name must not clear it.
+	if _, err := s.Apply(Delta{Kind: "noop"}); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := s.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Name != name {
+		t.Errorf("snap.Name = %q, want %q", snap.Name, name)
+	}
+	if snap.Revision != 2 {
+		t.Errorf("snap.Revision = %d, want 2", snap.Revision)
+	}
+}
+
+func mustOpen(t *testing.T) *Store {
+	t.Helper()
+	s, err := Open(t.TempDir() + "/e.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+func TestApplyRejectsEmptyTaskID(t *testing.T) {
+	s := mustOpen(t)
+	_, err := s.Apply(Delta{Upserts: []Task{{ID: "", Kind: "recon", Status: StatusTodo}}})
+	if err == nil {
+		t.Fatal("want error for empty task id")
+	}
+	if rev, _ := s.Revision(context.Background()); rev != 0 {
+		t.Errorf("revision moved to %d on rejected delta", rev)
+	}
+}
+
+func TestApplyRejectsSelfDependency(t *testing.T) {
+	s := mustOpen(t)
+	_, err := s.Apply(Delta{Upserts: []Task{{ID: "t1", Status: StatusTodo, DependsOn: []string{"t1"}}}})
+	if err == nil {
+		t.Fatal("want error for self-dependency")
+	}
+}
+
+func TestApplyRejectsCycleAcrossStoredAndUpsert(t *testing.T) {
+	s := mustOpen(t)
+	// t1 depends on t2; both new.
+	if _, err := s.Apply(Delta{Upserts: []Task{
+		{ID: "t2", Status: StatusTodo},
+		{ID: "t1", Status: StatusTodo, DependsOn: []string{"t2"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	// Now upsert t2 to depend on t1 -> closes a cycle t1->t2->t1.
+	_, err := s.Apply(Delta{Upserts: []Task{{ID: "t2", Status: StatusTodo, DependsOn: []string{"t1"}}}})
+	if err == nil {
+		t.Fatal("want error for dependency cycle")
+	}
+	if rev, _ := s.Revision(context.Background()); rev != 1 {
+		t.Errorf("revision = %d after rejected cycle, want 1", rev)
+	}
+}
+
+func TestApplyRejectsDoneToTodo(t *testing.T) {
+	s := mustOpen(t)
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "t1", Status: StatusDone}}}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.Apply(Delta{Upserts: []Task{{ID: "t1", Status: StatusTodo}}})
+	if err == nil {
+		t.Fatal("want error for done->todo downgrade")
+	}
+}
+
+func TestApplyAllowsDoneToActive(t *testing.T) {
+	s := mustOpen(t)
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "t1", Status: StatusDone}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "t1", Status: StatusActive}}}); err != nil {
+		t.Fatalf("done->active should be allowed: %v", err)
 	}
 }

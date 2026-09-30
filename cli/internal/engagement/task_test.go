@@ -1,6 +1,7 @@
 package engagement
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -85,7 +86,7 @@ func TestTaskStatusValid(t *testing.T) {
 
 func TestTaskRevisionFreshZero(t *testing.T) {
 	s := openTemp(t)
-	got, err := s.Revision()
+	got, err := s.Revision(context.Background())
 	if err != nil {
 		t.Fatalf("Revision: %v", err)
 	}

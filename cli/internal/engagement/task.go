@@ -1,6 +1,7 @@
 package engagement
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -96,9 +97,9 @@ func (s *Store) GetTask(id string) (Task, error) {
 }
 
 // Revision returns the current engagement revision counter.
-func (s *Store) Revision() (int64, error) {
+func (s *Store) Revision(ctx context.Context) (int64, error) {
 	var v string
-	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'revision'`).Scan(&v); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT v FROM meta WHERE k = 'revision'`).Scan(&v); err != nil {
 		return 0, err
 	}
 	return strconv.ParseInt(v, 10, 64)
