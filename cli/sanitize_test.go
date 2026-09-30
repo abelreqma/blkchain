@@ -362,10 +362,10 @@ func TestResumeRowStripsControlSequences(t *testing.T) {
 	useColor = false
 	defer func() { useColor = old }()
 
-	item := resumeItem{meta: sessionMeta{ID: "id", Title: "t\x1b]0;x\x07itle"}}
+	item := historyItem{meta: sessionMeta{ID: "id", Title: "t\x1b]0;x\x07itle"}}
 	for _, selected := range []bool{true, false} {
-		if row := resumeRow(selected, item); strings.ContainsRune(row, 0x1b) || strings.ContainsRune(row, 0x07) {
-			t.Errorf("resumeRow(selected=%v) holds a control character: %q", selected, row)
+		if row := historyRow(selected, item); strings.ContainsRune(row, 0x1b) || strings.ContainsRune(row, 0x07) {
+			t.Errorf("historyRow(selected=%v) holds a control character: %q", selected, row)
 		}
 	}
 }

@@ -237,7 +237,7 @@ func TestCancelWithoutPartialPrintsOnlyTag(t *testing.T) {
 
 func TestCtrlCClosesEveryOverlay(t *testing.T) {
 	overlays := map[string]overlayModel{
-		"resume": newResumePicker(nil, "", 80),
+		"resume": newHistoryPicker(nil, "", 80),
 		"model":  newModelPicker([]string{"a", "b"}, "a", "medium", 80),
 		"file":   newFilePicker(t.TempDir(), 80),
 	}
@@ -298,7 +298,7 @@ func TestFooterFollowsState(t *testing.T) {
 	}
 
 	overlays := map[string]overlayModel{
-		"resume": newResumePicker(nil, "", 80),
+		"resume": newHistoryPicker(nil, "", 80),
 		"model":  newModelPicker([]string{"a"}, "a", "medium", 80),
 		"file":   newFilePicker(t.TempDir(), 80),
 	}
@@ -327,7 +327,7 @@ func TestFooterFollowsState(t *testing.T) {
 
 func TestViewUnderOverlayOmitsInputHints(t *testing.T) {
 	m := newKeyModel(t)
-	m.overlay = newResumePicker(nil, "", 80)
+	m.overlay = newHistoryPicker(nil, "", 80)
 	if strings.Contains(m.View(), "newline") {
 		t.Error("View under an overlay should not show the input footer hints")
 	}
@@ -1039,7 +1039,7 @@ func TestViewNeverExceedsShortTerminals(t *testing.T) {
 			return m
 		},
 		"resume overlay": func(m model) model {
-			m.overlay = newResumePicker(manySessions(20), "id01", m.width)
+			m.overlay = newHistoryPicker(manySessions(20), "id01", m.width)
 			return m
 		},
 		"model overlay": func(m model) model {
@@ -1204,7 +1204,7 @@ func TestViewNarrowTerminalsDoNotPanic(t *testing.T) {
 			m.pal.open = true
 			m.pal.items = filterCommands(slashCommands(), "")
 			_ = m.View()
-			m.overlay = newResumePicker([]sessionMeta{{ID: "a", Title: "t", MsgCount: 1}}, "a", w)
+			m.overlay = newHistoryPicker([]sessionMeta{{ID: "a", Title: "t", MsgCount: 1}}, "a", w)
 			_ = m.View()
 			m.overlay = newModelPicker([]string{"a", "b"}, "a", "medium", w)
 			_ = m.View()
@@ -1227,13 +1227,13 @@ func TestLiveRegionNarrowWidthsStayInBounds(t *testing.T) {
 // Each overlay's key hints come from the one state-aware footer, and it lists
 // every key that overlay handles, including the close keys.
 func TestOverlayFooterListsEveryKey(t *testing.T) {
-	confirm := newResumePicker(manySessions(2), "", 100)
+	confirm := newHistoryPicker(manySessions(2), "", 100)
 	confirm.confirm = true
 	cases := map[string]struct {
 		overlay overlayModel
 		want    []string
 	}{
-		"resume":         {newResumePicker(manySessions(2), "", 100), []string{"1-9", "up/down", "enter", "d then y", "esc/ctrl+c close"}},
+		"resume":         {newHistoryPicker(manySessions(2), "", 100), []string{"1-9", "up/down", "enter", "d then y", "esc/ctrl+c close"}},
 		"resume confirm": {confirm, []string{"y confirm delete", "ctrl+d quit", "any other key cancel"}},
 		"model":          {newModelPicker(manyModels(2), "model-00", "low", 100), []string{"up/down", "tab/left/right", "enter", "esc/ctrl+c close"}},
 		"file":           {newFilePicker(t.TempDir(), 100), []string{"type", "up/down", "enter", "backspace", "esc/ctrl+c close"}},
@@ -1272,7 +1272,7 @@ func TestResumeConfirmFooterKeysDoWhatTheyList(t *testing.T) {
 		if err != nil || len(metas) != 2 {
 			t.Fatalf("sessions = %v, %v; want 2", metas, err)
 		}
-		p := newResumePicker(metas, "", 100)
+		p := newHistoryPicker(metas, "", 100)
 		p.confirm = true
 		m := layoutModel(t, 100, 30)
 		m.overlay = p
@@ -1288,7 +1288,7 @@ func TestResumeConfirmFooterKeysDoWhatTheyList(t *testing.T) {
 
 	// y: deletes the selected session, leaves confirm mode, keeps the picker open.
 	m, msg := press(t, confirming(), tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
-	if isQuit(msg) || m.overlay == nil || m.overlay.(resumePicker).confirm || count() != 1 {
+	if isQuit(msg) || m.overlay == nil || m.overlay.(historyPicker).confirm || count() != 1 {
 		t.Errorf("y: quit=%v overlay=%v sessions=%d, want the picker open and one session deleted", isQuit(msg), m.overlay, count())
 	}
 
@@ -1315,7 +1315,7 @@ func TestResumeConfirmFooterKeysDoWhatTheyList(t *testing.T) {
 		if _, closed := msg.(overlayCloseMsg); closed {
 			t.Errorf("%s: must cancel the delete, not close the picker", name)
 		}
-		if m.overlay == nil || m.overlay.(resumePicker).confirm {
+		if m.overlay == nil || m.overlay.(historyPicker).confirm {
 			t.Errorf("%s: picker should stay open with the confirmation cleared", name)
 		}
 		if count() != 2 {
@@ -1648,7 +1648,7 @@ func TestHelpBlockLayout(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"reopen a saved session; press 1-9 to pick, d then y to delete",
+		"reopen a saved session; clear or clear [n] erases",
 		"answer a question, with cited sources",
 		"find the most relevant source passages for a query",
 		"start the local services",
@@ -1935,7 +1935,7 @@ func TestEveryFooterKeepsItsWayOut(t *testing.T) {
 			m.overlay = ov
 			return m
 		}
-		confirm := newResumePicker(manySessions(2), "", w)
+		confirm := newHistoryPicker(manySessions(2), "", w)
 		confirm.confirm = true
 		working := sized(newKeyModel(t))
 		working.working = true
@@ -1958,7 +1958,7 @@ func TestEveryFooterKeepsItsWayOut(t *testing.T) {
 			{"key panel", openKeyPanel(t, sized(newKeyModel(t))), "esc close"},
 			{"reverse search", rsearch, "esc/ctrl+c cancel"},
 			{"palette", pal, "esc/ctrl+c close"},
-			{"resume", with(newResumePicker(manySessions(2), "", w)), "esc/ctrl+c close"},
+			{"resume", with(newHistoryPicker(manySessions(2), "", w)), "esc/ctrl+c close"},
 			{"resume confirm", with(confirm), "y confirm delete"},
 			{"model picker", with(newModelPicker(manyModels(2), "model-00", "low", w)), "esc/ctrl+c close"},
 			{"file picker", with(newFilePicker(t.TempDir(), w)), "esc/ctrl+c close"},
@@ -1997,7 +1997,7 @@ func TestEveryFooterKeepsItsWayOut(t *testing.T) {
 func TestConfirmFootersKeepTheConfirmKey(t *testing.T) {
 	noColor(t)
 	for _, w := range []int{24, 32, 40, 80} {
-		confirm := newResumePicker(manySessions(2), "", w)
+		confirm := newHistoryPicker(manySessions(2), "", w)
 		confirm.confirm = true
 		resume := newKeyModel(t)
 		nm, _ := resume.Update(tea.WindowSizeMsg{Width: w, Height: 30})

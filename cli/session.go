@@ -150,6 +150,40 @@ func openSession(id string) (*session, error) {
 
 func (s *session) filePath() string { return filepath.Join(s.dir, s.id+sessionExt) }
 
+// sessionExists reports whether a JSONL transcript file exists for id, so a
+// caller can prefer the rich transcript replay (which honors /undo) over the
+// langchaingo memory. An invalid id is treated as not present.
+func sessionExists(id string) bool {
+	if !validSessionID(id) {
+		return false
+	}
+	dir, err := sessionsDir()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, id+sessionExt))
+	return err == nil
+}
+
+func attachSession(id string) (*session, error) {
+	if !validSessionID(id) {
+		return nil, fmt.Errorf("invalid session id %q", id)
+	}
+	dir, err := sessionsDir()
+	if err != nil {
+		return nil, err
+	}
+	s := &session{id: id, dir: dir}
+	metas, _ := readIndexRaw(dir)
+	for _, m := range metas {
+		if m.ID == id {
+			s.title, s.count, s.model, s.mode = m.Title, m.MsgCount, m.Model, m.Mode
+			break
+		}
+	}
+	return s, nil
+}
+
 // validSessionID reports whether id is safe to use as the bare filename
 // component of a session transcript path. index.json is untrusted (it's a
 // file on disk, not something the program itself constrained at write time),
@@ -360,6 +394,29 @@ func deleteSession(id string) error {
 		}
 	}
 	return writeIndex(dir, out)
+}
+
+// deleteAllSessions removes every session transcript and the sidecar index, so
+// the JSONL side of the store is wiped. Missing files are ignored.
+func deleteAllSessions() error {
+	dir, err := sessionsDir()
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name == indexName || strings.HasSuffix(name, sessionExt) {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
+	return nil
 }
 
 // renameSession overrides a session's title in the index.

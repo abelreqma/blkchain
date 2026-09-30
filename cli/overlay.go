@@ -1,17 +1,20 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
 	"time"
+
+	"blkchain/cli/internal/histstore"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// overlay.go holds the focused overlay pickers: the /resume
+// overlay.go holds the focused overlay pickers: the /history
 // session picker and the /model reasoning picker. An overlay captures keys while
 // open; the base Update passes through only quit (tui.go). Each overlay renders
 // over the live region, replacing the input area, inside one rounded single-line
@@ -29,8 +32,8 @@ type overlayModel interface {
 
 // --- overlay result messages (handled in the base Update) ---
 
-type overlayCloseMsg struct{}              // Esc: cancel, keep current session/model
-type resumeSelectedMsg struct{ id string } // open this session
+type overlayCloseMsg struct{}               // Esc: cancel, keep current session/model
+type historySelectedMsg struct{ id string } // reopen this session (/history picker)
 type modelSelectedMsg struct{ model, reasoning string }
 
 // openModelPickerMsg carries the discovered models into the model picker. Model
@@ -186,52 +189,60 @@ func relTime(ts int64) string {
 	}
 }
 
-// --- resume picker ---
+// --- history (session) picker ---
 
-// resumeItem is one session row; num is its 1-9 quick-pick key (0 = none).
-type resumeItem struct {
+// historyItem is one session row; num is its 1-9 quick-pick key (0 = none).
+type historyItem struct {
 	meta sessionMeta
 	num  int
 }
 
-func (r resumeItem) FilterValue() string { return r.meta.Title }
+func (r historyItem) FilterValue() string { return r.meta.Title }
 
-type resumePicker struct {
+type historyPicker struct {
 	list    list.Model
 	metas   []sessionMeta
-	confirm bool // 'd' pressed, awaiting 'y'
+	confirm bool   // 'd' pressed, awaiting 'y'
+	title   string // box title
+	// store and titles back the /history picker: delete erases from the store and
+	// reload re-queries it, so the picker stays consistent with how /history lists
+	// and with /history clear. When store is nil the picker falls back to the JSONL
+	// session store (used by rendering/layout tests that need no live store).
+	store  *histstore.Store
+	titles map[string]string
 }
 
-// newResumePicker builds the picker from the current session list, selecting the
-// current session if present.
-func newResumePicker(metas []sessionMeta, currentID string, width int) resumePicker {
-	items := resumeItems(metas)
+// newHistoryPicker builds the picker from the given session list, selecting the
+// current session if present. It is the /history picker; selecting a row emits
+// historySelectedMsg.
+func newHistoryPicker(metas []sessionMeta, currentID string, width int) historyPicker {
+	items := historyItems(metas)
 	w := clamp(width-6, 30, 72)
 	h := clamp(len(items), 1, 9)
-	l := newCompactList(items, w, h, resumeRow)
+	l := newCompactList(items, w, h, historyRow)
 	for i, m := range metas {
 		if m.ID == currentID {
 			l.Select(i)
 			break
 		}
 	}
-	return resumePicker{list: l, metas: metas}
+	return historyPicker{list: l, metas: metas, title: "HISTORY"}
 }
 
-func resumeItems(metas []sessionMeta) []list.Item {
+func historyItems(metas []sessionMeta) []list.Item {
 	items := make([]list.Item, len(metas))
 	for i, m := range metas {
 		num := 0
 		if i < 9 {
 			num = i + 1
 		}
-		items[i] = resumeItem{meta: m, num: num}
+		items[i] = historyItem{meta: m, num: num}
 	}
 	return items
 }
 
-func resumeRow(selected bool, item list.Item) string {
-	r := item.(resumeItem)
+func historyRow(selected bool, item list.Item) string {
+	r := item.(historyItem)
 	title := strings.TrimSpace(sanitizeTerminal(r.meta.Title))
 	if title == "" {
 		title = r.meta.ID
@@ -247,7 +258,7 @@ func resumeRow(selected bool, item list.Item) string {
 	return "  " + Meta.Render(num) + Body.Render(title) + "  " + Meta.Render(meta)
 }
 
-func (p resumePicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
+func (p historyPicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 	km, ok := msg.(tea.KeyMsg)
 	if !ok {
 		var cmd tea.Cmd
@@ -258,8 +269,12 @@ func (p resumePicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 
 	if p.confirm {
 		if s == "y" || s == "Y" {
-			if it, ok := p.list.SelectedItem().(resumeItem); ok {
-				_ = deleteSession(it.meta.ID)
+			if it, ok := p.list.SelectedItem().(historyItem); ok {
+				if p.store != nil {
+					purgeHistorySession(p.store, it.meta.ID)
+				} else {
+					_ = deleteSession(it.meta.ID)
+				}
 			}
 			p.confirm = false
 			return p.reload(), nil
@@ -272,9 +287,9 @@ func (p resumePicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 	case "esc":
 		return p, closeOverlayCmd
 	case "enter":
-		if it, ok := p.list.SelectedItem().(resumeItem); ok {
+		if it, ok := p.list.SelectedItem().(historyItem); ok {
 			id := it.meta.ID
-			return p, func() tea.Msg { return resumeSelectedMsg{id: id} }
+			return p, func() tea.Msg { return historySelectedMsg{id: id} }
 		}
 		return p, nil
 	case "d":
@@ -286,7 +301,7 @@ func (p resumePicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 		n := int(s[0] - '0')
 		if n >= 1 && n <= len(p.metas) {
 			id := p.metas[n-1].ID
-			return p, func() tea.Msg { return resumeSelectedMsg{id: id} }
+			return p, func() tea.Msg { return historySelectedMsg{id: id} }
 		}
 		return p, nil
 	}
@@ -296,16 +311,24 @@ func (p resumePicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 	return p, cmd
 }
 
-// reload rebuilds the picker after a delete.
-func (p resumePicker) reload() resumePicker {
-	metas, _ := listSessions()
+// reload rebuilds the picker after a delete, re-querying the same source the
+// picker was opened from: the langchaingo store for /history, or the JSONL
+// session list as a fallback when no store is attached.
+func (p historyPicker) reload() historyPicker {
+	var metas []sessionMeta
+	if p.store != nil {
+		hs, _ := p.store.Sessions(context.Background())
+		metas = mergeHistoryMetas(hs, p.titles)
+	} else {
+		metas, _ = listSessions()
+	}
 	p.metas = metas
-	p.list.SetItems(resumeItems(metas))
+	p.list.SetItems(historyItems(metas))
 	p.list.SetHeight(clamp(len(metas), 1, 9))
 	return p
 }
 
-func (p resumePicker) View(width, height int) string {
+func (p historyPicker) View(width, height int) string {
 	// The list is sized to the box on every render (p is a copy, so the stored
 	// list keeps no stale geometry). SetSize keeps the selected row on screen.
 	body := func(w, rows int) string {
@@ -316,7 +339,7 @@ func (p resumePicker) View(width, height int) string {
 		return p.list.View()
 	}
 	return overlayBox(overlaySpec{
-		title: "RESUME SESSION",
+		title: p.title,
 		wantW: 72, wantRows: clamp(len(p.metas), 1, 9), body: body,
 	}, width, height)
 }

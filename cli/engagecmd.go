@@ -247,6 +247,11 @@ func runEngage(args []string) error {
 	if ferr := rw.Flush("complete"); ferr != nil {
 		fmt.Fprintf(os.Stderr, "report: final write failed: %v\n", ferr)
 	}
+	// Fold the finished report into the REPL's persistent memory so it surfaces in
+	// /history. Best-effort: a memory error never fails a completed engagement.
+	if ierr := ingestEngageRun(wsDir); ierr != nil {
+		fmt.Fprintf(os.Stderr, "history: could not record engagement: %v\n", ierr)
+	}
 	fmt.Fprintln(os.Stdout, final)
 	mdPath, jsonPath := reportPaths(wsDir)
 	fmt.Fprintf(os.Stdout, "\nReport: %s\n        %s\n", mdPath, jsonPath)

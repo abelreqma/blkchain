@@ -67,7 +67,7 @@ func slashCommands() []command {
 		{"mode", "", "switch between knowledge-base answers and the Hermes agent (also /agent, /rag)", groupModes},
 		{"agent", "", "use the Hermes agent for questions", groupHidden},
 		{"rag", "[on|off|question]", "answer from the knowledge base", groupHidden},
-		{"resume", "", "reopen a saved session; press 1-9 to pick, d then y to delete", groupSession},
+		{"history", "[clear [n]]", "reopen a saved session; clear or clear [n] erases", groupSession},
 		{"model", "", "pick the model and reasoning level (also ctrl+p)", groupSession},
 		{"title", "<name>", "rename the current session", groupSession},
 		{"attach", "", "attach a file to your next question (also @)", groupSession},

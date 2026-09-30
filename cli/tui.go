@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"blkchain/cli/internal/histstore"
 	"blkchain/cli/internal/modeleval"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
@@ -125,7 +126,7 @@ func (m model) footerKeys() footerKeyMap {
 	switch {
 	case m.overlay != nil:
 		switch ov := m.overlay.(type) {
-		case resumePicker:
+		case historyPicker:
 			if ov.confirm {
 				return footerKeyMap{short: []key.Binding{hint("y", "confirm delete"), hint("ctrl+d", "quit"), hint("any other key", "cancel")}, drop: confirmDrop}
 			}
@@ -418,6 +419,11 @@ type model struct {
 	sessTitle string
 	pendingQ  string
 
+	// hist is the persistent langchaingo/sqlite3 conversation memory (nil when it
+	// could not be opened). Every recorded turn is mirrored here keyed by the
+	// session id, and /history lists and reopens sessions from it.
+	hist *histstore.Store
+
 	// overlay is the open picker (/resume, /model) or nil. While set it captures
 	// keys; the base Update passes through only quit.
 	overlay overlayModel
@@ -505,6 +511,7 @@ func initialModel() model {
 	sp.Style = lipgloss.NewStyle().Foreground(Muted)
 
 	hist := loadHistory()
+	histDB := histstore.OpenDefault()
 	cfg := loadConfig()
 	rc, rcErr := newRetrievalClient(cfg)
 
@@ -538,6 +545,7 @@ func initialModel() model {
 		histIdx:   len(hist),
 		mode:      "rag",
 		sess:      sess,
+		hist:      histDB,
 		sessTitle: title,
 		reasoning: "medium",
 		ambient:   ambient,
@@ -1073,9 +1081,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return nil
 		})
 
-	case resumeSelectedMsg:
+	case historySelectedMsg:
 		m.overlay = nil
-		return m.openSessionInto(msg.id)
+		return m.openHistorySessionInto(msg.id)
 
 	case modelSelectedMsg:
 		m.overlay = nil
@@ -1279,6 +1287,13 @@ func (m *model) recordTurn(answer string) {
 	model := m.currentModel()
 	_ = m.sess.appendTurn(turnRecord{Role: roleUser, Content: m.pendingQ, Model: model, Mode: m.mode})
 	_ = m.sess.appendTurn(turnRecord{Role: roleAssistant, Content: answer, Model: model, Mode: m.mode})
+	if m.hist != nil {
+		// Mirror the exchange into the persistent langchaingo memory, keyed by the
+		// same session id. Best-effort: a write error just skips persistence.
+		ctx := context.Background()
+		_ = m.hist.AppendUser(ctx, m.sess.id, m.pendingQ)
+		_ = m.hist.AppendAI(ctx, m.sess.id, answer)
+	}
 	if m.sess.title != "" {
 		m.sessTitle = m.sess.title
 	}
@@ -1329,6 +1344,69 @@ func (m model) openSessionInto(id string) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, tea.Sequence(cmds...)
+}
+
+// openHistorySessionInto reopens a session chosen in the /history picker and
+// makes it current so the conversation can continue. It prefers the JSONL
+// transcript (rich replay that honors /undo) via openSessionInto, and falls back
+// to the langchaingo memory for a session that never wrote JSONL, such as an
+// ingested engage run.
+func (m model) openHistorySessionInto(id string) (tea.Model, tea.Cmd) {
+	if sessionExists(id) {
+		return m.openSessionInto(id)
+	}
+	if m.hist == nil {
+		return m, tea.Println(styleErr(fmt.Errorf("history: persistent memory is unavailable")))
+	}
+	msgs, err := m.hist.Messages(context.Background(), id)
+	if err != nil {
+		return m, tea.Println(styleErr(fmt.Errorf("history: %w", err)))
+	}
+	s, err := attachSession(id)
+	if err != nil {
+		return m, tea.Println(styleErr(fmt.Errorf("history: %w", err)))
+	}
+	m.sess = s
+	m.sessTitle = s.title
+	if m.sessTitle == "" {
+		m.sessTitle = s.id
+	}
+
+	cmds := []tea.Cmd{tea.Println(" " + Meta.Render("opened from history: "+sanitizeTerminal(m.sessTitle)))}
+	for _, r := range msgs {
+		switch r.Role {
+		case histstore.RoleUser:
+			cmds = append(cmds, tea.Println(promptEcho(r.Content)))
+		case histstore.RoleAI:
+			cmds = append(cmds, tea.Println(formatReplayAnswer(r.Content, m.renderWidth())))
+		}
+	}
+	return m, tea.Sequence(cmds...)
+}
+
+// historyClear handles "/history clear" (erase every stored session) and
+// "/history clear [n]" (erase the nth session, newest first, matching the
+// picker's 1-9 numbering). It erases from both the langchaingo store and the
+// JSONL transcripts. Erasing all is immediate and irreversible.
+func (m model) historyClear(echo string, args []string) (tea.Model, tea.Cmd) {
+	ctx := context.Background()
+	hs, err := m.hist.Sessions(ctx)
+	if err != nil {
+		return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("history: %w", err))))
+	}
+	if len(args) == 0 {
+		purgeAllHistory(m.hist)
+		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render(fmt.Sprintf("cleared all history (%d sessions)", len(hs)))))
+	}
+	idx, err := strconv.Atoi(args[0])
+	if err != nil || idx < 1 {
+		return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("history: clear takes a session number, got %q", args[0]))))
+	}
+	if idx > len(hs) {
+		return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("history: no session %d (have %d)", idx, len(hs)))))
+	}
+	purgeHistorySession(m.hist, hs[idx-1].ID)
+	return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render(fmt.Sprintf("cleared session %d", idx))))
 }
 
 // submit handles the Enter key: consume the draft, record history, then either
@@ -1432,12 +1510,30 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		}
 	case "copy":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(m.doCopy()))
-	case "resume":
-		metas, err := listSessions()
-		if err != nil {
-			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("resume: %w", err))))
+	case "history":
+		if m.hist == nil {
+			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("history: persistent memory is unavailable"))))
 		}
-		m.overlay = newResumePicker(metas, m.sessID(), m.width)
+		if fields := strings.Fields(arg); len(fields) > 0 {
+			if fields[0] == "clear" {
+				return m.historyClear(echo, fields[1:])
+			}
+			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("history: unknown option %q; use /history or /history clear [n]", arg))))
+		}
+		hs, err := m.hist.Sessions(context.Background())
+		if err != nil {
+			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("history: %w", err))))
+		}
+		titles := map[string]string{}
+		if metas, err := listSessions(); err == nil {
+			for _, meta := range metas {
+				titles[meta.ID] = meta.Title
+			}
+		}
+		hp := newHistoryPicker(mergeHistoryMetas(hs, titles), m.sessID(), m.width)
+		hp.store = m.hist
+		hp.titles = titles
+		m.overlay = hp
 		return m, tea.Println(echo)
 	case "model":
 		return m, tea.Batch(tea.Println(echo), m.openModelPickerCmd())

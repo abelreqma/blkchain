@@ -69,7 +69,7 @@ func visibleRows(view, prefix string) int {
 func TestResumePickerFitsEveryTerminal(t *testing.T) {
 	for _, w := range layoutWidths {
 		for _, h := range layoutHeights {
-			p := newResumePicker(manySessions(20), "id15", w)
+			p := newHistoryPicker(manySessions(20), "id15", w)
 			view := p.View(w, h)
 			label := fmt.Sprintf("resume %dx%d", w, h)
 			checkBox(t, label, view, w, h)
@@ -91,25 +91,25 @@ func TestPickersFitWithColorEnabled(t *testing.T) {
 	defer lipgloss.SetColorProfile(old)
 	for _, w := range layoutWidths {
 		for _, h := range layoutHeights {
-			checkBox(t, fmt.Sprintf("color resume %dx%d", w, h), newResumePicker(manySessions(20), "id01", w).View(w, h), w, h)
+			checkBox(t, fmt.Sprintf("color resume %dx%d", w, h), newHistoryPicker(manySessions(20), "id01", w).View(w, h), w, h)
 			checkBox(t, fmt.Sprintf("color model %dx%d", w, h), newModelPicker(manyModels(20), "model-01", "low", w).View(w, h), w, h)
 		}
 	}
 }
 
 func TestResumePickerFewSessionsShrinks(t *testing.T) {
-	p := newResumePicker(manySessions(2), "", 80)
+	p := newHistoryPicker(manySessions(2), "", 80)
 	view := p.View(80, 50)
 	checkBox(t, "resume small", view, 80, 50)
 	if got := len(strings.Split(view, "\n")); got > 12 {
 		t.Errorf("two sessions should not fill a tall overlay, got %d rows", got)
 	}
-	empty := newResumePicker(nil, "", 80)
+	empty := newHistoryPicker(nil, "", 80)
 	checkBox(t, "resume empty", empty.View(80, 24), 80, 24)
 }
 
 func TestResumePickerResizeRecomputes(t *testing.T) {
-	p := newResumePicker(manySessions(20), "id15", 120)
+	p := newHistoryPicker(manySessions(20), "id15", 120)
 	big := p.View(120, 50)
 	small := p.View(40, 10)
 	if lipgloss.Width(strings.Split(small, "\n")[0]) >= lipgloss.Width(strings.Split(big, "\n")[0]) {
@@ -147,7 +147,7 @@ func TestModelPickerFitsEveryTerminal(t *testing.T) {
 func TestOverlayNarrowTerminalsDoNotPanic(t *testing.T) {
 	for _, w := range []int{1, 2, 3, 5, 8, 12, 20, 30} {
 		for _, h := range []int{1, 3, 6, 10} {
-			_ = newResumePicker(manySessions(5), "id01", w).View(w, h)
+			_ = newHistoryPicker(manySessions(5), "id01", w).View(w, h)
 			_ = newModelPicker(manyModels(5), "", "", w).View(w, h)
 		}
 	}
@@ -198,9 +198,9 @@ func TestOverlayBoxShrinksOnShortTerminals(t *testing.T) {
 	}
 
 	for h := 6; h <= 9; h++ {
-		p := newResumePicker(manySessions(20), "id15", 40)
+		p := newHistoryPicker(manySessions(20), "id15", 40)
 		view := p.View(40, h)
-		if strings.Contains(view, "RESUME SESSION") || !strings.Contains(view, "row-15") {
+		if strings.Contains(view, "HISTORY") || !strings.Contains(view, "row-15") {
 			t.Errorf("height %d: want no title and the selected row visible:\n%s", h, view)
 		}
 		if n := len(strings.Split(p.View(40, h), "\n")); n+2 > h {
@@ -221,7 +221,7 @@ func TestOverlayBoxShrinksOnShortTerminals(t *testing.T) {
 // draws its own inside the box.
 func TestOverlaysDrawNoInBoxKeyFooter(t *testing.T) {
 	views := map[string]string{
-		"resume": newResumePicker(manySessions(3), "", 100).View(100, 30),
+		"resume": newHistoryPicker(manySessions(3), "", 100).View(100, 30),
 		"model":  newModelPicker(manyModels(3), "model-00", "low", 100).View(100, 30),
 		"file":   newFilePicker(t.TempDir(), 100).View(100, 30),
 	}
@@ -232,7 +232,7 @@ func TestOverlaysDrawNoInBoxKeyFooter(t *testing.T) {
 			}
 		}
 	}
-	confirming := newResumePicker(manySessions(3), "", 100)
+	confirming := newHistoryPicker(manySessions(3), "", 100)
 	confirming.confirm = true
 	if v := confirming.View(100, 30); strings.Contains(v, "confirm") {
 		t.Errorf("resume delete prompt must live in the footer, not the box:\n%s", v)

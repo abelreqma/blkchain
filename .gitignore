@@ -1,15 +1,48 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
-*.pyo
-data/
+*.py[cod]
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Go
+cli/blk
+*.test
+*.out
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Models, corpus & data
 models/
 corpus/
-*.log
-.env
-.DS_Store
-.pytest_cache/
-.reranker-report.md
+data/
+
+# Tooling reports & runtime
 .reports/
 .run/
-cli/blk
+.reranker-report.md
+.deepeval/
+*.log
+
+# OS & editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
