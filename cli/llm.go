@@ -65,12 +65,17 @@ func capRunes(s string, n int) string {
 // each chunk's text to cfg.ContextCharsPerChunk runes, so the prefill stays
 // bounded (BLKCHAIN_ANSWER_MAX_CHUNKS and BLKCHAIN_CONTEXT_CHARS_PER_CHUNK).
 func boundChunks(cfg ragconfig.Config, results []retrieval.Result) []retrieval.Result {
-	if len(results) > cfg.AnswerMaxChunks {
+	// A non-positive cap means "no cap": guard so a bad value never indexes
+	// results[:negative] or truncates every chunk to empty. ragconfig.Load
+	// already validates these, so this only defends a directly-built Config.
+	if cfg.AnswerMaxChunks > 0 && len(results) > cfg.AnswerMaxChunks {
 		results = results[:cfg.AnswerMaxChunks]
 	}
 	out := make([]retrieval.Result, len(results))
 	for i, r := range results {
-		r.Payload.Text = capRunes(r.Payload.Text, cfg.ContextCharsPerChunk)
+		if cfg.ContextCharsPerChunk > 0 {
+			r.Payload.Text = capRunes(r.Payload.Text, cfg.ContextCharsPerChunk)
+		}
 		out[i] = r
 	}
 	return out
@@ -289,8 +294,11 @@ type llmTransport struct {
 }
 
 func (t *llmTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Clone before touching the body, ContentLength, or headers: a RoundTripper
+	// must not mutate the caller's request. This was only done on the keyless
+	// path, so a keyed request leaked the rewritten body/headers back.
+	req = req.Clone(req.Context())
 	if t.keyless {
-		req = req.Clone(req.Context())
 		req.Header.Del("Authorization")
 	}
 	noThinking := os.Getenv("BLK_ENABLE_THINKING") != "1"

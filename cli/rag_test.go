@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -129,6 +130,28 @@ func TestAnswerLoopStageOrderSufficient(t *testing.T) {
 	want := []string{"retrieving", "grading", "answering"}
 	if !reflect.DeepEqual(stages, want) {
 		t.Fatalf("stages = %v, want %v", stages, want)
+	}
+}
+
+// MaxLoops <= 0 must not skip grading, the web fallback, and the guardrails: it
+// is clamped to at least one pass. With MaxLoops=0 the loop still grades once.
+func TestAnswerLoopClampsMaxLoopsToAtLeastOne(t *testing.T) {
+	srv := fakeLLM(t, []string{`{"sufficient":true,"rewrite":"","use_web":false}`}, "ok [1]")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	t.Setenv("TAVILY_SETUP_TOKEN", "")
+
+	var stages []string
+	rc := fakeSearcher{[]retrieval.Result{chunk("wstg", "a.md", "s", "text")}}
+	_, _, _, _, _, err := AnswerLoop(context.Background(), rc, answerCfg(0), "q", AnswerOpts{
+		Stage: func(s string) { stages = append(stages, s) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(stages, stageGrading) {
+		t.Fatalf("stages = %v, want a grading pass even with MaxLoops=0", stages)
 	}
 }
 

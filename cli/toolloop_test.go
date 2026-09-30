@@ -142,6 +142,21 @@ func TestToolLoopToolError(t *testing.T) {
 	}
 }
 
+// A tool that panics is converted to a tool error and fed back, like runBatch
+// recovers an executor panic; it must not crash the whole loop.
+func TestToolLoopToolPanicBecomesError(t *testing.T) {
+	boom := &fakeTool{name: "boom", fn: func(string) (string, error) { panic("kaboom") }}
+	m := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "boom", "{}"), textResp("final")}}
+	final, _, err := runToolLoop(context.Background(), m, newLoopReg(t, boom), userMsgs(), LoopCaps{MaxRounds: 4, MaxCalls: 8})
+	if err != nil || final != "final" {
+		t.Fatalf("final=%q err=%v", final, err)
+	}
+	res := toolResults(m)
+	if len(res) != 1 || !strings.Contains(res[0].Content, "panic") || !strings.Contains(res[0].Content, "kaboom") {
+		t.Fatalf("tool results = %+v", res)
+	}
+}
+
 func TestToolLoopMaxRounds(t *testing.T) {
 	echo := &fakeTool{name: "echo", fn: func(string) (string, error) { return "ok", nil }}
 	m := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "echo", "{}")}}

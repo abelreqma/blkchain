@@ -30,6 +30,25 @@ func TestMCPSearchInputTopKOmitted(t *testing.T) {
 	}
 }
 
+func TestMCPSearchTopKClampAndEmptyQuery(t *testing.T) {
+	cfg := ragconfig.Config{TopK: 5}
+	if _, err := mcpSearchTopK(mcpSearchIn{Query: "   "}, cfg); err == nil {
+		t.Error("empty query should be rejected")
+	}
+	if k, err := mcpSearchTopK(mcpSearchIn{Query: "ssrf"}, cfg); err != nil || k != 5 {
+		t.Errorf("omitted top_k: k=%d err=%v, want 5", k, err)
+	}
+	for _, bad := range []int{0, -3} {
+		if k, err := mcpSearchTopK(mcpSearchIn{Query: "ssrf", TopK: &bad}, cfg); err != nil || k != 5 {
+			t.Errorf("top_k=%d: k=%d err=%v, want the default 5", bad, k, err)
+		}
+	}
+	huge := 9999
+	if k, err := mcpSearchTopK(mcpSearchIn{Query: "ssrf", TopK: &huge}, cfg); err != nil || k != kbSearchMaxTopK {
+		t.Errorf("huge top_k: k=%d err=%v, want %d", k, err, kbSearchMaxTopK)
+	}
+}
+
 func TestMCPAnswerInputDecodes(t *testing.T) {
 	var in mcpAnswerIn
 	if err := json.Unmarshal([]byte(`{"query":"how do I chain this SSRF to RCE?"}`), &in); err != nil || in.Query == "" {

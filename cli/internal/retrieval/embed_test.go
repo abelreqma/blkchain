@@ -2,11 +2,42 @@ package retrieval
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+// The shared HTTP client carries no fixed Timeout, so a configured
+// request_timeout_seconds larger than the old hardcoded 60s is honored end to
+// end instead of being silently capped. The per-call context deadline (set in
+// Search from cfg.RequestTimeout) is the only bound.
+func TestHTTPClientHasNoFixedTimeout(t *testing.T) {
+	if httpClient.Timeout != 0 {
+		t.Errorf("httpClient.Timeout = %s, want 0 (rely on the context deadline)", httpClient.Timeout)
+	}
+}
+
+// A request still honors the caller's context deadline: a server slower than
+// the deadline is cancelled, not left to run.
+func TestPostJSONHonorsContextDeadline(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.Write([]byte(`{"embeddings":[[0.1]],"dim":1}`))
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, err := embedQuery(ctx, srv.URL, "q")
+	if err == nil {
+		t.Fatal("want a deadline error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want context.DeadlineExceeded", err)
+	}
+}
 
 func TestEmbedQueryParsesVector(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -10,7 +10,6 @@ import (
 	"blkchain/cli/internal/retrieval"
 
 	"github.com/tmc/langchaingo/llms"
-	"github.com/tmc/langchaingo/llms/openai"
 )
 
 // gradePromptTemplate is the grading instruction: ask for one JSON verdict
@@ -57,9 +56,12 @@ func parseGrade(raw string) grade {
 // gradeContext runs one non-streaming oMLX call to grade whether the
 // retrieved chunks are sufficient to answer query. The numbered context block
 // reuses buildContext (llm.go). oMLX occasionally returns a response with no
-// choices at all, so it retries once before giving up. The error return is
-// only populated when both attempts fail to produce usable choices.
-func gradeContext(ctx context.Context, l *openai.LLM, cfg ragconfig.Config, query string, chunks []retrieval.Result) (grade, error) {
+// choices at all, so it retries once before giving up. It errors when the call
+// fails, when the context is canceled, or when both attempts produce no
+// choices (an empty grade is a failure, not a silent all-false verdict).
+// It takes the GenerateContent interface (toolLoopModel) so it can be tested
+// without a live LLM; *openai.LLM satisfies it.
+func gradeContext(ctx context.Context, l toolLoopModel, cfg ragconfig.Config, query string, chunks []retrieval.Result) (grade, error) {
 	contextText := "(no results retrieved)"
 	if len(chunks) > 0 {
 		contextText = buildContext(chunks)
@@ -73,21 +75,31 @@ func gradeContext(ctx context.Context, l *openai.LLM, cfg ragconfig.Config, quer
 
 	var text string
 	var lastErr error
+	gotChoices := false
 	for attempt := 0; attempt < 2; attempt++ {
+
+		if err := ctx.Err(); err != nil {
+			return grade{}, err
+		}
 		cr, err := l.GenerateContent(ctx, msgs, opts...)
 		if err != nil {
 			lastErr = err
 			continue
 		}
 		lastErr = nil
-		if len(cr.Choices) == 0 {
+		if cr == nil || len(cr.Choices) == 0 {
 			continue
 		}
+		gotChoices = true
 		text = cr.Choices[0].Content
 		break
 	}
 	if lastErr != nil {
 		return grade{}, lastErr
+	}
+
+	if !gotChoices {
+		return grade{}, fmt.Errorf("grader returned no choices after 2 attempts")
 	}
 	return parseGrade(text), nil
 }

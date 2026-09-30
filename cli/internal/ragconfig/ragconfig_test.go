@@ -78,6 +78,118 @@ func repoRootForTest() (string, error) {
 	}
 }
 
+// intField reads one of the six clamped integer fields of c by its env-var name.
+func intField(c Config, env string) int {
+	switch env {
+	case "BLKCHAIN_ANSWER_MAX_CHUNKS":
+		return c.AnswerMaxChunks
+	case "BLKCHAIN_CONTEXT_CHARS_PER_CHUNK":
+		return c.ContextCharsPerChunk
+	case "BLKCHAIN_ANSWER_MAX_TOKENS":
+		return c.AnswerMaxTokens
+	case "BLKCHAIN_GRADE_MAX_TOKENS":
+		return c.GradeMaxTokens
+	case "BLKCHAIN_TIMEOUT_SECONDS":
+		return c.RequestTimeoutSeconds
+	case "BLKCHAIN_ROUTE_MAX_TOKENS":
+		return c.RouteMaxTokens
+	}
+	return 0
+}
+
+// defaultIntField is intField over builtinDefaults().
+func defaultIntField(env string) int { return intField(builtinDefaults(), env) }
+
+// A non-positive or absurdly large integer env override cannot reach a turn: it
+// is rejected with one note and the built-in default stands. This closes the
+// crash where a negative AnswerMaxChunks indexed results[:negative].
+func TestIntEnvOverridesAreValidated(t *testing.T) {
+	envs := []string{
+		"BLKCHAIN_ANSWER_MAX_CHUNKS",
+		"BLKCHAIN_CONTEXT_CHARS_PER_CHUNK",
+		"BLKCHAIN_ANSWER_MAX_TOKENS",
+		"BLKCHAIN_GRADE_MAX_TOKENS",
+		"BLKCHAIN_TIMEOUT_SECONDS",
+		"BLKCHAIN_ROUTE_MAX_TOKENS",
+	}
+	for _, env := range envs {
+		for _, bad := range []string{"0", "-1", "999999999999"} {
+			t.Run(env+"="+bad, func(t *testing.T) {
+				warn := captureWarnings(t)
+				t.Setenv(env, bad)
+				c := Load()
+				if got, want := intField(c, env), defaultIntField(env); got != want {
+					t.Errorf("%s=%s: field = %d, want the default %d", env, bad, got, want)
+				}
+				assertOneNote(t, warn, env)
+			})
+		}
+	}
+}
+
+// A valid integer env override in range is applied, with no note.
+func TestIntEnvOverrideInRangeApplied(t *testing.T) {
+	warn := captureWarnings(t)
+	t.Setenv("BLKCHAIN_ANSWER_MAX_CHUNKS", "7")
+	t.Setenv("BLKCHAIN_TIMEOUT_SECONDS", "45")
+	c := Load()
+	if c.AnswerMaxChunks != 7 {
+		t.Errorf("AnswerMaxChunks = %d, want 7", c.AnswerMaxChunks)
+	}
+	if c.RequestTimeoutSeconds != 45 {
+		t.Errorf("RequestTimeoutSeconds = %d, want 45", c.RequestTimeoutSeconds)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("valid values wrote a note: %q", warn.String())
+	}
+}
+
+// A malformed rag.json is not silently discarded: loadContract writes one note
+// naming the file and returns ok=false so the caller keeps its built-in
+// defaults visibly, not silently.
+func TestLoadContractMalformedWarnsAndFallsBack(t *testing.T) {
+	warn := captureWarnings(t)
+	path := filepath.Join(t.TempDir(), "rag.json")
+	if err := os.WriteFile(path, []byte(`{not json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, ok := loadContract(path)
+	if ok {
+		t.Error("malformed rag.json reported ok=true, want false")
+	}
+	if !reflect.DeepEqual(cfg, builtinDefaults()) {
+		t.Error("fallback is not the built-in defaults")
+	}
+	assertOneNote(t, warn, path)
+}
+
+// An unreadable rag.json (e.g. a stat/read race or permissions) also warns and
+// falls back, rather than being swallowed.
+func TestLoadContractUnreadableWarnsAndFallsBack(t *testing.T) {
+	warn := captureWarnings(t)
+	path := filepath.Join(t.TempDir(), "does-not-exist", "rag.json")
+	if _, ok := loadContract(path); ok {
+		t.Error("missing rag.json reported ok=true, want false")
+	}
+	assertOneNote(t, warn, path)
+}
+
+// A well-formed rag.json loads with no note.
+func TestLoadContractValidNoNote(t *testing.T) {
+	warn := captureWarnings(t)
+	path := filepath.Join(t.TempDir(), "rag.json")
+	if err := os.WriteFile(path, []byte(`{"top_k": 3}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, ok := loadContract(path)
+	if !ok || cfg.TopK != 3 {
+		t.Errorf("valid rag.json: ok=%v TopK=%d, want true 3", ok, cfg.TopK)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("valid rag.json wrote a note: %q", warn.String())
+	}
+}
+
 // A turn is always bounded: a timeout that is not positive falls back to the
 // built-in default.
 func TestRouterDefaults(t *testing.T) {

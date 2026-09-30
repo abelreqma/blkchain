@@ -128,7 +128,14 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 	hasTavily := tavilyKey() != "" && !opts.NoWeb
 	looksCVE := looksLikeCVEorPoC(question)
 
-	for i := 0; i < cfg.MaxLoops; i++ {
+	// Clamp MaxLoops to at least one pass: a value <= 0 (a bad rag.json or env)
+	// would skip grading, the web fallback, and the guardrails entirely and go
+	// straight to synthesis on the raw first retrieval.
+	maxLoops := cfg.MaxLoops
+	if maxLoops < 1 {
+		maxLoops = 1
+	}
+	for i := 0; i < maxLoops; i++ {
 		stage(stageGrading)
 		g, gerr := gradeContext(ctx, l, cfg, question, results)
 		if gerr != nil {

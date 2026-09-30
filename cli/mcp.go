@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
@@ -65,9 +67,9 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 		Name:        "kb_search",
 		Description: "Hybrid retrieval (dense + BM25, RRF-fused, cross-encoder reranked) over the local blkChain knowledge base. Returns the top-ranked chunks with source pointers.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpSearchIn) (*mcp.CallToolResult, any, error) {
-		topK := cfg.TopK
-		if in.TopK != nil {
-			topK = *in.TopK
+		topK, err := mcpSearchTopK(in, cfg)
+		if err != nil {
+			return nil, nil, err
 		}
 		res, err := followPrefs(rc, loadPrefs()).Search(ctx, in.Query, topK, in.Filters)
 		if err != nil {
@@ -98,6 +100,24 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 	registerEngageTool(s, defaultEngageService(rc, cfg, cat))
 
 	return s
+}
+
+// mcpSearchTopK validates kb_search's input and resolves its effective top_k,
+// mirroring the loop tool (kbtools.go): it rejects an empty query and clamps
+// top_k to at most kbSearchMaxTopK, with a non-positive or omitted top_k
+// falling back to the config default. Factored out for direct testing.
+func mcpSearchTopK(in mcpSearchIn, cfg ragconfig.Config) (int, error) {
+	if strings.TrimSpace(in.Query) == "" {
+		return 0, fmt.Errorf("query is required")
+	}
+	topK := cfg.TopK
+	if in.TopK != nil && *in.TopK > 0 {
+		topK = *in.TopK
+	}
+	if topK > kbSearchMaxTopK {
+		topK = kbSearchMaxTopK
+	}
+	return topK, nil
 }
 
 // mcpRouteResult is route_skill's read-only handler body, factored out for

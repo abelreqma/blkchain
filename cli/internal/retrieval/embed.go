@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 )
 
 // maxResponseBytes bounds how much of an embed_server response body we will
@@ -17,12 +16,12 @@ const maxResponseBytes = 32 << 20 // 32 MiB
 // maxErrorBodyBytes is how much of a failed response's body an error quotes.
 const maxErrorBodyBytes = 512
 
-// httpClientTimeout is a sensible default; callers needing a tighter bound
-// should set a deadline on the context they pass in instead.
-const httpClientTimeout = 60 * time.Second
-
-// httpClient is shared across embed/rerank calls.
-var httpClient = &http.Client{Timeout: httpClientTimeout}
+// httpClient is shared across embed/rerank calls. It carries no fixed Timeout:
+// a whole-client cap would override the configured request_timeout_seconds and
+// silently cut a slow call at 60s. Every call runs under a context deadline
+// (Search derives one from cfg.RequestTimeout when the caller set none), so the
+// context is the only bound.
+var httpClient = &http.Client{}
 
 // embedRequest is the request body of embed_server's POST /embed.
 type embedRequest struct {

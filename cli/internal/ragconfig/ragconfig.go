@@ -251,6 +251,28 @@ func validateSampling(cfg *Config) {
 	}
 }
 
+// validateInts replaces each bounded integer tunable that is out of range with
+// its built-in default, with a note. These are caps: a non-positive value would
+// either crash a turn (a negative chunk cap indexes results[:negative]) or make
+// no sense, and an absurdly large one risks a duration overflow on the timeout.
+// It covers both rag.json values and environment overrides, since Load calls it
+// after both are applied.
+func validateInts(cfg *Config) {
+	def := builtinDefaults()
+	check := func(key string, v *int, lo, hi, fallback int) {
+		if *v < lo || *v > hi {
+			warnf("ignoring %s=%d: out of range [%d,%d], using %d", key, *v, lo, hi, fallback)
+			*v = fallback
+		}
+	}
+	check("BLKCHAIN_ANSWER_MAX_CHUNKS", &cfg.AnswerMaxChunks, 1, 1000, def.AnswerMaxChunks)
+	check("BLKCHAIN_CONTEXT_CHARS_PER_CHUNK", &cfg.ContextCharsPerChunk, 1, 1_000_000, def.ContextCharsPerChunk)
+	check("BLKCHAIN_ANSWER_MAX_TOKENS", &cfg.AnswerMaxTokens, 1, 1_000_000, def.AnswerMaxTokens)
+	check("BLKCHAIN_GRADE_MAX_TOKENS", &cfg.GradeMaxTokens, 1, 1_000_000, def.GradeMaxTokens)
+	check("BLKCHAIN_TIMEOUT_SECONDS", &cfg.RequestTimeoutSeconds, 1, 86_400, def.RequestTimeoutSeconds)
+	check("BLKCHAIN_ROUTE_MAX_TOKENS", &cfg.RouteMaxTokens, 1, 1_000_000, def.RouteMaxTokens)
+}
+
 // warnOut receives the load notes; tests swap it.
 var warnOut io.Writer = os.Stderr
 
@@ -272,18 +294,32 @@ func warnf(format string, args ...any) {
 	fmt.Fprintln(warnOut, line)
 }
 
+// loadContract reads rag.json at path. On success it returns the parsed Config
+// and ok=true. On a read or parse failure it writes one note naming the file
+// and returns the built-in defaults with ok=false, so a malformed or unreadable
+// contract falls back visibly instead of being silently discarded.
+func loadContract(path string) (Config, bool) {
+	cfg, err := loadFromFile(path)
+	if err != nil {
+		warnf("ignoring rag.json at %s: %v; using built-in defaults", path, err)
+		return builtinDefaults(), false
+	}
+	return cfg, true
+}
+
 // Load returns the effective Config: built-in defaults, overlaid by
 // blkchain/contract/rag.json when found, overlaid by environment variables,
 // with any out-of-range sampling value reset to its default.
 func Load() Config {
 	cfg := builtinDefaults()
 	if path, ok := findContractFile(); ok {
-		if fromFile, err := loadFromFile(path); err == nil {
+		if fromFile, loaded := loadContract(path); loaded {
 			cfg = fromFile
 		}
 	}
 	envOverrides(&cfg)
 	validateSampling(&cfg)
+	validateInts(&cfg)
 	return cfg
 }
 

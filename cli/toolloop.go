@@ -98,7 +98,9 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 }
 
 // execToolCall runs one tool call and returns the text to feed back to the model.
-func execToolCall(ctx context.Context, reg *tooldef.Registry, hasCall bool, name, args string) string {
+// A panicking tool is recovered into a tool error (matching runBatch's executor
+// recover) so one bad tool cannot crash the whole loop.
+func execToolCall(ctx context.Context, reg *tooldef.Registry, hasCall bool, name, args string) (result string) {
 	if !hasCall {
 		return "invalid tool call: missing function"
 	}
@@ -106,6 +108,11 @@ func execToolCall(ctx context.Context, reg *tooldef.Registry, hasCall bool, name
 	if !ok {
 		return fmt.Sprintf("tool not found: %s; available tools: %v", name, reg.Names())
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			result = fmt.Sprintf("tool error: panic: %v", r)
+		}
+	}()
 	out, err := tool.Call(ctx, args)
 	if err != nil {
 		return "tool error: " + err.Error()

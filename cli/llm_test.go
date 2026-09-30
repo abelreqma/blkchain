@@ -83,6 +83,18 @@ func TestBoundChunksUsesConfigCap(t *testing.T) {
 	}
 }
 
+// A non-positive cap (a Config built without going through ragconfig.Load, or a
+// bad value that slipped through) must not panic boundChunks: <=0 means no cap,
+// not results[:negative] or an empty truncation.
+func TestBoundChunksNonPositiveCapsDoNotPanic(t *testing.T) {
+	cfg := ragconfig.Config{AnswerMaxChunks: -1, ContextCharsPerChunk: -1}
+	in := []retrieval.Result{{Payload: retrieval.Payload{Text: "abcdefgh"}}, {}, {}}
+	out := boundChunks(cfg, in)
+	if len(out) != 3 || out[0].Payload.Text != "abcdefgh" {
+		t.Fatalf("non-positive caps: got %d chunks, first=%q, want all 3 untruncated", len(out), out[0].Payload.Text)
+	}
+}
+
 func TestBoundChunksUnderCap(t *testing.T) {
 	cfg := ragconfig.Config{AnswerMaxChunks: 8, ContextCharsPerChunk: 1200}
 	in := []retrieval.Result{chunk("kb", "p", "s", "short")}
@@ -266,6 +278,39 @@ func TestLLMTransportPassesANonJSONBodyThrough(t *testing.T) {
 	ctx := withSampling(context.Background(), ragconfig.Config{SynthTopP: 0.95, SynthTopK: 64})
 	if got := postThroughTransport(t, ctx, body); string(got) != body {
 		t.Errorf("body = %q, want %q unchanged", got, body)
+	}
+}
+
+// RoundTrip must not mutate the caller's *http.Request, even on the keyed path
+// (keyless=false). It clones before rewriting the body, ContentLength, and
+// headers, so the caller's request object is untouched (the RoundTripper
+// contract).
+func TestLLMTransportDoesNotMutateTheCallersRequest(t *testing.T) {
+	t.Setenv("BLK_ENABLE_THINKING", "") // noThinking path is active, so the body is rewritten
+	srv, _ := rawBodyServer(t)
+	body := `{"model":"m","messages":[]}`
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	origLen := req.ContentLength
+	origCT := req.Header.Get("Content-Type")
+	origHeaderKeys := len(req.Header)
+
+	resp, err := (&llmTransport{base: http.DefaultTransport}).RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if req.ContentLength != origLen {
+		t.Errorf("caller ContentLength mutated: %d -> %d", origLen, req.ContentLength)
+	}
+	if got := req.Header.Get("Content-Type"); got != origCT {
+		t.Errorf("caller Content-Type mutated: %q -> %q", origCT, got)
+	}
+	if len(req.Header) != origHeaderKeys {
+		t.Errorf("caller header set mutated: %d -> %d keys", origHeaderKeys, len(req.Header))
 	}
 }
 
