@@ -229,6 +229,21 @@ func commandSpecs() []cmdSpec {
 			run:      runMCP,
 		},
 		{
+			name: "analyze", args: "[text...]", group: hgAgent,
+			desc: "generate schema-validated JSON from the LLM",
+			long: "Sends your subject to the LLM and returns one JSON object matching a chosen offensive-security schema, validated and retried until it conforms. " +
+				"Choose the shape with --schema: target-profile, attack-plan, finding, ioc, or binary-assessment. " +
+				"The subject comes from the argument, from --input FILE, or from a pipe, and with --retrieve it first pulls matching knowledge-base context. " +
+				"It prints the JSON to stdout so you can pipe it into jq, and it needs the LLM server running.",
+			flags: func(fs *flag.FlagSet) { defineAnalyzeFlags(fs, &analyzeOpts{}, loadConfig().TopK) },
+			examples: []string{
+				`blk analyze --schema attack-plan "external assessment of acme.test"`,
+				`blk analyze --schema ioc --input scan.log`,
+				`blk analyze --schema finding --retrieve "reflected XSS in the q parameter"`,
+			},
+			run: runAnalyze,
+		},
+		{
 			name: "engage", args: "<goal...>", group: hgAgent,
 			desc: "run a gated, multi-step engagement against a goal",
 			long: "Runs a bounded, gated engagement: the orchestrator plans tasks and hands each to a domain-specialized executor, which can run allowlisted commands against in-scope targets. " +
