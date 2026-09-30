@@ -113,6 +113,9 @@ func execute(args []string) error {
 // dispatch runs the named command. A help flag as the first argument prints
 // the command's help for every command, including those that take no flags.
 func dispatch(cmd string, args []string) error {
+	if cmd == "__vizdemo" { // hidden dev driver, deliberately not in the registry or help
+		return runVizDemo()
+	}
 	c, ok := lookupCommand(cmd)
 	if !ok {
 		return unknownCommand(cmd)
@@ -122,6 +125,96 @@ func dispatch(cmd string, args []string) error {
 		return nil
 	}
 	return c.run(args)
+}
+
+// runVizDemo is a DEMO and verification vehicle, not a shipped feature. It
+// drives the progress view end to end against the real mmdflux: a scripted
+// stub engagement advances step by step, printing the committed DAG block when
+// the revision changed and a live-bar line (the shape of model.vizBar).
+func runVizDemo() error {
+	stub := newStubEngagement("acme")
+	r := newVizRenderer(newMmdfluxRunner())
+	ctx := context.Background()
+
+	task := func(id, kind, target string, st TaskStatus, deps ...string) Task {
+		return Task{ID: id, Kind: kind, Target: target, Objective: target, Status: st, DependsOn: deps}
+	}
+	steps := []Engagement{
+		{
+			Tasks: []Task{
+				task("recon", "recon", "acme.test", TaskDone),
+				task("enum", "enum", "services", TaskActive, "recon"),
+				task("sqli", "web", "SQLi /login", TaskTodo, "enum"),
+			},
+			ActiveID: "enum",
+			Stage:    Stage{Label: "enum: services", Step: 1, Total: 4},
+		},
+		{
+			Tasks: []Task{
+				task("recon", "recon", "acme.test", TaskDone),
+				task("enum", "enum", "services", TaskDone, "recon"),
+				task("sqli", "web", "SQLi /login", TaskActive, "enum"),
+			},
+			ActiveID: "sqli",
+			Stage:    Stage{Label: "web: SQLi", Step: 2, Total: 4},
+		},
+		{
+			Tasks: []Task{
+				task("recon", "recon", "acme.test", TaskDone),
+				task("enum", "enum", "services", TaskDone, "recon"),
+				task("sqli", "web", "SQLi /login", TaskDone, "enum"),
+				task("idor", "web", "IDOR /api/orders", TaskActive, "enum"),
+				task("evidence", "evidence", "findings", TaskTodo, "sqli", "idor"),
+			},
+			ActiveID: "idor",
+			Stage:    Stage{Label: "web: IDOR", Step: 3, Total: 4},
+		},
+		{
+			Tasks: []Task{
+				task("recon", "recon", "acme.test", TaskDone),
+				task("enum", "enum", "services", TaskDone, "recon"),
+				task("sqli", "web", "SQLi /login", TaskDone, "enum"),
+				task("idor", "web", "IDOR /api/orders", TaskDone, "enum"),
+				task("evidence", "evidence", "findings", TaskDone, "sqli", "idor"),
+				task("report", "report", "acme", TaskActive, "evidence"),
+			},
+			ActiveID: "report",
+			Stage:    Stage{Label: "report", Step: 4, Total: 4},
+		},
+	}
+
+	bar := func(e Engagement) string {
+		frac := float64(e.Stage.Step) / float64(e.Stage.Total)
+		return " " + sanitizeTerminal(e.Stage.Label) + "  " + plMeter(frac, 12, plCurrentTier()) +
+			fmt.Sprintf("  %d/%d", e.Stage.Step, e.Stage.Total)
+	}
+	show := func(label string) error {
+		block, changed, err := r.Block(ctx, stub)
+		if err != nil {
+			return err
+		}
+		fmt.Println(label)
+		if changed {
+			fmt.Println(block)
+		} else {
+			fmt.Println("(no revision change, no new block)")
+		}
+		return nil
+	}
+	for i, e := range steps {
+		stub.setSnapshot(e)
+		if err := show(fmt.Sprintf("--- step %d ---", i+1)); err != nil {
+			return err
+		}
+		fmt.Println(bar(e))
+		time.Sleep(300 * time.Millisecond)
+		if i == 1 { // same revision again: must print no new block
+			if err := show("--- step 2 (unchanged) ---"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // pad right-pads s with spaces to width (a no-op if s is already that long).

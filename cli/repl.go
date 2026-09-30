@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -50,6 +51,10 @@ func plainREPL() error {
 	mode := "rag"
 	var rc replClient
 	defer rc.close()
+	// eng stays nil until the plain REPL gets an engage mode; the final DAG
+	// snapshot below is dormant until then.
+	var eng EngagementView
+	var vz *vizRenderer
 
 	fmt.Printf("%s  %s\n", H1.Render("blkChain"), Meta.Render(replBanner()))
 
@@ -86,6 +91,16 @@ func plainREPL() error {
 			printErr(runLogs(largs))
 		case "models":
 			printErr(replModels(rest))
+		case "viz":
+			p := loadPrefs()
+			on, ok := vizNext(p.Viz, rest)
+			if !ok {
+				printErr(fmt.Errorf("viz: use on or off"))
+				break
+			}
+			p.Viz = on
+			_ = savePrefs(p)
+			fmt.Println(Meta.Render(vizNote(on)))
 		case "copy":
 			fmt.Println(Meta.Render("/copy is only available in the interactive TUI"))
 		case "mode":
@@ -114,7 +129,48 @@ func plainREPL() error {
 			// agent mode it runs the hermes agent instead.
 			printErr(replAsk(mode, line, &rc))
 		}
+		// After a turn, print one final DAG block. There is no live bar off a TTY.
+		if eng != nil && loadPrefs().Viz {
+			if vz == nil {
+				vz = newVizRenderer(newMmdfluxRunner())
+			}
+			plainVizSnapshot(os.Stdout, vz, eng)
+		}
 	}
+}
+
+// plainVizSnapshot writes the current DAG block once, for output that has no
+// live progress bar. It writes nothing when the block is empty or errors.
+func plainVizSnapshot(w io.Writer, r *vizRenderer, v EngagementView) {
+	block, _, err := r.Block(context.Background(), v)
+	if err == nil && block != "" {
+		fmt.Fprintln(w, block)
+	}
+}
+
+// plainClarify asks a numbered question on a non-TTY. An empty line or EOF
+// cancels, a number in range picks that option, and any other text is a custom
+// instruction. The plain REPL is serial, so it needs no reply channel.
+func plainClarify(in *bufio.Scanner, out io.Writer, c Clarification) ClarifyResult {
+	fmt.Fprintln(out, H2.Render(c.Question))
+	if c.Detail != "" {
+		fmt.Fprintln(out, Meta.Render(c.Detail))
+	}
+	for i, o := range c.Options {
+		fmt.Fprintf(out, "  %d) %s\n", i+1, o.Label)
+	}
+	fmt.Fprint(out, Prompt.Render("choose> "))
+	if !in.Scan() {
+		return ClarifyResult{Canceled: true}
+	}
+	line := strings.TrimSpace(in.Text())
+	if line == "" {
+		return ClarifyResult{Canceled: true}
+	}
+	if n, err := strconv.Atoi(line); err == nil && n >= 1 && n <= len(c.Options) {
+		return ClarifyResult{Value: c.Options[n-1].Value}
+	}
+	return ClarifyResult{Custom: line}
 }
 
 // replClient is the plain REPL's one retrieval client, made on first use and
@@ -236,6 +292,7 @@ func replGroups() []rowGroup {
 			{"/rag", replSlashDesc("rag")},
 		}},
 		{hgSetup, []helpRow{
+			{"/viz [on|off]", replSlashDesc("viz")},
 			{"/help", "show this list"},
 			{"/quit", "leave (also Ctrl-D)"},
 		}},

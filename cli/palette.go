@@ -75,6 +75,7 @@ func slashCommands() []command {
 		{"init", "", "load ./.blk/context.md as context for this session", groupSession},
 		{"cost", "", "show the tokens and time of the last answer", groupSession},
 		{"undo", "", "drop the last question and answer from this session", groupSession},
+		{"viz", "on|off", "show or hide the live engagement diagram and progress bar", groupSession},
 		{"clear", "", "start fresh; earlier output stays in your scrollback", groupSession},
 		{"copy", "", "copy the last answer to the clipboard", groupSession},
 		{"up", "", spec["up"], groupServices},

@@ -132,6 +132,11 @@ func (m model) footerKeys() footerKeyMap {
 			return footerKeyMap{short: []key.Binding{hint("1-9", "open"), hint("up/down", "move"), hint("enter", "open"), hint("d then y", "delete"), closeKey}}
 		case modelPicker:
 			return footerKeyMap{short: []key.Binding{hint("up/down", "choose"), hint("tab/left/right", "switch column"), hint("enter", "apply"), closeKey}}
+		case clarifyPicker:
+			if ov.typing {
+				return footerKeyMap{short: []key.Binding{hint("enter", "submit"), hint("esc", "back")}}
+			}
+			return footerKeyMap{short: []key.Binding{hint("up/down", "move"), hint("enter", "choose"), hint("esc", "cancel")}}
 		case filePicker:
 			return footerKeyMap{short: []key.Binding{hint("type", "filter"), hint("up/down", "move"), hint("enter", "open/select"), hint("backspace", "erase/up"), closeKey}}
 		case modelsPanel:
@@ -246,6 +251,47 @@ func reduceMotion() bool {
 // reduced-motion mode. gen ties it to the turn that started the chain, so a
 // stale chain from an earlier turn dies instead of doubling the tick rate.
 type secondTickMsg struct{ gen int }
+
+// vizTickMsg polls the engagement revision once per second while a turn runs.
+// gen ties it to the turn that started the chain, like secondTickMsg.
+type vizTickMsg struct{ gen int }
+
+// vizTick schedules the next revision poll for the current turn.
+func (m model) vizTick() tea.Cmd {
+	gen := m.tickGen
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return vizTickMsg{gen: gen} })
+}
+
+// startVizPoll begins the poll chain for a turn, only when an engagement is
+// wired. It returns nil otherwise so plain turns start no ticker.
+func (m model) startVizPoll() tea.Cmd {
+	if m.engagement == nil {
+		return nil
+	}
+	return m.vizTick()
+}
+
+// vizBlockMsg carries a rendered task-graph block to commit to scrollback.
+type vizBlockMsg struct{ block string }
+
+// vizCommitCmd polls the engagement revision off the UI goroutine and emits a
+// vizBlockMsg only when the revision advanced. It returns nil when viz is off
+// or no engagement is wired.
+func (m *model) vizCommitCmd() tea.Cmd {
+	if !m.prefs.Viz || m.engagement == nil || m.viz == nil {
+		return nil
+	}
+	eng, vz := m.engagement, m.viz
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		block, changed, err := vz.Block(ctx, eng)
+		if err != nil || !changed {
+			return nil
+		}
+		return vizBlockMsg{block: block}
+	}
+}
 
 // workTick starts the redraw ticker for a turn: the spinner animation normally,
 // a once-per-second tick in reduced-motion mode.
@@ -390,6 +436,12 @@ type model struct {
 	// and web switches. Changes are kept here at once and saved in a command.
 	prefs modelPrefs
 
+	// engagement feeds the live progress bar and viz renders the task graph.
+	// Both stay nil until the viz wiring lands; a nil engagement keeps the
+	// plain spinner line.
+	engagement EngagementView
+	viz        *vizRenderer
+
 	lastAnswer  string
 	openTargets []openTarget // files for /open N (from the last answer or search)
 
@@ -490,6 +542,7 @@ func initialModel() model {
 		rc:        rc,
 		liveCache: &liveCache{},
 		rcErr:     rcErr,
+		viz:       newVizRenderer(newMmdfluxRunner()),
 
 		reduceMotion: reduceMotion(),
 	}
@@ -686,6 +739,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.workTick()
+
+	case vizTickMsg:
+		if !m.working || m.engagement == nil || msg.gen != m.tickGen {
+			return m, nil
+		}
+		return m, tea.Batch(m.vizCommitCmd(), m.vizTick())
+
+	case vizBlockMsg:
+		if msg.block == "" {
+			return m, nil
+		}
+		return m, tea.Println(msg.block)
 
 	case chunkMsg:
 		if !m.working {
@@ -979,6 +1044,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.overlay = nil
 		return m, textarea.Blink
 
+	case clarifyMsg:
+		// A clarify overlay already open is displaced: answer it as canceled so
+		// its requester is not left blocked on the reply channel.
+		var cancel tea.Cmd
+		if old, ok := m.overlay.(clarifyPicker); ok && old.reply != nil {
+			reply := old.reply
+			cancel = func() tea.Msg {
+				reply <- ClarifyResult{Canceled: true}
+				return nil
+			}
+		}
+		m.overlay = newClarifyPicker(msg.c, m.width, msg.reply)
+		return m, cancel
+
+	case clarifyResolvedMsg:
+		m.overlay = nil
+		reply, res := msg.reply, msg.res
+		// The send runs in a command so a slow receiver never blocks the loop.
+		return m, tea.Batch(textarea.Blink, func() tea.Msg {
+			if reply != nil {
+				reply <- res
+			}
+			return nil
+		})
+
 	case resumeSelectedMsg:
 		m.overlay = nil
 		return m.openSessionInto(msg.id)
@@ -1262,6 +1352,28 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 // rather than run concurrently while another turn is in flight).
 func isTurnVerb(v string) bool { return v == "ask" || v == "search" || v == "health" }
 
+// vizNext applies a /viz argument to the current setting. ok is false for an
+// argument that is not on, off, toggle, or empty.
+func vizNext(cur bool, arg string) (on, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(arg)) {
+	case "on":
+		return true, true
+	case "off":
+		return false, true
+	case "", "toggle":
+		return !cur, true
+	}
+	return cur, false
+}
+
+// vizNote is the confirmation line printed after /viz.
+func vizNote(on bool) string {
+	if on {
+		return "viz: on"
+	}
+	return "viz: off (diagram and bar hidden)"
+}
+
 // dispatchInput parses one input line, echoes it to scrollback, and runs the
 // matching command. It never touches the draft/history/queue (submit and the
 // dequeue handler own those).
@@ -1313,6 +1425,14 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, tea.Println("   "+Meta.Render("loading can take a few minutes; the result prints here")))
 		}
 		return m, tea.Sequence(append(cmds, modelsArgsCmd(verb, name, m.activeModel()))...)
+	case "viz":
+		on, ok := vizNext(m.prefs.Viz, arg)
+		if !ok {
+			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("viz: use on or off"))))
+		}
+		m.prefs.Viz = on
+		_ = savePrefs(m.prefs)
+		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render(vizNote(on))))
 	case "attach":
 		return m.openFilePickerEcho(echo)
 	case "editor":
@@ -1380,12 +1500,12 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 				if preface != "" {
 					message = preface + "\n\n" + arg
 				}
-				return m, tea.Batch(tea.Println(echo), m.workTick(), m.agentStreamCmd(ctx, message))
+				return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.agentStreamCmd(ctx, message))
 			}
 			// RAG mode: stream the full AnswerLoop synthesis directly from oMLX.
-			return m, tea.Batch(tea.Println(echo), m.workTick(), m.streamCmd(ctx, arg, preface, m.turnStart))
+			return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.streamCmd(ctx, arg, preface, m.turnStart))
 		}
-		return m, tea.Batch(tea.Println(echo), m.workTick(), m.dispatchCmd(ctx, verb, arg, m.turnStart))
+		return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.dispatchCmd(ctx, verb, arg, m.turnStart))
 	}
 	// Unknown /verb.
 	return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("unknown command /%s, try /help", verb))))
@@ -1463,7 +1583,9 @@ func (m model) View() string {
 		// above the input gets the rest, and is omitted when nothing is left.
 		spin := ""
 		if m.working {
-			spin = m.spinnerLine()
+			if spin = m.vizBar(); spin == "" {
+				spin = m.spinnerLine()
+			}
 		}
 		budget := h - lipgloss.Height(status) - lipgloss.Height(footer)
 		if spin != "" {
@@ -2146,12 +2268,13 @@ func (m model) statusLine() string {
 	}
 	dot := Glyph(GlyphDot)
 	style := Caut
+	var tone lipgloss.TerminalColor = Warn
 	label := "checking services"
 	if m.servicesChecked {
 		if m.servicesOK {
-			style, label = OK, "services ok"
+			style, tone, label = OK, Success, "services ok"
 		} else {
-			style, label = Fail, "services down"
+			style, tone, label = Fail, Err, "services down"
 			if m.health != nil {
 				if down := downServices(m.health); len(down) > 0 {
 					label = strings.Join(down, ", ") + " down"
@@ -2175,7 +2298,7 @@ func (m model) statusLine() string {
 	case m.health != nil:
 		retrieval = append(retrieval, "rerank down")
 	}
-	return m.composeStatus(style.Render(dot), "rag", m.currentModel(), label, retrieval)
+	return m.composeStatus(style.Render(dot), tone, "rag", m.currentModel(), label, retrieval)
 }
 
 // modelPriorityCols is how much of the model name the status line keeps
@@ -2187,14 +2310,16 @@ const modelPriorityCols = 24
 // ("services ok" rather than "ok").
 type statusLayout struct{ title, reasoning, retrieval, longHealth bool }
 
-// composeStatus renders the status line as labeled fields: mode, model,
-// reasoning, the retrieval models, health, and session title, so each value
-// says what it is. The model name has priority. While the line overflows and
-// fewer than modelPriorityCols of the name would show, the session title goes
-// first, then the reasoning, then the word "services" in the health label.
-// Past that the line collapses to mode, model, and health, and the model is
-// cut as the last resort (with an ASCII "...").
-func (m model) composeStatus(dot, mode, modelID, health string, retrieval []string) string {
+// composeStatus renders the status line as a powerline ribbon of labeled
+// fields. The left cluster is mode, model, and reasoning on the surface fill.
+// The right cluster is the retrieval models, health (filled with tone), and the
+// viz switch. The session title and the queue count trail as muted text. The
+// model name has priority. While the line overflows and fewer than
+// modelPriorityCols of the name would show, the session title goes first, then
+// the reasoning (and viz), then the word "services" in the health label. Past
+// that the line collapses to mode, model, and health, and the model is cut as
+// the last resort (with an ASCII "...").
+func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, modelID, health string, retrieval []string) string {
 	modelID = sanitizeTerminal(modelID)
 	title := ""
 	if t := strings.TrimSpace(m.sessTitle); t != "" {
@@ -2203,25 +2328,43 @@ func (m model) composeStatus(dot, mode, modelID, health string, retrieval []stri
 	shortHealth := strings.TrimSpace(strings.Replace(health, "services", "", 1))
 	queued := m.queuedIndicator()
 	build := func(model string, l statusLayout) string {
-		parts := []string{mode, "model " + model}
+		left := []plSegment{
+			{Text: mode, FG: Heading, BG: Surface},
+			{Text: "model " + model, FG: Heading, BG: Surface},
+		}
 		if l.reasoning {
-			parts = append(parts, "reasoning "+m.reasoning)
+			left = append(left, plSegment{Text: "reasoning " + m.reasoning, FG: Muted, BG: Surface})
 		}
+		var right []plSegment
 		if l.retrieval {
-			parts = append(parts, retrieval...)
+			for _, r := range retrieval {
+				right = append(right, plSegment{Text: r, FG: Muted, BG: Surface})
+			}
 		}
+		h := shortHealth
 		if l.longHealth {
-			parts = append(parts, health)
-		} else {
-			parts = append(parts, shortHealth)
+			h = health
 		}
+		right = append(right, plSegment{Text: h, FG: Surface, BG: tone})
+		if l.reasoning && mode == "rag" {
+			if m.prefs.Viz {
+				right = append(right, plSegment{Text: "viz", FG: Surface, BG: Warn})
+			} else {
+				right = append(right, plSegment{Text: "viz off", FG: Muted, BG: Surface})
+			}
+		}
+		line := " " + dot + " " + plRenderRibbon(left, right, plCurrentTier(), 0)
+		var extra []string
 		if l.title && title != "" {
-			parts = append(parts, title)
+			extra = append(extra, title)
 		}
 		if queued != "" {
-			parts = append(parts, queued)
+			extra = append(extra, queued)
 		}
-		return " " + dot + " " + Meta.Render(joinSep(parts...))
+		if len(extra) > 0 {
+			line += "  " + Meta.Render(joinSep(extra...))
+		}
+		return line
 	}
 	w, _ := m.termSize()
 	for _, l := range []statusLayout{
@@ -2279,18 +2422,19 @@ func (m model) agentStatusLine() string {
 		}
 	}
 	style := Caut
+	var tone lipgloss.TerminalColor = Warn
 	label := xport
 	switch xport {
 	case "gateway":
-		style, label = OK, "via gateway"
+		style, tone, label = OK, Success, "via gateway"
 	case "subprocess":
 		label = "via subprocess"
 	case "unavailable":
-		style, label = Fail, "gateway unavailable"
+		style, tone, label = Fail, Err, "gateway unavailable"
 	case "checking":
 		label = "checking gateway"
 	}
-	return m.composeStatus(style.Render(dot), "agent", m.currentModel(), label, nil)
+	return m.composeStatus(style.Render(dot), tone, "agent", m.currentModel(), label, nil)
 }
 
 // ragModelLabel is the oMLX model the plain REPL's /models marks active,
@@ -2343,6 +2487,38 @@ func (m model) spinnerLine() string {
 		}
 	}
 	line := head + Meta.Render(ellipsize(m.workingVerb, w-lipgloss.Width(head)))
+	return lipgloss.NewStyle().MaxWidth(w).Render(line)
+}
+
+// vizBar renders the active engagement stage as a progress bar. It returns ""
+// when viz is off, no engagement is wired, or the stage has no total, so the
+// caller falls back to the spinner line.
+func (m model) vizBar() string {
+	if !m.prefs.Viz || m.engagement == nil {
+		return ""
+	}
+	e, err := m.engagement.Snapshot(context.Background())
+	if err != nil || e.Stage.Total <= 0 {
+		return ""
+	}
+	frac := float64(e.Stage.Step) / float64(e.Stage.Total)
+	meter := plMeter(frac, 12, plCurrentTier())
+	right := fmt.Sprintf("%d/%d", e.Stage.Step, e.Stage.Total)
+	if e.Stage.Tool != "" {
+		right += " " + sanitizeTerminal(e.Stage.Tool)
+	}
+	label := lipgloss.NewStyle().Foreground(Accent).Render(sanitizeTerminal(e.Stage.Label))
+	line := " " + label + "  " + meter + "  " + Meta.Render(right)
+	if !m.firstTokAt.IsZero() && m.liveTokens > 0 {
+		tps := modeleval.TokensPerSec(m.liveTokens, time.Since(m.firstTokAt))
+		sage := lipgloss.NewStyle().Foreground(Success)
+		bolt := ""
+		if plCurrentTier() == plNerd {
+			bolt = sage.Render("\uf0e7") + " "
+		}
+		line += Meta.Render(" "+Glyph(GlyphBar)+" ") + bolt + sage.Render(fmt.Sprintf("%.0f", tps)) + Meta.Render(" tok/s")
+	}
+	w, _ := m.termSize()
 	return lipgloss.NewStyle().MaxWidth(w).Render(line)
 }
 

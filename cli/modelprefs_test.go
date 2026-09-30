@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,7 +20,7 @@ func prefsFile(t *testing.T) string {
 
 func TestPrefsDefaultsWhenMissingOrCorrupt(t *testing.T) {
 	isolateUserDirs(t)
-	want := modelPrefs{Rerank: true, Web: true}
+	want := modelPrefs{Rerank: true, Web: true, Viz: true}
 	if got := loadPrefs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("missing file: got %+v, want %+v", got, want)
 	}
@@ -40,7 +41,7 @@ func TestPrefsDefaultsWhenMissingOrCorrupt(t *testing.T) {
 
 func TestPrefsRoundTripAndMode(t *testing.T) {
 	isolateUserDirs(t)
-	in := modelPrefs{Hidden: []string{"a", "b/c"}, Rerank: false, Web: true}
+	in := modelPrefs{Hidden: []string{"a", "b/c"}, Rerank: false, Web: true, Viz: true}
 	if err := savePrefs(in); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,7 @@ func TestPrefsSaveIsAtomicAndDoesNotFollowSymlinks(t *testing.T) {
 	if err := os.Symlink(outside, path); err != nil {
 		t.Fatal(err)
 	}
-	if err := savePrefs(modelPrefs{Rerank: true, Web: false}); err != nil {
+	if err := savePrefs(modelPrefs{Rerank: true, Web: false, Viz: true}); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(outside); string(b) != "keep" {
@@ -136,5 +137,18 @@ func TestPrefsHiddenToggle(t *testing.T) {
 	}
 	if !orig.isHidden("a") {
 		t.Error("withHidden changed the original value")
+	}
+}
+
+func TestPrefsVizDefaultsTrueAndSurvivesMissingKey(t *testing.T) {
+	if !defaultPrefs().Viz {
+		t.Fatalf("defaultPrefs().Viz should be true")
+	}
+	p := defaultPrefs()
+	if err := json.Unmarshal([]byte(`{"rerank":true,"web":true}`), &p); err != nil {
+		t.Fatal(err)
+	}
+	if !p.Viz {
+		t.Fatalf("viz should stay true when the key is absent, got false")
 	}
 }

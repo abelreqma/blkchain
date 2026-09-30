@@ -2022,3 +2022,288 @@ func TestIdleFooterKeepsTheKeysHint(t *testing.T) {
 		}
 	}
 }
+
+// The ribbon status line keeps the collapse order and never exceeds the width.
+func TestStatusRibbonCollapsesNarrow(t *testing.T) {
+	noColor(t)
+	m := newTestModel(t)
+	m.width = 30
+	m.servicesChecked = true
+	m.servicesOK = true
+	line := m.statusLine()
+	if lipgloss.Width(line) > 30 {
+		t.Fatalf("status width %d exceeds 30: %q", lipgloss.Width(line), line)
+	}
+	if !strings.Contains(line, "rag") {
+		t.Fatalf("collapsed status lost the mode: %q", line)
+	}
+}
+
+// The viz segment follows the viz preference (ascii tier).
+func TestStatusRibbonShowsViz(t *testing.T) {
+	noColor(t)
+	m := layoutModel(t, 200, 24)
+	m.prefs = defaultPrefs()
+	if line := m.statusLine(); !strings.Contains(line, "viz") || strings.Contains(line, "viz off") {
+		t.Errorf("viz on: status %q should show a plain viz segment", line)
+	}
+	m.prefs.Viz = false
+	if line := m.statusLine(); !strings.Contains(line, "viz off") {
+		t.Errorf("viz off: status %q lacks \"viz off\"", line)
+	}
+}
+
+// The colored ribbon (unicode tier) fits the width, carries the segment
+// content, and uses both hard arrows and thin separators.
+func TestStatusRibbonColorTier(t *testing.T) {
+	oldC, oldU := useColor, useUnicode
+	useColor, useUnicode = true, true
+	defer func() { useColor, useUnicode = oldC, oldU }()
+	t.Setenv("BLKCHAIN_POWERLINE", "")
+
+	m := newTestModel(t)
+	m.width = 120
+	m.ragModel = "gemma"
+	m.reasoning = "medium"
+	m.servicesChecked, m.servicesOK = true, true
+	m.prefs = defaultPrefs()
+	line := m.statusLine()
+	if w := lipgloss.Width(line); w > 120 {
+		t.Errorf("colored status width %d exceeds 120: %q", w, line)
+	}
+	for _, want := range []string{"rag", "model gemma", "services ok", "viz"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("colored status %q lacks %q", line, want)
+		}
+	}
+	if !strings.Contains(line, "\u25B6") {
+		t.Errorf("colored status lacks a hard arrow: %q", line)
+	}
+	if !strings.Contains(line, "\u2502") {
+		t.Errorf("colored status lacks a thin separator: %q", line)
+	}
+}
+
+func TestVizBarShowsStageAndMeter(t *testing.T) {
+	m := newTestModel(t)
+	m.prefs.Viz = true
+	stub := newStubEngagement("acme")
+	stub.setSnapshot(Engagement{ActiveID: "t2", Stage: Stage{Label: "web: SQLi on /login", Step: 3, Total: 6, Tool: "run_command"}})
+	m.engagement = stub
+	bar := stripANSI(m.vizBar())
+	for _, want := range []string{"web: SQLi on /login", "3/6", "run_command"} {
+		if !strings.Contains(bar, want) {
+			t.Fatalf("vizBar missing %q: %q", want, bar)
+		}
+	}
+	m.prefs.Viz = false
+	if m.vizBar() != "" {
+		t.Fatalf("vizBar should be empty when viz off")
+	}
+}
+
+func TestVizBarShowsLiveTokensPerSec(t *testing.T) {
+	m := newTestModel(t)
+	m.prefs.Viz = true
+	stub := newStubEngagement("acme")
+	stub.setSnapshot(Engagement{Stage: Stage{Label: "web: SQLi on /login", Step: 3, Total: 6, Tool: "run_command"}})
+	m.engagement = stub
+	m.firstTokAt = time.Now().Add(-2 * time.Second)
+	m.liveTokens = 300
+	bar := stripANSI(m.vizBar())
+	if !strings.Contains(bar, "tok/s") {
+		t.Fatalf("vizBar should show tok/s while streaming: %q", bar)
+	}
+	if !strings.Contains(bar, "150") {
+		t.Fatalf("vizBar should show the real rate ~150: %q", bar)
+	}
+	// absent when the model has not streamed this turn
+	m.liveTokens = 0
+	m.firstTokAt = time.Time{}
+	if strings.Contains(stripANSI(m.vizBar()), "tok/s") {
+		t.Fatalf("vizBar must not show tok/s before the first token")
+	}
+}
+
+func TestVizBarEmptyWithoutEngagementOrTotal(t *testing.T) {
+	m := newTestModel(t)
+	m.prefs.Viz = true
+	m.engagement = nil
+	if got := m.vizBar(); got != "" {
+		t.Fatalf("vizBar with nil engagement = %q, want empty", got)
+	}
+	stub := newStubEngagement("acme")
+	stub.setSnapshot(Engagement{Stage: Stage{Label: "idle", Step: 0, Total: 0}})
+	m.engagement = stub
+	if got := m.vizBar(); got != "" {
+		t.Fatalf("vizBar with zero Total = %q, want empty", got)
+	}
+}
+
+func TestViewPrefersVizBarWhileWorking(t *testing.T) {
+	m := newTestModel(t)
+	m.prefs.Viz = true
+	m.working = true
+	m.workingVerb = "Thinking"
+	m.turnStart = time.Now()
+	stub := newStubEngagement("acme")
+	stub.setSnapshot(Engagement{Stage: Stage{Label: "web: SQLi on /login", Step: 3, Total: 6}})
+	m.engagement = stub
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "web: SQLi on /login") || strings.Contains(out, "Thinking") {
+		t.Fatalf("View should show the viz bar in place of the spinner line: %q", out)
+	}
+	m.engagement = nil
+	out = stripANSI(m.View())
+	if !strings.Contains(out, "Thinking") {
+		t.Fatalf("View should fall back to the spinner line: %q", out)
+	}
+}
+
+func TestVizCommitOnlyOnRevisionChange(t *testing.T) {
+	r := newVizRenderer(&fakeRunner{out: "web: SQLi on /login"})
+	stub := newStubEngagement("acme")
+	stub.setSnapshot(sampleEngagement(0)) // rev 1
+	block, changed, _ := r.Block(context.Background(), stub)
+	if !changed || stripANSI(block) == "" {
+		t.Fatalf("first poll should produce a block")
+	}
+	if _, changed2, _ := r.Block(context.Background(), stub); changed2 {
+		t.Fatalf("no revision change must not recommit")
+	}
+	stub.setSnapshot(sampleEngagement(0)) // rev 2
+	if _, changed3, _ := r.Block(context.Background(), stub); !changed3 {
+		t.Fatalf("revision change must recommit")
+	}
+}
+
+func TestVizCommitCmdGatingAndMessages(t *testing.T) {
+	m := newTestModel(t)
+	if m.vizCommitCmd() != nil {
+		t.Fatalf("nil engagement must yield no command")
+	}
+	stub := newStubEngagement("acme")
+	stub.setSnapshot(sampleEngagement(0))
+	m.engagement = stub
+	m.viz = newVizRenderer(&fakeRunner{out: "web: SQLi on /login"})
+	m.prefs.Viz = false
+	if m.vizCommitCmd() != nil {
+		t.Fatalf("viz off must yield no command")
+	}
+	m.prefs.Viz = true
+	cmd := m.vizCommitCmd()
+	if cmd == nil {
+		t.Fatalf("viz on with an engagement must yield a command")
+	}
+	msg, ok := cmd().(vizBlockMsg)
+	if !ok || stripANSI(msg.block) == "" {
+		t.Fatalf("first poll should emit a vizBlockMsg with a block, got %#v", msg)
+	}
+	if got := m.vizCommitCmd()(); got != nil {
+		t.Fatalf("unchanged revision must emit no message, got %#v", got)
+	}
+}
+
+func TestVizBlockMsgPrintsBlockOnly(t *testing.T) {
+	m := newTestModel(t)
+	if _, cmd := m.Update(vizBlockMsg{}); cmd != nil {
+		t.Fatalf("empty vizBlockMsg must be ignored")
+	}
+	_, cmd := m.Update(vizBlockMsg{block: "graph"})
+	if cmd == nil {
+		t.Fatalf("non-empty vizBlockMsg must print")
+	}
+	if cmd() == nil {
+		t.Fatalf("print command must produce a message")
+	}
+}
+
+func TestVizTickPollsInBothMotionModes(t *testing.T) {
+	for _, reduced := range []bool{false, true} {
+		m := newTestModel(t)
+		m.working, m.reduceMotion, m.tickGen = true, reduced, 3
+		m.engagement = newStubEngagement("acme")
+		m.viz = newVizRenderer(&fakeRunner{out: "x"})
+		m.prefs.Viz = true
+		if _, cmd := m.Update(vizTickMsg{gen: 3}); cmd == nil {
+			t.Fatalf("reduceMotion=%v: current-gen vizTick must poll and re-arm", reduced)
+		}
+		if _, cmd := m.Update(vizTickMsg{gen: 2}); cmd != nil {
+			t.Fatalf("reduceMotion=%v: stale-gen vizTick must be dropped", reduced)
+		}
+		idle := m
+		idle.working = false
+		if _, cmd := idle.Update(vizTickMsg{gen: 3}); cmd != nil {
+			t.Fatalf("reduceMotion=%v: idle model must drop vizTick", reduced)
+		}
+	}
+}
+
+func TestVizTickDroppedWithoutEngagement(t *testing.T) {
+	m := newTestModel(t)
+	m.working, m.tickGen = true, 1
+	if _, cmd := m.Update(vizTickMsg{gen: 1}); cmd != nil {
+		t.Fatalf("vizTick without an engagement must be dropped")
+	}
+	if m.startVizPoll() != nil {
+		t.Fatalf("no engagement must not start the poll")
+	}
+	m.engagement = newStubEngagement("acme")
+	if m.startVizPoll() == nil {
+		t.Fatalf("an engagement must start the poll")
+	}
+}
+
+func TestVizCommandTogglesPref(t *testing.T) {
+	m := newTestModel(t)
+	m.prefs.Viz = true
+
+	nm, _ := m.dispatchInput("/viz off")
+	m = nm.(model)
+	if m.prefs.Viz {
+		t.Fatalf("/viz off should set Viz false")
+	}
+	if loadPrefs().Viz {
+		t.Fatalf("/viz off should persist Viz false")
+	}
+
+	nm, _ = m.dispatchInput("/viz on")
+	m = nm.(model)
+	if !m.prefs.Viz {
+		t.Fatalf("viz on should set Viz true")
+	}
+
+	nm, _ = m.dispatchInput("/viz")
+	m = nm.(model)
+	if m.prefs.Viz {
+		t.Fatalf("bare /viz should toggle Viz to false")
+	}
+	nm, _ = m.dispatchInput("/viz toggle")
+	m = nm.(model)
+	if !m.prefs.Viz {
+		t.Fatalf("/viz toggle should flip Viz back to true")
+	}
+
+	nm, _ = m.dispatchInput("/viz maybe")
+	m = nm.(model)
+	if !m.prefs.Viz {
+		t.Fatalf("an unknown arg must leave Viz unchanged")
+	}
+}
+
+func TestVizCommandIsRegisteredAndInReplHelp(t *testing.T) {
+	if _, ok := slashCommand("viz"); !ok {
+		t.Fatalf("viz is not in the slash registry")
+	}
+	found := false
+	for _, g := range replGroups() {
+		for _, r := range g.rows {
+			if strings.HasPrefix(r.name, "/viz") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("plain REPL help has no /viz row")
+	}
+}

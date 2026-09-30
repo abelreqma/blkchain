@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"strconv"
 )
 
 // Status is the lifecycle state of a task.
@@ -98,9 +97,5 @@ func (s *Store) GetTask(id string) (Task, error) {
 
 // Revision returns the current engagement revision counter.
 func (s *Store) Revision(ctx context.Context) (int64, error) {
-	var v string
-	if err := s.db.QueryRowContext(ctx, `SELECT v FROM meta WHERE k = 'revision'`).Scan(&v); err != nil {
-		return 0, err
-	}
-	return strconv.ParseInt(v, 10, 64)
+	return readRevision(ctx, s.db)
 }

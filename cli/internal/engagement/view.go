@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strconv"
 )
 
 // Stage is where the harness is in the current step, for the live progress view.
@@ -25,10 +26,16 @@ type Engagement struct {
 	Stage    Stage
 }
 
-// rowQueryer is the read subset shared by *sql.DB and *sql.Conn so meta and task
-// reads work both inside and outside an Apply transaction.
+// rowQueryer is the single-row read subset shared by *sql.DB and *sql.Conn so
+// meta reads work both inside and outside a transaction.
 type rowQueryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// rowsQueryer is the multi-row read subset shared by *sql.DB and *sql.Conn so
+// task reads work both inside and outside a transaction.
+type rowsQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // getMeta returns the value for key, or "" when the key is absent.
@@ -44,9 +51,19 @@ func getMeta(ctx context.Context, q rowQueryer, key string) (string, error) {
 	return v, nil
 }
 
-// allTasks returns every task ordered by creation revision then id.
-func (s *Store) allTasks(ctx context.Context) ([]Task, error) {
-	rows, err := s.db.QueryContext(ctx,
+// readRevision reads the monotonic revision counter through q.
+func readRevision(ctx context.Context, q rowQueryer) (int64, error) {
+	var v string
+	if err := q.QueryRowContext(ctx, `SELECT v FROM meta WHERE k = 'revision'`).Scan(&v); err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(v, 10, 64)
+}
+
+// scanAllTasks returns every task ordered by creation revision then id, read
+// through q.
+func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
+	rows, err := q.QueryContext(ctx,
 		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev
 		 FROM task ORDER BY created_rev ASC, id ASC`)
 	if err != nil {
@@ -75,22 +92,35 @@ func (s *Store) allTasks(ctx context.Context) ([]Task, error) {
 	return out, rows.Err()
 }
 
-// Snapshot returns the whole engagement as of now: revision, name, all tasks,
-// the active task id, and the current stage. Missing meta rows read as zero.
 func (s *Store) Snapshot(ctx context.Context) (Engagement, error) {
-	var e Engagement
-	rev, err := s.Revision(ctx)
+	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return Engagement{}, err
 	}
-	e.Revision = rev
-	if e.Name, err = getMeta(ctx, s.db, "name"); err != nil {
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN DEFERRED"); err != nil {
 		return Engagement{}, err
 	}
-	if e.ActiveID, err = getMeta(ctx, s.db, "active_id"); err != nil {
+	committed := false
+	defer func() {
+		if !committed {
+			conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
+	var e Engagement
+
+	if e.Revision, err = readRevision(ctx, conn); err != nil {
 		return Engagement{}, err
 	}
-	stageJSON, err := getMeta(ctx, s.db, "stage")
+	if e.Name, err = getMeta(ctx, conn, "name"); err != nil {
+		return Engagement{}, err
+	}
+	if e.ActiveID, err = getMeta(ctx, conn, "active_id"); err != nil {
+		return Engagement{}, err
+	}
+	stageJSON, err := getMeta(ctx, conn, "stage")
 	if err != nil {
 		return Engagement{}, err
 	}
@@ -99,8 +129,13 @@ func (s *Store) Snapshot(ctx context.Context) (Engagement, error) {
 			return Engagement{}, err
 		}
 	}
-	if e.Tasks, err = s.allTasks(ctx); err != nil {
+	if e.Tasks, err = scanAllTasks(ctx, conn); err != nil {
 		return Engagement{}, err
 	}
+
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return Engagement{}, err
+	}
+	committed = true
 	return e, nil
 }
