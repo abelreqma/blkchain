@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 )
 
 // Gate composes every security layer. It performs no execution.
@@ -20,6 +22,15 @@ type Gate struct {
 
 	Protected []string
 	Scratch   string
+
+	Now      func() time.Time
+	rateHits []time.Time
+
+	ConfigDenied        []string
+	UnattendedAllow     *Allowlist
+	AllowInterpreterPoC bool
+
+	AutoScopeOverride bool
 }
 
 // Start validates the gate for its mode. Auto refuses without a non-empty scope.
@@ -31,7 +42,12 @@ func (g *Gate) Start() error {
 	}
 	if g.Mode == Auto {
 		if g.Scope == nil || (g.Scope.Empty() && !g.Scope.Local()) {
-			return errors.New("secgate: /auto requires a scope with in-scope targets or a local directive")
+			if !g.AutoScopeOverride {
+				return errors.New("secgate: /auto requires a scope with in-scope targets or a local directive, or an explicit override")
+			}
+			// Logged override: auto with no scope. Record it once; the gate still
+			// fails closed on any targeted command (checkLocked).
+			g.audit("override", "auto started without a scope (logged operator override)")
 		}
 	}
 	if g.Episode == nil {
@@ -133,6 +149,10 @@ func (g *Gate) checkLocked(c Command) Decision {
 	if ok, reason := g.Episode.AllowCommand(); !ok {
 		return g.deny("cap", c, reason, "")
 	}
+
+	if deniedByConfig(c.Binary, g.ConfigDenied) {
+		return g.deny("config-denylist", c, "binary "+c.Binary+" is denied by .blkchain/config.yaml", "")
+	}
 	if g.Scope != nil && g.Scope.Local() {
 		// LOCAL profile: no binary allowlist. Only the structural denials that
 		// keep gating enforceable (raw-shell metacharacters, shells,
@@ -169,11 +189,23 @@ func (g *Gate) checkLocked(c Command) Decision {
 		if g.Allow == nil || !g.Allow.Permits(c.Binary) {
 			return g.deny("allowlist", c, fmt.Sprintf("binary %q is not on the allowlist", c.Binary), "")
 		}
-		// 4. scope. Auto without a usable scope is denied even if Start was skipped.
-		if g.Mode == Auto && (g.Scope == nil || g.Scope.Empty()) {
+		// 4. scope.
+		emptyScope := g.Scope == nil || g.Scope.Empty()
+		switch {
+		case g.Mode == Auto && emptyScope && !g.AutoScopeOverride:
+			// Auto without a usable scope is denied even if Start was skipped.
 			return g.deny("scope", c, "auto mode requires a non-empty scope", "")
-		}
-		if g.Scope != nil {
+		case g.Mode == Auto && emptyScope && g.AutoScopeOverride:
+			// Logged no-scope override: fail closed on any network target (nothing
+			// can be confirmed in scope), permit only no-target recon.
+			targets, ok := ExtractTargets(c)
+			if !ok {
+				return g.deny("scope", c, "command has an unverifiable target (cannot confirm it is in scope)", "")
+			}
+			if len(targets) > 0 {
+				return g.deny("scope", c, "no scope defined; target cannot be confirmed in scope: "+targets[0], "")
+			}
+		case g.Scope != nil:
 			targets, ok := ExtractTargets(c)
 			if !ok {
 				return g.deny("scope", c, "command has an unverifiable target (cannot confirm it is in scope)", "")
@@ -188,6 +220,42 @@ func (g *Gate) checkLocked(c Command) Decision {
 			}
 		}
 	}
+	// RoE rate limit is the last deny-layer: only an otherwise-admissible command
+	// consumes a slot in the sliding window.
+	if d := g.rateAllowLocked(c); !d.Allowed {
+		return d
+	}
+	return Decision{Allowed: true}
+}
+
+// rateAllowLocked enforces the scope's optional "## Rate" policy. It assumes
+// g.mu is held (it mutates g.rateHits). It prunes timestamps older than the
+// window, denies when the window is already full, and otherwise records the
+// admitted command's time. A nil scope or no rate policy is a no-op allow.
+func (g *Gate) rateAllowLocked(c Command) Decision {
+	if g.Scope == nil {
+		return Decision{Allowed: true}
+	}
+	rl, ok := g.Scope.Rate()
+	if !ok {
+		return Decision{Allowed: true}
+	}
+	now := time.Now()
+	if g.Now != nil {
+		now = g.Now()
+	}
+	cutoff := now.Add(-rl.Per)
+	kept := g.rateHits[:0]
+	for _, t := range g.rateHits {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	g.rateHits = kept
+	if len(g.rateHits) >= rl.N {
+		return g.deny("rate", c, fmt.Sprintf("rate limit exceeded: at most %d command(s) per %s", rl.N, rl.Per), "")
+	}
+	g.rateHits = append(g.rateHits, now)
 	return Decision{Allowed: true}
 }
 
@@ -199,7 +267,12 @@ func (g *Gate) checkLocked(c Command) Decision {
 // confirmation is needed and it audits allow directly.
 func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
 	localProfile := g.Scope != nil && g.Scope.Local()
-	needConfirm := (g.Mode != Auto || localProfile) && (g.Approvals == nil || !g.Approvals.Approved(c))
+	needConfirm := g.Mode != Auto || localProfile
+
+	if !needConfirm && g.UnattendedAllow != nil && !g.UnattendedAllow.Permits(c.Binary) {
+		needConfirm = true
+	}
+	needConfirm = needConfirm && (g.Approvals == nil || !g.Approvals.Approved(c))
 	if !needConfirm {
 		g.audit("allow", Signature(c))
 		g.mu.Unlock()
@@ -219,6 +292,25 @@ func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
 	g.audit("allow", Signature(c))
 	g.mu.Unlock()
 	return Decision{Allowed: true}
+}
+
+// deniedByConfig reports whether c's binary base name matches any entry in the
+// config denied_binaries list (case-insensitive base-name match, so a planted
+// path to a denied name is caught too).
+func deniedByConfig(binary string, denied []string) bool {
+	if len(denied) == 0 {
+		return false
+	}
+	b := strings.ToLower(baseName(strings.TrimSpace(binary)))
+	if b == "" {
+		return false
+	}
+	for _, d := range denied {
+		if strings.ToLower(baseName(strings.TrimSpace(d))) == b {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *Gate) deny(layer string, c Command, reason, suggestion string) Decision {

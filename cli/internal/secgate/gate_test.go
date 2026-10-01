@@ -533,3 +533,151 @@ func stubEnumFixtureResolver(t *testing.T) {
 		"anything.com": outScope,
 	})
 }
+
+// TestRateLimitDeniesOverBudget: with a 2/s scope rate, the first two commands
+// in a window are allowed, the third is denied, and after the window advances a
+// command is allowed again. The clock is injected so the test is deterministic.
+func TestRateLimitDeniesOverBudget(t *testing.T) {
+	s, err := BuildScope(ScopeSpec{In: []string{"10.0.0.0/24"}, Rate: "2/s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1000, 0)
+	g := &Gate{Mode: Auto, Scope: s, Allow: NewAllowlist("nmap"), Now: func() time.Time { return now }}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	cmd := Command{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.5"}}
+	for i := 0; i < 2; i++ {
+		if d := g.Authorize(context.Background(), cmd); !d.Allowed {
+			t.Fatalf("command %d within rate should be allowed: %q", i+1, d.Reason)
+		}
+	}
+	if d := g.Authorize(context.Background(), cmd); d.Allowed {
+		t.Fatal("third command within the same second must be denied by the rate limit")
+	}
+	now = now.Add(2 * time.Second)
+	if d := g.Authorize(context.Background(), cmd); !d.Allowed {
+		t.Fatalf("after the window the command should be allowed again: %q", d.Reason)
+	}
+}
+
+// TestConfigDeniedAlwaysDenies: a binary in ConfigDenied is denied even when it
+// is otherwise allowed, in both the external and the local profile.
+func TestConfigDeniedAlwaysDenies(t *testing.T) {
+	ext := &Gate{Mode: Auto, Scope: okScope(t), Allow: NewAllowlist("nmap"), ConfigDenied: []string{"nmap"}}
+	if err := ext.Start(); err != nil {
+		t.Fatal(err)
+	}
+	d := ext.Authorize(context.Background(), Command{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.5"}})
+	if d.Allowed {
+		t.Error("external: a config-denied binary must be denied even when allowlisted")
+	}
+
+	local, err := ParseScope(strings.NewReader("local\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loc := &Gate{Mode: Safe, Scope: local, Confirm: stubConfirmer{true}, Approvals: NewSessionApprovals(), ConfigDenied: []string{"id"}}
+	if err := loc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if d := loc.Authorize(context.Background(), Command{Binary: "id"}); d.Allowed {
+		t.Error("local: a config-denied binary must be denied before confirmation")
+	}
+}
+
+func TestUnattendedAllowBoundAutoHITL(t *testing.T) {
+	g := &Gate{Mode: Auto, Scope: okScope(t), Allow: NewAllowlist("nmap"), UnattendedAllow: NewAllowlist()}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	d := g.Authorize(context.Background(), Command{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.5"}})
+	if d.Allowed {
+		t.Error("auto with an empty unattended allowlist and no confirmer must deny (HITL fallback)")
+	}
+}
+
+// TestUnattendedAllowPermitsRunsUnattended: a binary in the unattended allowlist
+// runs in Auto without a prompt.
+func TestUnattendedAllowPermitsRunsUnattended(t *testing.T) {
+	g := &Gate{Mode: Auto, Scope: okScope(t), Allow: NewAllowlist("nmap"), UnattendedAllow: NewAllowlist("nmap")}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	d := g.Authorize(context.Background(), Command{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.5"}})
+	if !d.Allowed {
+		t.Errorf("an unattended-allowlisted binary should run without a prompt: %q", d.Reason)
+	}
+}
+
+// TestUnattendedAllowNilLegacy: a nil unattended allowlist keeps the legacy
+// behavior (external Auto runs unattended with no confirmer).
+func TestUnattendedAllowNilLegacy(t *testing.T) {
+	g := &Gate{Mode: Auto, Scope: okScope(t), Allow: NewAllowlist("nmap")}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	d := g.Authorize(context.Background(), Command{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.5"}})
+	if !d.Allowed {
+		t.Errorf("nil unattended allowlist must keep legacy unattended auto: %q", d.Reason)
+	}
+}
+
+// TestAutoNoScopeRefusedWithoutOverride: Auto with no scope and no override must
+// refuse to start, and with the override it must start.
+func TestAutoNoScopeRefusedWithoutOverride(t *testing.T) {
+	g := &Gate{Mode: Auto, Allow: NewAllowlist("curl")}
+	if err := g.Start(); err == nil {
+		t.Fatal("Auto with no scope and no override must refuse to start")
+	}
+	g2 := &Gate{Mode: Auto, Allow: NewAllowlist("curl"), AutoScopeOverride: true}
+	if err := g2.Start(); err != nil {
+		t.Fatalf("Auto with an override must start: %v", err)
+	}
+}
+
+// TestAutoNoScopeOverrideAudits: starting Auto with no scope under an override
+// writes an `override` audit action.
+func TestAutoNoScopeOverrideAudits(t *testing.T) {
+	var actions []string
+	g := recordingGate(&Gate{Mode: Auto, Allow: NewAllowlist("curl"), AutoScopeOverride: true}, &actions)
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, a := range actions {
+		if a == "override" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("auto-without-scope override must be audited; actions=%v", actions)
+	}
+}
+
+// TestAutoOverrideNoTargetReconProceeds: under the override a no-target recon
+// command is allowed.
+func TestAutoOverrideNoTargetReconProceeds(t *testing.T) {
+	g := &Gate{Mode: Auto, Allow: NewAllowlist("curl"), AutoScopeOverride: true}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	d := g.Authorize(context.Background(), Command{Binary: "curl", Args: []string{"--version"}})
+	if !d.Allowed {
+		t.Errorf("a no-target recon command should proceed under the override: %q", d.Reason)
+	}
+}
+
+// TestAutoOverrideTargetFailsClosed: under the override, a command naming a
+// network target is denied (no scope can confirm it is in scope).
+func TestAutoOverrideTargetFailsClosed(t *testing.T) {
+	g := &Gate{Mode: Auto, Allow: NewAllowlist("nmap"), AutoScopeOverride: true}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	d := g.Authorize(context.Background(), Command{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.5"}})
+	if d.Allowed {
+		t.Error("a targeted command must fail closed under the no-scope override")
+	}
+}

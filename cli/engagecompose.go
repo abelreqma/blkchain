@@ -51,15 +51,14 @@ func externalEngageAllowlist() []string {
 	}
 }
 
-// buildEngageGate is the single composition root for the engage gate. It
-// selects the allowlist by profile: the external allowlist plus the scope's
-// `allow <bin>` lines when the scope is not local, and no allowlist at all for
-// local (ClassifyLocal governs there; every local command is human-confirmed
-// regardless). It also builds the one and only copy of the Protected-paths
-// recipe (the engagement's own artifacts, guarded from an executor's file
-// arguments in the LOCAL profile) and sets Scratch. The caller starts the
-// returned gate.
-func buildEngageGate(ws *engagement.Workspace, scope *secgate.Scope, mode secgate.Mode, confirm secgate.Confirmer, approvals *secgate.SessionApprovals, scratch string, audit func(action, detail string)) *secgate.Gate {
+type gatePolicy struct {
+	DeniedBinaries      []string
+	UnattendedAllow     *secgate.Allowlist
+	AllowInterpreterPoC bool
+	AutoScopeOverride   bool
+}
+
+func buildEngageGate(ws *engagement.Workspace, scope *secgate.Scope, mode secgate.Mode, confirm secgate.Confirmer, approvals *secgate.SessionApprovals, scratch string, policy gatePolicy, audit func(action, detail string)) *secgate.Gate {
 	var allow *secgate.Allowlist
 	if scope == nil || !scope.Local() {
 		allowBins := externalEngageAllowlist()
@@ -88,7 +87,11 @@ func buildEngageGate(ws *engagement.Workspace, scope *secgate.Scope, mode secgat
 			protMD,
 			protJSON,
 		},
-		Scratch: scratch,
+		Scratch:             scratch,
+		ConfigDenied:        policy.DeniedBinaries,
+		UnattendedAllow:     policy.UnattendedAllow,
+		AllowInterpreterPoC: policy.AllowInterpreterPoC,
+		AutoScopeOverride:   policy.AutoScopeOverride,
 	}
 }
 

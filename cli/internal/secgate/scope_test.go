@@ -3,6 +3,7 @@ package secgate
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseScopeAndMatch(t *testing.T) {
@@ -158,5 +159,93 @@ func TestScopeLocalOnlyIsValidNonEmptyForAuto(t *testing.T) {
 func TestScopeAllowEmptyBaseNameIsError(t *testing.T) {
 	if _, err := ParseScope(strings.NewReader("local\nallow /\n")); err == nil {
 		t.Error("allow with an empty base name must be a parse error")
+	}
+}
+
+func TestBuildScopeInOutTargets(t *testing.T) {
+	s, err := BuildScope(ScopeSpec{
+		In:      []string{"10.0.0.0/24", "host.example.com"},
+		Out:     []string{"10.0.0.5"},
+		Targets: []string{"acme corp", "admin@example.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.InScope("10.0.0.9") {
+		t.Error("10.0.0.9 should be in scope")
+	}
+	if s.InScope("10.0.0.5") {
+		t.Error("10.0.0.5 is out of scope, must be denied")
+	}
+	got := s.Targets()
+	if len(got) != 2 || got[0] != "acme corp" || got[1] != "admin@example.com" {
+		t.Errorf("Targets round-trip wrong: %v", got)
+	}
+}
+
+func TestBuildScopeOutWinsOverIn(t *testing.T) {
+
+	s, err := BuildScope(ScopeSpec{
+		In:  []string{"dup.example.com"},
+		Out: []string{"dup.example.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.InScope("dup.example.com") {
+		t.Error("a host in both In and Out must be denied (out wins, fail closed)")
+	}
+}
+
+func TestBuildScopeMalformedFailsClosed(t *testing.T) {
+	if s, err := BuildScope(ScopeSpec{In: []string{"not a host!!"}}); err == nil || s != nil {
+		t.Errorf("malformed in-scope entry must error and yield nil scope; got scope=%v err=%v", s, err)
+	}
+}
+
+func TestParseRate(t *testing.T) {
+	ok := []struct {
+		in  string
+		n   int
+		per time.Duration
+	}{
+		{"10/s", 10, time.Second},
+		{"60/m", 60, time.Minute},
+		{"100/h", 100, time.Hour},
+		{" 5 / s ", 5, time.Second},
+	}
+	for _, c := range ok {
+		r, err := parseRate(c.in)
+		if err != nil {
+			t.Errorf("parseRate(%q) unexpected error: %v", c.in, err)
+			continue
+		}
+		if r.N != c.n || r.Per != c.per {
+			t.Errorf("parseRate(%q) = {%d,%v}, want {%d,%v}", c.in, r.N, r.Per, c.n, c.per)
+		}
+	}
+	bad := []string{"0/s", "-1/s", "10/x", "abc", "10", "", "10/", "/s", "1.5/s"}
+	for _, c := range bad {
+		if r, err := parseRate(c); err == nil {
+			t.Errorf("parseRate(%q) should error, got %v", c, r)
+		}
+	}
+}
+
+func TestScopeRateAccessor(t *testing.T) {
+	s, err := BuildScope(ScopeSpec{In: []string{"10.0.0.5"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.Rate(); ok {
+		t.Error("a scope with no rate must report ok=false")
+	}
+	s2, err := BuildScope(ScopeSpec{In: []string{"10.0.0.5"}, Rate: "5/s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := s2.Rate()
+	if !ok || r.N != 5 || r.Per != time.Second {
+		t.Errorf("Rate() = {%d,%v},%v; want {5,1s},true", r.N, r.Per, ok)
 	}
 }

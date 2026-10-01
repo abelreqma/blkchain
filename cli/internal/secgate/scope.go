@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // scopeMatcher matches a target string (hostname or IP text) against one scope
@@ -112,6 +114,109 @@ type Scope struct {
 	out       []scopeMatcher
 	local     bool
 	allowBins []string
+
+	targets []string
+	rate    *RateLimit
+}
+
+// RateLimit is a parsed "## Rate" policy: at most N admitted commands per Per
+// window. The gate enforces it over every gated command.
+type RateLimit struct {
+	N   int
+	Per time.Duration
+}
+
+// ScopeSpec is the structured input a parsed ROE.md hands to BuildScope: the
+// In Scope / Out of Scope / Targets entries and the optional Rate string. The
+// ROE.md markdown parser (cli/roe.go) owns sectioning; BuildScope owns matcher
+// and rate parsing and the fail-closed validation.
+type ScopeSpec struct {
+	In      []string
+	Out     []string
+	Targets []string
+	Rate    string // "" means no rate limit
+}
+
+// BuildScope parses a ScopeSpec into a Scope. Every In and Out entry is parsed
+// by parseMatcher, so a malformed entry fails closed (returns an error and a nil
+// Scope - a broken RoE never yields a permissive scope). Targets are stored
+// verbatim. An empty Rate string means no rate limit; a non-empty malformed Rate
+// is an error.
+func BuildScope(spec ScopeSpec) (*Scope, error) {
+	s := &Scope{}
+	for _, e := range spec.In {
+		if strings.TrimSpace(e) == "" {
+			continue
+		}
+		m, err := parseMatcher(e)
+		if err != nil {
+			return nil, fmt.Errorf("in-scope: %w", err)
+		}
+		s.in = append(s.in, m)
+	}
+	for _, e := range spec.Out {
+		if strings.TrimSpace(e) == "" {
+			continue
+		}
+		m, err := parseMatcher(e)
+		if err != nil {
+			return nil, fmt.Errorf("out-of-scope: %w", err)
+		}
+		s.out = append(s.out, m)
+	}
+	for _, tg := range spec.Targets {
+		if t := strings.TrimSpace(tg); t != "" {
+			s.targets = append(s.targets, t)
+		}
+	}
+	if strings.TrimSpace(spec.Rate) != "" {
+		r, err := parseRate(spec.Rate)
+		if err != nil {
+			return nil, err
+		}
+		s.rate = &r
+	}
+	return s, nil
+}
+
+// parseRate parses a "N/unit" rate string. unit is one of s, m, h (also the
+// spellings sec/second, min/minute, hr/hour). N must be a positive integer. An
+// empty or malformed string is an error (fail closed).
+func parseRate(s string) (RateLimit, error) {
+	t := strings.TrimSpace(s)
+	i := strings.IndexByte(t, '/')
+	if i < 0 {
+		return RateLimit{}, fmt.Errorf("secgate: malformed rate %q (want N/s, N/m, or N/h)", s)
+	}
+	nStr := strings.TrimSpace(t[:i])
+	unit := strings.TrimSpace(t[i+1:])
+	n, err := strconv.Atoi(nStr)
+	if err != nil || n < 1 {
+		return RateLimit{}, fmt.Errorf("secgate: rate count must be a positive integer in %q", s)
+	}
+	var per time.Duration
+	switch strings.ToLower(unit) {
+	case "s", "sec", "second":
+		per = time.Second
+	case "m", "min", "minute":
+		per = time.Minute
+	case "h", "hr", "hour":
+		per = time.Hour
+	default:
+		return RateLimit{}, fmt.Errorf("secgate: unknown rate unit %q (want s, m, or h)", unit)
+	}
+	return RateLimit{N: n, Per: per}, nil
+}
+
+// Targets returns the informational engagement targets from "## Targets".
+func (s *Scope) Targets() []string { return append([]string(nil), s.targets...) }
+
+// Rate returns the scope's rate limit and whether one is set.
+func (s *Scope) Rate() (RateLimit, bool) {
+	if s.rate == nil {
+		return RateLimit{}, false
+	}
+	return *s.rate, true
 }
 
 // ParseScope reads a line-based scope file. Blank lines and lines beginning with

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"blkchain/cli/internal/askuser"
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/histstore"
 	"blkchain/cli/internal/secgate"
 	"blkchain/cli/internal/skillcat"
 )
@@ -23,16 +25,18 @@ func loadEngageCatalog() (*skillcat.Catalog, error) {
 
 // engageOpts holds `blk engage`'s flags.
 type engageOpts struct {
-	scope     string
-	auto      bool
-	workspace string
-	model     string
+	scope        string
+	auto         bool
+	autoOverride bool
+	workspace    string
+	model        string
 }
 
 // defineEngageFlags declares `blk engage`'s flags.
 func defineEngageFlags(fs *flag.FlagSet, o *engageOpts) {
 	fs.StringVar(&o.scope, "scope", "", "scope file: in-scope targets, `local`, and `allow <bin>` lines")
-	fs.BoolVar(&o.auto, "auto", false, "run without confirmation prompts (bounded by scope); requires --scope")
+	fs.BoolVar(&o.auto, "auto", false, "run without confirmation prompts (bounded by scope and allowed_binaries)")
+	fs.BoolVar(&o.autoOverride, "auto-override", false, "allow --auto with no scope (logged to audit.jsonl); only no-target recon runs autonomously")
 	fs.StringVar(&o.workspace, "workspace", "", "engagement workspace directory (default: a new one under the config dir)")
 	fs.StringVar(&o.model, "model", "", "chat model id (default: the resolved model)")
 }
@@ -56,27 +60,32 @@ func runEngage(args []string) error {
 	if strings.TrimSpace(goal) == "" {
 		return missingArg("engage", "missing goal", `engage --scope scope.txt "enumerate 10.0.0.5"`)
 	}
-	if o.auto && strings.TrimSpace(o.scope) == "" {
-		return usageErr(`engage: --auto requires --scope. Example: blk engage --auto --scope scope.txt "enumerate 10.0.0.5". See "blk help engage".`)
+
+	cwd, _ := os.Getwd()
+	// Shared memory store for RoE recall-by-directory (best-effort; nil degrades).
+	var roeDB *sql.DB
+	if store := histstore.OpenDefault(); store != nil {
+		defer store.Close()
+		roeDB = store.DB()
 	}
 
-	var scope *secgate.Scope
-	if o.scope != "" {
-		f, err := os.Open(o.scope)
-		if err != nil {
-			return fmt.Errorf("engage: cannot read scope file: %w", err)
-		}
-		s, perr := secgate.ParseScope(f)
-		f.Close()
-		if perr != nil {
-			return fmt.Errorf("engage: %w", perr)
-		}
-		scope = s
+	scope, scopeDesc, roeUsed, err := resolveEngageScope(o, cwd, roeDB)
+	if err != nil {
+		return fmt.Errorf("engage: %w", err)
+	}
+	policy, err := resolveEngageConfigPolicy(o, cwd)
+	if err != nil {
+		return fmt.Errorf("engage: %w", err)
 	}
 
 	mode := secgate.Safe
 	if o.auto {
 		mode = secgate.Auto
+	}
+
+	// No-RoE floor: --auto needs a scope OR an explicit logged override.
+	if mode == secgate.Auto && (scope == nil || (scope.Empty() && !scope.Local())) && !o.autoOverride {
+		return usageErr(`engage: --auto needs a scope (via --scope, or an ROE.md with "## In Scope") or --auto-override. Example: blk engage --auto --scope scope.txt "enumerate 10.0.0.5". See "blk help engage".`)
 	}
 
 	cat, err := loadEngageCatalog()
@@ -100,13 +109,21 @@ func runEngage(args []string) error {
 	}
 	defer ws.Close()
 
+	// When no RoE was found and no explicit scope was given, drop a pre-formatted
+	// ROE.md template into the workspace (idempotent; never overwrites).
+	if roeUsed == "" && strings.TrimSpace(o.scope) == "" {
+		if _, werr := writeRoETemplate(ws.Dir); werr != nil {
+			fmt.Fprintf(os.Stderr, "engage: could not write ROE.md template: %v\n", werr)
+		}
+	}
+
 	tty := isTerminalFile(os.Stdin)
 	var confirm secgate.Confirmer
 	// The mmdflux viz session replaces this with its widget confirmer by assigning confirm here before the gate is built.
-	// A local/post-access engagement requires per-command confirmation in every
-	// mode (the human is the positive control), so a terminal confirmer is
-	// provided for /auto local too, not only /safe.
-	if tty && (mode == secgate.Safe || (scope != nil && scope.Local())) {
+	// A terminal confirmer is provided on any TTY: /safe confirms every command,
+	// /auto local confirms every command (the human is the positive control), and
+	// /auto external falls back to HITL for a binary not in allowed_binaries.
+	if tty {
 		confirm = newTerminalConfirmer(os.Stdin, os.Stdout)
 	}
 	// Fail closed: a local engagement with no way to confirm cannot run, because
@@ -125,7 +142,7 @@ func runEngage(args []string) error {
 	}
 	defer os.RemoveAll(scratch)
 
-	gate := buildEngageGate(ws, scope, mode, confirm, secgate.NewSessionApprovals(), scratch, func(action, detail string) {
+	gate := buildEngageGate(ws, scope, mode, confirm, secgate.NewSessionApprovals(), scratch, policy, func(action, detail string) {
 		_ = ws.AuditLine("secgate", action, detail)
 	})
 	if err := gate.Start(); err != nil {
@@ -156,10 +173,6 @@ func runEngage(args []string) error {
 	if o.auto {
 		modeStr = "auto"
 	}
-	scopeDesc := o.scope
-	if scopeDesc == "" {
-		scopeDesc = "(none)"
-	}
 	rw := newReportWriter(ws.Store, wsDir, goal, scopeDesc, modeStr)
 	if err := rw.Flush("in-progress"); err != nil {
 		fmt.Fprintf(os.Stderr, "report: initial write failed: %v\n", err)
@@ -187,6 +200,81 @@ func runEngage(args []string) error {
 	mdPath, jsonPath := reportPaths(wsDir)
 	fmt.Fprintf(os.Stdout, "\nReport: %s\n        %s\n", mdPath, jsonPath)
 	return nil
+}
+
+// resolveEngageScope resolves the engagement scope from the flags and the
+// project directory. An explicit --scope file wins (the back-compat line-based
+// format). Otherwise an ROE.md in cwd, or the ROE.md remembered for cwd, is
+// parsed into the extended scope and remembered for next time. With no scope
+// source, scope is nil, scopeDesc is "(none)", and roeUsed is "" (the caller
+// writes a workspace template). db may be nil (recall degrades to a miss).
+func resolveEngageScope(o engageOpts, cwd string, db *sql.DB) (scope *secgate.Scope, scopeDesc, roeUsed string, err error) {
+	if strings.TrimSpace(o.scope) != "" {
+		f, oerr := os.Open(o.scope)
+		if oerr != nil {
+			return nil, "", "", fmt.Errorf("cannot read scope file: %w", oerr)
+		}
+		s, perr := secgate.ParseScope(f)
+		f.Close()
+		if perr != nil {
+			return nil, "", "", perr
+		}
+		return s, o.scope, "", nil
+	}
+	roePath := ""
+	cand := filepath.Join(cwd, "ROE.md")
+	if fi, serr := os.Stat(cand); serr == nil && !fi.IsDir() {
+		roePath = cand
+	} else if p, ok := recallRoE(db, cwd); ok {
+		roePath = p
+	}
+	if roePath == "" {
+		return nil, "(none)", "", nil
+	}
+	f, oerr := os.Open(roePath)
+	if oerr != nil {
+		return nil, "", "", fmt.Errorf("cannot read ROE.md: %w", oerr)
+	}
+	roe, perr := ParseRoE(f)
+	f.Close()
+	if perr != nil {
+		return nil, "", "", fmt.Errorf("ROE.md: %w", perr)
+	}
+	_ = rememberRoE(db, cwd, roePath) // best-effort recall-by-directory
+	return roe.Scope, roePath, roePath, nil
+}
+
+// resolveEngageConfigPolicy autodetects .blkchain/config.yaml in cwd and builds
+// the gate policy. The unattended-/auto bound (UnattendedAllow) is always set:
+// an absent config yields an empty allowlist, so unattended /auto falls back to
+// HITL (the no-allowlist floor, decision 8). The auto-scope override comes from
+// the flag.
+func resolveEngageConfigPolicy(o engageOpts, cwd string) (gatePolicy, error) {
+	cfg, _, err := autodetectEngageConfig(cwd)
+	if err != nil {
+		return gatePolicy{}, err
+	}
+	var denied []string
+	poc := false
+	// Default (no config): an empty, non-nil unattended bound, so unattended /auto
+	// falls back to HITL (the no-allowlist floor).
+	unattended := secgate.NewAllowlist()
+	if cfg != nil {
+		denied = cfg.DeniedBinaries
+		poc = cfg.AllowInterpreterPoC
+		if cfg.AllowedBinaries.All {
+			// allowed_binaries: true -> everything allowed unattended (no bound).
+			unattended = nil
+		} else {
+			unattended = secgate.NewAllowlist(cfg.AllowedBinaries.List...)
+		}
+	}
+	return gatePolicy{
+		DeniedBinaries:      denied,
+		UnattendedAllow:     unattended,
+		AllowInterpreterPoC: poc,
+		AutoScopeOverride:   o.autoOverride,
+	}, nil
 }
 
 // engageWorkspaceDir returns dir when set, else a fresh, timestamped

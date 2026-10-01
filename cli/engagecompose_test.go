@@ -50,8 +50,8 @@ func TestBuildEngageGateOneCompositionRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	extGate := buildEngageGate(ws, extScope, secgate.Auto, nil, secgate.NewSessionApprovals(), t.TempDir(), nil)
-	localGate := buildEngageGate(ws, localScope, secgate.Auto, fakeConfirmer{}, secgate.NewSessionApprovals(), t.TempDir(), nil)
+	extGate := buildEngageGate(ws, extScope, secgate.Auto, nil, secgate.NewSessionApprovals(), t.TempDir(), gatePolicy{}, nil)
+	localGate := buildEngageGate(ws, localScope, secgate.Auto, fakeConfirmer{}, secgate.NewSessionApprovals(), t.TempDir(), gatePolicy{}, nil)
 
 	protMD, protJSON := reportPaths(ws.Dir)
 	want := []string{
@@ -89,3 +89,35 @@ func TestBuildEngageGateOneCompositionRoot(t *testing.T) {
 type fakeConfirmer struct{}
 
 func (fakeConfirmer) Confirm(context.Context, secgate.Command) bool { return true }
+
+func TestBuildEngageGateSetsConfigPolicy(t *testing.T) {
+	dir := t.TempDir()
+	ws, err := engagement.OpenWorkspace(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	scope, err := secgate.ParseScope(strings.NewReader("10.0.0.5\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol := gatePolicy{
+		DeniedBinaries:      []string{"nc"},
+		UnattendedAllow:     secgate.NewAllowlist("nmap"),
+		AllowInterpreterPoC: true,
+		AutoScopeOverride:   true,
+	}
+	g := buildEngageGate(ws, scope, secgate.Auto, nil, secgate.NewSessionApprovals(), t.TempDir(), pol, nil)
+	if len(g.ConfigDenied) != 1 || g.ConfigDenied[0] != "nc" {
+		t.Errorf("ConfigDenied not threaded: %v", g.ConfigDenied)
+	}
+	if g.UnattendedAllow == nil || !g.UnattendedAllow.Permits("nmap") {
+		t.Error("UnattendedAllow not threaded")
+	}
+	if !g.AllowInterpreterPoC {
+		t.Error("AllowInterpreterPoC not threaded")
+	}
+	if !g.AutoScopeOverride {
+		t.Error("AutoScopeOverride not threaded")
+	}
+}

@@ -252,7 +252,7 @@ func (svc engageService) handle(ctx context.Context, ss *mcp.ServerSession, in m
 	}
 	defer os.RemoveAll(scratch)
 
-	gate := buildEngageGate(ws, p.Scope, mode, confirm, approvals, scratch, func(action, detail string) {
+	gate := buildEngageGate(ws, p.Scope, mode, confirm, approvals, scratch, gatePolicy{}, func(action, detail string) {
 		_ = ws.AuditLine("secgate", action, detail)
 	})
 	if err := gate.Start(); err != nil {
