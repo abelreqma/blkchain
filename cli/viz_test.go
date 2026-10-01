@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	eng "blkchain/cli/internal/engagement"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 )
@@ -26,10 +27,10 @@ func (f *fakeRunner) Render(_ context.Context, _ string, _ bool) (string, error)
 	return f.out, f.err
 }
 
-func sampleEngagement(rev int64) Engagement {
-	return Engagement{Revision: rev, Name: "acme", Tasks: []Task{
-		{ID: "t1", Kind: "recon", Objective: "enumerate host", Status: TaskDone},
-		{ID: "t2", Kind: "web", Objective: "SQLi on /login", Status: TaskActive, DependsOn: []string{"t1"}},
+func sampleEngagement(rev int64) eng.Engagement {
+	return eng.Engagement{Revision: rev, Name: "acme", Tasks: []eng.Task{
+		{ID: "t1", Kind: "recon", Objective: "enumerate host", Status: eng.StatusDone},
+		{ID: "t2", Kind: "web", Objective: "SQLi on /login", Status: eng.StatusActive, DependsOn: []string{"t1"}},
 	}}
 }
 
@@ -81,7 +82,7 @@ func TestVizFallbackOnRunnerError(t *testing.T) {
 }
 
 func TestVizMermaidCyclicAndDanglingSafe(t *testing.T) {
-	e := Engagement{Revision: 1, Tasks: []Task{
+	e := eng.Engagement{Revision: 1, Tasks: []eng.Task{
 		{ID: "a", Kind: "x", Objective: "a", DependsOn: []string{"b"}},
 		{ID: "b", Kind: "x", Objective: "b", DependsOn: []string{"a", "ghost"}},
 	}}
@@ -92,7 +93,7 @@ func TestVizMermaidCyclicAndDanglingSafe(t *testing.T) {
 }
 
 func TestVizMermaidDropsInvalidIDs(t *testing.T) {
-	e := Engagement{Revision: 1, Tasks: []Task{
+	e := eng.Engagement{Revision: 1, Tasks: []eng.Task{
 		{ID: "ok1", Kind: "recon", Objective: "fine"},
 		{ID: `x["evil"]`, Kind: "x", Objective: "quote"},
 		{ID: "a --> b", Kind: "x", Objective: "arrow"},
@@ -138,18 +139,18 @@ func vizForceColor(t *testing.T) {
 
 func TestVizColorizeStylesEachSpanOnSharedRow(t *testing.T) {
 	vizForceColor(t)
-	e := Engagement{Tasks: []Task{
-		{ID: "a", Kind: "recon", Objective: "scan", Status: TaskActive},
-		{ID: "b", Kind: "web", Objective: "SQLi", Status: TaskDone},
+	e := eng.Engagement{Tasks: []eng.Task{
+		{ID: "a", Kind: "recon", Objective: "scan", Status: eng.StatusActive},
+		{ID: "b", Kind: "web", Objective: "SQLi", Status: eng.StatusDone},
 	}}
 	body := "| recon: scan |   | web: SQLi |\n+-------------+"
 	got := vizColorize(body, e)
-	want := "| " + vizStatusStyle(TaskActive).Render("recon: scan") + " |   | " +
-		vizStatusStyle(TaskDone).Render("web: SQLi") + " |\n+-------------+"
+	want := "| " + vizStatusStyle(eng.StatusActive).Render("recon: scan") + " |   | " +
+		vizStatusStyle(eng.StatusDone).Render("web: SQLi") + " |\n+-------------+"
 	if got != want {
 		t.Fatalf("spans not styled independently:\n got %q\nwant %q", got, want)
 	}
-	if vizStatusStyle(TaskActive).Render("x") == vizStatusStyle(TaskDone).Render("x") {
+	if vizStatusStyle(eng.StatusActive).Render("x") == vizStatusStyle(eng.StatusDone).Render("x") {
 		t.Fatal("test needs distinct status styles")
 	}
 	if stripANSI(got) != body {
@@ -164,14 +165,14 @@ func TestVizColorizeStylesEachSpanOnSharedRow(t *testing.T) {
 
 func TestVizColorizeSubstringLabelDoesNotWin(t *testing.T) {
 	vizForceColor(t)
-	e := Engagement{Tasks: []Task{
-		{ID: "a", Kind: "web", Objective: "", Status: TaskDone},       // label "web:"
-		{ID: "b", Kind: "web", Objective: "SQLi", Status: TaskActive}, // label "web: SQLi"
+	e := eng.Engagement{Tasks: []eng.Task{
+		{ID: "a", Kind: "web", Objective: "", Status: eng.StatusDone},       // label "web:"
+		{ID: "b", Kind: "web", Objective: "SQLi", Status: eng.StatusActive}, // label "web: SQLi"
 	}}
 	body := "| web: SQLi |  | web: |"
 	got := vizColorize(body, e)
-	want := "| " + vizStatusStyle(TaskActive).Render("web: SQLi") + " |  | " +
-		vizStatusStyle(TaskDone).Render("web:") + " |"
+	want := "| " + vizStatusStyle(eng.StatusActive).Render("web: SQLi") + " |  | " +
+		vizStatusStyle(eng.StatusDone).Render("web:") + " |"
 	if got != want {
 		t.Fatalf("substring pair miscolored:\n got %q\nwant %q", got, want)
 	}
@@ -228,14 +229,14 @@ func vizNodeLine(t *testing.T, mermaid, id string) string {
 	return ""
 }
 
-func basisEngagement(tasks ...Task) Engagement {
-	return Engagement{Revision: 1, Name: "acme", Tasks: tasks}
+func basisEngagement(tasks ...eng.Task) eng.Engagement {
+	return eng.Engagement{Revision: 1, Name: "acme", Tasks: tasks}
 }
 
 func TestVizMermaidBasisEdgeEmitted(t *testing.T) {
 	m := vizMermaid(basisEngagement(
-		Task{ID: "t1", Kind: "recon", Objective: "scan"},
-		Task{ID: "t2", Kind: "web", Objective: "probe", BasisIDs: []string{"t1"}},
+		eng.Task{ID: "t1", Kind: "recon", Objective: "scan"},
+		eng.Task{ID: "t2", Kind: "web", Objective: "probe", BasisIDs: []string{"t1"}},
 	))
 	if !strings.Contains(m, "t1 -.-> t2") {
 		t.Fatalf("missing basis edge: %q", m)
@@ -244,8 +245,8 @@ func TestVizMermaidBasisEdgeEmitted(t *testing.T) {
 
 func TestVizMermaidBasisDedupsAgainstDependsOn(t *testing.T) {
 	m := vizMermaid(basisEngagement(
-		Task{ID: "t1", Kind: "recon", Objective: "scan"},
-		Task{ID: "t2", Kind: "web", Objective: "probe", DependsOn: []string{"t1"}, BasisIDs: []string{"t1"}},
+		eng.Task{ID: "t1", Kind: "recon", Objective: "scan"},
+		eng.Task{ID: "t2", Kind: "web", Objective: "probe", DependsOn: []string{"t1"}, BasisIDs: []string{"t1"}},
 	))
 	if strings.Count(m, "t1 --> t2") != 1 {
 		t.Fatalf("want exactly one solid edge: %q", m)
@@ -257,8 +258,8 @@ func TestVizMermaidBasisDedupsAgainstDependsOn(t *testing.T) {
 
 func TestVizMermaidBasisUnknownAndSelfDropped(t *testing.T) {
 	m := vizMermaid(basisEngagement(
-		Task{ID: "t1", Kind: "recon", Objective: "scan", BasisIDs: []string{"t1"}},
-		Task{ID: "t2", Kind: "web", Objective: "probe", BasisIDs: []string{"nope", "bad id\n-->x"}},
+		eng.Task{ID: "t1", Kind: "recon", Objective: "scan", BasisIDs: []string{"t1"}},
+		eng.Task{ID: "t2", Kind: "web", Objective: "probe", BasisIDs: []string{"nope", "bad id\n-->x"}},
 	))
 	if strings.Contains(m, "-.->") {
 		t.Fatalf("unknown or self basis produced an edge: %q", m)
@@ -268,11 +269,11 @@ func TestVizMermaidBasisUnknownAndSelfDropped(t *testing.T) {
 func TestVizMermaidDomainIconNerdTier(t *testing.T) {
 	vizForceTier(t, plNerd)
 	m := vizMermaid(basisEngagement(
-		Task{ID: "a", Kind: "recon", Objective: "scan"},
-		Task{ID: "b", Kind: " Web ", Objective: "probe"},
-		Task{ID: "c", Kind: "mystery", Objective: "x"},
-		Task{ID: "d", Kind: "local", Objective: "privesc"},
-		Task{ID: "e", Kind: "target-analysis", Objective: "parse"},
+		eng.Task{ID: "a", Kind: "recon", Objective: "scan"},
+		eng.Task{ID: "b", Kind: " Web ", Objective: "probe"},
+		eng.Task{ID: "c", Kind: "mystery", Objective: "x"},
+		eng.Task{ID: "d", Kind: "local", Objective: "privesc"},
+		eng.Task{ID: "e", Kind: "target-analysis", Objective: "parse"},
 	))
 	for id, glyph := range map[string]string{"a": "\U000F2B10", "b": "\U000F2B11", "c": "\U000F2B17", "d": "\U000F2B18", "e": "\U000F2B19"} {
 		if ln := vizNodeLine(t, m, id); !strings.Contains(ln, "["+glyph+" ") {
@@ -285,8 +286,8 @@ func TestVizMermaidDomainIconAbsentOutsideNerd(t *testing.T) {
 	for _, tier := range []plTier{plASCII, plUnicode} {
 		vizForceTier(t, tier)
 		m := vizMermaid(basisEngagement(
-			Task{ID: "a", Kind: "recon", Objective: "scan"},
-			Task{ID: "b", Kind: "web", Objective: "probe"},
+			eng.Task{ID: "a", Kind: "recon", Objective: "scan"},
+			eng.Task{ID: "b", Kind: "web", Objective: "probe"},
 		))
 		for _, r := range m {
 			if r >= 0xF2B00 && r <= 0xF2BFF {
@@ -303,8 +304,8 @@ func TestVizMultipleActiveNodesStyledWarn(t *testing.T) {
 	vizForceColor(t)
 	vizForceTier(t, plNerd)
 	e := basisEngagement(
-		Task{ID: "a", Kind: "recon", Objective: "scan", Status: TaskActive},
-		Task{ID: "b", Kind: "web", Objective: "SQLi", Status: TaskActive},
+		eng.Task{ID: "a", Kind: "recon", Objective: "scan", Status: eng.StatusActive},
+		eng.Task{ID: "b", Kind: "web", Objective: "SQLi", Status: eng.StatusActive},
 	)
 	m := vizMermaid(e)
 	if !strings.Contains(m, "a[") || !strings.Contains(m, "b[") {
@@ -313,7 +314,7 @@ func TestVizMultipleActiveNodesStyledWarn(t *testing.T) {
 	fr := &fakeRunner{out: "| \U000F2B10 recon: scan |   | \U000F2B11 web: SQLi |"}
 	block := newVizRenderer(fr).blockFor(context.Background(), e)
 	for _, label := range []string{"recon: scan", "web: SQLi"} {
-		if !strings.Contains(block, vizStatusStyle(TaskActive).Render(label)) {
+		if !strings.Contains(block, vizStatusStyle(eng.StatusActive).Render(label)) {
 			t.Fatalf("%q not styled Warn: %q", label, block)
 		}
 	}

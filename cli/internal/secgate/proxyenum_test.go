@@ -151,6 +151,7 @@ func TestProxyAuditIgnoresHeadersAndData(t *testing.T) {
 // Legitimate in-scope proxy usage stays allowed, and so does every command with
 // no proxy at all.
 func TestProxyInScopeUsageAllowedByGate(t *testing.T) {
+	stubEnumFixtureResolver(t)
 	g := newEnumGate(t, "curl", "nmap")
 	for _, c := range []Command{
 		{Binary: "curl", Args: []string{"http://10.0.0.5/path"}},

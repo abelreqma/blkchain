@@ -59,6 +59,35 @@ func TestLocalProfileKeepsEnforceabilityDenials(t *testing.T) {
 	}
 }
 
+func TestLocalProfileDeniesExecWrappersAndMacInterpreters(t *testing.T) {
+	g := localGate(t, "local\n")
+	denied := []Command{
+		{Binary: "nsenter", Args: []string{"-t", "1", "-m"}},
+		{Binary: "unshare", Args: []string{"-r"}},
+		{Binary: "setpriv", Args: []string{"--reuid", "0"}},
+		{Binary: "flock", Args: []string{"/tmp/x", "id"}},
+		{Binary: "capsh", Args: []string{"--"}},
+		{Binary: "ionice", Args: []string{"-c", "3", "id"}},
+		{Binary: "taskset", Args: []string{"-c", "0", "id"}},
+		{Binary: "setarch", Args: []string{"x86_64", "id"}},
+		{Binary: "chrt", Args: []string{"-f", "99", "id"}},
+		{Binary: "runcon", Args: []string{"unconfined_t", "id"}},
+		{Binary: "eatmydata", Args: []string{"id"}},
+		{Binary: "expect", Args: []string{"-c", "spawn id"}},
+		{Binary: "tclsh"},
+		{Binary: "wish"},
+		{Binary: "osascript", Args: []string{"-e", "do shell script \"id\""}},
+		{Binary: "lldb", Args: []string{"-o", "run"}},
+		{Binary: "dtrace", Args: []string{"-n", "syscall:::entry"}},
+		{Binary: "/usr/bin/osascript", Args: []string{"-e", "x"}}, // path-qualified still denied by base name
+	}
+	for _, c := range denied {
+		if d := g.Authorize(context.Background(), c); d.Allowed {
+			t.Errorf("%q must be denied in the local profile (S1)", c.Binary)
+		}
+	}
+}
+
 // The known per-binary code-exec flags stay denied in local mode, in every
 // spelling the external profile denies, and the same tools run without them.
 func TestLocalProfileDeniesCodeExecFlags(t *testing.T) {

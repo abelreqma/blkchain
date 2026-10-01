@@ -8,12 +8,14 @@ implements.
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
 from pathlib import Path
 from typing import Iterable, Iterator
 
 import pypdf
-from langchain_text_splitters import Language, MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 
 from . import config
 from .schema import Chunk, chunk_id
@@ -29,7 +31,13 @@ try:
         # (e.g. "<|endoftext|>", common in prompt-injection payloads) are counted
         # as normal text instead of raising ValueError.
         return len(_ENCODER.encode(text, disallowed_special=()))
-except Exception:
+except Exception as _tiktoken_exc:  # noqa: BLE001
+    # Log loudly: the length/4 estimate shifts chunk boundaries versus a real
+    # build, so a silent fallback would change the index without a trace (PI9).
+    print(f"[ingest] WARNING: tiktoken encoding unavailable ({type(_tiktoken_exc).__name__}); "
+          "falling back to a length/4 token estimate, which shifts chunk boundaries",
+          file=sys.stderr, flush=True)
+
     def _count_tokens(text: str) -> int:  # offline fallback: ~4 chars/token
         return max(1, len(text) // 4)
 
@@ -77,10 +85,6 @@ _SECLISTS_CONTENT_EXTS = {".php", ".jsp", ".asp", ".py", ".sh", ".xml", ".svg"}
 
 _PAYLOAD_CONTENT_EXTS = {".txt", ".php", ".py", ".xml", ".xsl", ".svg"}
 
-_MD_HEADERS: list[tuple[str, str]] = [
-    ("#", "h1"), ("##", "h2"), ("###", "h3"), ("####", "h4"), ("#####", "h5"),
-]
-
 
 def _extract_identifiers(text: str) -> dict[str, list[str]]:
     ids: dict[str, list[str]] = {}
@@ -93,11 +97,26 @@ def _extract_identifiers(text: str) -> dict[str, list[str]]:
     return ids
 
 
+# Keywords checked longest-first so a longer phrase wins over a shorter one it
+# contains (e.g. "nosql injection" before "sql injection"); word-boundary
+# matching (below) then keeps a short acronym from matching inside a word.
+_CWE_KEYWORDS_BY_LEN = tuple(sorted(_CWE_KEYWORDS, key=lambda kv: len(kv[0]), reverse=True))
+
+
 def _cwe_class_from_path(path_str: str) -> str | None:
-    low = path_str.lower()
-    for keyword, tag in _CWE_KEYWORDS:
-        if keyword in low:
-            return tag
+    """Map a path to a CWE-concept tag.
+
+    Matches on word boundaries (so "selfie" does not match "lfi", "corridor"
+    does not match "idor"), normalizes '-'/'_' to spaces (so "sql-injection"
+    matches the "sql injection" phrase), and prefers the leaf filename and its
+    parent directory over the full path (a leaf concept wins over a distant
+    ancestor)."""
+    p = Path(path_str)
+    for raw in (p.stem, p.parent.name, path_str):
+        haystack = raw.lower().replace("-", " ").replace("_", " ")
+        for keyword, tag in _CWE_KEYWORDS_BY_LEN:
+            if re.search(r"\b" + re.escape(keyword) + r"\b", haystack):
+                return tag
     return None
 
 
@@ -117,22 +136,70 @@ def _source_name(spec: config.SourceSpec) -> str:
     return "ai-pentest" if spec.name == "ai-pentest-pdf" else spec.name
 
 
-def _is_excluded(path: Path, exclude: tuple[str, ...]) -> bool:
-    s = str(path)
-    return any(frag in s for frag in exclude)
+def _is_excluded(path: Path, exclude: tuple[str, ...], root: Path | None = None) -> bool:
+    """True if `path` matches an exclude fragment, evaluated relative to `root`
+    (PI7). A fragment matches when it equals a path COMPONENT (a directory or
+    file name, e.g. "docs", ".obsidian", "LICENSE.md") or, for an extension-like
+    fragment (leading "."), when the file NAME ends with it (".png", ".tar.gz").
+    This stops "docs" from dropping ".../mydocs/..." and ".png" from dropping
+    "foo.png.md"."""
+    rel = path
+    if root is not None:
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            rel = path
+    parts = set(rel.parts)
+    name = rel.name.lower()
+    for frag in exclude:
+        if frag in parts:
+            return True
+        if frag.startswith(".") and name.endswith(frag.lower()):
+            return True
+    return False
+
+
+# Files never ingested regardless of extension: dotfiles and credential/secret
+# material. Skipping these keeps a private key or a .env out of the index if it
+# happens to sit inside a corpus directory or a `blk add <dir>` target.
+_SECRET_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".env",
+                 ".netrc", ".htpasswd", ".pgpass", "credentials"}
+_SECRET_EXTS = {".pem", ".key", ".p12", ".pfx", ".keystore", ".jks"}
+
+
+def _is_secret_like(p: Path) -> bool:
+    """True for a dotfile or a credential/secret-looking file that must never be
+    ingested (defense against leaking a key/.env sitting in a corpus tree)."""
+    name = p.name
+    if name.startswith("."):
+        return True
+    if name in _SECRET_NAMES:
+        return True
+    return p.suffix.lower() in _SECRET_EXTS
 
 
 def _iter_files(root: Path, exts: set[str] | None, exclude: tuple[str, ...]) -> Iterator[Path]:
     if not root.exists():
         return
-    for p in sorted(root.rglob("*")):
-        if not p.is_file():
-            continue
-        if _is_excluded(p, exclude):
-            continue
-        if exts is not None and p.suffix.lower() not in exts:
-            continue
-        yield p
+    # os.walk with followlinks=False so a symlinked directory is never descended
+    # into (it could point outside the corpus/add root); symlinked files are
+    # skipped explicitly below. This closes the "ingest follows symlinks out of
+    
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames.sort()
+        # Drop symlinked subdirectories so the walk stays inside the real tree.
+        dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
+        for name in sorted(filenames):
+            p = Path(dirpath) / name
+            if p.is_symlink() or not p.is_file():
+                continue
+            if _is_secret_like(p):
+                continue
+            if _is_excluded(p, exclude, root):
+                continue
+            if exts is not None and p.suffix.lower() not in exts:
+                continue
+            yield p
 
 
 # Map a file extension to a langchain Language for code-aware splitting. Names
@@ -177,23 +244,76 @@ def _recursive_split(text: str, ext: str | None = None) -> list[str]:
     return splitter.split_text(text)
 
 
+_FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
+_HEADER_RE = re.compile(r"^(#{1,5})\s+(.*)$")
+
+
 def _markdown_sections(text: str) -> list[tuple[str, str]]:
-    """Split markdown into (heading breadcrumb, section_text) pairs."""
-    splitter = MarkdownHeaderTextSplitter(headers_to_split_on=_MD_HEADERS, strip_headers=False)
-    docs = splitter.split_text(text)
-    if not docs:
+    """Split markdown into (heading breadcrumb, section_text) pairs, fence-aware.
+
+    A manual line scanner that tracks fenced code blocks (``` / ~~~), so a '#'
+    line inside a fence is NOT treated as a heading, and keeps raw lines so code
+    indentation is preserved. The breadcrumb is the '>'-joined header path, and
+    the header line stays in its section (strip_headers=False behavior). Any
+    preamble before the first header is its own section with an empty breadcrumb.
+    """
+    header_stack: list[tuple[int, str]] = []
+    sections: list[tuple[str, str]] = []
+    cur: list[str] = []
+    in_fence = False
+    fence_marker: str | None = None
+
+    def breadcrumb() -> str:
+        return " > ".join(title for _, title in header_stack)
+
+    def flush() -> None:
+        if cur:
+            body = "".join(cur)
+            if body.strip():
+                sections.append((breadcrumb(), body))
+
+    for line in text.splitlines(keepends=True):
+        fence = _FENCE_RE.match(line)
+        if fence:
+            marker = fence.group(1)[:3]  # normalize to ``` / ~~~
+            if not in_fence:
+                in_fence, fence_marker = True, marker
+            elif marker == fence_marker:
+                in_fence, fence_marker = False, None
+            cur.append(line)
+            continue
+        if not in_fence:
+            m = _HEADER_RE.match(line)
+            if m:
+                flush()
+                level = len(m.group(1))
+                title = m.group(2).strip()
+                while header_stack and header_stack[-1][0] >= level:
+                    header_stack.pop()
+                header_stack.append((level, title))
+                cur = [line]  # keep the header line in its own section
+                continue
+        cur.append(line)
+    flush()
+    if not sections:
         return [("", text)] if text.strip() else []
-    out = []
-    for doc in docs:
-        breadcrumb = " > ".join(str(v) for v in doc.metadata.values() if v)
-        out.append((breadcrumb, doc.page_content))
-    return out
+    return sections
+
+
+def _read_text_capped(file_path: Path) -> str | None:
+    """Read a text file into memory bounded by MAX_TEXT_FILE_BYTES, so a
+    pathologically large file cannot be fully materialized (PI3). Returns None on
+    a read error."""
+    try:
+        raw = file_path.read_bytes()[: config.MAX_TEXT_FILE_BYTES]
+    except OSError:
+        return None
+    return raw.decode("utf-8", errors="ignore")
 
 
 def _chunk_markdown_file(file_path: Path, source: str, chunk_type: str) -> Iterator[Chunk]:
-    try:
-        text = file_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+    text = _read_text_capped(file_path)
+    if text is None:
         return
     if not text.strip():
         return
@@ -206,7 +326,7 @@ def _chunk_markdown_file(file_path: Path, source: str, chunk_type: str) -> Itera
             if not piece:
                 continue
             yield Chunk(
-                id=chunk_id(path_str, str(idx)),
+                id=chunk_id(source, path_str, str(idx)),
                 text=piece,
                 source=source,
                 path=path_str,
@@ -226,11 +346,8 @@ def _chunk_markdown_dir(spec: config.SourceSpec) -> Iterator[Chunk]:
 
 
 def _chunk_plain_file(file_path: Path, source: str, chunk_type: str, base_dir: Path) -> Iterator[Chunk]:
-    try:
-        text = file_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return
-    if not text.strip():
+    text = _read_text_capped(file_path)
+    if text is None or not text.strip():
         return
     path_str = _rel_path(file_path)
     cwe = _cwe_class_from_path(path_str)
@@ -244,7 +361,7 @@ def _chunk_plain_file(file_path: Path, source: str, chunk_type: str, base_dir: P
         if not piece:
             continue
         yield Chunk(
-            id=chunk_id(path_str, str(i)),
+            id=chunk_id(source, path_str, str(i)),
             text=piece,
             source=source,
             path=path_str,
@@ -275,11 +392,19 @@ def _chunk_pdf(spec: config.SourceSpec) -> Iterator[Chunk]:
         return
     path_str = _rel_path(file_path)
     cwe = _cwe_class_from_path(path_str)
-    reader = pypdf.PdfReader(str(file_path))
-    for page_num, page in enumerate(reader.pages, start=1):
+    try:
+        reader = pypdf.PdfReader(str(file_path))
+        pages = list(enumerate(reader.pages, start=1))
+    except Exception as exc:  # noqa: BLE001 - a corrupt PDF must not abort the source
+        print(f"[ingest] WARNING: cannot read PDF {file_path}: {type(exc).__name__}",
+              file=sys.stderr, flush=True)
+        return
+    page_errors = 0
+    for page_num, page in pages:
         try:
             text = (page.extract_text() or "").strip()
         except Exception:
+            page_errors += 1
             continue
         if not text:
             continue
@@ -290,7 +415,7 @@ def _chunk_pdf(spec: config.SourceSpec) -> Iterator[Chunk]:
             if not piece:
                 continue
             yield Chunk(
-                id=chunk_id(path_str, f"{page_num}-{i}"),
+                id=chunk_id(source, path_str, f"{page_num}-{i}"),
                 text=piece,
                 source=source,
                 path=path_str,
@@ -299,6 +424,9 @@ def _chunk_pdf(spec: config.SourceSpec) -> Iterator[Chunk]:
                 identifiers=_extract_identifiers(piece),
                 cwe_class=cwe,
             )
+    if page_errors:
+        print(f"[ingest] WARNING: {file_path}: skipped {page_errors} page(s) on extract error",
+              file=sys.stderr, flush=True)
 
 
 def _chunk_skills(spec: config.SourceSpec) -> Iterator[Chunk]:
@@ -332,18 +460,30 @@ def _infer_purpose(file_path: Path, root: Path) -> str:
     return f"{readme_snip} ({name_guess})" if readme_snip else name_guess
 
 
-def _file_stats(file_path: Path, max_sample: int = 5) -> tuple[int, int, list[str]]:
-    """Stream a file for (size_bytes, line_count, sample_lines) without
-    ever loading a multi-GB wordlist fully into memory."""
+def _file_stats(file_path: Path, max_sample: int = 5,
+                sample_char_cap: int = 200) -> tuple[int, int, list[str]]:
+    """Stream a file for (size_bytes, line_count, sample_lines) with bounded
+    memory (PI2): count newlines in 1 MiB blocks (never buffers an unbounded
+    line), cap each sample line to `sample_char_cap` chars, and treat a file with
+    a NUL byte in the first 8 KiB as binary (no samples)."""
     size_bytes = file_path.stat().st_size
     line_count = 0
     sample_lines: list[str] = []
     try:
         with file_path.open("rb") as f:
-            for raw_line in f:
-                line_count += 1
-                if len(sample_lines) < max_sample:
-                    sample_lines.append(raw_line.decode("utf-8", errors="ignore").rstrip())
+            head = f.read(8192)
+            if b"\x00" in head:  # binary: do not scan or sample
+                return size_bytes, 0, []
+            for raw in head.split(b"\n"):
+                if len(sample_lines) >= max_sample:
+                    break
+                sample_lines.append(raw.decode("utf-8", errors="ignore").rstrip()[:sample_char_cap])
+            line_count = head.count(b"\n")
+            while True:
+                block = f.read(1024 * 1024)
+                if not block:
+                    break
+                line_count += block.count(b"\n")
     except OSError:
         pass
     return size_bytes, line_count, sample_lines
@@ -392,7 +532,7 @@ def _chunk_seclists_file(file_path: Path, source: str, root: Path) -> Iterator[C
                     if not piece:
                         continue
                     yield Chunk(
-                        id=chunk_id(path_str, str(i)),
+                        id=chunk_id(source, path_str, str(i)),
                         text=piece,
                         source=source,
                         path=path_str,
@@ -408,7 +548,7 @@ def _chunk_seclists_file(file_path: Path, source: str, root: Path) -> Iterator[C
     purpose = _infer_purpose(file_path, root)
     card = _manifest_card(path_str, category, file_path.name, purpose, line_count, size_bytes, sample_lines)
     yield Chunk(
-        id=chunk_id(path_str, "manifest"),
+        id=chunk_id(source, path_str, "manifest"),
         text=card,
         source=source,
         path=path_str,
@@ -426,41 +566,60 @@ def _chunk_seclists(spec: config.SourceSpec) -> Iterator[Chunk]:
         yield from _chunk_seclists_file(file_path, source, spec.path)
 
 
+def _json_str(v) -> str:
+    """Coerce a JSON field to a string, treating any non-string as empty rather
+    than str()-ing a list/dict into junk text (PI1)."""
+    return v if isinstance(v, str) else ""
+
+
 def _chunk_arsenal_json(spec: config.SourceSpec) -> Iterator[Chunk]:
     source = _source_name(spec)
     for file_path in _iter_files(spec.path, {".json"}, spec.exclude):
         try:
+            if file_path.stat().st_size > config.MAX_JSON_FILE_BYTES:
+                print(f"[ingest] WARNING: skipping oversized JSON {file_path} "
+                      f"(> {config.MAX_JSON_FILE_BYTES} bytes)", file=sys.stderr, flush=True)
+                continue
             data = json.loads(file_path.read_text(encoding="utf-8", errors="ignore"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError, RecursionError):
+            # ValueError covers json.JSONDecodeError; RecursionError guards a
+            # deeply-nested (malformed/hostile) document. One bad file must not
+            # abort the whole source.
             continue
         if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
             continue
         path_str = _rel_path(file_path)
         cwe = _cwe_class_from_path(file_path.stem.replace("-", " ").replace("_", " "))
-        category = data.get("category", "")
+        category = _json_str(data.get("category"))
         idx = 0
         for entry in data["entries"]:
             if not isinstance(entry, dict):
                 continue
-            title = entry.get("title") or ""
-            body = entry.get("body") or ""
+            title = _json_str(entry.get("title"))
+            body = _json_str(entry.get("body"))
             if not body.strip():
-                body = (entry.get("meta") or {}).get("caption") or ""
+                meta = entry.get("meta")
+                body = _json_str(meta.get("caption")) if isinstance(meta, dict) else ""
             if not title.strip() and not body.strip():
                 continue
             text = f"{title}\n\n{body}".strip()
-            section = f"{category} > {entry.get('subcategory', '')}".strip()
+            section = f"{category} > {_json_str(entry.get('subcategory'))}".strip()
             section = section.removesuffix(">").strip()
-            yield Chunk(
-                id=chunk_id(path_str, str(idx)),
-                text=text,
-                source=source,
-                path=path_str,
-                section=section,
-                type="technique",
-                identifiers=_extract_identifiers(text),
-                cwe_class=cwe,
-            )
+            # Split a long technique body so no single chunk is unbounded (PI1).
+            for j, piece in enumerate(_recursive_split(text)):
+                piece = piece.strip()
+                if not piece:
+                    continue
+                yield Chunk(
+                    id=chunk_id(source, path_str, f"{idx}-{j}"),
+                    text=piece,
+                    source=source,
+                    path=path_str,
+                    section=section,
+                    type="technique",
+                    identifiers=_extract_identifiers(piece),
+                    cwe_class=cwe,
+                )
             idx += 1
 
 

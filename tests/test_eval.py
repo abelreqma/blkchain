@@ -229,6 +229,47 @@ class MissingBinaryTest(unittest.TestCase):
         self.assertIn("BlkError", reason)
 
 
+class MainExitCodeTest(FakeBlkTestCase):
+    """PI11: main() must return non-zero on any case error or below --min-hit5,
+    guard n==0, and reject a negative --limit/--judge-limit."""
+
+    def _run_main(self, argv, dataset):
+        report = self.dir / "report.md"
+        with mock.patch.object(run, "load_dataset", return_value=dataset), \
+             mock.patch.object(run, "REPORT_PATH", report), \
+             mock.patch.object(sys, "argv", ["run", *argv]):
+            return run.main()
+
+    def test_nonzero_when_a_case_errors(self):
+        self.fake_blk("sys.exit(1)")
+        rc = self._run_main(["--no-judge"], [Case("q", ["metadata"])])
+        self.assertNotEqual(rc, 0)
+
+    def test_zero_when_all_hit_and_no_error(self):
+        self.emit(_SEARCH_JSON)
+        rc = self._run_main(["--no-judge"], [Case("q", ["metadata"])])
+        self.assertEqual(rc, 0)
+
+    def test_min_hit5_below_threshold_is_nonzero(self):
+        self.emit({"results": [{"payload": {"text": "unrelated", "source": "s"}}]})
+        rc = self._run_main(["--no-judge", "--min-hit5", "0.9"], [Case("q", ["metadata"])])
+        self.assertNotEqual(rc, 0)
+
+    def test_empty_dataset_does_not_zerodivide(self):
+        rc = self._run_main(["--no-judge"], [])
+        self.assertNotEqual(rc, 0)  # nothing evaluated is a failure, not a crash
+
+    def test_negative_limit_rejected(self):
+        with mock.patch.object(sys, "argv", ["run", "--no-judge", "--limit", "-1"]):
+            rc = run.main()
+        self.assertEqual(rc, 2)
+
+    def test_negative_judge_limit_rejected(self):
+        with mock.patch.object(sys, "argv", ["run", "--judge-limit", "-1"]):
+            rc = run.main()
+        self.assertEqual(rc, 2)
+
+
 class BlkAnswerTest(FakeBlkTestCase):
     def test_success(self):
         self.emit({"answer": "a [1]", "citations": [{"source": "s", "path": "p", "section": ""}],

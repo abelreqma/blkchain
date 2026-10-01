@@ -51,6 +51,7 @@ func TestDNSEnumBenignInvocationsAllowed(t *testing.T) {
 }
 
 func TestDNSEnumGateAllowsBenignInScope(t *testing.T) {
+	stubEnumFixtureResolver(t)
 	scope, err := ParseScope(strings.NewReader("10.0.0.0/24\ncorp.example\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +131,7 @@ func TestDNSReconPathFlagsDeniedEverySpelling(t *testing.T) {
 // ExtractTargets skips a dash-led token with no '=', so a glued or bundled
 // short flag value would carry an unchecked target. The classifier denies it.
 func TestDNSReconGluedShortFlagTargetDeniedByGate(t *testing.T) {
+	stubEnumFixtureResolver(t)
 	scope, err := ParseScope(strings.NewReader("10.0.0.0/24\ncorp.example\n"))
 	if err != nil {
 		t.Fatal(err)

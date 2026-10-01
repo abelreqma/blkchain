@@ -23,7 +23,12 @@ import mlx.core as mx
 from mlx_lm import load as _load
 
 from blkchain import config as _config
-from blkchain.rerank_scores import SENTINEL_SCORE, partition_blank, sanitize_scores
+from blkchain.rerank_scores import (
+    SENTINEL_SCORE,
+    neutralize_control_tokens,
+    partition_blank,
+    sanitize_scores,
+)
 
 # Default task instruction (the reranker is instruction-aware; this matches the
 # model's default "query" prompt). Override-free: the offsec corpus is retrieval.
@@ -46,11 +51,15 @@ print("[reranker] ready", flush=True)
 
 def _score(query: str, doc: str) -> float:
     """P(document relevant) = softmax([logit(no), logit(yes)])[1] at last pos."""
+    # Neutralize control tokens so a poisoned document cannot inject judge-prompt
+    # structure (e.g. its own <|im_start|>...yes<|im_end|>) and pin to rank 1.
+    doc = neutralize_control_tokens(doc)
     content = f"<Instruct>: {_INSTRUCT}\n<Query>: {query}\n<Document>: {doc}"
     body = _HF.encode(content, add_special_tokens=False)[:_MAX_DOC_TOKENS]
     ids = _PRE + body + _SUF
     logits = _MODEL(mx.array([ids]))[:, -1, :]
-    pair = mx.stack([logits[0, _FALSE_ID], logits[0, _TRUE_ID]])
+    # Cast to float32 before softmax: bf16 logits soft-max imprecisely.
+    pair = mx.stack([logits[0, _FALSE_ID], logits[0, _TRUE_ID]]).astype(mx.float32)
     score = mx.exp((pair - mx.logsumexp(pair))[1])
     mx.eval(score)
     return float(score)

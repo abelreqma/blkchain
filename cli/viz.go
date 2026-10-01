@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	eng "blkchain/cli/internal/engagement"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -71,7 +72,7 @@ func domainIcon(kind string) string {
 // "kind: objective", sanitized, with a leading domain glyph in the nerd tier.
 // A task's basis ids become dotted edges unless a dependency edge already
 // covers the pair. It only reads e.
-func vizMermaid(e Engagement) string {
+func vizMermaid(e eng.Engagement) string {
 	known := make(map[string]bool, len(e.Tasks))
 	for _, t := range e.Tasks {
 		if vizIDRe.MatchString(t.ID) {
@@ -209,7 +210,7 @@ func (r *vizRenderer) Block(ctx context.Context, v EngagementView) (string, bool
 
 // blockFor renders one snapshot to a framed DAG block, or the plain list when
 // the renderer fails or returns nothing. It does no caching and no polling.
-func (r *vizRenderer) blockFor(ctx context.Context, e Engagement) string {
+func (r *vizRenderer) blockFor(ctx context.Context, e eng.Engagement) string {
 	body, rerr := r.run.Render(ctx, vizMermaid(e), plCurrentTier() == plASCII)
 	body = sanitizeTerminal(body) // renderer output is data: no escapes reach the screen
 	if rerr != nil || strings.TrimSpace(body) == "" {
@@ -218,13 +219,13 @@ func (r *vizRenderer) blockFor(ctx context.Context, e Engagement) string {
 	return vizFrame(e, vizColorize(body, e))
 }
 
-func vizStatusStyle(s TaskStatus) lipgloss.Style {
+func vizStatusStyle(s eng.Status) lipgloss.Style {
 	switch s {
-	case TaskDone:
+	case eng.StatusDone:
 		return lipgloss.NewStyle().Foreground(Success)
-	case TaskActive:
+	case eng.StatusActive:
 		return lipgloss.NewStyle().Foreground(Warn)
-	case TaskNA:
+	case eng.StatusNA:
 		return lipgloss.NewStyle().Foreground(Muted).Strikethrough(true)
 	}
 	return lipgloss.NewStyle().Foreground(Muted)
@@ -236,7 +237,7 @@ type vizSpan struct{ start, end, task int }
 // longest first (ties by task order) so a label that is a substring of another
 // does not win, and each match is claimed once so spans never overlap. Only the
 // matched span is styled, so boxes sharing a text row keep their own colors.
-func vizColorize(body string, e Engagement) string {
+func vizColorize(body string, e eng.Engagement) string {
 	labels := make([]string, len(e.Tasks))
 	order := make([]int, 0, len(e.Tasks))
 	seen := map[string]bool{}
@@ -296,17 +297,17 @@ func vizOverlaps(spans []vizSpan, s vizSpan) bool {
 }
 
 // vizFrame wraps the body in a header and a status caption ribbon.
-func vizFrame(e Engagement, body string) string {
+func vizFrame(e eng.Engagement, body string) string {
 	var done, active, todo, blocked, na int
 	for _, t := range e.Tasks {
 		switch t.Status {
-		case TaskDone:
+		case eng.StatusDone:
 			done++
-		case TaskActive:
+		case eng.StatusActive:
 			active++
-		case TaskBlocked:
+		case eng.StatusBlocked:
 			blocked++
-		case TaskNA:
+		case eng.StatusNA:
 			na++
 		default:
 			todo++
@@ -330,7 +331,7 @@ func vizFrame(e Engagement, body string) string {
 
 // vizFallbackList renders a plain indented task list when mmdflux is absent or
 // failed.
-func vizFallbackList(e Engagement) string {
+func vizFallbackList(e eng.Engagement) string {
 	var b strings.Builder
 	b.WriteString(Meta.Render(fmt.Sprintf("engagement %s rev %d (diagram renderer unavailable)", vizSanitizeLabel(e.Name), e.Revision)))
 	b.WriteString("\n")

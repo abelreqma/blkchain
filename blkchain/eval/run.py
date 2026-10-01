@@ -329,7 +329,10 @@ def _build_judge():
         """Wraps the local oMLX endpoint (temperature 0, thinking off)."""
 
         def __init__(self) -> None:
-            self._client = OpenAI(base_url=config.LLM_BASE_URL, api_key=config.omlx_api_key())
+            # Bound each judge call (a hung local endpoint must not stall the run)
+            # and do not auto-retry (a failed case is recorded, not retried) (PI12).
+            self._client = OpenAI(base_url=config.LLM_BASE_URL, api_key=config.omlx_api_key(),
+                                  timeout=120.0, max_retries=0)
             super().__init__(config.LLM_MODEL)
 
         def load_model(self):
@@ -444,6 +447,12 @@ def _fmt_pct(x: float) -> str:
     return f"{x * 100:.1f}%"
 
 
+def _ratio(numerator: int, denominator: int) -> float:
+    """Safe ratio: 0.0 when there are no cases, so an empty run does not divide
+    by zero (PI11)."""
+    return numerator / denominator if denominator else 0.0
+
+
 def build_report(
     case_results: list[CaseResult],
     top_k: int,
@@ -455,7 +464,7 @@ def build_report(
     n = len(case_results)
     hit5 = sum(1 for c in case_results if c.hit_at(5))
     hit10 = sum(1 for c in case_results if c.hit_at(10))
-    mrr = sum(c.mrr for c in case_results) / n if n else 0.0
+    mrr = _ratio(sum(c.mrr for c in case_results), n)
 
     lines: list[str] = []
     lines.append("# blkChain RAG evaluation report")
@@ -466,8 +475,8 @@ def build_report(
     lines.append("")
     lines.append("## Retrieval metrics (primary gate, deterministic)")
     lines.append("")
-    lines.append(f"- hit_rate@5:  **{_fmt_pct(hit5 / n)}** ({hit5}/{n})")
-    lines.append(f"- hit_rate@10: **{_fmt_pct(hit10 / n)}** ({hit10}/{n})")
+    lines.append(f"- hit_rate@5:  **{_fmt_pct(_ratio(hit5, n))}** ({hit5}/{n})")
+    lines.append(f"- hit_rate@10: **{_fmt_pct(_ratio(hit10, n))}** ({hit10}/{n})")
     lines.append(f"- MRR:         **{mrr:.3f}**")
     for label, h, t in _breakdown_by_difficulty(case_results):
         lines.append(f"- hit_rate@5 ({label}): {_fmt_pct(h / t)} ({h}/{t})")
@@ -535,10 +544,18 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=None, help="evaluate only the first N cases")
     parser.add_argument("--no-judge", action="store_true", help="skip LLM answer metrics")
     parser.add_argument("--judge-limit", type=int, default=3, help="judge only the first N cases (default 3)")
+    parser.add_argument("--min-hit5", type=float, default=None,
+                        help="fail (non-zero exit) if hit_rate@5 is below this fraction (0..1)")
     parser.add_argument("--collection", default=None,
                         help="Qdrant collection to evaluate (default config.QDRANT_COLLECTION); "
                              "use to A/B an alternate-embedder index")
     args = parser.parse_args()
+
+    # Validate numeric bounds up front (a negative limit would silently slice
+    # from the end / produce nonsense), before touching the binary (PI11).
+    if (args.limit is not None and args.limit < 0) or args.judge_limit < 0:
+        print("error: --limit and --judge-limit must be >= 0", file=sys.stderr)
+        return 2
 
     try:
         find_blk()
@@ -566,10 +583,10 @@ def main() -> int:
     n = len(case_results)
     hit5 = sum(1 for c in case_results if c.hit_at(5))
     hit10 = sum(1 for c in case_results if c.hit_at(10))
-    mrr = sum(c.mrr for c in case_results) / n if n else 0.0
+    mrr = _ratio(sum(c.mrr for c in case_results), n)
     print("-" * 100)
-    print(f"hit_rate@5 = {_fmt_pct(hit5 / n)} ({hit5}/{n})   "
-          f"hit_rate@10 = {_fmt_pct(hit10 / n)} ({hit10}/{n})   MRR = {mrr:.3f}")
+    print(f"hit_rate@5 = {_fmt_pct(_ratio(hit5, n))} ({hit5}/{n})   "
+          f"hit_rate@10 = {_fmt_pct(_ratio(hit10, n))} ({hit10}/{n})   MRR = {mrr:.3f}")
     breakdown = _breakdown_by_difficulty(case_results)
     if len(breakdown) > 1:
         print("  by difficulty:  " + "   ".join(
@@ -613,6 +630,20 @@ def main() -> int:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(report, encoding="utf-8")
     print(f"\nReport written to {REPORT_PATH}")
+
+    # Exit code is a CI gate (PI11): non-zero on nothing evaluated, any failed
+    # blk call, or hit_rate@5 below an explicit --min-hit5 floor.
+    if n == 0:
+        print("error: no cases evaluated", file=sys.stderr)
+        return 1
+    if any(c.error for c in case_results):
+        print(f"error: {sum(1 for c in case_results if c.error)} case(s) failed to run",
+              file=sys.stderr)
+        return 1
+    if args.min_hit5 is not None and _ratio(hit5, n) < args.min_hit5:
+        print(f"error: hit_rate@5 {_ratio(hit5, n):.3f} below --min-hit5 {args.min_hit5}",
+              file=sys.stderr)
+        return 1
     return 0
 
 

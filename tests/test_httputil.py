@@ -86,6 +86,79 @@ class ReadJsonBodyTest(unittest.TestCase):
         self.assertEqual(obj["k"], "a" * (MAX - 10))
 
 
+class NonDictBodyTest(unittest.TestCase):
+    ''
+
+    def test_list_body_400(self):
+        body = b"[1, 2, 3]"
+        h = FakeHandler(body, str(len(body)))
+        obj, code, msg = read_json_body(h, MAX)
+        self.assertIsNone(obj)
+        self.assertEqual(code, 400)
+
+    def test_string_body_400(self):
+        body = b'"just a string"'
+        h = FakeHandler(body, str(len(body)))
+        obj, code, msg = read_json_body(h, MAX)
+        self.assertIsNone(obj)
+        self.assertEqual(code, 400)
+
+    def test_number_body_400(self):
+        body = b"42"
+        h = FakeHandler(body, str(len(body)))
+        obj, code, msg = read_json_body(h, MAX)
+        self.assertIsNone(obj)
+        self.assertEqual(code, 400)
+
+
+class StrictContentLengthTest(unittest.TestCase):
+    """Content-Length must be strict ascii digits: Python's int() accepts
+    underscores and unicode digits, which is a smuggling/parse-confusion risk."""
+
+    def test_underscore_length_rejected(self):
+        h = FakeHandler(b"{}", "1_000")
+        obj, code, msg = read_json_body(h, MAX)
+        self.assertEqual(code, 400)
+
+    def test_unicode_digit_length_rejected(self):
+        h = FakeHandler(b"{}", "１２")  # fullwidth 12
+        obj, code, msg = read_json_body(h, MAX)
+        self.assertEqual(code, 400)
+
+
+class SendErrorLogInjectionTest(unittest.TestCase):
+    """send_error must not let an attacker-controlled exception message forge
+    extra log lines (newline/CR in the message)."""
+
+    def test_newlines_in_message_are_neutralized(self):
+        import sys
+        from blkchain.httputil import send_error
+
+        class Out:
+            def __init__(self):
+                self.wfile = io.BytesIO()
+
+            def send_response(self, code):
+                pass
+
+            def send_header(self, *a):
+                pass
+
+            def end_headers(self):
+                pass
+
+        err = io.StringIO()
+        real = sys.stderr
+        sys.stderr = err
+        try:
+            send_error(Out(), 500, "internal error", exc=RuntimeError("a\n[error] FORGED: b"))
+        finally:
+            sys.stderr = real
+        first_line = err.getvalue().splitlines()[0]
+        self.assertIn("[error]", first_line)
+        self.assertIn("FORGED", first_line)  # folded onto one line, not a new record
+
+
 class StrictJsonTest(unittest.TestCase):
     """Responses must be strict JSON: NaN and Inf become null."""
 

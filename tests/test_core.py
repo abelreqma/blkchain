@@ -14,15 +14,25 @@ from blkchain.schema import Chunk, chunk_from_payload, chunk_id, content_hash
 
 class SchemaTest(unittest.TestCase):
     def test_chunk_id_deterministic(self):
-        a = chunk_id("path/to/doc.md", "3")
-        b = chunk_id("path/to/doc.md", "3")
-        c = chunk_id("path/to/doc.md", "4")
+        a = chunk_id("seclists", "path/to/doc.md", "3")
+        b = chunk_id("seclists", "path/to/doc.md", "3")
+        c = chunk_id("seclists", "path/to/doc.md", "4")
         self.assertEqual(a, b)
         self.assertNotEqual(a, c)
+
+    def test_chunk_id_includes_source_no_cross_root_collision(self):
+        # Two corpus roots yielding the same relative path must not collide (PI6).
+        self.assertNotEqual(chunk_id("seclists", "README.md", "0"),
+                            chunk_id("skills", "README.md", "0"))
 
     def test_content_hash_tracks_text(self):
         self.assertEqual(content_hash("abc"), content_hash("abc"))
         self.assertNotEqual(content_hash("abc"), content_hash("abd"))
+
+    def test_encode_handles_lone_surrogate(self):
+        # A lone surrogate in corpus text must not raise (surrogatepass).
+        content_hash("bad \ud800 text")
+        chunk_id("s", "p \ud800", "0")
 
     def test_payload_has_hash_and_roundtrip_excludes_meta(self):
         pl = Chunk(id="x", text="hi", source="s", path="p", extra={"line_count": 5}).payload("v1")
@@ -32,10 +42,17 @@ class SchemaTest(unittest.TestCase):
         self.assertNotIn("snapshot_version", back.extra)
         self.assertEqual(back.extra.get("line_count"), 5)
 
+    def test_payload_extra_does_not_overwrite_core(self):
+        pl = Chunk(id="x", text="hi", source="real", path="p",
+                   extra={"source": "evil", "text": "evil", "line_count": 5}).payload("v1")
+        self.assertEqual(pl["source"], "real")
+        self.assertEqual(pl["text"], "hi")
+        self.assertEqual(pl["line_count"], 5)
+
 
 class PointIdTest(unittest.TestCase):
     def test_point_id_is_deterministic_uuid(self):
-        cid = chunk_id("doc", "1")
+        cid = chunk_id("s", "doc", "1")
         pid = index._point_id(cid)
         self.assertEqual(pid, index._point_id(cid))
         uuid.UUID(pid)  # raises if not a valid UUID
@@ -84,9 +101,9 @@ class IngestHelpersTest(unittest.TestCase):
 
 class BuildIndexResumeTest(unittest.TestCase):
     def test_resume_skips_unchanged_updates_changed_indexes_new(self):
-        unchanged = Chunk(id=chunk_id("a", "0"), text="alpha", source="s", path="a")
-        changed = Chunk(id=chunk_id("b", "0"), text="bravo-new", source="s", path="b")
-        fresh = Chunk(id=chunk_id("c", "0"), text="charlie", source="s", path="c")
+        unchanged = Chunk(id=chunk_id("s", "a", "0"), text="alpha", source="s", path="a")
+        changed = Chunk(id=chunk_id("s", "b", "0"), text="bravo-new", source="s", path="b")
+        fresh = Chunk(id=chunk_id("s", "c", "0"), text="charlie", source="s", path="c")
 
         existing = {
             index._point_id(unchanged.id): content_hash("alpha"),      # same -> skip
@@ -146,11 +163,12 @@ class AddPathTest(unittest.TestCase):
             with mock.patch.object(index, "QdrantClient", FakeClient), \
                  mock.patch.object(index, "SparseTextEmbedding", FakeSparse), \
                  mock.patch.object(index, "_existing_hashes", return_value={}), \
+                 mock.patch.object(index, "_reconcile_manual_source", return_value=0), \
                  mock.patch.object(index, "_embed_dense",
                                     side_effect=lambda texts: [[0.0] * config_dim() for _ in texts]):
                 stats = index.add_path(str(f), source="mydocs", collection="testcol")
 
-        self.assertEqual(stats, {"indexed": 1, "updated": 0, "skipped": 0, "batches": 1})
+        self.assertEqual(stats, {"indexed": 1, "updated": 0, "skipped": 0, "batches": 1, "deleted": 0})
         self.assertEqual(collections_used, ["testcol"])
         self.assertEqual(len(upserted), 1)
         self.assertIn("purple widgets", upserted[0].payload["text"])
@@ -168,6 +186,7 @@ class AddPathTest(unittest.TestCase):
                  mock.patch.object(index, "QdrantClient"), \
                  mock.patch.object(index, "SparseTextEmbedding"), \
                  mock.patch.object(index, "_existing_hashes", return_value={}), \
+                 mock.patch.object(index, "_reconcile_manual_source", return_value=0), \
                  mock.patch.object(index, "_index_chunks") as fake_index_chunks:
                 fake_index_chunks.return_value = {"indexed": 0, "updated": 0, "skipped": 0, "batches": 0}
                 index.add_path(str(f))
@@ -181,6 +200,74 @@ class AddPathTest(unittest.TestCase):
     def test_add_path_missing_file_raises(self):
         with self.assertRaises(FileNotFoundError):
             index.add_path("/nonexistent/path/does-not-exist.md")
+
+
+class OriginTaggingTest(unittest.TestCase):
+    ''
+
+    def test_url_chunk_tagged_and_roundtrips(self):
+        chunks = list(index._chunk_text("prose about ssrf metadata", "example.com",
+                                        "https://example.com/", markdown=False))
+        self.assertTrue(chunks)
+        for c in chunks:
+            self.assertEqual(c.extra.get("origin"), "url")
+            pl = c.payload("v1")
+            self.assertEqual(pl["origin"], "url")
+            back = chunk_from_payload("pid", pl)
+            self.assertEqual(back.extra.get("origin"), "url")
+
+    def test_file_chunk_has_no_origin(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "doc.md"
+            f.write_text("# Title\n\nlocal body about xss\n")
+            chunks = list(ingest._chunk_markdown_file(f, "vault", "doc"))
+        self.assertTrue(chunks)
+        for c in chunks:
+            self.assertNotIn("origin", c.extra)
+            self.assertNotIn("origin", c.payload("v1"))
+
+
+class EmbedDenseValidationTest(unittest.TestCase):
+    ''
+
+    def _fake_session(self, payload):
+        resp = mock.Mock()
+        resp.raise_for_status = lambda: None
+        resp.json = lambda: payload
+        sess = mock.MagicMock()
+        sess.__enter__.return_value = sess
+        sess.post.return_value = resp
+        return sess
+
+    def test_valid_vectors_pass_through(self):
+        dim = config_dim()
+        payload = {"embeddings": [[0.0] * dim, [1.0] * dim], "dim": dim}
+        with mock.patch.object(index, "_no_proxy_session", return_value=self._fake_session(payload)):
+            out = index._embed_dense(["a", "b"])
+        self.assertEqual(len(out), 2)
+
+    def test_wrong_dim_vector_raises(self):
+        payload = {"embeddings": [[0.0] * 10], "dim": 10}
+        with mock.patch.object(index, "_no_proxy_session", return_value=self._fake_session(payload)):
+            with self.assertRaises(RuntimeError):
+                index._embed_dense(["a"])
+
+    def test_non_finite_value_raises(self):
+        dim = config_dim()
+        bad = [float("nan")] + [0.0] * (dim - 1)
+        payload = {"embeddings": [bad], "dim": dim}
+        with mock.patch.object(index, "_no_proxy_session", return_value=self._fake_session(payload)):
+            with self.assertRaises(RuntimeError):
+                index._embed_dense(["a"])
+
+    def test_null_value_raises(self):
+        dim = config_dim()
+        bad = [None] + [0.0] * (dim - 1)  # server sanitizes NaN -> null
+        payload = {"embeddings": [bad], "dim": dim}
+        with mock.patch.object(index, "_no_proxy_session", return_value=self._fake_session(payload)):
+            with self.assertRaises(RuntimeError):
+                index._embed_dense(["a"])
 
 
 class FetchUrlSSRFTest(unittest.TestCase):

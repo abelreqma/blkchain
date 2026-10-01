@@ -43,10 +43,13 @@ type searcher interface {
 // webSearch is the web fallback, a variable so tests do not touch the network.
 var webSearch = tavilySearch
 
-// rag.go is the single bounded RAG answer loop (AnswerLoop): retrieve, grade
+// rag.go is the bounded RAG answer loop (AnswerLoop): retrieve, grade
 // sufficiency, optionally web-search or rewrite-and-re-retrieve, then stream a
-// grounded, cited synthesis. It is the only answer path; ask, the TUI, and the
-// MCP server all use it.
+// grounded, cited synthesis. AnswerLoop is the only path that RETRIEVES and
+// grades; its synthesis tail is the shared `synthesize` primitive, which
+// SynthesizeFromResults (the /generate entry) also calls to answer over
+// caller-supplied results without retrieving or grading. route.go's
+// adaptiveAnswer/directAnswer pick between grounding here and a direct answer.
 
 // cveQueryPattern and pocQueryPattern spot a CVE id and a proof-of-concept or
 // exploit request.
@@ -183,14 +186,29 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 		}
 	}
 
+	answer, cits, tokens, err = synthesize(ctx, l, cfg, question, results, opts)
+	return answer, cits, usedWeb, results, tokens, err
+}
+
+// synthesize runs the final grounded, cited synthesis over results: bound the
+// chunks, build the prompt, stream the answer with the synth_* sampling, and
+// extract citations. It does NOT retrieve or grade. AnswerLoop and
+// SynthesizeFromResults share it, so both stream and cite identically.
+func synthesize(ctx context.Context, l *openai.LLM, cfg ragconfig.Config, question string, results []retrieval.Result, opts AnswerOpts) (answer string, cits []citation, tokens int, err error) {
+	stage := func(name string) {
+		if opts.Stage != nil {
+			opts.Stage(name)
+		}
+	}
+
 	chunks := boundChunks(cfg, results)
 	if len(chunks) == 0 {
 		// A canceled or timed-out turn can leave retrieval empty; report that, not
 		// "no results", so the caller does not treat it as a completed turn.
 		if cerr := ctx.Err(); cerr != nil {
-			return "", nil, usedWeb, results, 0, cerr
+			return "", nil, 0, cerr
 		}
-		return "", nil, usedWeb, results, 0, ErrNoResults
+		return "", nil, 0, ErrNoResults
 	}
 
 	stage(stageAnswering)
@@ -208,6 +226,12 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 	stream := func(_ context.Context, chunk []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		// oMLX streams a keepalive first chunk (empty content) and reasoning-only
+		// deltas also arrive empty; drop them so a consumer (the live tokens/sec
+		// bar) does not record a false first token. It is a no-op for `full`.
+		if len(chunk) == 0 {
+			return nil
 		}
 		full.Write(chunk)
 		if opts.Stream != nil {
@@ -230,5 +254,22 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 	cr, genErr := l.GenerateContent(withSampling(ctx, cfg), msgs, callOpts...)
 	answer = full.String()
 	cits = citationsFromAnswer(answer, chunks)
-	return answer, cits, usedWeb, results, completionTokens(cr), mapLLMError(genErr, omlxBaseURL())
+	return answer, cits, completionTokens(cr), mapLLMError(genErr, omlxBaseURL())
+}
+
+// SynthesizeFromResults synthesizes a grounded, cited answer over caller-supplied
+// results WITHOUT retrieving or grading. It is the /generate entry: the caller
+// passes the results from a prior search, and the answer streams and cites
+// exactly as AnswerLoop's synthesis does (same synth_* sampling, citation
+// extraction, and untrusted-tag behavior). It never calls Search and never
+// grades.
+func SynthesizeFromResults(ctx context.Context, cfg ragconfig.Config, question string, results []retrieval.Result, opts AnswerOpts) (answer string, cits []citation, tokens int, err error) {
+	l := opts.llm
+	if l == nil {
+		l, err = newOMLX(cfg, opts.Model)
+		if err != nil {
+			return "", nil, 0, err
+		}
+	}
+	return synthesize(ctx, l, cfg, question, results, opts)
 }

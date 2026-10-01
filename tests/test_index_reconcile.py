@@ -109,6 +109,67 @@ class CorpusReconciliationTest(unittest.TestCase):
 
         reconcile.assert_not_called()
 
+    def test_high_stale_ratio_requires_prune_flag(self):
+        ''
+        source = "hacktricks"
+        # 60 reconcilable points (>= the ratio-guard floor), 45 stale (75% > 20%).
+        stale = [types.SimpleNamespace(id=f"s{i}", payload={
+            "source": source, "path": f"old{i}.md", "index_scope": "corpus",
+            "index_generation": "old"}) for i in range(45)]
+        fresh = [types.SimpleNamespace(id=f"f{i}", payload={
+            "source": source, "path": f"new{i}.md", "index_scope": "corpus",
+            "index_generation": "now"}) for i in range(15)]
+
+        class FakeClient:
+            def __init__(self):
+                self.deleted = []
+
+            def scroll(self, **kwargs):
+                return stale + fresh, None
+
+            def delete(self, **kwargs):
+                self.deleted.extend(kwargs["points_selector"])
+
+        with mock.patch.object(config, "CORPUS_SOURCES",
+                               (config.SourceSpec(source, Path("/tmp"), "markdown"),)):
+            guarded = FakeClient()
+            self.assertEqual(index._reconcile_corpus(guarded, "col", "now"), 0)  # 75% stale -> refused
+            self.assertEqual(guarded.deleted, [])
+            forced = FakeClient()
+            self.assertEqual(
+                index._reconcile_corpus(forced, "col", "now", prune_missing_sources=True), 45)
+
+
+class ManualReconcileTest(unittest.TestCase):
+    ''
+
+    def test_readding_shrunk_source_deletes_orphans(self):
+        ns = types.SimpleNamespace
+        records = [
+            ns(id="a", payload={"source": "docs", "index_scope": "manual", "index_generation": "gen2"}),
+            ns(id="b", payload={"source": "docs", "index_scope": "manual", "index_generation": "gen2"}),
+            ns(id="c", payload={"source": "docs", "index_scope": "manual", "index_generation": "gen1"}),  # orphan
+            ns(id="other", payload={"source": "notes", "index_scope": "manual", "index_generation": "gz"}),
+            ns(id="corp", payload={"source": "docs", "index_scope": "corpus", "index_generation": "gen1"}),
+        ]
+
+        class FakeClient:
+            def __init__(self):
+                self.deleted = []
+
+            def scroll(self, **kwargs):
+                return records, None
+
+            def delete(self, **kwargs):
+                self.deleted.extend(kwargs["points_selector"])
+
+        client = FakeClient()
+        deleted = index._reconcile_manual_source(client, "col", "docs", "gen2")
+        self.assertEqual(deleted, 1)
+        self.assertEqual(client.deleted, ["c"])  # only the stale 'docs' manual point
+
+
+class ReconcileWithQdrantBackendTest(unittest.TestCase):
     def test_reconciliation_with_qdrant_local_backend(self):
         source = "hacktricks"
         client = QdrantClient(":memory:")

@@ -62,12 +62,30 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 		}
 	}()
 
-	for _, t := range d.Upserts {
+	// Validate and default each upsert into a local copy; the defaulted values
+	// (not d.Upserts) are what gets written below.
+	upserts := make([]Task, len(d.Upserts))
+	for i, t := range d.Upserts {
 		if t.ID == "" {
 			return 0, fmt.Errorf("engagement: upsert has empty task id")
 		}
 		if !t.Status.valid() {
 			return 0, fmt.Errorf("engagement: task %q has invalid status %q", t.ID, t.Status)
+		}
+		if t.Phase == "" {
+			t.Phase = PhaseRecon
+		}
+		if !t.Phase.valid() {
+			return 0, fmt.Errorf("engagement: task %q has invalid phase %q", t.ID, t.Phase)
+		}
+		if t.Surface == "" {
+			t.Surface = surfaceForKind(t.Kind)
+		}
+		if !t.Surface.valid() {
+			return 0, fmt.Errorf("engagement: task %q has invalid surface %q", t.ID, t.Surface)
+		}
+		if t.Capability != "" && !t.Capability.valid() {
+			return 0, fmt.Errorf("engagement: task %q has invalid capability %q", t.ID, t.Capability)
 		}
 		for _, dep := range t.DependsOn {
 			if dep == t.ID {
@@ -79,6 +97,7 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 				return 0, fmt.Errorf("engagement: task %q lists itself as a basis", t.ID)
 			}
 		}
+		upserts[i] = t
 	}
 
 	// Ids that exist after this delta: every id already stored plus the upserts.
@@ -100,10 +119,10 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 		return 0, err
 	}
 	rows.Close()
-	for _, t := range d.Upserts {
+	for _, t := range upserts {
 		known[t.ID] = true
 	}
-	for _, t := range d.Upserts {
+	for _, t := range upserts {
 		for _, dep := range t.DependsOn {
 			if !known[dep] {
 				return 0, fmt.Errorf("engagement: task %q depends on unknown task %q", t.ID, dep)
@@ -150,7 +169,7 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 		return 0, err
 	}
 	drows.Close()
-	for _, t := range d.Upserts {
+	for _, t := range upserts {
 		if curStatus[t.ID] == StatusDone && t.Status == StatusTodo {
 			return 0, fmt.Errorf("engagement: task %q cannot move from done to todo", t.ID)
 		}
@@ -173,10 +192,10 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 		return 0, err
 	}
 
-	for _, t := range d.Upserts {
+	for _, t := range upserts {
 		if _, err := conn.ExecContext(ctx,
-			`INSERT INTO task (id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO task (id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			   kind = excluded.kind,
 			   target = excluded.target,
@@ -185,9 +204,13 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 			   status = excluded.status,
 			   depends_on = excluded.depends_on,
 			   basis_ids = excluded.basis_ids,
-			   updated_rev = excluded.updated_rev`,
+			   updated_rev = excluded.updated_rev,
+			   phase = excluded.phase,
+			   surface = excluded.surface,
+			   capability = excluded.capability`,
 			t.ID, t.Kind, t.Target, t.Objective, t.DoneWhen, string(t.Status),
-			marshalStrings(t.DependsOn), marshalStrings(t.BasisIDs), newRev, newRev); err != nil {
+			marshalStrings(t.DependsOn), marshalStrings(t.BasisIDs), newRev, newRev,
+			string(t.Phase), string(t.Surface), string(t.Capability)); err != nil {
 			return 0, err
 		}
 	}

@@ -451,6 +451,11 @@ type model struct {
 	lastAnswer  string
 	openTargets []openTarget // files for /open N (from the last answer or search)
 
+	// lastQuery and lastResults hold the most recent /search so /generate can
+	// synthesize an answer from exactly those retrieved chunks (no re-retrieval).
+	lastQuery   string
+	lastResults []retrieval.Result
+
 	// cfg is the RAG config, read once when the session starts. rc is the
 	// session's one retrieval client, closed when the session ends; rcErr is why
 	// it could not be made.
@@ -864,6 +869,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel = nil
 		}
 		m.openTargets = resultTargets(msg.results)
+		// Retain this search so /generate can synthesize from exactly these chunks.
+		m.lastQuery, m.lastResults = msg.query, msg.results
 		m.markRetrievalOK()
 		return m, m.finish(tea.Println(strings.TrimRight(formatResults(msg.query, msg.results, msg.elapsed, m.renderWidth()), "\n")))
 
@@ -1440,7 +1447,9 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 
 // isTurnVerb reports whether a verb starts a network turn (and so must queue
 // rather than run concurrently while another turn is in flight).
-func isTurnVerb(v string) bool { return v == "ask" || v == "search" || v == "health" }
+func isTurnVerb(v string) bool {
+	return v == "ask" || v == "search" || v == "health" || v == "generate"
+}
 
 // vizNext applies a /viz argument to the current setting. ok is false for an
 // argument that is not on, off, toggle, or empty.
@@ -1476,7 +1485,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "help":
 		w, _ := m.termSize()
-		return m, tea.Sequence(tea.Println(echo), tea.Println(helpBlock(w)))
+		return m, tea.Sequence(tea.Println(echo), tea.Println(helpResponse(arg, w)))
 	case "mode":
 		if m.mode == "agent" {
 			m.mode = "rag"
@@ -1634,6 +1643,24 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.streamCmd(ctx, arg, preface, m.turnStart, force))
 		}
 		return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.dispatchCmd(ctx, verb, arg, m.turnStart))
+	case "generate":
+		// Synthesize an answer from the LAST /search results, with no re-retrieval.
+		if len(m.lastResults) == 0 {
+			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(errors.New("generate: nothing retrieved yet; run /search first"))))
+		}
+		question := generateQuestion(arg, m.lastQuery)
+		results := m.lastResults
+		m.working = true
+		m.tickGen++
+		m.workingVerb = workingVerbLabel("generate")
+		m.live = ""
+		m.turnStart = time.Now()
+		m.liveTokens = 0
+		m.firstTokAt = time.Time{}
+		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RequestTimeout())
+		m.cancel = cancel
+		m.pendingQ = question
+		return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.generateCmd(ctx, question, results, m.turnStart))
 	}
 	// Unknown /verb.
 	return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("unknown command /%s, try /help", verb))))
@@ -1998,6 +2025,53 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 			return errMsg{timeoutOrErr(err)}
 		}
 		return streamDoneMsg{full: full, citations: cits, usedWeb: usedWeb, rerankOff: rc.SkipRerank, err: err, tokens: tokens}
+	}
+}
+
+
+
+
+var synthFromResultsFn = SynthesizeFromResults
+
+// generateCmd synthesizes an answer from the given retrieved results (the last
+// /search), streaming each token back as a chunkMsg like streamCmd. It does no
+// retrieval or grading; grounding is exactly the results passed in. A cancel
+// returns a canceledMsg; ErrNoResults becomes a noResultsMsg.
+func (m model) generateCmd(ctx context.Context, question string, results []retrieval.Result, start time.Time) tea.Cmd {
+	prog := m.prog
+	turnModel := m.ragTurnModel()
+	cfg := m.cfg
+	return func() tea.Msg {
+		if turnModel == "" {
+			if turnModel = listedModel(); turnModel != "" && prog != nil {
+				prog.Send(modelResolvedMsg(turnModel))
+			}
+		}
+		streamed := false
+		full, cits, tokens, err := synthFromResultsFn(ctx, cfg, question, results, AnswerOpts{
+			Model: turnModel,
+			Stream: func(b []byte) {
+				streamed = true
+				if prog != nil {
+					prog.Send(chunkMsg(string(b)))
+				}
+			},
+			Stage: func(stage string) {
+				if prog != nil {
+					prog.Send(stageMsg(stage))
+				}
+			},
+		})
+		if errors.Is(err, ErrNoResults) {
+			return noResultsMsg{}
+		}
+		if err != nil && !streamed {
+			if errors.Is(err, context.Canceled) {
+				return canceledMsg{}
+			}
+			return errMsg{timeoutOrErr(err)}
+		}
+		return streamDoneMsg{full: full, citations: cits, tokens: tokens}
 	}
 }
 
@@ -2653,16 +2727,25 @@ func (m model) vizBar() string {
 	on := func(fg lipgloss.Color) lipgloss.Style { return lipgloss.NewStyle().Foreground(fg).Background(wBarBg) }
 	gap := on(wBarBg).Render(" ")
 	label := on(wOffWhite).Render(sanitizeTerminal(e.Stage.Label))
-	accent := on(wMeterOn).Render("\u258e")
-	spinner := on(wMeterOn).Render("\u283f")
+	// Nerd tier leads with the play glyph (F2B06) and spins with the loader glyph
+	// (F2B05); other tiers keep the braille loader (U+283F) and accent (U+258E).
+	tier := plCurrentTier()
+	lead, spin := "\u258e", "\u283f"
+	if tier == plNerd {
+		lead, spin = "\U000F2B06", "\U000F2B05"
+	}
+	accent := on(wMeterOn).Render(lead)
+	spinner := on(wMeterOn).Render(spin)
 	line := accent + gap + spinner + gap + label + gap + gap + meter + gap + gap + on(wMutedFg).Render(right)
 	if !m.firstTokAt.IsZero() && m.liveTokens > 0 {
 		tps := modeleval.TokensPerSec(m.liveTokens, time.Since(m.firstTokAt))
 		bolt := ""
-		if plCurrentTier() == plNerd {
+		if tier == plNerd {
 			bolt = on(wMeterOn).Render("\U000F2B02") + gap
 		}
-		line += on(wMutedFg).Render(" "+Glyph(GlyphBar)+" ") + bolt + on(wSageFg).Render(fmt.Sprintf("%.0f", tps)) + on(wMutedFg).Render(" tok/s")
+		// The rate is approximate: blk counts stream chunks, and one delta can carry
+		// several tokens, so the chunk count under-reports. A muted "~" marks it.
+		line += on(wMutedFg).Render(" "+Glyph(GlyphBar)+" ") + bolt + on(wMutedFg).Render("~") + on(wTanFg).Render(fmt.Sprintf("%.0f", tps)) + on(wMutedFg).Render(" t/s")
 	}
 	w, _ := m.termSize()
 	return lipgloss.NewStyle().Background(wBarBg).MaxWidth(w).Render(line)
@@ -2799,35 +2882,83 @@ func promptEcho(q string) string {
 	return b.String()
 }
 
-// welcomeBanner is the two-line greeting printed at startup. Line one names the
-// tool and says what to do; line two lists the next steps. Neither line wraps at
-// width: the wording is shortened, then hints are dropped from the end.
+// bannerTagline is the one-line framework descriptor shown inside the welcome box.
+const bannerTagline = "Autonomous Offensive Security Framework"
+
+// welcomeBanner is the startup greeting: a full-width rounded box in the ribbon's
+// palette, with the tool name on the top edge and the framework tagline inside.
+// The nerd tier leads the title with the radar glyph; the unicode tier draws the
+// box without it; a terminal without unicode gets two plain lines and no box.
+// Every rendered line is exactly width columns, so the box corners stay flush.
 func welcomeBanner(width int) string {
-	const lead = 6 // " blk  "
-	head := " " + H1.Render("blk")
-	for _, text := range []string{"Type a question and press enter.", "Ask a question, press enter."} {
-		if lead+len(text) <= width {
-			head += "  " + Meta.Render(text)
-			break
-		}
+	if width < 1 {
+		width = 1
 	}
-	// The hints get shorter, then drop from the end, but the quit hint stays.
-	tiers := [][]string{
-		{"/ for commands", "? for keys", "ctrl+d to quit"},
-		{"/ commands", "? keys", "ctrl+d quit"},
-		{"/ cmds", "? keys", "ctrl+d quit"},
-		{"/ cmds", "ctrl+d quit"},
-		{"ctrl+d quit"},
+	title := "blk"
+	tagStyle := lipgloss.NewStyle().Foreground(wTanFg)
+
+	if !useUnicode {
+		head := " " + H1.Render(title)
+		tag := " " + tagStyle.Render(ellipsize(bannerTagline, max(width-1, 1)))
+		return lipgloss.NewStyle().MaxWidth(width).Render(head) + "\n" +
+			lipgloss.NewStyle().MaxWidth(width).Render(tag)
 	}
-	for _, hints := range tiers {
-		for _, indent := range []int{lead, 1} {
-			if line := joinSep(hints...); indent+lipgloss.Width(line) <= width {
-				return lipgloss.NewStyle().MaxWidth(width).Render(head) + "\n" +
-					strings.Repeat(" ", indent) + Meta.Render(line)
-			}
-		}
+
+	border := lipgloss.NewStyle().Foreground(Muted)
+	titleStyle := lipgloss.NewStyle().Foreground(wHeadFg).Bold(true)
+	iconStyle := lipgloss.NewStyle().Foreground(wSageFg)
+
+	icon, iconW := "", 0
+	if plCurrentTier() == plNerd {
+		icon, iconW = "\U000F2B10", 2 // ti-radar-2: glyph + trailing space
 	}
-	return lipgloss.NewStyle().MaxWidth(max(width, 1)).Render(head)
+	// Top edge: "╭─ [icon ]blk " then a rule to the "╮". dashN fills to width.
+	dashN := width - 8 - iconW
+	if dashN < 0 {
+		// Too narrow for the box: one plain, bounded line.
+		return lipgloss.NewStyle().MaxWidth(width).Render(" " + titleStyle.Render(title))
+	}
+	var top strings.Builder
+	top.WriteString(border.Render("╭─ ")) // "╭─ "
+	if icon != "" {
+		top.WriteString(iconStyle.Render(icon))
+		top.WriteString(border.Render(" "))
+	}
+	top.WriteString(titleStyle.Render(title))
+	top.WriteString(border.Render(" " + strings.Repeat("─", dashN) + "╮")) // " " + rule + "╮"
+
+	inner := width - 2 // columns between the two side borders
+	tag := bannerTagline
+	if lipgloss.Width(tag) > inner-2 {
+		tag = ellipsize(tag, max(inner-2, 1))
+	}
+	padN := inner - 1 - lipgloss.Width(tag)
+	if padN < 0 {
+		padN = 0
+	}
+	mid := border.Render("│ ") + tagStyle.Render(tag) + strings.Repeat(" ", padN) + border.Render("│")
+
+	bottom := border.Render("╰" + strings.Repeat("─", inner) + "╯")
+
+	return top.String() + "\n" + mid + "\n" + bottom
+}
+
+// helpResponse renders the REPL /help output: the full command list when arg is
+// empty, one command's help (the same renderer as `blk help <command>`) when arg
+// names a known command, or an unknown-command error otherwise. Only the first
+// token of arg names the command.
+func helpResponse(arg string, width int) string {
+	name := ""
+	if f := strings.Fields(arg); len(f) > 0 {
+		name = f[0]
+	}
+	if name == "" {
+		return helpBlock(width)
+	}
+	if c, ok := lookupCommand(name); ok {
+		return strings.TrimRight(renderCommandHelp(c, width), "\n")
+	}
+	return styleErr(unknownCommand(name))
 }
 
 // helpBlock is the /help text: one section per command group, every description
@@ -3081,9 +3212,20 @@ func workingVerbLabel(verb string) string {
 		return "searching" + ellipsis()
 	case "health":
 		return "checking" + ellipsis()
+	case "generate":
+		return "answering" + ellipsis()
 	default:
 		return "thinking" + ellipsis()
 	}
+}
+
+// generateQuestion is the question /generate synthesizes against: the explicit
+// argument when given, otherwise the last search query.
+func generateQuestion(arg, lastQuery string) string {
+	if a := strings.TrimSpace(arg); a != "" {
+		return a
+	}
+	return lastQuery
 }
 
 func ellipsis() string {

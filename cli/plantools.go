@@ -12,14 +12,17 @@ import (
 )
 
 type planTaskArgs struct {
-	ID        string   `json:"id" desc:"stable task id, e.g. t1"`
-	Kind      string   `json:"kind,omitempty" desc:"task kind or domain, e.g. recon, web, ad, cloud"`
-	Target    string   `json:"target,omitempty" desc:"the in-scope target the task acts on"`
-	Objective string   `json:"objective,omitempty" desc:"what the task should achieve"`
-	DoneWhen  string   `json:"done_when,omitempty" desc:"the observable condition that completes the task"`
-	Status    string   `json:"status,omitempty" desc:"todo, active, done, na, or blocked; defaults to todo"`
-	DependsOn []string `json:"depends_on,omitempty" desc:"ids of tasks that must finish first"`
-	BasisIDs  []string `json:"basis_ids,omitempty" desc:"ids of the task(s) or finding(s) this task was derived from (provenance; not a scheduling dependency)"`
+	ID         string   `json:"id" desc:"stable task id, e.g. t1"`
+	Kind       string   `json:"kind,omitempty" desc:"task kind or domain, e.g. recon, web, ad, cloud"`
+	Target     string   `json:"target,omitempty" desc:"the in-scope target the task acts on"`
+	Objective  string   `json:"objective,omitempty" desc:"what the task should achieve"`
+	DoneWhen   string   `json:"done_when,omitempty" desc:"the observable condition that completes the task"`
+	Status     string   `json:"status,omitempty" desc:"todo, active, done, na, or blocked; defaults to todo"`
+	Phase      string   `json:"phase,omitempty" desc:"recon, exploit, post-ex, or report; defaults to recon"`
+	Surface    string   `json:"surface,omitempty" desc:"local, network, web, or ad-cloud; defaults from kind"`
+	Capability string   `json:"capability,omitempty" desc:"passive, enumerate, or active"`
+	DependsOn  []string `json:"depends_on,omitempty" desc:"ids of tasks that must finish first"`
+	BasisIDs   []string `json:"basis_ids,omitempty" desc:"ids of the task(s) or finding(s) this task was derived from (provenance; not a scheduling dependency)"`
 }
 
 type planCompleteArgs struct {
@@ -37,14 +40,17 @@ func planTaskFromArgs(a planTaskArgs) engagement.Task {
 		status = engagement.StatusTodo
 	}
 	return engagement.Task{
-		ID:        a.ID,
-		Kind:      a.Kind,
-		Target:    a.Target,
-		Objective: a.Objective,
-		DoneWhen:  a.DoneWhen,
-		Status:    status,
-		DependsOn: a.DependsOn,
-		BasisIDs:  a.BasisIDs,
+		ID:         a.ID,
+		Kind:       a.Kind,
+		Target:     a.Target,
+		Objective:  a.Objective,
+		DoneWhen:   a.DoneWhen,
+		Status:     status,
+		Phase:      engagement.Phase(a.Phase),
+		Surface:    engagement.Surface(a.Surface),
+		Capability: engagement.Capability(a.Capability),
+		DependsOn:  a.DependsOn,
+		BasisIDs:   a.BasisIDs,
 	}
 }
 
@@ -108,6 +114,15 @@ func newPlanUpdateTool(st *engagement.Store) tooldef.Tool {
 			}
 			if len(a.DependsOn) > 0 {
 				cur.DependsOn = a.DependsOn
+			}
+			if a.Phase != "" {
+				cur.Phase = engagement.Phase(a.Phase)
+			}
+			if a.Surface != "" {
+				cur.Surface = engagement.Surface(a.Surface)
+			}
+			if a.Capability != "" {
+				cur.Capability = engagement.Capability(a.Capability)
 			}
 			rev, err := st.Apply(engagement.Delta{
 				Upserts: []engagement.Task{cur},

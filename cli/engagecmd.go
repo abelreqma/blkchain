@@ -15,35 +15,6 @@ import (
 	"blkchain/cli/internal/skillcat"
 )
 
-// defaultEngageAllowlist is the base allowlist merged with the scope's allow
-// lines. It is conservative: shells, wrappers, and interpreters (sudo, env,
-// bash, sh, python, find, xargs) are excluded because secgate's classifier
-// denies them outright regardless of the allowlist, so listing them here would
-// only be misleading. An operator who needs one of those tools runs it by
-// hand, outside run_command.
-func defaultEngageAllowlist() []string {
-	return []string{
-		"nmap", "curl", "wget", "dig", "whois", "nc", "ncat",
-		"id", "whoami", "uname", "hostname", "ps", "ls", "cat", "head", "tail", "grep",
-		"stat", "getcap", "ss", "netstat", "ip", "ifconfig",
-		// DNS enumeration. Each has a flag audit in secgate (see
-		// secgate/dnsenum_test.go); host and nslookup have no file, exec, or
-		// config flag, dnsrecon's file flags are bounded in FileAccessViolation.
-		"host", "nslookup", "dnsrecon",
-		// SMB, RPC, NetBIOS, and NFS enumeration. Audited in
-		// secgate/smbenum_test.go: -c/--command, config and credential files, and
-		// nbtscan -f are denied, log paths are bounded, glued host flags are
-		// denied, and a UNC host is scope-checked.
-		"smbclient", "rpcclient", "nbtscan", "showmount",
-		// LDAP, SNMP, and HTTP discovery. Audited in secgate/netenum_test.go and
-		// secgate/httpenum_test.go: exec and plugin flags, config and credential
-		// files, and file-of-targets flags are denied, output and wordlist paths
-		// are bounded, glued target flags are denied, and every target flag value
-		// must resolve to a host the scope check can see.
-		"ldapsearch", "snmpwalk", "onesixtyone", "gobuster", "ffuf", "nikto",
-	}
-}
-
 // loadEngageCatalog loads the skill catalog from BLKCHAIN_SKILLS_DIR. An
 // unset or empty dir yields an empty catalog and no error.
 func loadEngageCatalog() (*skillcat.Catalog, error) {
@@ -129,12 +100,6 @@ func runEngage(args []string) error {
 	}
 	defer ws.Close()
 
-	allowBins := defaultEngageAllowlist()
-	if scope != nil {
-		allowBins = append(allowBins, scope.AllowedBins()...)
-	}
-	allow := secgate.NewAllowlist(allowBins...)
-
 	tty := isTerminalFile(os.Stdin)
 	var confirm secgate.Confirmer
 	// The mmdflux viz session replaces this with its widget confirmer by assigning confirm here before the gate is built.
@@ -150,20 +115,6 @@ func runEngage(args []string) error {
 		return fmt.Errorf("engage: local/post-access engagements require interactive confirmation; run on a TTY (or over MCP with confirm=elicit)")
 	}
 
-	gate := &secgate.Gate{
-		Mode:      mode,
-		Scope:     scope,
-		Allow:     allow,
-		Confirm:   confirm,
-		Approvals: secgate.NewSessionApprovals(),
-		Audit: func(action, detail string) {
-			_ = ws.AuditLine("secgate", action, detail)
-		},
-	}
-	if err := gate.Start(); err != nil {
-		return fmt.Errorf("engage: %w", err)
-	}
-
 	// The scratch dir lives outside the workspace: run_command's cwd, so a
 	// relative ".." in a tool's file-writing flag cannot reach audit.jsonl,
 	// engagement.db, or evidence inside ws.Dir (see secgate.FileAccessViolation
@@ -174,19 +125,12 @@ func runEngage(args []string) error {
 	}
 	defer os.RemoveAll(scratch)
 
-	// LOCAL profile only: guard the engagement's own artifacts from an
-	// executor's file arguments. ws.Dir is the absolute workspace dir, so these
-	// resolve to the same absolute paths the sensitive-path check compares
-	// against. reportPaths and EvidenceDir are the code's own path builders.
-	protMD, protJSON := reportPaths(ws.Dir)
-	gate.Protected = []string{
-		filepath.Join(ws.Dir, "engagement.db"),
-		filepath.Join(ws.Dir, "audit.jsonl"),
-		ws.EvidenceDir(),
-		protMD,
-		protJSON,
+	gate := buildEngageGate(ws, scope, mode, confirm, secgate.NewSessionApprovals(), scratch, func(action, detail string) {
+		_ = ws.AuditLine("secgate", action, detail)
+	})
+	if err := gate.Start(); err != nil {
+		return fmt.Errorf("engage: %w", err)
 	}
-	gate.Scratch = scratch
 
 	var asker askuser.Asker = askuser.AutoAsker{}
 	if mode == secgate.Safe && tty {
@@ -204,20 +148,7 @@ func runEngage(args []string) error {
 	defer rc.Close()
 
 	r := newVizRenderer(newMmdfluxRunner())
-	deps := engageDeps{
-		Model:     model,
-		RC:        rc,
-		Cfg:       cfg,
-		Prefs:     prefs,
-		Store:     ws.Store,
-		Asker:     asker,
-		Gate:      gate,
-		Confirmer: confirm,
-		Runs:      NewRunOutputs(),
-		WorkDir:   scratch,
-		Catalog:   cat,
-		Progress:  makeEngageProgress(os.Stdout, r, prefs.Viz),
-	}
+	deps := buildEngageDeps(model, rc, cfg, prefs, ws.Store, gate, scratch, cat, asker, confirm, makeEngageProgress(os.Stdout, r, prefs.Viz))
 
 	// Resumable engagement report: a projection of the store written to the
 	// workspace, refreshed on each commit and rebuilt from the store on resume.

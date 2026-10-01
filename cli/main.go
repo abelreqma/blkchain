@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	eng "blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 )
@@ -138,54 +139,54 @@ func runVizDemo() error {
 	r := newVizRenderer(newMmdfluxRunner())
 	ctx := context.Background()
 
-	task := func(id, kind, target string, st TaskStatus, deps ...string) Task {
-		return Task{ID: id, Kind: kind, Target: target, Objective: target, Status: st, DependsOn: deps}
+	task := func(id, kind, target string, st eng.Status, deps ...string) eng.Task {
+		return eng.Task{ID: id, Kind: kind, Target: target, Objective: target, Status: st, DependsOn: deps}
 	}
-	steps := []Engagement{
+	steps := []eng.Engagement{
 		{
-			Tasks: []Task{
-				task("recon", "recon", "acme.test", TaskDone),
-				task("enum", "enum", "services", TaskActive, "recon"),
-				task("sqli", "web", "SQLi /login", TaskTodo, "enum"),
+			Tasks: []eng.Task{
+				task("recon", "recon", "acme.test", eng.StatusDone),
+				task("enum", "enum", "services", eng.StatusActive, "recon"),
+				task("sqli", "web", "SQLi /login", eng.StatusTodo, "enum"),
 			},
 			ActiveID: "enum",
-			Stage:    Stage{Label: "enum: services", Step: 1, Total: 4},
+			Stage:    eng.Stage{Label: "enum: services", Step: 1, Total: 4},
 		},
 		{
-			Tasks: []Task{
-				task("recon", "recon", "acme.test", TaskDone),
-				task("enum", "enum", "services", TaskDone, "recon"),
-				task("sqli", "web", "SQLi /login", TaskActive, "enum"),
+			Tasks: []eng.Task{
+				task("recon", "recon", "acme.test", eng.StatusDone),
+				task("enum", "enum", "services", eng.StatusDone, "recon"),
+				task("sqli", "web", "SQLi /login", eng.StatusActive, "enum"),
 			},
 			ActiveID: "sqli",
-			Stage:    Stage{Label: "web: SQLi", Step: 2, Total: 4},
+			Stage:    eng.Stage{Label: "web: SQLi", Step: 2, Total: 4},
 		},
 		{
-			Tasks: []Task{
-				task("recon", "recon", "acme.test", TaskDone),
-				task("enum", "enum", "services", TaskDone, "recon"),
-				task("sqli", "web", "SQLi /login", TaskDone, "enum"),
-				task("idor", "web", "IDOR /api/orders", TaskActive, "enum"),
-				task("evidence", "evidence", "findings", TaskTodo, "sqli", "idor"),
+			Tasks: []eng.Task{
+				task("recon", "recon", "acme.test", eng.StatusDone),
+				task("enum", "enum", "services", eng.StatusDone, "recon"),
+				task("sqli", "web", "SQLi /login", eng.StatusDone, "enum"),
+				task("idor", "web", "IDOR /api/orders", eng.StatusActive, "enum"),
+				task("evidence", "evidence", "findings", eng.StatusTodo, "sqli", "idor"),
 			},
 			ActiveID: "idor",
-			Stage:    Stage{Label: "web: IDOR", Step: 3, Total: 4},
+			Stage:    eng.Stage{Label: "web: IDOR", Step: 3, Total: 4},
 		},
 		{
-			Tasks: []Task{
-				task("recon", "recon", "acme.test", TaskDone),
-				task("enum", "enum", "services", TaskDone, "recon"),
-				task("sqli", "web", "SQLi /login", TaskDone, "enum"),
-				task("idor", "web", "IDOR /api/orders", TaskDone, "enum"),
-				task("evidence", "evidence", "findings", TaskDone, "sqli", "idor"),
-				task("report", "report", "acme", TaskActive, "evidence"),
+			Tasks: []eng.Task{
+				task("recon", "recon", "acme.test", eng.StatusDone),
+				task("enum", "enum", "services", eng.StatusDone, "recon"),
+				task("sqli", "web", "SQLi /login", eng.StatusDone, "enum"),
+				task("idor", "web", "IDOR /api/orders", eng.StatusDone, "enum"),
+				task("evidence", "evidence", "findings", eng.StatusDone, "sqli", "idor"),
+				task("report", "report", "acme", eng.StatusActive, "evidence"),
 			},
 			ActiveID: "report",
-			Stage:    Stage{Label: "report", Step: 4, Total: 4},
+			Stage:    eng.Stage{Label: "report", Step: 4, Total: 4},
 		},
 	}
 
-	bar := func(e Engagement) string {
+	bar := func(e eng.Engagement) string {
 		frac := float64(e.Stage.Step) / float64(e.Stage.Total)
 		return " " + sanitizeTerminal(e.Stage.Label) + "  " + plMeter(frac, 12, plCurrentTier()) +
 			fmt.Sprintf("  %d/%d", e.Stage.Step, e.Stage.Total)

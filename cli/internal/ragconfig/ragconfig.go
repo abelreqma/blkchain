@@ -261,7 +261,9 @@ func validateInts(cfg *Config) {
 	def := builtinDefaults()
 	check := func(key string, v *int, lo, hi, fallback int) {
 		if *v < lo || *v > hi {
-			warnf("ignoring %s=%d: out of range [%d,%d], using %d", key, *v, lo, hi, fallback)
+			// The value may have come from the env var key or from rag.json;
+			// name both so the note is not misleading for a bad file value.
+			warnf("ignoring %s=%d (env or rag.json): out of range [%d,%d], using %d", key, *v, lo, hi, fallback)
 			*v = fallback
 		}
 	}

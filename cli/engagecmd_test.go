@@ -23,7 +23,7 @@ func TestEngageRequiresGoal(t *testing.T) {
 }
 
 func TestDefaultAllowlistExcludesClassifierDeniedBinaries(t *testing.T) {
-	al := secgate.NewAllowlist(defaultEngageAllowlist()...)
+	al := secgate.NewAllowlist(externalEngageAllowlist()...)
 	// Sanity: an allowlisted recon binary is permitted by the allowlist.
 	if !al.Permits("nmap") {
 		t.Error("nmap should be in the default allowlist")
@@ -31,7 +31,7 @@ func TestDefaultAllowlistExcludesClassifierDeniedBinaries(t *testing.T) {
 	// The default must not list binaries the classifier denies (shells/wrappers/interpreters),
 	// since Authorize would deny them anyway; keep the default coherent.
 	for _, bad := range []string{"sudo", "env", "bash", "sh", "python", "find", "xargs"} {
-		for _, b := range defaultEngageAllowlist() {
+		for _, b := range externalEngageAllowlist() {
 			if b == bad {
 				t.Errorf("default allowlist should not contain classifier-denied %q", bad)
 			}
@@ -40,7 +40,7 @@ func TestDefaultAllowlistExcludesClassifierDeniedBinaries(t *testing.T) {
 }
 
 func TestDefaultAllowlistIncludesAuditedSMBEnumTools(t *testing.T) {
-	al := secgate.NewAllowlist(defaultEngageAllowlist()...)
+	al := secgate.NewAllowlist(externalEngageAllowlist()...)
 	for _, b := range []string{"smbclient", "rpcclient", "nbtscan", "showmount"} {
 		if !al.Permits(b) {
 			t.Errorf("%s should be in the default allowlist", b)
@@ -49,7 +49,7 @@ func TestDefaultAllowlistIncludesAuditedSMBEnumTools(t *testing.T) {
 }
 
 func TestDefaultAllowlistIncludesAuditedLDAPSNMPHTTPEnumTools(t *testing.T) {
-	al := secgate.NewAllowlist(defaultEngageAllowlist()...)
+	al := secgate.NewAllowlist(externalEngageAllowlist()...)
 	for _, b := range []string{"ldapsearch", "snmpwalk", "onesixtyone", "gobuster", "ffuf", "nikto"} {
 		if !al.Permits(b) {
 			t.Errorf("%s should be in the default allowlist", b)
@@ -58,7 +58,7 @@ func TestDefaultAllowlistIncludesAuditedLDAPSNMPHTTPEnumTools(t *testing.T) {
 }
 
 func TestDefaultAllowlistIncludesAuditedDNSEnumTools(t *testing.T) {
-	al := secgate.NewAllowlist(defaultEngageAllowlist()...)
+	al := secgate.NewAllowlist(externalEngageAllowlist()...)
 	for _, b := range []string{"host", "nslookup", "dnsrecon"} {
 		if !al.Permits(b) {
 			t.Errorf("%s should be in the default allowlist", b)

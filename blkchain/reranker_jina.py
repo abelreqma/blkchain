@@ -36,6 +36,7 @@ from mlx_embeddings.models.qwen3 import Qwen3Model as _Qwen3Model
 from transformers import AutoTokenizer
 
 from blkchain import config as _config
+from blkchain.rerank_scores import neutralize_control_tokens
 
 _MODEL_PATH = Path(_config.RERANKER_PATH)
 
@@ -142,8 +143,12 @@ def _score_block(query: str, docs: list[str]) -> tuple[np.ndarray, np.ndarray, n
 
     doc_positions = [i for i, t in enumerate(ids) if t == _DOC_TOKEN_ID]
     query_positions = [i for i, t in enumerate(ids) if t == _QUERY_TOKEN_ID]
-    assert len(doc_positions) == len(docs), "doc token count mismatch"
-    assert len(query_positions) == 1, "expected exactly one query token"
+    # ValueError, not assert: the counts depend on tokenized (untrusted) document
+    # content, and assertions are stripped under python -O.
+    if len(doc_positions) != len(docs):
+        raise ValueError("jina reranker: doc token count mismatch")
+    if len(query_positions) != 1:
+        raise ValueError("jina reranker: expected exactly one query token")
 
     doc_hidden = hidden[mx.array(doc_positions)]
     query_hidden = hidden[mx.array(query_positions)]
@@ -171,7 +176,9 @@ def rerank_documents(query: str, documents: list[str]) -> list[float]:
     docs: list[str] = []
     doc_lengths: list[int] = []
     for d in documents:
-        d2, length = _truncate(d, _MAX_DOC_TOKENS)
+        # Neutralize control tokens so a poisoned passage cannot inject the
+        # listwise prompt's own <passage>/<query> or chat structure (PI13).
+        d2, length = _truncate(neutralize_control_tokens(d), _MAX_DOC_TOKENS)
         docs.append(d2)
         doc_lengths.append(length)
 

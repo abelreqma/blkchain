@@ -66,7 +66,11 @@ def send_error(handler, code: int, public_message: str, exc: Exception | None = 
     exception type or str(e), to avoid leaking internal detail on a 500.
     """
     if exc is not None:
-        print(f"[error] {type(exc).__name__}: {exc}", file=sys.stderr)
+        # Fold CR/LF in the (possibly attacker-controlled) message onto one line
+        # so it cannot forge extra log records (log injection). The traceback is
+        # our own structured output and is left intact.
+        detail = f"{type(exc).__name__}: {exc}".replace("\r", " ").replace("\n", " ")
+        print(f"[error] {detail}", file=sys.stderr)
         print(traceback.format_exc(), file=sys.stderr)
     send_json(handler, code, {"error": public_message})
 
@@ -81,16 +85,22 @@ def read_json_body(handler, max_bytes: int):
       - malformed JSON                    -> (None, 400, "bad json: ...")
       - success                           -> (obj, None, None)
     """
-    try:
-        length = int(handler.headers.get("Content-Length", 0))
-    except (TypeError, ValueError):
+    # Strict ascii-digit parse: Python's int() accepts underscores ("1_000") and
+    # unicode digits, which would let a Content-Length disagree with the bytes on
+    # the wire. Only a run of ascii digits is a valid length.
+    raw = str(handler.headers.get("Content-Length", "0")).strip() or "0"
+    if not (raw.isascii() and raw.isdigit()):
         return None, 400, "invalid Content-Length"
-    if length < 0:
-        return None, 400, "invalid Content-Length"
+    length = int(raw)
     if length > max_bytes:
         return None, 413, "request body too large"
     try:
         req = json.loads(handler.rfile.read(length) or b"{}")
     except Exception as e:
         return None, 400, f"bad json: {e}"
+    # The handlers immediately do req.get(...); a non-object body (list, string,
+    # number, null) must be a clean 400, not an AttributeError that kills the
+    # handler thread.
+    if not isinstance(req, dict):
+        return None, 400, "body must be a JSON object"
     return req, None, None

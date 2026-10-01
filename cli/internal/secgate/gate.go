@@ -78,26 +78,39 @@ func (g *Gate) Authorize(ctx context.Context, c Command) Decision {
 	}
 	// Deny-layers passed. Run the confirmation tail, which releases g.mu for the
 	// human prompt and re-acquires it before touching Approvals or the audit log.
-	return g.confirmTailLocked(ctx, c)
+	// The exec-time rechecks run AFTER confirmation, off g.mu, so a resolution
+	// change during the human prompt is still caught.
+	d := g.confirmTailLocked(ctx, c)
+	if !d.Allowed {
+		return d
+	}
+	return g.recheck(c)
 }
 
-// Check runs only the deny-layers for one command (episode caps and breaker, the
-// classifier, allowlist, and scope checks of the selected profile) and returns
-// the Decision WITHOUT confirming and WITHOUT auditing an allow. Like Authorize
-// it consumes one budget slot per call, so a 3-stage pipeline that calls Check
-// once per stage consumes 3 slots. A pipeline uses Check to clear every stage's
-// deny-layers and then confirms ONCE via ConfirmCommand, so /safe prompts once
-// per pipeline instead of once per stage.
+// Check runs the deny-layers for one command (episode caps and breaker, the
+// classifier, allowlist, and scope checks of the selected profile) and then the
+// exec-time rechecks (Gate.recheck), and returns the Decision WITHOUT confirming
+// and WITHOUT auditing an allow. Like Authorize it consumes one budget slot per
+// call, so a 3-stage pipeline that calls Check once per stage consumes 3 slots.
+// A pipeline confirms ONCE via ConfirmCommand, then calls Check per stage so the
+// authoritative rechecks run after confirmation, immediately before exec. The
+// deny-layers run under g.mu; g.mu is released before the rechecks, which do DNS.
 func (g *Gate) Check(ctx context.Context, c Command) Decision {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if g.Episode == nil {
 		g.Episode = NewEpisode(Caps{}, nil)
 	}
 	if g.Mode != Safe && g.Mode != Auto {
-		return g.deny("mode", c, "unknown mode", "")
+		d := g.deny("mode", c, "unknown mode", "")
+		g.mu.Unlock()
+		return d
 	}
-	return g.checkLocked(c)
+	d := g.checkLocked(c)
+	g.mu.Unlock()
+	if !d.Allowed {
+		return d
+	}
+	return g.recheck(c)
 }
 
 // ConfirmCommand runs only the confirmation tail for one command: in Safe it
@@ -105,7 +118,7 @@ func (g *Gate) Check(ctx context.Context, c Command) Decision {
 // an approval, and audits the final allow or deny; in Auto it is a no-op that
 // audits allow. It runs no deny-layer and consumes no budget slot. A pipeline
 // calls it once with a synthetic command that stands for the whole pipeline,
-// after Check has cleared every stage, so a /safe pipeline prompts once.
+// before Check clears every stage, so a /safe pipeline prompts once.
 func (g *Gate) ConfirmCommand(ctx context.Context, c Command) Decision {
 	g.mu.Lock()
 	return g.confirmTailLocked(ctx, c)

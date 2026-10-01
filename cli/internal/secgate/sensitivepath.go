@@ -6,6 +6,20 @@ import (
 	"strings"
 )
 
+// isDotenvName reports whether base is a dotenv file: exactly ".env" or a
+// ".env.<suffix>" variant (.env.local, .env.prod), compared case-insensitively.
+// A name without the leading dot (plain "env") is not a dotenv file.
+func isDotenvName(base string) bool {
+	b := strings.ToLower(base)
+	return b == ".env" || strings.HasPrefix(b, ".env.")
+}
+
+// pathEqualFold reports whether two cleaned paths are equal, or a is under
+// directory b, comparing case-insensitively (macOS default FS is case-insensitive).
+func pathEqualFold(a, b, sep string) bool {
+	return strings.EqualFold(a, b) || strings.HasPrefix(strings.ToLower(a), strings.ToLower(b)+sep)
+}
+
 func SensitivePathViolation(c Command, protected []string, scratch string) (arg string, bad bool) {
 	sep := string(os.PathSeparator)
 	for _, tok := range c.Args {
@@ -17,7 +31,7 @@ func SensitivePathViolation(c Command, protected []string, scratch string) (arg 
 				continue
 			}
 			// A .env reference is denied whatever it resolves to.
-			if filepath.Base(cand) == ".env" {
+			if isDotenvName(filepath.Base(cand)) {
 				return tok, true
 			}
 
@@ -29,7 +43,7 @@ func SensitivePathViolation(c Command, protected []string, scratch string) (arg 
 				// names instead of over-denying every arg.
 				b := filepath.Base(filepath.Clean(cand))
 				for _, p := range protected {
-					if b == filepath.Base(filepath.Clean(p)) {
+					if strings.EqualFold(b, filepath.Base(filepath.Clean(p))) {
 						return tok, true
 					}
 				}
@@ -44,12 +58,12 @@ func SensitivePathViolation(c Command, protected []string, scratch string) (arg 
 			} else {
 				continue
 			}
-			if filepath.Base(resolved) == ".env" {
+			if isDotenvName(filepath.Base(resolved)) {
 				return tok, true
 			}
 			for _, p := range protected {
 				cp := filepath.Clean(p)
-				if resolved == cp || strings.HasPrefix(resolved, cp+sep) {
+				if pathEqualFold(resolved, cp, sep) {
 					return tok, true
 				}
 			}

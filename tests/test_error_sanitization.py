@@ -93,6 +93,7 @@ def _embed_server(reranker, generate=None):
 def _post(embed_server, path: str, body: bytes, content_length=None) -> FakeHandler:
     h = FakeHandler(body, path, content_length)
     h._send = types.MethodType(embed_server.Handler._send, h)
+    h._content_type_ok = types.MethodType(embed_server.Handler._content_type_ok, h)
     embed_server.Handler.do_POST(h)
     return h
 
@@ -180,6 +181,41 @@ class EmbedServerWireTest(unittest.TestCase):
 
         self.assertEqual(h.status, 413)
         self.assertEqual(json.loads(h.wfile.getvalue()), {"error": "request body too large"})
+
+
+class EmbedFinitenessTest(unittest.TestCase):
+    ''
+
+    def test_rejects_non_finite(self):
+        import numpy as np
+        from blkchain import config
+        with _embed_server(_working_reranker(lambda q, d: [0.0])) as embed_server:
+            good = np.zeros((1, config.EMBED_DIM), dtype="float32")
+            embed_server._validate_embed_arr(good)  # no raise
+            bad = good.copy()
+            bad[0, 0] = np.nan
+            with self.assertRaises(ValueError):
+                embed_server._validate_embed_arr(bad)
+
+    def test_rejects_wrong_dim(self):
+        import numpy as np
+        with _embed_server(_working_reranker(lambda q, d: [0.0])) as embed_server:
+            with self.assertRaises(ValueError):
+                embed_server._validate_embed_arr(np.zeros((1, 7), dtype="float32"))
+
+
+class EmbedElementValidationTest(unittest.TestCase):
+    """Non-scalar request elements are rejected with 400 before any inference."""
+
+    def test_embed_rejects_non_scalar_element(self):
+        with _embed_server(_working_reranker(lambda q, d: [0.0])) as embed_server:
+            h = _post(embed_server, "/embed", b'{"texts": [["nested"]]}')
+        self.assertEqual(h.status, 400)
+
+    def test_rerank_rejects_non_scalar_element(self):
+        with _embed_server(_working_reranker(lambda q, d: [0.0])) as embed_server:
+            h = _post(embed_server, "/rerank", b'{"query": "q", "documents": [{"x": 1}]}')
+        self.assertEqual(h.status, 400)
 
 
 if __name__ == "__main__":

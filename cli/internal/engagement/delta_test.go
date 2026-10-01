@@ -350,3 +350,46 @@ func TestApplyAllowsDoneToActive(t *testing.T) {
 		t.Fatalf("done->active should be allowed: %v", err)
 	}
 }
+
+// A-applyLocked (EXPAND): a task upserted with an invalid (non-empty) Surface is
+// rejected transactionally - nothing is written and the revision is unchanged.
+func TestApplyRejectsInvalidSurfaceTransactionally(t *testing.T) {
+	s := openTemp(t)
+	before, _ := s.Revision(context.Background())
+	_, err := s.Apply(Delta{Upserts: []Task{{ID: "t1", Status: StatusTodo, Surface: "mars"}}, Kind: "add"})
+	if err == nil {
+		t.Fatal("expected rejection of invalid surface 'mars'")
+	}
+	after, _ := s.Revision(context.Background())
+	if before != after {
+		t.Errorf("revision changed on a rejected apply: %d -> %d (not transactional)", before, after)
+	}
+	if _, gerr := s.GetTask("t1"); gerr == nil {
+		t.Error("task t1 was written despite the invalid surface")
+	}
+}
+
+// A valid phase/surface round-trips; an omitted one is defaulted (mechanism A).
+func TestApplyDefaultsAndRoundTripsPhaseSurface(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "t1", Kind: "web", Status: StatusTodo}}, Kind: "add"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetTask("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != PhaseRecon {
+		t.Errorf("phase default = %q, want recon", got.Phase)
+	}
+	if got.Surface != SurfaceWeb {
+		t.Errorf("surface default for kind web = %q, want web", got.Surface)
+	}
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "t2", Status: StatusTodo, Phase: PhaseExploit, Surface: SurfaceNetwork, Capability: CapActive}}, Kind: "add"}); err != nil {
+		t.Fatal(err)
+	}
+	g2, _ := s.GetTask("t2")
+	if g2.Phase != PhaseExploit || g2.Surface != SurfaceNetwork || g2.Capability != CapActive {
+		t.Errorf("round-trip mismatch: %+v", g2)
+	}
+}

@@ -79,76 +79,34 @@ var execRunner = realExec
 // execPipeline runs a shell-free pipeline with a timeout and byte cap. Stubbed in tests.
 var execPipeline = realExecPipeline
 
-// authorizeCommand runs the gate + exec-time rechecks for one command. It
-// returns a non-empty deny message (already audited) when the command is not
-// allowed, or "" when it may run.
+// authorizeCommand runs g.Authorize (deny-layers, confirmation, then the
+// exec-time rechecks) for one command. It returns a non-empty deny message
+// (already audited) when the command is not allowed, or "" when it may run.
 func authorizeCommand(ctx context.Context, g *secgate.Gate, cmd secgate.Command) string {
 	if d := g.Authorize(ctx, cmd); !d.Allowed {
-		msg := "run_command denied: " + d.Reason
-		if d.Suggestion != "" {
-			msg += " Suggestion: " + d.Suggestion
-		}
-		return msg
-	}
-	if ip, ok := secgate.ScopeViolation(g.Scope, cmd); ok {
-		if g.Audit != nil {
-			g.Audit("deny:scope-recheck", secgate.Signature(cmd))
-		}
-		return "run_command denied: a target resolves to an out-of-scope address: " + ip
-	}
-	if host, ip, bad := secgate.ResolveScopeViolation(g.Scope, cmd); bad {
-		if g.Audit != nil {
-			g.Audit("deny:resolve", secgate.Signature(cmd))
-		}
-		if ip != "" {
-			return "run_command denied: " + host + " resolves to an out-of-scope address: " + ip
-		}
-		return "run_command denied: could not resolve " + host + " to verify it is in scope"
-	}
-	if arg, bad := secgate.FileAccessViolation(cmd); bad {
-		if g.Audit != nil {
-			g.Audit("deny:fileaccess", secgate.Signature(cmd))
-		}
-		return "run_command denied: file path outside the working directory, or a config-file option, is not allowed: " + arg
+		return denyMessage(d)
 	}
 	return ""
 }
 
-// checkCommand runs the gate's deny-layers (via g.Check, NO confirmation) plus
-// the same exec-time rechecks as authorizeCommand. It returns a non-empty deny
-// message (already audited) when the command is not allowed, or "" when its
-// deny-layers pass. A pipeline uses it to clear every stage without prompting,
-// then confirms ONCE for the whole pipeline via g.ConfirmCommand.
+// checkCommand runs g.Check (deny-layers plus the exec-time rechecks, NO
+// confirmation). It returns a non-empty deny message (already audited) when the
+// command is not allowed, or "" when it passes. A pipeline confirms ONCE via
+// g.ConfirmCommand, then calls it per stage so the rechecks run after
+// confirmation.
 func checkCommand(ctx context.Context, g *secgate.Gate, cmd secgate.Command) string {
 	if d := g.Check(ctx, cmd); !d.Allowed {
-		msg := "run_command denied: " + d.Reason
-		if d.Suggestion != "" {
-			msg += " Suggestion: " + d.Suggestion
-		}
-		return msg
-	}
-	if ip, ok := secgate.ScopeViolation(g.Scope, cmd); ok {
-		if g.Audit != nil {
-			g.Audit("deny:scope-recheck", secgate.Signature(cmd))
-		}
-		return "run_command denied: a target resolves to an out-of-scope address: " + ip
-	}
-	if host, ip, bad := secgate.ResolveScopeViolation(g.Scope, cmd); bad {
-		if g.Audit != nil {
-			g.Audit("deny:resolve", secgate.Signature(cmd))
-		}
-		if ip != "" {
-			return "run_command denied: " + host + " resolves to an out-of-scope address: " + ip
-		}
-		return "run_command denied: could not resolve " + host + " to verify it is in scope"
-	}
-	if arg, bad := secgate.FileAccessViolation(cmd); bad {
-		if g.Audit != nil {
-			g.Audit("deny:fileaccess", secgate.Signature(cmd))
-		}
-		return "run_command denied: file path outside the working directory, or a config-file option, is not allowed: " + arg
+		return denyMessage(d)
 	}
 	return ""
+}
+
+func denyMessage(d secgate.Decision) string {
+	msg := "run_command denied: " + d.Reason
+	if d.Suggestion != "" {
+		msg += " Suggestion: " + d.Suggestion
+	}
+	return msg
 }
 
 // newRunCommandTool builds the run_command tool. It executes ONLY when the gate
@@ -206,27 +164,30 @@ func newRunCommandTool(g *secgate.Gate, capBytes int, timeout time.Duration, wor
 					return "run_command: invalid arguments: pipeline stage " + strconv.Itoa(i+1) + " has an empty binary", nil
 				}
 			}
-			// Check EVERY stage's deny-layers before running ANY: a denied stage
-			// anywhere aborts the whole pipeline with zero side effects (fail
-			// closed). checkCommand does NOT prompt; the whole pipeline is
-			// confirmed once below, so /safe asks the human a single time.
+			// Confirm the whole pipeline once, FIRST. The synthetic display command
+			// has binary "pipeline" and one arg per stage rendered as
+			// "bin arg1 arg2 ...", so its Signature is stable and an approval is
+			// remembered for an identical pipeline.
 			cmds := make([]secgate.Command, len(a.Pipeline))
 			stageStrs := make([]string, len(a.Pipeline))
 			for i := range a.Pipeline {
 				cmds[i] = secgate.Command{Binary: a.Pipeline[i].Binary, Args: a.Pipeline[i].Args}
+				stageStrs[i] = strings.Join(append([]string{cmds[i].Binary}, cmds[i].Args...), " ")
+			}
+			display := secgate.Command{Binary: "pipeline", Args: stageStrs}
+			if d := g.ConfirmCommand(ctx, display); !d.Allowed {
+				return "run_command denied: " + d.Reason, nil
+			}
+			// Then check EVERY stage (deny-layers plus the exec-time rechecks) before
+			// running ANY: a denied stage anywhere aborts the whole pipeline with zero
+			// side effects (fail closed). Running the check after confirmation closes
+			// the window in which a hostname could re-resolve out of scope while the
+			// human prompt was open. checkCommand does NOT prompt again.
+			for i := range cmds {
 				if msg := checkCommand(ctx, g, cmds[i]); msg != "" {
 					reason := strings.TrimPrefix(msg, "run_command denied: ")
 					return "run_command denied (stage " + strconv.Itoa(i+1) + "): " + reason, nil
 				}
-				stageStrs[i] = strings.Join(append([]string{cmds[i].Binary}, cmds[i].Args...), " ")
-			}
-			// Confirm the whole pipeline once. The synthetic display command has
-			// binary "pipeline" and one arg per stage rendered as "bin arg1 arg2 ...",
-			// so its Signature is stable and an approval is remembered for an
-			// identical pipeline.
-			display := secgate.Command{Binary: "pipeline", Args: stageStrs}
-			if d := g.ConfirmCommand(ctx, display); !d.Allowed {
-				return "run_command denied: " + d.Reason, nil
 			}
 			if g.Audit != nil {
 				sigs := make([]string, len(cmds))

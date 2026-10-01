@@ -244,6 +244,7 @@ func TestNetEnumOutOfScopeTargetsDeniedByGate(t *testing.T) {
 }
 
 func TestNetEnumGateAllowsBenignInScope(t *testing.T) {
+	stubEnumFixtureResolver(t)
 	g := newEnumGate(t, "ldapsearch", "snmpwalk", "onesixtyone")
 	for _, c := range []Command{
 		{Binary: "ldapsearch", Args: []string{"-x", "-H", "ldap://10.0.0.5", "-b", "dc=corp,dc=example", "-s", "base"}},

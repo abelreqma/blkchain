@@ -9,12 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	eng "blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 
@@ -1562,33 +1564,51 @@ func TestKeyPanelFooterSaysHowToClose(t *testing.T) {
 }
 
 func TestWelcomeBannerFitsEveryWidth(t *testing.T) {
-	noColor(t)
-	for w := 20; w <= 200; w++ {
-		lines := strings.Split(welcomeBanner(w), "\n")
-		if len(lines) > 2 {
-			t.Fatalf("width %d: banner is %d lines, want at most 2", w, len(lines))
+	// Unicode tiers render a full-width rounded box: exactly 3 lines, each exactly
+	// `width` columns wide (corners flush, right edge straight).
+	for _, tier := range []plTier{plUnicode, plNerd} {
+		vizForceTier(t, tier)
+		for w := 24; w <= 200; w++ {
+			b := welcomeBanner(w)
+			lines := strings.Split(b, "\n")
+			if len(lines) != 3 {
+				t.Fatalf("tier %v width %d: box is %d lines, want 3:\n%s", tier, w, len(lines), b)
+			}
+			for i, ln := range lines {
+				if lipgloss.Width(ln) != w {
+					t.Errorf("tier %v width %d: row %d is %d cols, want exactly %d: %q", tier, w, i, lipgloss.Width(ln), w, ln)
+				}
+			}
 		}
-		for _, ln := range lines {
-			if lipgloss.Width(ln) > w {
-				t.Errorf("width %d: banner row is %d columns: %q", w, lipgloss.Width(ln), ln)
+		b := welcomeBanner(80)
+		if !strings.Contains(b, "blk") || !strings.Contains(b, "Autonomous Offensive Security Framework") {
+			t.Errorf("tier %v: box must name blk and the tagline:\n%s", tier, b)
+		}
+		for _, corner := range []string{"\u256D", "\u256E", "\u2570", "\u256F"} {
+			if !strings.Contains(b, corner) {
+				t.Errorf("tier %v: box lacks corner %q:\n%s", tier, corner, b)
 			}
 		}
 	}
-	for _, w := range []int{40, 80} {
-		b := welcomeBanner(w)
-		if !strings.Contains(b, "blk") || !strings.Contains(b, "Type a question and press enter.") {
-			t.Errorf("width %d: line one must name the tool and say what to do:\n%s", w, b)
+	// Nerd tier leads the title with the radar glyph; the unicode tier does not.
+	vizForceTier(t, plNerd)
+	if !strings.Contains(welcomeBanner(80), "\U000F2B10") {
+		t.Error("nerd banner should carry the radar glyph U+F2B10")
+	}
+	vizForceTier(t, plUnicode)
+	if b := welcomeBanner(80); strings.ContainsRune(b, 0xF2B10) {
+		t.Errorf("unicode banner must not carry a Plane-15 glyph:\n%s", b)
+	}
+	// ASCII tier: no box, plain lines, still naming blk and the tagline.
+	vizForceTier(t, plASCII)
+	b := welcomeBanner(80)
+	for _, corner := range []string{"\u256D", "\u2570"} {
+		if strings.Contains(b, corner) {
+			t.Errorf("ascii banner must not draw a box:\n%s", b)
 		}
 	}
-	wide := welcomeBanner(80)
-	for _, want := range []string{"/ for commands", "? for keys", "ctrl+d to quit"} {
-		if !strings.Contains(wide, want) {
-			t.Errorf("80 columns: banner lacks %q:\n%s", want, wide)
-		}
-	}
-	// At 40 columns the hints are shortened or dropped from the end, never wrapped.
-	if b := welcomeBanner(40); len(strings.Split(b, "\n")) != 2 || !strings.Contains(b, "/") {
-		t.Errorf("40 columns should still show a second line of hints: %q", b)
+	if !strings.Contains(b, "blk") || !strings.Contains(b, "Autonomous Offensive Security Framework") {
+		t.Errorf("ascii banner must still name blk and the tagline:\n%s", b)
 	}
 }
 
@@ -1981,15 +2001,6 @@ func TestEveryFooterKeepsItsWayOut(t *testing.T) {
 			}
 		}
 	}
-	for w := 24; w <= 120; w++ {
-		lines := strings.Split(welcomeBanner(w), "\n")
-		if len(lines) != 2 || !strings.Contains(lines[1], "ctrl+d") || !strings.Contains(lines[1], "quit") {
-			t.Errorf("%d columns: banner %q lacks the quit hint", w, lines)
-		}
-	}
-	if b := welcomeBanner(32); !strings.Contains(b, "/ cmds") || !strings.Contains(b, "ctrl+d quit") {
-		t.Errorf("32 columns: banner %q should shorten the other hints before dropping them", b)
-	}
 }
 
 // In a confirm state the pending confirmation matters most: the confirm hint
@@ -2139,7 +2150,7 @@ func TestVizBarShowsStageAndMeter(t *testing.T) {
 	m := newTestModel(t)
 	m.prefs.Viz = true
 	stub := newStubEngagement("acme")
-	stub.setSnapshot(Engagement{ActiveID: "t2", Stage: Stage{Label: "web: SQLi on /login", Step: 3, Total: 6, Tool: "run_command"}})
+	stub.setSnapshot(eng.Engagement{ActiveID: "t2", Stage: eng.Stage{Label: "web: SQLi on /login", Step: 3, Total: 6, Tool: "run_command"}})
 	m.engagement = stub
 	bar := stripANSI(m.vizBar())
 	for _, want := range []string{"web: SQLi on /login", "3/6", "run_command"} {
@@ -2153,26 +2164,108 @@ func TestVizBarShowsStageAndMeter(t *testing.T) {
 	}
 }
 
+var tsReadoutRe = regexp.MustCompile(`~\d+ t/s`)
+
 func TestVizBarShowsLiveTokensPerSec(t *testing.T) {
 	m := newTestModel(t)
 	m.prefs.Viz = true
 	stub := newStubEngagement("acme")
-	stub.setSnapshot(Engagement{Stage: Stage{Label: "web: SQLi on /login", Step: 3, Total: 6, Tool: "run_command"}})
+	stub.setSnapshot(eng.Engagement{Stage: eng.Stage{Label: "web: SQLi on /login", Step: 3, Total: 6, Tool: "run_command"}})
 	m.engagement = stub
 	m.firstTokAt = time.Now().Add(-2 * time.Second)
-	m.liveTokens = 300
+	m.liveTokens = 300 // 300 chunks / ~2s = ~150/s
 	bar := stripANSI(m.vizBar())
-	if !strings.Contains(bar, "tok/s") {
-		t.Fatalf("vizBar should show tok/s while streaming: %q", bar)
+	// The rate is approximate (a delta can carry several tokens, so the chunk count
+	// under-reports): a leading "~" qualifier, an integer, labeled t/s (section 4).
+	if !tsReadoutRe.MatchString(bar) {
+		t.Fatalf("vizBar should show an approximate integer t/s rate while streaming: %q", bar)
+	}
+	if strings.Contains(bar, "150.0") {
+		t.Fatalf("an approximate rate should carry no decimal: %q", bar)
 	}
 	if !strings.Contains(bar, "150") {
 		t.Fatalf("vizBar should show the real rate ~150: %q", bar)
 	}
+	if strings.Contains(bar, "tok/s") {
+		t.Fatalf("vizBar should use the t/s label, not tok/s: %q", bar)
+	}
 	// absent when the model has not streamed this turn
 	m.liveTokens = 0
 	m.firstTokAt = time.Time{}
-	if strings.Contains(stripANSI(m.vizBar()), "tok/s") {
-		t.Fatalf("vizBar must not show tok/s before the first token")
+	if strings.Contains(stripANSI(m.vizBar()), "t/s") {
+		t.Fatalf("vizBar must not show a t/s rate before the first token")
+	}
+}
+
+// The t/s number is wTanFg (palette "t/s"), never the old wSageFg.
+func TestVizBarTokensPerSecColoredTan(t *testing.T) {
+	vizForceColor(t)
+	vizForceTier(t, plNerd)
+	m := newTestModel(t)
+	m.prefs.Viz = true
+	stub := newStubEngagement("acme")
+	stub.setSnapshot(eng.Engagement{Stage: eng.Stage{Label: "web: SQLi on /login", Step: 3, Total: 6, Tool: "run_command"}})
+	m.engagement = stub
+	m.firstTokAt = time.Now().Add(-2 * time.Second)
+	m.liveTokens = 300
+	bar := m.vizBar() // colored, not stripped
+	// Derive the exact foreground escapes the active profile emits for each token
+	// (termenv rounds truecolor), so the assertion does not hardcode RGB.
+	fgRe := regexp.MustCompile(`38;2;\d+;\d+;\d+`)
+	tanFg := fgRe.FindString(lipgloss.NewStyle().Foreground(wTanFg).Render("x"))
+	sageFg := fgRe.FindString(lipgloss.NewStyle().Foreground(wSageFg).Render("x"))
+	if tanFg == "" || sageFg == "" {
+		t.Fatalf("could not derive fg escapes (tan=%q sage=%q)", tanFg, sageFg)
+	}
+	if !strings.Contains(bar, tanFg) {
+		t.Fatalf("t/s number must be rendered wTanFg (%s): %q", tanFg, bar)
+	}
+	if strings.Contains(bar, sageFg) {
+		t.Fatalf("t/s number must not keep the old sage color (%s): %q", sageFg, bar)
+	}
+}
+
+// Nerd tier leads the bar with the play glyph (F2B06) and spins with the loader
+// glyph (F2B05), reconciling the section-4 loader with the section-7 icon map.
+func TestVizBarNerdTierUsesPlayAndLoaderGlyphs(t *testing.T) {
+	vizForceTier(t, plNerd)
+	m := newTestModel(t)
+	m.prefs.Viz = true
+	stub := newStubEngagement("acme")
+	stub.setSnapshot(eng.Engagement{Stage: eng.Stage{Label: "recon: scan", Step: 1, Total: 4, Tool: "run_command"}})
+	m.engagement = stub
+	bar := stripANSI(m.vizBar())
+	for name, glyph := range map[string]string{"play F2B06": "\U000F2B06", "loader F2B05": "\U000F2B05"} {
+		if !strings.Contains(bar, glyph) {
+			t.Fatalf("nerd viz bar lacks %s: %q", name, bar)
+		}
+	}
+	for _, old := range []string{"⠿", "▎"} {
+		if strings.Contains(bar, old) {
+			t.Fatalf("nerd viz bar should not keep %q: %q", old, bar)
+		}
+	}
+}
+
+// Unicode and ascii tiers keep the braille loader and accent; no Plane-15 glyph
+// leaks into a terminal without the patched font.
+func TestVizBarNonNerdKeepsBrailleLoader(t *testing.T) {
+	for _, tier := range []plTier{plASCII, plUnicode} {
+		vizForceTier(t, tier)
+		m := newTestModel(t)
+		m.prefs.Viz = true
+		stub := newStubEngagement("acme")
+		stub.setSnapshot(eng.Engagement{Stage: eng.Stage{Label: "recon: scan", Step: 1, Total: 4}})
+		m.engagement = stub
+		bar := stripANSI(m.vizBar())
+		if !strings.Contains(bar, "⠿") || !strings.Contains(bar, "▎") {
+			t.Fatalf("tier %v should keep the braille loader and accent: %q", tier, bar)
+		}
+		for _, r := range bar {
+			if r >= 0xF2B00 && r <= 0xF2BFF {
+				t.Fatalf("tier %v leaked a Plane-15 glyph %U: %q", tier, r, bar)
+			}
+		}
 	}
 }
 
@@ -2184,7 +2277,7 @@ func TestVizBarEmptyWithoutEngagementOrTotal(t *testing.T) {
 		t.Fatalf("vizBar with nil engagement = %q, want empty", got)
 	}
 	stub := newStubEngagement("acme")
-	stub.setSnapshot(Engagement{Stage: Stage{Label: "idle", Step: 0, Total: 0}})
+	stub.setSnapshot(eng.Engagement{Stage: eng.Stage{Label: "idle", Step: 0, Total: 0}})
 	m.engagement = stub
 	if got := m.vizBar(); got != "" {
 		t.Fatalf("vizBar with zero Total = %q, want empty", got)
@@ -2198,7 +2291,7 @@ func TestViewPrefersVizBarWhileWorking(t *testing.T) {
 	m.workingVerb = "Thinking"
 	m.turnStart = time.Now()
 	stub := newStubEngagement("acme")
-	stub.setSnapshot(Engagement{Stage: Stage{Label: "web: SQLi on /login", Step: 3, Total: 6}})
+	stub.setSnapshot(eng.Engagement{Stage: eng.Stage{Label: "web: SQLi on /login", Step: 3, Total: 6}})
 	m.engagement = stub
 	out := stripANSI(m.View())
 	if !strings.Contains(out, "web: SQLi on /login") || strings.Contains(out, "Thinking") {
@@ -2339,6 +2432,116 @@ func TestVizCommandTogglesPref(t *testing.T) {
 	m = nm.(model)
 	if !m.prefs.Viz {
 		t.Fatalf("an unknown arg must leave Viz unchanged")
+	}
+}
+
+// /help <command> shows that one command's help (the CLI renderer), /help alone
+// shows the full list, and an unknown name is reported.
+func TestHelpResponseScopesToCommand(t *testing.T) {
+	noColor(t)
+	c, ok := lookupCommand("ask")
+	if !ok {
+		t.Fatal("ask missing from the command registry")
+	}
+	got := helpResponse("ask", 100)
+	if want := strings.TrimRight(renderCommandHelp(c, 100), "\n"); got != want {
+		t.Errorf("helpResponse(ask) is not the ask command help.\n got: %q\nwant: %q", got, want)
+	}
+	if strings.Contains(got, "/mode") {
+		t.Errorf("per-command help leaked the full command list: %q", got)
+	}
+	// only the first token names the command; trailing text is ignored.
+	if helpResponse("ask --json foo", 100) != got {
+		t.Error("only the first token should name the command")
+	}
+	// no argument keeps the full command list.
+	if full := helpResponse("", 100); !strings.Contains(full, "/mode") {
+		t.Errorf("bare /help should render the full list: %q", full)
+	}
+	// an unknown command is reported with the shared suggestion phrasing.
+	if bad := helpResponse("nope", 100); !strings.Contains(bad, "unknown command") {
+		t.Errorf("unknown command should be reported: %q", bad)
+	}
+}
+
+// /generate uses an explicit argument, else the last search query.
+func TestGenerateQuestionPrefersArgThenLastQuery(t *testing.T) {
+	if got := generateQuestion("  specific ask  ", "last search"); got != "specific ask" {
+		t.Errorf("arg should win (trimmed): %q", got)
+	}
+	if got := generateQuestion("", "last search"); got != "last search" {
+		t.Errorf("empty arg should fall back to the last query: %q", got)
+	}
+	if got := generateQuestion("   ", "last search"); got != "last search" {
+		t.Errorf("whitespace arg should fall back to the last query: %q", got)
+	}
+}
+
+// A /search retains its query and results so /generate can synthesize from them.
+func TestSearchMsgRetainsResultsForGenerate(t *testing.T) {
+	m := newTestModel(t)
+	m.working = true
+	res := []retrieval.Result{{ID: "a", Payload: retrieval.Payload{Path: "x.md"}}}
+	nm, _ := m.Update(searchMsg{query: "ssrf", results: res, elapsed: time.Second})
+	got := nm.(model)
+	if got.lastQuery != "ssrf" {
+		t.Errorf("searchMsg should retain the query, got %q", got.lastQuery)
+	}
+	if len(got.lastResults) != 1 || got.lastResults[0].ID != "a" {
+		t.Errorf("searchMsg should retain the results, got %+v", got.lastResults)
+	}
+}
+
+// /generate does nothing until a search has run, then starts a turn.
+func TestGenerateGatedUntilSearch(t *testing.T) {
+	m := newTestModel(t)
+	m.width, m.height = 100, 24
+	nm, _ := m.dispatchInput("/generate")
+	if nm.(model).working {
+		t.Fatal("/generate with no prior search must not start a turn")
+	}
+	m.lastResults = []retrieval.Result{{ID: "a", Payload: retrieval.Payload{Path: "x.md"}}}
+	m.lastQuery = "ssrf"
+	nm, _ = m.dispatchInput("/generate")
+	if !nm.(model).working {
+		t.Fatal("/generate after a search should start a turn")
+	}
+}
+
+// generateCmd synthesizes from the given results via the seam and ends the turn,
+// and the done message sets the last answer and the /open targets.
+func TestGenerateCmdSynthesizesAndEndsTurn(t *testing.T) {
+	noColor(t)
+	var gotQ string
+	var gotN int
+	orig := synthFromResultsFn
+	synthFromResultsFn = func(ctx context.Context, cfg ragconfig.Config, question string, results []retrieval.Result, opts AnswerOpts) (string, []citation, int, error) {
+		gotQ, gotN = question, len(results)
+		return "SYNTH ANSWER", []citation{{Source: "wstg", Path: "ssrf.md", Section: "imds"}}, 9, nil
+	}
+	t.Cleanup(func() { synthFromResultsFn = orig })
+
+	m := newTestModel(t)
+	res := []retrieval.Result{{ID: "a"}, {ID: "b"}}
+	msg := m.generateCmd(context.Background(), "my question", res, time.Now())()
+	done, ok := msg.(streamDoneMsg)
+	if !ok {
+		t.Fatalf("generateCmd should return streamDoneMsg, got %T", msg)
+	}
+	if gotQ != "my question" || gotN != 2 {
+		t.Fatalf("SynthesizeFromResults got question=%q n=%d; want (my question, 2)", gotQ, gotN)
+	}
+	if done.full != "SYNTH ANSWER" || done.tokens != 9 || len(done.citations) != 1 {
+		t.Fatalf("done msg = %+v", done)
+	}
+	m.working = true
+	nm, _ := m.Update(done)
+	gm := nm.(model)
+	if gm.lastAnswer != "SYNTH ANSWER" {
+		t.Errorf("lastAnswer = %q", gm.lastAnswer)
+	}
+	if len(gm.openTargets) != 1 || gm.openTargets[0].Path != "ssrf.md" {
+		t.Errorf("openTargets = %+v", gm.openTargets)
 	}
 }
 

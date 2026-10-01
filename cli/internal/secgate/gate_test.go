@@ -2,6 +2,7 @@ package secgate
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -451,4 +452,84 @@ func TestAutoNonLocalStillDeniesNoTarget(t *testing.T) {
 	if g.Authorize(context.Background(), Command{Binary: "id"}).Allowed {
 		t.Error("a non-local scope must still deny a no-target command")
 	}
+}
+
+// confirmFunc adapts a function to the Confirmer interface so a test confirmer
+// can run a side effect when the human prompt is reached.
+type confirmFunc func(ctx context.Context, c Command) bool
+
+func (f confirmFunc) Confirm(ctx context.Context, c Command) bool { return f(ctx, c) }
+
+func TestAuthorizeAndCheckDenyIdenticallyOnRecheck(t *testing.T) {
+	s, _ := ParseScope(strings.NewReader("10.0.0.5\n"))
+	g := &Gate{Mode: Auto, Scope: s, Allow: NewAllowlist("curl"), Approvals: NewSessionApprovals()}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	cmd := Command{Binary: "curl", Args: []string{"-o", "/etc/cron.d/x", "http://10.0.0.5/"}}
+	a := g.Authorize(context.Background(), cmd)
+	c := g.Check(context.Background(), cmd)
+	if a.Allowed || c.Allowed {
+		t.Fatalf("both must deny: Authorize.Allowed=%v Check.Allowed=%v", a.Allowed, c.Allowed)
+	}
+	if a.Reason != c.Reason {
+		t.Errorf("deny reasons differ: Authorize=%q Check=%q", a.Reason, c.Reason)
+	}
+}
+
+func TestPipelineRechecksResolutionAfterConfirm(t *testing.T) {
+	saved := lookupIPFn
+	defer func() { lookupIPFn = saved }()
+	// Before confirm: host.example resolves in-scope. The confirmer flips it
+	// out-of-scope, modeling a rebind during the human prompt.
+	inScope := true
+	lookupIPFn = func(host string) ([]net.IP, error) {
+		if inScope {
+			return []net.IP{net.ParseIP("10.0.0.5")}, nil
+		}
+		return []net.IP{net.ParseIP("8.8.8.8")}, nil
+	}
+	s, _ := ParseScope(strings.NewReader("10.0.0.5\nhost.example\n"))
+	confirmer := confirmFunc(func(ctx context.Context, c Command) bool { inScope = false; return true })
+	g := &Gate{Mode: Safe, Scope: s, Allow: NewAllowlist("curl"), Confirm: confirmer, Approvals: NewSessionApprovals()}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the pipeline's post-confirm per-stage check:
+	g.ConfirmCommand(context.Background(), Command{Binary: "pipeline", Args: []string{"curl http://host.example/"}})
+	d := g.Check(context.Background(), Command{Binary: "curl", Args: []string{"http://host.example/"}})
+	if d.Allowed {
+		t.Fatal("stage must be denied: resolution flipped out-of-scope after confirmation (TOCTOU)")
+	}
+}
+
+// stubResolver replaces lookupIPFn for one test so the exec-time resolve
+// recheck is hermetic. A host missing from m fails to resolve (fail closed),
+// like NXDOMAIN. It is restored on cleanup.
+func stubResolver(t *testing.T, m map[string][]net.IP) {
+	t.Helper()
+	prev := lookupIPFn
+	lookupIPFn = func(host string) ([]net.IP, error) {
+		if ips, ok := m[strings.ToLower(host)]; ok {
+			return ips, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	t.Cleanup(func() { lookupIPFn = prev })
+}
+
+// stubEnumFixtureResolver maps the enum-test fixture names to addresses that
+// preserve each assertion: corp.example is a placeholder for a real in-scope
+// host (10.0.0.5, inside the fixtures' 10.0.0.0/24), and the out-of-scope
+// placeholder names resolve to 8.8.8.8.
+func stubEnumFixtureResolver(t *testing.T) {
+	t.Helper()
+	inScope := []net.IP{net.ParseIP("10.0.0.5")}
+	outScope := []net.IP{net.ParseIP("8.8.8.8")}
+	stubResolver(t, map[string][]net.IP{
+		"corp.example": inScope,
+		"evil.com":     outScope,
+		"evil":         outScope,
+		"anything.com": outScope,
+	})
 }

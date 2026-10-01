@@ -505,3 +505,15 @@ func TestDestructiveNotAppliedInExternalProfile(t *testing.T) {
 		}
 	}
 }
+
+func TestSystemPathWriteCaseFold(t *testing.T) {
+	for _, c := range []Command{
+		{Binary: "tee", Args: []string{"/ETC/passwd"}},
+		{Binary: "cp", Args: []string{"x", "/Usr/Bin/y"}},
+		{Binary: "install", Args: []string{"-m", "755", "x", "/ETC/cron.d/z"}},
+	} {
+		if err := DestructiveViolation(c); err == nil {
+			t.Errorf("%v must be denied (S2 system-write case-fold)", c.Args)
+		}
+	}
+}

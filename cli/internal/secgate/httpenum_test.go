@@ -303,6 +303,7 @@ func TestHTTPEnumOutOfScopeTargetsDeniedByGate(t *testing.T) {
 }
 
 func TestHTTPEnumGateAllowsBenignInScope(t *testing.T) {
+	stubEnumFixtureResolver(t)
 	g := newEnumGate(t, "gobuster", "ffuf", "nikto")
 	for _, c := range []Command{
 		{Binary: "gobuster", Args: []string{"dir", "-u", "http://10.0.0.5", "-w", "wl", "-o", "out", "-t", "10", "-q"}},

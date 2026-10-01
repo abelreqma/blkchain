@@ -161,3 +161,31 @@ func TestSensitivePathNotAppliedInExternalProfile(t *testing.T) {
 		}
 	}
 }
+
+func TestSensitivePathCaseFoldAndDotenvVariants(t *testing.T) {
+	protected := []string{"/ws/engagement.db", "/ws/audit.jsonl", "/ws/evidence", "/ws/report.md"}
+	scratch := "/scratch"
+	deny := []Command{
+		{Binary: "cat", Args: []string{"/ws/Engagement.DB"}},         // case variant of a protected file
+		{Binary: "cat", Args: []string{"/WS/AUDIT.JSONL"}},           // case variant, dir + file
+		{Binary: "grep", Args: []string{"x", "/ws/Evidence/e1.txt"}}, // under a protected dir, case variant
+		{Binary: "cat", Args: []string{".env"}},
+		{Binary: "cat", Args: []string{".env.local"}},
+		{Binary: "cat", Args: []string{".ENV"}},
+		{Binary: "cat", Args: []string{"/some/dir/.Env.Prod"}},
+	}
+	for _, c := range deny {
+		if _, bad := SensitivePathViolation(c, protected, scratch); !bad {
+			t.Errorf("%v must be denied (S2 case-fold / .env.*)", c.Args)
+		}
+	}
+	// Control: a plain file named "env" (no dot) and an unrelated file are allowed.
+	for _, c := range []Command{
+		{Binary: "cat", Args: []string{"env"}},
+		{Binary: "cat", Args: []string{"/etc/hosts"}},
+	} {
+		if _, bad := SensitivePathViolation(c, protected, scratch); bad {
+			t.Errorf("%v must NOT be denied by the harness-artifact check", c.Args)
+		}
+	}
+}

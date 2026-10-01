@@ -2,6 +2,7 @@ package secgate
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -227,6 +228,7 @@ func TestSMBEnumOutOfScopeTargetsDeniedByGate(t *testing.T) {
 }
 
 func TestSMBEnumGateAllowsBenignInScope(t *testing.T) {
+	stubEnumFixtureResolver(t)
 	g := newSMBGate(t)
 	for _, c := range []Command{
 		{Binary: "smbclient", Args: []string{"//10.0.0.5/share", "-N"}},
@@ -305,6 +307,7 @@ func TestUNCExtractionLimitedToSMBTools(t *testing.T) {
 }
 
 func TestUNCPayloadsAndPathsInScopeStayAllowedForNonSMBTools(t *testing.T) {
+	stubEnumFixtureResolver(t)
 	scope, err := ParseScope(strings.NewReader("10.0.0.0/24\ncorp.example\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -317,11 +320,28 @@ func TestUNCPayloadsAndPathsInScopeStayAllowedForNonSMBTools(t *testing.T) {
 		{Binary: "curl", Args: []string{"-d", "file=//etc/passwd", "http://10.0.0.5/"}},
 		{Binary: "curl", Args: []string{"-d", "file=\\\\windows\\win.ini", "http://10.0.0.5/"}},
 		{Binary: "curl", Args: []string{"--data-raw", "//x", "https://corp.example/"}},
-		{Binary: "curl", Args: []string{"-o", "//x", "http://10.0.0.5/"}},
-		{Binary: "wget", Args: []string{"-O", "//tmp/x", "http://10.0.0.5/"}},
 	} {
 		if d := g.Authorize(context.Background(), c); !d.Allowed {
 			t.Errorf("Authorize(%q %v) denied an in-scope non-SMB command: %q", c.Binary, c.Args, d.Reason)
+		}
+	}
+	// A "//" value to a write flag is an absolute output path, not an SMB target.
+	// The classifier and target extraction must still not treat it as UNC (only
+	// the in-scope URL is a target), but the file-access recheck correctly denies
+	// the absolute path, so the full seam denies it with that reason.
+	for _, c := range []Command{
+		{Binary: "curl", Args: []string{"-o", "//x", "http://10.0.0.5/"}},
+		{Binary: "wget", Args: []string{"-O", "//tmp/x", "http://10.0.0.5/"}},
+	} {
+		if d := Classify(c); !d.Allowed {
+			t.Errorf("Classify(%q %v) denied a non-SMB command: %q", c.Binary, c.Args, d.Reason)
+		}
+		if got, ok := ExtractTargets(c); !ok || !reflect.DeepEqual(got, []string{"10.0.0.5"}) {
+			t.Errorf("ExtractTargets(%q %v) = %v, %v; want [10.0.0.5] true", c.Binary, c.Args, got, ok)
+		}
+		d := g.Authorize(context.Background(), c)
+		if d.Allowed || !strings.Contains(d.Reason, "file path outside the working directory") {
+			t.Errorf("Authorize(%q %v) = %+v; want a file-access denial", c.Binary, c.Args, d)
 		}
 	}
 }

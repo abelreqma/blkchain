@@ -116,6 +116,7 @@ func digGate(t *testing.T, bins ...string) *Gate {
 }
 
 func TestDigServerIsScopeChecked(t *testing.T) {
+	stubEnumFixtureResolver(t)
 	g := digGate(t, "dig")
 	for _, args := range [][]string{
 		{"@8.8.8.8", "x"},
@@ -151,12 +152,13 @@ func TestDigServerIsScopeChecked(t *testing.T) {
 // name is allowed. Without an explicit resolver the name is still the only
 // checkable target and stays scope-checked.
 func TestDigQueryNameNotScopeCheckedWithExplicitServer(t *testing.T) {
+	stubEnumFixtureResolver(t)
 	g := digGate(t, "dig")
 	for _, args := range [][]string{
 		{"@10.0.0.5", "anything.com"},
 		{"anything.com", "@10.0.0.5"},
 		{"@10.0.0.5", "-t", "mx", "anything.com"},
-		{"@10.0.0.5", "-x", "8.8.8.8"},
+		{"@10.0.0.5", "-x", "10.0.0.9"},
 		{"@10.0.0.5", "-q", "anything.com"},
 		{"@corp.example", "anything.com", "txt"},
 	} {
@@ -193,6 +195,7 @@ func TestDigServerExtraction(t *testing.T) {
 // An '@' in a non-dig tool's data or URL must keep its old meaning: the change
 // is bound to dig and must not touch other tools.
 func TestNonDigAtTokenUnaffected(t *testing.T) {
+	stubEnumFixtureResolver(t)
 	g := digGate(t, "dig", "curl")
 	for _, c := range []Command{
 		{Binary: "curl", Args: []string{"-d", "user@corp.example", "http://10.0.0.5/"}},

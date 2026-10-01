@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	eng "blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 
@@ -68,8 +69,8 @@ func TestPlainVizSnapshotWritesBlock(t *testing.T) {
 type failingView struct{}
 
 func (failingView) Revision(context.Context) (int64, error) { return 0, errors.New("boom") }
-func (failingView) Snapshot(context.Context) (Engagement, error) {
-	return Engagement{}, errors.New("boom")
+func (failingView) Snapshot(context.Context) (eng.Engagement, error) {
+	return eng.Engagement{}, errors.New("boom")
 }
 
 func TestPlainVizSnapshotSilentOnError(t *testing.T) {

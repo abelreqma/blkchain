@@ -481,17 +481,19 @@ func sensitiveWriteDest(dest string) bool {
 	if dest == "" || !strings.HasPrefix(dest, "/") {
 		return false
 	}
-	clean := filepath.Clean(dest)
-	if devWriteExempt[clean] {
+	// Compare case-folded: the macOS default filesystem is case-insensitive, so
+	// /ETC/passwd is /etc/passwd. The prefix and exempt constants are lowercase.
+	lc := strings.ToLower(filepath.Clean(dest))
+	if devWriteExempt[lc] {
 		return false
 	}
 	for _, ex := range []string{"/dev/shm", "/tmp", "/var/tmp"} {
-		if clean == ex || strings.HasPrefix(clean, ex+"/") {
+		if lc == ex || strings.HasPrefix(lc, ex+"/") {
 			return false
 		}
 	}
 	for _, p := range sensitiveWritePrefixes {
-		if clean == p || strings.HasPrefix(clean, p+"/") {
+		if lc == p || strings.HasPrefix(lc, p+"/") {
 			return true
 		}
 	}

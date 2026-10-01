@@ -9,7 +9,10 @@ var metaTokens = []string{
 // deniedBinaries are shells, interpreters, and exec-wrappers. Running one
 // re-introduces the shell that argv execution exists to avoid (sh -c, bash -lc)
 // or re-execs an arbitrary program behind the gate (env sh, sudo, xargs), so
-// they are denied outright by basename rather than by flag.
+// they are denied outright by basename rather than by flag. This also covers
+// exec wrappers that re-exec or bound another program (nsenter, unshare, flock,
+// ...) and macOS interpreters and tracers that script or run arbitrary code
+// (osascript, lldb, dtrace).
 var deniedBinaries = map[string]bool{
 	// shells
 	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true,
@@ -25,6 +28,14 @@ var deniedBinaries = map[string]bool{
 	"python": true, "python2": true, "python3": true, "perl": true,
 	"ruby": true, "node": true, "nodejs": true, "php": true, "lua": true,
 	"awk": true, "gawk": true, "find": true,
+	// exec wrappers (S1)
+	"nsenter": true, "unshare": true, "setpriv": true, "flock": true,
+	"capsh": true, "ionice": true, "taskset": true, "setarch": true,
+	"chrt": true, "runcon": true, "eatmydata": true,
+	// interpreters (S1)
+	"expect": true, "tclsh": true, "wish": true,
+	// macOS interpreters and tracers (S1)
+	"osascript": true, "lldb": true, "dtrace": true,
 }
 
 // unboundedRules maps a binary to the flags that bound it and the suggestion

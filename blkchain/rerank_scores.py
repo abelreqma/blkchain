@@ -19,11 +19,27 @@ MLX, transformers, or any model (reranker_modernbert imports mlx at module top).
 from __future__ import annotations
 
 import math
+import re
 import sys
 from collections.abc import Sequence
 
 # Model scores are sigmoid(logit) in [0, 1]; this sorts strictly below all of them.
 SENTINEL_SCORE = -1.0
+
+# Chat/control markers a document might contain. Bounded (no nested quantifier
+# over untrusted length) so an unterminated "<|..." cannot backtrack.
+_CONTROL_TOKEN_RE = re.compile(r"<\|[^|>]{0,64}\|>")
+_THINK_RE = re.compile(r"</?think>")
+
+
+def neutralize_control_tokens(text: str) -> str:
+    """Strip chat/control markers (<|...|>, <think>/</think>) from a document so
+    a poisoned chunk cannot inject prompt structure into an instruction-aware
+    reranker's judge prompt and pin itself to rank 1 (PI13). Linear time."""
+    if not isinstance(text, str):
+        return text
+    text = _CONTROL_TOKEN_RE.sub(" ", text)
+    return _THINK_RE.sub(" ", text)
 
 
 def is_blank_document(doc: str) -> bool:

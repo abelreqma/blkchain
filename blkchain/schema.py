@@ -17,19 +17,31 @@ SOURCES = (
 )
 TYPES = ("note", "finding", "http", "code", "payload", "wordlist", "doc", "template")
 
+# Payload keys owned by the core schema; an `extra` entry may never overwrite one.
+_CORE_PAYLOAD_KEYS = frozenset({
+    "source", "path", "section", "type", "identifiers", "cwe_class", "blurb",
+    "text", "snapshot_version", "content_hash", "index_scope", "index_generation",
+})
 
-def chunk_id(source_path: str, span: str) -> str:
+
+def chunk_id(source: str, source_path: str, span: str) -> str:
     """Deterministic chunk id: stable across re-ingest, so upserts are idempotent
-    and resumable (PROSE lesson 7). `span` is any stable locator within the file
-    (e.g. a char range "1024-1536" or a section id)."""
-    return hashlib.sha256(f"{source_path}#{span}".encode()).hexdigest()
+    and resumable (PROSE lesson 7). The `source` name is part of the id so two
+    corpus roots that yield the same relative path (e.g. `README.md` under both
+    SECLISTS_DIR and SKILLS_DIR) do not collide onto one point. `span` is any
+    stable locator within the file (a char range "1024-1536" or a section id).
+    surrogatepass so a lone surrogate in adversarial corpus text does not raise."""
+    return hashlib.sha256(
+        f"{source}::{source_path}#{span}".encode("utf-8", "surrogatepass")
+    ).hexdigest()
 
 
 def content_hash(text: str) -> str:
     """Hash of a chunk's text, stored in the payload so resume can detect when a
     chunk's content changed (same id, new text) and re-embed it, rather than
-    skipping it as already-indexed."""
-    return hashlib.sha256(text.encode()).hexdigest()
+    skipping it as already-indexed. surrogatepass so a lone surrogate in the text
+    does not raise."""
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 @dataclass
@@ -52,7 +64,7 @@ class Chunk:
         index_generation: str | None = None,
     ) -> dict[str, Any]:
         """Qdrant point payload (RAG-BUILD-PLAN section 6.2)."""
-        p = {
+        core = {
             "source": self.source,
             "path": self.path,
             "section": self.section,
@@ -64,7 +76,11 @@ class Chunk:
             "snapshot_version": snapshot_version,
             "content_hash": content_hash(self.text),
         }
-        p.update(self.extra)
+        # Extra keys (line_count, origin, ...) are added first, then core keys
+        # overwrite, so a stray extra key ("source", "text") can never clobber a
+        # core payload field.
+        p = {k: v for k, v in self.extra.items() if k not in _CORE_PAYLOAD_KEYS}
+        p.update(core)
         if index_scope is not None:
             p["index_scope"] = index_scope
         if index_generation is not None:

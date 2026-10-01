@@ -56,5 +56,20 @@ class TestRerankerPathWiring(unittest.TestCase):
         self.assertEqual(r.stdout.strip().splitlines()[-1], "custom-reranker-dir")
 
 
+class UnknownRerankerKindTest(unittest.TestCase):
+    """PI14: an unknown BLKCHAIN_RERANKER_KIND must raise, never silently load the
+    non-commercial jina backend. The raise happens before any backend import, so
+    no MLX model loads (importing blkchain.reranker is safe to assert on)."""
+
+    def test_unknown_kind_raises(self):
+        env = {**os.environ, "BLKCHAIN_RERANKER_KIND": "bogus"}
+        env.pop("BLKCHAIN_RERANKER_PATH", None)
+        r = subprocess.run([sys.executable, "-c", "import blkchain.reranker"],
+                           capture_output=True, text=True, env=env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("ValueError", r.stderr)
+        self.assertIn("bogus", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

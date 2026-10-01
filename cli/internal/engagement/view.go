@@ -64,7 +64,7 @@ func readRevision(ctx context.Context, q rowQueryer) (int64, error) {
 // through q.
 func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev
+		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability
 		 FROM task ORDER BY created_rev ASC, id ASC`)
 	if err != nil {
 		return nil, err
@@ -73,14 +73,18 @@ func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
 	out := []Task{}
 	for rows.Next() {
 		var (
-			t         Task
-			status    string
-			deps, bas sql.NullString
+			t                      Task
+			status                 string
+			deps, bas              sql.NullString
+			phase, surface, capVal sql.NullString
 		)
-		if err := rows.Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev); err != nil {
+		if err := rows.Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal); err != nil {
 			return nil, err
 		}
 		t.Status = Status(status)
+		t.Phase = Phase(phase.String)
+		t.Surface = Surface(surface.String)
+		t.Capability = Capability(capVal.String)
 		if t.DependsOn, err = unmarshalStrings(deps.String); err != nil {
 			return nil, err
 		}

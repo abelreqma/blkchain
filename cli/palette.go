@@ -64,6 +64,7 @@ func slashCommands() []command {
 		{"ask", "<q>", spec["ask"], groupAsk},
 		{"search", "<q>", spec["search"], groupAsk},
 		{"open", "<N|path>", spec["open"], groupAsk},
+		{"generate", "[question]", "answer from the last search results, no new retrieval", groupAsk},
 		{"mode", "", "switch between knowledge-base answers and the Hermes agent (also /agent, /rag)", groupModes},
 		{"agent", "", "use the Hermes agent for questions", groupHidden},
 		{"rag", "[on|off|question]", "answer from the knowledge base", groupHidden},
@@ -86,7 +87,7 @@ func slashCommands() []command {
 		{"models", "[verb <name>]", "see all models; turn them on or off, load or unload", groupServices},
 		{"logs", "[service]", spec["logs"], groupServices},
 		{"hermes", "<prompt>", spec["hermes"], groupAgent},
-		{"help", "", "show this list of commands", groupSetup},
+		{"help", "[command]", "show all commands, or one command in detail", groupSetup},
 		{"quit", "", "leave blk (also ctrl+d)", groupSetup},
 	}
 }

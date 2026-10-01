@@ -252,30 +252,9 @@ func (svc engageService) handle(ctx context.Context, ss *mcp.ServerSession, in m
 	}
 	defer os.RemoveAll(scratch)
 
-	allow := secgate.NewAllowlist(append(defaultEngageAllowlist(), p.Scope.AllowedBins()...)...)
-	gate := &secgate.Gate{
-		Mode:      mode,
-		Scope:     p.Scope,
-		Allow:     allow,
-		Confirm:   confirm,
-		Approvals: approvals,
-		Audit: func(action, detail string) {
-			_ = ws.AuditLine("secgate", action, detail)
-		},
-	}
-	// LOCAL profile only: guard the engagement's own artifacts from an executor's
-	// file arguments, mirroring `blk engage`. ws.Dir is the absolute workspace
-	// dir, so these resolve to the same absolute paths the sensitive-path check
-	// compares against, and scratch is run_command's cwd for relative arguments.
-	protMD, protJSON := reportPaths(ws.Dir)
-	gate.Protected = []string{
-		filepath.Join(ws.Dir, "engagement.db"),
-		filepath.Join(ws.Dir, "audit.jsonl"),
-		ws.EvidenceDir(),
-		protMD,
-		protJSON,
-	}
-	gate.Scratch = scratch
+	gate := buildEngageGate(ws, p.Scope, mode, confirm, approvals, scratch, func(action, detail string) {
+		_ = ws.AuditLine("secgate", action, detail)
+	})
 	if err := gate.Start(); err != nil {
 		return nil, fmt.Errorf("engage: %w", err)
 	}
@@ -285,19 +264,7 @@ func (svc engageService) handle(ctx context.Context, ss *mcp.ServerSession, in m
 		return nil, fmt.Errorf("engage: %w", err)
 	}
 
-	deps := engageDeps{
-		Model:    model,
-		RC:       svc.rc,
-		Cfg:      svc.cfg,
-		Prefs:    loadPrefs(),
-		Store:    ws.Store,
-		Asker:    askuser.AutoAsker{},
-		Gate:     gate,
-		Runs:     NewRunOutputs(),
-		WorkDir:  scratch,
-		Catalog:  svc.cat,
-		Progress: nil,
-	}
+	deps := buildEngageDeps(model, svc.rc, svc.cfg, loadPrefs(), ws.Store, gate, scratch, svc.cat, askuser.AutoAsker{}, nil, nil)
 	final, err := svc.run(ctx, deps, p.Goal)
 	if err != nil {
 		return nil, fmt.Errorf("engage: %w", err)
