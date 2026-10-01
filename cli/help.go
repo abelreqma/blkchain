@@ -259,6 +259,21 @@ func commandSpecs() []cmdSpec {
 			run: runEngage,
 		},
 		{
+			name: "kg", group: hgAgent,
+			desc: "query the engagement knowledge graph",
+			long: "Queries the engagement knowledge graph: a read-only, in-process projection of the engagement store that correlates tasks, assets, and evidence as nodes and edges. " +
+				"With --node it shows one node's neighborhood; with --type it filters to task, asset, or evidence; with neither it prints the whole graph. " +
+				"It reads the most recent engagement unless --workspace is given, and with --json it prints the name, revision, nodes, and edges. " +
+				"It only reads the engagement store, so run blk engage first.",
+			flags: func(fs *flag.FlagSet) { defineKgFlags(fs, &kgOpts{}) },
+			examples: []string{
+				"blk kg",
+				"blk kg --node asset:10.0.0.1",
+				"blk kg --type task --json",
+			},
+			run: runKg,
+		},
+		{
 			name: "install", group: hgSetup,
 			desc: "put blk on your PATH (run once, from the project)",
 			long: "Copies this blk binary onto your PATH and remembers the project folder, so blk works from any directory. " +

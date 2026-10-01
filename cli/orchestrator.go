@@ -143,6 +143,7 @@ const (
 	batchErrTaskDone    = "already done"
 	batchErrTaskNA      = "marked not applicable"
 	batchErrTaskUnknown = "not found"
+	batchErrTaskBlocked = "blocked (not actionable; e.g. an ungrounded corpus-coverage-gap candidate)"
 )
 
 // engageParallel returns the cap on concurrently running executors in one
@@ -247,6 +248,11 @@ func newDispatchBatchToolWith(d engageDeps, exec func(ctx context.Context, d eng
 					skipped = append(skipped, batchResult{TaskID: id, Result: "skipped: task is " + batchErrTaskNA})
 					continue
 				}
+
+				if task.Status == engagement.StatusBlocked {
+					skipped = append(skipped, batchResult{TaskID: id, Result: "skipped: task is " + batchErrTaskBlocked})
+					continue
+				}
 				valid = append(valid, id)
 				upserts = append(upserts, markTaskActive(task))
 			}
@@ -301,6 +307,13 @@ func runExecutor(ctx context.Context, d engageDeps, taskID string) (string, erro
 func runOrchestrator(ctx context.Context, d engageDeps, goal string) (string, error) {
 	if d.Progress != nil {
 		remove := d.Store.AddOnApply(d.Progress)
+		defer remove()
+	}
+	// Attach every multi-flow on-apply listener registered via registerOnApply.
+	// This runs in all engage flows (CLI/REPL/MCP) because they funnel through
+	// here. Each listener is removed when the engagement loop returns.
+	for _, fn := range onApplyListeners {
+		remove := d.Store.AddOnApply(fn)
 		defer remove()
 	}
 	reg := tooldef.NewRegistry()

@@ -208,8 +208,8 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 
 	for _, t := range upserts {
 		if _, err := conn.ExecContext(ctx,
-			`INSERT INTO task (id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, citation)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO task (id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, citation, advisory)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			   kind = excluded.kind,
 			   target = excluded.target,
@@ -223,10 +223,12 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 			   surface = excluded.surface,
 			   capability = excluded.capability,
 			   armed = excluded.armed,
-			   citation = excluded.citation`,
+			   coverage_gap = excluded.coverage_gap,
+			   citation = excluded.citation,
+			   advisory = excluded.advisory`,
 			t.ID, t.Kind, t.Target, t.Objective, t.DoneWhen, string(t.Status),
 			marshalStrings(t.DependsOn), marshalStrings(t.BasisIDs), newRev, newRev,
-			string(t.Phase), string(t.Surface), string(t.Capability), boolToInt(t.Armed), marshalCitation(t.Citation)); err != nil {
+			string(t.Phase), string(t.Surface), string(t.Capability), boolToInt(t.Armed), boolToInt(t.CoverageGap), marshalCitation(t.Citation), t.Advisory); err != nil {
 			return 0, err
 		}
 	}

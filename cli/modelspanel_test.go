@@ -43,7 +43,7 @@ func panelData() modelsData {
 			{ID: "hid-model", Known: true},
 			{ID: "idle-model", Known: true},
 		},
-		admin: true, embedUp: true, embed: embedHealth{Embedder: true, Reranker: true}, webSet: true,
+		admin: true, embedUp: true, embed: embedHealth{Embedder: true, Reranker: true}, webProvider: webProviderTavily,
 	}
 }
 
@@ -133,7 +133,8 @@ func TestModelsPanelRowsAndStates(t *testing.T) {
 		}
 	}
 	d := panelData()
-	d.embedUp, d.webSet, d.admin = false, false, false
+	d.embedUp, d.admin = false, false
+	d.webProvider = webProviderNone
 	d.chat = []chatModel{{ID: "act-model"}, {ID: "other"}}
 	nm, _ := m.Update(modelsDataMsg{data: d})
 	m = nm.(model)
@@ -234,7 +235,7 @@ func TestModelsPanelSpaceTogglesAndSaves(t *testing.T) {
 func TestModelsPanelWebNotConfiguredDoesNotToggle(t *testing.T) {
 	m := panelModel(t, 100, 30)
 	d := panelData()
-	d.webSet = false
+	d.webProvider = webProviderNone
 	nm, _ := m.Update(modelsDataMsg{data: d})
 	m = selectRow(t, nm.(model), "web search")
 	m, _ = step(t, m, keySpace)
@@ -918,5 +919,68 @@ func TestRunModelsArgsRagKind(t *testing.T) {
 	}
 	if sw == nil || sw.kind != rowRag || sw.on {
 		t.Errorf("switch = %+v, want rowRag off", sw)
+	}
+}
+
+// webPanel opens the /models panel on panelData with the web switch and the
+// active provider set, for exercising the web row's provider reflection.
+func webPanel(t *testing.T, provider string, web bool) model {
+	t.Helper()
+	m := newKeyModel(t)
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = nm.(model)
+	m.ragModel = "act-model"
+	m.prefs = defaultPrefs().withHidden("hid-model", true)
+	m.prefs.Web = web
+	m.overlay = newModelsPanel(m.prefs, m.currentModel())
+	d := panelData()
+	d.webProvider = provider
+	nm, _ = m.Update(modelsDataMsg{data: d})
+	return nm.(model)
+}
+
+// The panel web row keeps the colored state word (on/off/not configured) and
+// names the active provider in the detail column; with no provider it says how
+// to configure one.
+func TestModelsPanelWebProviderStates(t *testing.T) {
+	isolateUserDirs(t)
+	cases := []struct {
+		provider   string
+		web        bool
+		wantState  string
+		wantDetail string
+	}{
+		{webProviderTavily, true, "on", "tavily"},
+		{webProviderTavily, false, "off", "tavily"},
+		{webProviderDuckDuckGo, true, "on", "duckduckgo fallback"},
+		{webProviderDuckDuckGo, false, "off", "duckduckgo fallback"},
+		{webProviderNone, true, "not configured", "or DuckDuckGo"},
+	}
+	for _, c := range cases {
+		m := webPanel(t, c.provider, c.web)
+		if got := rowState(t, m, "web search"); got != c.wantState {
+			t.Errorf("provider %q web=%v: state = %q, want %q", c.provider, c.web, got, c.wantState)
+		}
+		if v := m.View(); !strings.Contains(v, c.wantDetail) {
+			t.Errorf("provider %q web=%v: view lacks %q:\n%s", c.provider, c.web, c.wantDetail, v)
+		}
+	}
+}
+
+// The keyless DuckDuckGo fallback makes web search available, so the panel
+// toggles it (the on/off action is no longer gated on a Tavily token).
+func TestModelsPanelWebDDGFallbackToggles(t *testing.T) {
+	isolateUserDirs(t)
+	m := webPanel(t, webProviderDuckDuckGo, true)
+	m = selectRow(t, m, "web search")
+	m, _ = step(t, m, keySpace)
+	if m.prefs.Web {
+		t.Error("space on an available DDG web search should turn it off")
+	}
+	if got := rowState(t, m, "web search"); got != "off" {
+		t.Errorf("after toggle: state = %q, want off", got)
+	}
+	if v := m.View(); !strings.Contains(v, "duckduckgo fallback") {
+		t.Errorf("view should name the DDG provider:\n%s", v)
 	}
 }

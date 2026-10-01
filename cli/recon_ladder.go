@@ -35,6 +35,14 @@ var genericReconLadder = reconLadder{
 	{Index: 0, Name: "enumerate", Dimensions: []string{"enumerated"}},
 }
 
+// registerLadder registers a recon ladder for a surface. It is the seam a future
+// per-surface ladder fills from its OWN file via init(), so no two surface
+// sessions edit this file. The network ladder above stays in-file (preserving
+// today's behavior); ladderFor still falls back to genericReconLadder.
+func registerLadder(surface engagement.Surface, l reconLadder) {
+	surfaceLadders[surface] = l
+}
+
 // ladderFor returns the recon ladder for surface, or the generic fallback when
 // the surface has no dedicated ladder.
 func ladderFor(surface engagement.Surface) reconLadder {

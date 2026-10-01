@@ -15,13 +15,25 @@ type surfaceExecutor interface {
 	Run(ctx context.Context, task engagement.Task) (string, error)
 }
 
-// executorFor selects the executor for a task by its Surface. Every surface maps
-// to genericExecutor today; the switch is the seam the surface SPs fill in.
+// surfaceExecutors is the per-surface executor registry. Each future per-surface
+// executor registers its factory from its OWN file via init() (registerExecutor),
+// so no two surface sessions edit this file. Nothing is registered today, so
+// executorFor falls back to genericExecutor for every surface, as before.
+var surfaceExecutors = map[engagement.Surface]func(engageDeps) surfaceExecutor{}
+
+// registerExecutor registers a factory for a surface. It is the seam the surface
+// SPs fill in; call it once per surface from that surface's own file.
+func registerExecutor(surface engagement.Surface, factory func(engageDeps) surfaceExecutor) {
+	surfaceExecutors[surface] = factory
+}
+
+// executorFor selects the executor for a task by its Surface. A surface with a
+// registered factory uses it; every other surface falls back to genericExecutor.
 func executorFor(d engageDeps, task engagement.Task) surfaceExecutor {
-	switch task.Surface {
-	default:
-		return genericExecutor{d: d}
+	if factory, ok := surfaceExecutors[task.Surface]; ok {
+		return factory(d)
 	}
+	return genericExecutor{d: d}
 }
 
 type genericExecutor struct {
@@ -74,6 +86,9 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 			Phase:   secgate.Phase(string(task.Phase)),
 			Surface: secgate.Surface(string(task.Surface)),
 			Armed:   task.Armed,
+
+			Kind:   task.Kind,
+			Target: task.Target,
 		}
 		// Help-grounding: ground each proposed command against the tool's real
 		// interface before the gate authorizes it. nil ToolHelp disables it.

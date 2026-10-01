@@ -41,7 +41,9 @@ type searcher interface {
 }
 
 // webSearch is the web fallback, a variable so tests do not touch the network.
-var webSearch = tavilySearch
+// It routes to Tavily when a key is configured and to the opted-in keyless
+// DuckDuckGo fallback otherwise (see webProvider).
+var webSearch = dispatchWebSearch
 
 // rag.go is the bounded RAG answer loop (AnswerLoop): retrieve, grade
 // sufficiency, optionally web-search or rewrite-and-re-retrieve, then stream a
@@ -69,14 +71,15 @@ func looksLikeCVEorPoC(query string) bool {
 // nextAction is the pure loop-control decision, extracted so it can be unit
 // tested without any LLM or network dependency. The loop wants the web when the
 // grader asks for it, the query looks like a CVE or PoC question, or retrieval
-// found nothing, and gets it only when a Tavily key is configured;
+// found nothing, and gets it only when web search is enabled (the web provider
+// is Tavily, or the opted-in keyless DuckDuckGo fallback, see webProvider);
 // grade.Sufficient always wins first.
-func nextAction(g grade, hasTavily, looksCVE bool, results int) string {
+func nextAction(g grade, hasWeb, looksCVE bool, results int) string {
 	if g.Sufficient {
 		return "sufficient"
 	}
 	wantsWeb := g.UseWeb || looksCVE || results == 0
-	if wantsWeb && hasTavily {
+	if wantsWeb && hasWeb {
 		return "web"
 	}
 	return "rewrite"
@@ -128,7 +131,13 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 	}
 
 	searchQuery := question
-	hasTavily := tavilyKey() != "" && !opts.NoWeb
+	// Web search is reachable only when a provider is available and the caller
+	// did not disable it. The provider is Tavily when a key is set, else the
+	// keyless DuckDuckGo fallback when it is opted in (see webProvider); with no
+	// key and no opt-in, web stays off so a keyless install makes no outbound
+	// request.
+	_, webAvail := webProvider(tavilyKey())
+	hasWeb := webAvail && !opts.NoWeb
 	looksCVE := looksLikeCVEorPoC(question)
 
 	// Clamp MaxLoops to at least one pass: a value <= 0 (a bad rag.json or env)
@@ -146,7 +155,7 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 			break
 		}
 
-		action := nextAction(g, hasTavily, looksCVE, len(results))
+		action := nextAction(g, hasWeb, looksCVE, len(results))
 		if action == "sufficient" {
 			break
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 )
 
@@ -22,5 +23,86 @@ func TestTavilyKeyAbsentSkips(t *testing.T) {
 	t.Setenv("TAVILY_SETUP_TOKEN", "")
 	if tavilyKey() != "" {
 		t.Errorf("expected empty key")
+	}
+}
+
+// fnPtr identifies a function value by its code pointer, so a test can assert
+// which provider webProvider returned (func values are not == comparable).
+func fnPtr(f webSearchFn) uintptr { return reflect.ValueOf(f).Pointer() }
+
+func TestWebProviderSelection(t *testing.T) {
+	// A Tavily key selects Tavily and web is available, regardless of the
+	// fallback opt-in.
+	t.Setenv("BLKCHAIN_WEB_FALLBACK", "")
+	if fn, ok := webProvider("tvly-xxx"); !ok || fnPtr(fn) != fnPtr(tavilySearch) {
+		t.Errorf("a Tavily key should select Tavily and be available (ok=%v)", ok)
+	}
+
+	// No key and no opt-in: web search stays unavailable so a keyless install
+	// makes no outbound request by default.
+	if _, ok := webProvider(""); ok {
+		t.Error("no key and no opt-in should leave web search unavailable")
+	}
+
+	// No key with the DuckDuckGo opt-in: the keyless fallback is selected.
+	t.Setenv("BLKCHAIN_WEB_FALLBACK", "duckduckgo")
+	if fn, ok := webProvider(""); !ok || fnPtr(fn) != fnPtr(duckDuckGoSearch) {
+		t.Errorf("no key with opt-in should select the DuckDuckGo fallback (ok=%v)", ok)
+	}
+}
+
+func TestActiveWebProvider(t *testing.T) {
+	cases := []struct {
+		name     string
+		tavily   string
+		fallback string
+		want     string
+	}{
+		{"tavily key present", "tvly-xxx", "", "tavily"},
+		{"tavily key beats fallback", "tvly-xxx", "duckduckgo", "tavily"},
+		{"no key, ddg opted in", "", "duckduckgo", "duckduckgo"},
+		{"no key, no opt-in", "", "", "off"},
+		{"no key, unknown fallback value", "", "bing", "off"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("TAVILY_SETUP_TOKEN", c.tavily)
+			t.Setenv("BLKCHAIN_WEB_FALLBACK", c.fallback)
+			if got := activeWebProvider(); got != c.want {
+				t.Errorf("activeWebProvider() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestDuckDuckGoSearchMapsUntrustedAndCaps(t *testing.T) {
+	const body = `{
+		"Heading":"XSS",
+		"AbstractText":"Cross-site scripting overview",
+		"AbstractURL":"https://owasp.org/xss",
+		"RelatedTopics":[
+			{"Text":"Reflected XSS","FirstURL":"https://a.example/1"},
+			{"Topics":[{"Text":"Stored XSS","FirstURL":"https://a.example/2"}]}
+		]
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	got, err := duckDuckGoSearchAt(context.Background(), srv.URL, "reflected xss", 2)
+	if err != nil {
+		t.Fatalf("duckDuckGoSearchAt: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("max_results cap not enforced: want 2, got %d (%+v)", len(got), got)
+	}
+	for i, r := range got {
+		if r.Payload.Source != webSource {
+			t.Errorf("result %d Source = %q, want %q (web results must stay untrusted)", i, r.Payload.Source, webSource)
+		}
+	}
+	if got[0].Payload.Path != "https://owasp.org/xss" {
+		t.Errorf("abstract not mapped first: got %q", got[0].Payload.Path)
 	}
 }

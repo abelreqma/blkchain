@@ -27,7 +27,10 @@ type modelsData struct {
 	chatErr error // listing the chat models failed
 	embedUp bool  // embed_server answered GET /health
 	embed   embedHealth
-	webSet  bool // TAVILY_SETUP_TOKEN is set
+	// webProvider is the active web-search provider (activeWebProvider):
+	// "tavily", "duckduckgo", or "off". Web search is available whenever it is
+	// not "off", whether configured by a Tavily key or the keyless fallback.
+	webProvider string
 }
 
 // fetchModelsData does the network work behind /models. It is called from a
@@ -38,7 +41,7 @@ func fetchModelsData() modelsData {
 	var d modelsData
 	d.chat, d.admin, d.chatErr = fetchChatModels(ctx)
 	d.embed, d.embedUp = probeEmbedHealth(loadConfig())
-	d.webSet = tavilyKey() != ""
+	d.webProvider = activeWebProvider()
 	return d
 }
 
@@ -122,11 +125,19 @@ func modelRows(d modelsData, p modelPrefs, active string, loading map[string]boo
 		rag = "off"
 	}
 	web, webDetail := "off", []string(nil)
-	switch {
-	case !d.webSet:
-		web, webDetail = "not configured", []string{"set TAVILY_SETUP_TOKEN"}
-	case p.Web:
-		web = "on"
+	switch d.webProvider {
+	case webProviderTavily:
+		webDetail = []string{"tavily"}
+		if p.Web {
+			web = "on"
+		}
+	case webProviderDuckDuckGo:
+		webDetail = []string{"duckduckgo fallback"}
+		if p.Web {
+			web = "on"
+		}
+	default:
+		web, webDetail = "not configured", []string{"set TAVILY_SETUP_TOKEN or DuckDuckGo"}
 	}
 	return append(rows,
 		modelRow{kind: rowEmbedder, group: "RETRIEVAL", name: "embedder", state: embed},
@@ -211,7 +222,8 @@ func fitDetail(parts []string, w int) string {
 // setModelSwitch turns one model on or off in p: a chat model shown or hidden
 // in the model picker, or the reranker or web search on or off. It refuses to
 // hide the active model, to turn off the embedder, and to change web search
-// while it is not configured. It returns the new settings and what changed.
+// while no provider is available. webSet is that availability (a Tavily key or
+// the keyless fallback). It returns the new settings and what changed.
 func setModelSwitch(p modelPrefs, kind rowKind, id string, on bool, active string, webSet bool) (modelPrefs, string, error) {
 	switch kind {
 	case rowEmbedder:
@@ -227,7 +239,7 @@ func setModelSwitch(p modelPrefs, kind rowKind, id string, on bool, active strin
 		return p, "reranker off: answers keep the hybrid search order", nil
 	case rowWeb:
 		if !webSet {
-			return p, "", errors.New("web search is not configured: set TAVILY_SETUP_TOKEN")
+			return p, "", errors.New("web search is not configured: set TAVILY_SETUP_TOKEN or DuckDuckGo")
 		}
 		p.Web = on
 		if on {
@@ -316,7 +328,8 @@ func resolveChatModel(name string, models []chatModel) (string, error) {
 
 // modelSwitch is the one switch a "/models on|off <name>" turns: a chat model
 // shown or hidden in the model picker, or the reranker or web search on or off.
-// webSet is whether web search was configured when the command ran.
+// webSet is whether web search was available (a provider configured) when the
+// command ran.
 type modelSwitch struct {
 	kind   rowKind
 	id     string
@@ -368,7 +381,7 @@ func runModelsArgs(verb, name, active string) (string, *modelSwitch, error) {
 		}
 		return modelActionNote(id, verb, id == active), nil, nil
 	}
-	return "", &modelSwitch{kind: kind, id: id, on: verb == "on", webSet: tavilyKey() != ""}, nil
+	return "", &modelSwitch{kind: kind, id: id, on: verb == "on", webSet: activeWebProvider() != webProviderNone}, nil
 }
 
 // replModels is /models in the plain REPL: with no arguments it prints every
@@ -596,7 +609,7 @@ func (p modelsPanel) key(k string) (overlayModel, tea.Cmd) {
 		case rowRag:
 			on = !p.prefs.Rag
 		}
-		np, note, err := setModelSwitch(p.prefs, r.kind, r.id, on, p.active, p.data.webSet)
+		np, note, err := setModelSwitch(p.prefs, r.kind, r.id, on, p.active, p.data.webProvider != webProviderNone)
 		if err != nil {
 			return p.setNote(err.Error(), true), nil
 		}
@@ -678,7 +691,7 @@ func (p modelsPanel) hints(closeKey key.Binding) []key.Binding {
 	case rowRag:
 		out = append(out, onOff(p.prefs.Rag))
 	case rowWeb:
-		if p.data.webSet {
+		if p.data.webProvider != webProviderNone {
 			out = append(out, onOff(p.prefs.Web))
 		}
 	}

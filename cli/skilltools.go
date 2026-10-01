@@ -14,7 +14,7 @@ import (
 const routeSkillBodyCap = 8000
 
 type routeSkillArgs struct {
-	Domain string `json:"domain" desc:"an engagement domain (generic, recon, web, ad, cloud, k8s, wifi, exploit-dev) or a kind/vuln-class keyword such as kerberos, xss, or adcs, to route a skill for"`
+	Domain string `json:"domain" desc:"an engagement domain (generic, recon, web, ad, cloud, k8s, wifi, exploit-dev, ai-security) or a kind/vuln-class keyword such as kerberos, xss, or adcs, to route a skill for"`
 }
 
 // resolveDomain maps a domain or kind/vuln-class keyword to a domain bucket
@@ -54,7 +54,7 @@ func routeSkillFor(cat *skillcat.Catalog, domain string) (skillcat.Skill, bool) 
 // newRouteSkillTool builds the deterministic route_skill tool. See the doc.
 func newRouteSkillTool(cat *skillcat.Catalog, st *engagement.Store, activeTask func() string) tooldef.Tool {
 	return newStoreTool("route_skill",
-		"Get the playbook for an engagement domain. Provide one domain (generic, recon, web, ad, cloud, k8s, wifi, exploit-dev) or a kind/vuln-class keyword (for example kerberos, xss, adcs); the harness selects the skill deterministically and returns its playbook. You cannot choose a specific skill by name; an unrecognized domain returns the generic playbook or a clear no-skill message.",
+		"Get the playbook for an engagement domain. Provide one domain (generic, recon, web, ad, cloud, k8s, wifi, exploit-dev, ai-security) or a kind/vuln-class keyword (for example kerberos, xss, adcs); the harness selects the skill deterministically and returns its playbook. You cannot choose a specific skill by name; an unrecognized domain returns the generic playbook or a clear no-skill message.",
 		routeSkillArgs{},
 		func(ctx context.Context, argsJSON string) (string, error) {
 			var a routeSkillArgs

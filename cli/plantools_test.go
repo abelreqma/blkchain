@@ -295,3 +295,72 @@ func TestPlanAddBasisDoesNotBlockScheduling(t *testing.T) {
 		t.Errorf("BasisIDs = %v after update, want [t1] preserved", got.BasisIDs)
 	}
 }
+
+// planAddJSON is a small helper to call the plan_add tool.
+func callPlanAdd(t *testing.T, tool interface {
+	Call(context.Context, string) (string, error)
+}, json string) string {
+	t.Helper()
+	out, err := tool.Call(context.Background(), json)
+	if err != nil {
+		t.Fatalf("plan_add call: %v", err)
+	}
+	return out
+}
+
+func TestPlanAddRejectsOpenDuplicate(t *testing.T) {
+	st := openStore(t)
+	tool := newPlanAddTool(st)
+	callPlanAdd(t, tool, `{"id":"t1","kind":"recon","target":"10.0.0.5","objective":"enumerate services","surface":"network"}`)
+	// A near-duplicate storm entry: different id, identical kind/target/objective/surface.
+	out := callPlanAdd(t, tool, `{"id":"t2","kind":"recon","target":"10.0.0.5","objective":"enumerate services","surface":"network"}`)
+	if !strings.Contains(out, "duplicate") {
+		t.Fatalf("plan_add of a duplicate = %q, want a duplicate rejection", out)
+	}
+	if _, err := st.GetTask("t2"); !errors.Is(err, engagement.ErrNotFound) {
+		t.Fatalf("duplicate task t2 was created (err=%v); it must not be added", err)
+	}
+}
+
+func TestPlanAddAllowsDistinctObjective(t *testing.T) {
+	st := openStore(t)
+	tool := newPlanAddTool(st)
+	callPlanAdd(t, tool, `{"id":"t1","kind":"recon","target":"10.0.0.5","objective":"enumerate services","surface":"network"}`)
+	out := callPlanAdd(t, tool, `{"id":"t2","kind":"recon","target":"10.0.0.5","objective":"brute force ssh","surface":"network"}`)
+	if strings.Contains(out, "duplicate") {
+		t.Fatalf("distinct-objective task rejected as duplicate: %q", out)
+	}
+	if _, err := st.GetTask("t2"); err != nil {
+		t.Fatalf("distinct task t2 should be added: %v", err)
+	}
+}
+
+func TestPlanAddAllowsDuplicateAfterTaskClosed(t *testing.T) {
+	st := openStore(t)
+	tool := newPlanAddTool(st)
+	callPlanAdd(t, tool, `{"id":"t1","kind":"recon","target":"10.0.0.5","objective":"enumerate services","surface":"network"}`)
+	// Close t1 so it is no longer open.
+	if _, err := st.Apply(engagement.Delta{Completes: []string{"t1"}, Kind: "test-close"}); err != nil {
+		t.Fatal(err)
+	}
+	out := callPlanAdd(t, tool, `{"id":"t2","kind":"recon","target":"10.0.0.5","objective":"enumerate services","surface":"network"}`)
+	if strings.Contains(out, "duplicate") {
+		t.Fatalf("re-adding an identical task after the prior one closed was rejected: %q", out)
+	}
+	if _, err := st.GetTask("t2"); err != nil {
+		t.Fatalf("task t2 should be added after t1 closed: %v", err)
+	}
+}
+
+func TestPlanAddExplicitDifferentSurfaceAllowed(t *testing.T) {
+	st := openStore(t)
+	tool := newPlanAddTool(st)
+	callPlanAdd(t, tool, `{"id":"t1","kind":"recon","target":"10.0.0.5","objective":"enumerate services","surface":"network"}`)
+	out := callPlanAdd(t, tool, `{"id":"t2","kind":"recon","target":"10.0.0.5","objective":"enumerate services","surface":"web"}`)
+	if strings.Contains(out, "duplicate") {
+		t.Fatalf("an explicitly different surface should not be a duplicate: %q", out)
+	}
+	if _, err := st.GetTask("t2"); err != nil {
+		t.Fatalf("different-surface task t2 should be added: %v", err)
+	}
+}

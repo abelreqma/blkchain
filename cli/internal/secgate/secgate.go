@@ -11,6 +11,9 @@ type Command struct {
 	PoCIsInterpreter bool
 	PoCHash          string
 	PoCBody          string
+
+	Kind   string
+	Target string
 }
 
 // Decision is the gate's verdict for one command. Suggestion is a bounded

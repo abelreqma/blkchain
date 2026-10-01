@@ -194,6 +194,10 @@ func (g *Gate) checkLocked(c Command) Decision {
 	if c.Phase.requiresArm() && !c.Armed {
 		return g.deny("tier", c, "exploit/post-ex phase requires an armed task", "arm the task before running an exploit or post-exploitation command")
 	}
+
+	if tgt, bad := TargetSelfExecViolation(c, g.Scratch); bad {
+		return g.deny("target-self-exec", c, "a target-analysis task must not execute its own analysis target: "+tgt, "inspect the target read-only (file, stat, nm, readelf, objdump, strings, ldd, getcap) instead of executing it")
+	}
 	// Human-governed paths (LOCAL always-confirm, Safe, the Auto HITL-fallback)
 	// relax the structural shell/interpreter/exec-wrapper/metacharacter/exec-flag
 	// denials: the operator approves the exact argv. Unattended paths (Auto with the

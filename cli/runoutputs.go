@@ -32,6 +32,18 @@ func (r *RunOutputs) Count(taskID string) int {
 	return len(r.byTask[taskID])
 }
 
+// Outputs returns a copy of the outputs captured for taskID, in capture order.
+// The copy is safe to read without holding the lock. The code-side evidence
+// backstop uses it to turn captured run_command output into evidence rows when
+// the model recorded none.
+func (r *RunOutputs) Outputs(taskID string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.byTask[taskID]))
+	copy(out, r.byTask[taskID])
+	return out
+}
+
 // Contains reports whether quote is a non-empty substring of some captured
 // output for taskID.
 func (r *RunOutputs) Contains(taskID, quote string) bool {

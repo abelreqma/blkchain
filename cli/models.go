@@ -48,20 +48,22 @@ func runModels(args []string) error {
 	}
 	wg.Wait()
 
-	prefs, webSet := loadPrefs(), tavilyKey() != ""
+	prefs, provider := loadPrefs(), activeWebProvider()
 	if jsonOut {
-		return emitReportsJSON(os.Stdout, reports, prefs, webSet)
+		return emitReportsJSON(os.Stdout, reports, prefs, provider)
 	}
 
 	fmt.Println(H1.Render("blk models"))
 	fmt.Println()
-	fmt.Print(renderModelsText(reports, prefs, webSet))
+	fmt.Print(renderModelsText(reports, prefs, provider))
 	return nil
 }
 
 // renderModelsText is the text report: one line per model, the reranker marked
 // when /models turned it off, then web search and any hidden chat models.
-func renderModelsText(reports []modeleval.ModelReport, p modelPrefs, webSet bool) string {
+// provider is the active web-search provider (activeWebProvider): the web row
+// names it and composes it with the web switch.
+func renderModelsText(reports []modeleval.ModelReport, p modelPrefs, provider string) string {
 	var b strings.Builder
 	for _, r := range reports {
 		line := renderReport(r)
@@ -75,11 +77,17 @@ func renderModelsText(reports []modeleval.ModelReport, p modelPrefs, webSet bool
 		ragLine = "off: answers never query the local knowledge base"
 	}
 	fmt.Fprintf(&b, " %s %s\n", Key.Render(fmt.Sprintf("%-7s", "rag")), Meta.Render(ragLine))
-	web := "not configured (set TAVILY_SETUP_TOKEN)"
-	if webSet {
-		web = "off"
+	web := "off (no provider; set TAVILY_SETUP_TOKEN or BLKCHAIN_WEB_FALLBACK=duckduckgo)"
+	switch provider {
+	case webProviderTavily:
+		web = "off (tavily configured)"
 		if p.Web {
-			web = "on"
+			web = "on (tavily)"
+		}
+	case webProviderDuckDuckGo:
+		web = "off (duckduckgo fallback configured)"
+		if p.Web {
+			web = "on (duckduckgo fallback)"
 		}
 	}
 	fmt.Fprintf(&b, " %s %s\n", Key.Render(fmt.Sprintf("%-7s", "web")), Meta.Render(web))
@@ -165,15 +173,16 @@ func renderReport(r modeleval.ModelReport) string {
 // string. enabled is the /models switch (always true
 // for chat and embed), the chat entry lists the hidden chat models, and a web
 // entry reports web search: ready when it is configured.
-func emitReportsJSON(w io.Writer, reports []modeleval.ModelReport, p modelPrefs, webSet bool) error {
+func emitReportsJSON(w io.Writer, reports []modeleval.ModelReport, p modelPrefs, provider string) error {
 	type jsonReport struct {
-		Model   string                `json:"model"`
-		Ready   bool                  `json:"ready"`
-		ReadyMs int64                 `json:"ready_ms"`
-		Enabled bool                  `json:"enabled"`
-		Hidden  []string              `json:"hidden,omitempty"`
-		Error   string                `json:"error,omitempty"`
-		Perf    *modeleval.PerfResult `json:"perf,omitempty"`
+		Model    string                `json:"model"`
+		Ready    bool                  `json:"ready"`
+		ReadyMs  int64                 `json:"ready_ms"`
+		Enabled  bool                  `json:"enabled"`
+		Provider string                `json:"provider,omitempty"`
+		Hidden   []string              `json:"hidden,omitempty"`
+		Error    string                `json:"error,omitempty"`
+		Perf     *modeleval.PerfResult `json:"perf,omitempty"`
 	}
 	out := make([]jsonReport, 0, len(reports)+1)
 	for _, r := range reports {
@@ -190,7 +199,7 @@ func emitReportsJSON(w io.Writer, reports []modeleval.ModelReport, p modelPrefs,
 		out = append(out, jr)
 	}
 	out = append(out, jsonReport{Model: "rag", Ready: true, Enabled: p.Rag})
-	out = append(out, jsonReport{Model: "web", Ready: webSet, Enabled: p.Web})
+	out = append(out, jsonReport{Model: "web", Ready: provider != webProviderNone, Enabled: p.Web, Provider: provider})
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return err

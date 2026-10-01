@@ -134,6 +134,34 @@ func TestDispatchBatchSkipsNATask(t *testing.T) {
 	}
 }
 
+func TestDispatchBatchSkipsBlockedTask(t *testing.T) {
+	d := testDeps(t, nil)
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{
+		{ID: "t1", Kind: "exploit", Target: "10.0.0.5:22", Objective: "uncited coverage-gap",
+			Status: engagement.StatusBlocked, Phase: engagement.PhaseExploit, CoverageGap: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var ran atomic.Int32
+	exec := func(ctx context.Context, d engageDeps, id string) (string, error) {
+		ran.Add(1)
+		return id, nil
+	}
+	out, err := newDispatchBatchToolWith(d, exec).Call(context.Background(), `{"task_ids":["t1"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ran.Load() != 0 {
+		t.Errorf("a blocked coverage-gap candidate must NOT be dispatched: ran=%d", ran.Load())
+	}
+	if !strings.Contains(out, "blocked") {
+		t.Errorf("blocked task must be skipped with a note: out=%q", out)
+	}
+	if got, _ := d.Store.GetTask("t1"); got.Status != engagement.StatusBlocked {
+		t.Errorf("blocked task status = %q, want unchanged (not marked active)", got.Status)
+	}
+}
+
 func TestEngageParallelClamp(t *testing.T) {
 	cases := []struct {
 		env  string

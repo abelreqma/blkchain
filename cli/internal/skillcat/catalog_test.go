@@ -114,6 +114,28 @@ func TestDeriveDomainTargetAnalysis(t *testing.T) {
 	}
 }
 
+// TestDeriveDomainAISecurity pins the ai-security bucket rule: AI/LLM skills route
+// to ai-security (not generic), so route_skill("ai-security") has a skill to
+// return.
+func TestDeriveDomainAISecurity(t *testing.T) {
+	for _, in := range []struct{ name, desc string }{
+		{"offensive-ai-security", "SKILL: AI Pentest"},
+		{"llm-redteam", "prompt injection and jailbreak testing of an LLM"},
+		{"ai-security", "AI red team and model extraction"},
+	} {
+		if got := DeriveDomain(in.name, in.desc); got != "ai-security" {
+			t.Errorf("DeriveDomain(%q,%q) = %q, want ai-security", in.name, in.desc, got)
+		}
+	}
+	// Must not steal unrelated matches: a plain web/ad skill still routes as before.
+	if got := DeriveDomain("web app", "sqli and xss testing"); got != "web" {
+		t.Errorf("web skill misrouted to %q", got)
+	}
+	if got := DeriveDomain("adcs", "kerberos and ldap abuse"); got != "ad" {
+		t.Errorf("ad skill misrouted to %q", got)
+	}
+}
+
 // When a text matches keywords in more than one rule, the earlier rule in
 // domainRules wins. These pin that precedence so reordering the slice is caught.
 func TestDeriveDomainMultiKeywordPrecedence(t *testing.T) {
@@ -121,11 +143,12 @@ func TestDeriveDomainMultiKeywordPrecedence(t *testing.T) {
 		desc string
 		want string
 	}{
-		{"kerberos abuse leading to xss on the portal", "ad"},                        // ad (rule 0) over web (rule 3)
-		{"pivot through aws into the kubernetes cluster", "cloud"},                   // cloud (rule 1) over k8s (rule 2)
+		{"prompt injection on the web chatbot api", "ai-security"},                   // ai-security (rule 0) over web
+		{"kerberos abuse leading to xss on the portal", "ad"},                        // ad over web
+		{"pivot through aws into the kubernetes cluster", "cloud"},                   // cloud over k8s
 		{"docker breakout on an azure node", "cloud"},                                // cloud over k8s
 		{"ldap enumeration plus sqli on the app", "ad"},                              // ad over web
-		{"privilege escalation via a vulnerable binary analysis", "target-analysis"}, // target-analysis (rule 5) over local (rule 7)
+		{"privilege escalation via a vulnerable binary analysis", "target-analysis"}, // target-analysis over local
 	}
 	for _, c := range cases {
 		if got := DeriveDomain("x", c.desc); got != c.want {

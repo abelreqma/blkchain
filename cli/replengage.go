@@ -108,6 +108,10 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 
 	SetEngageEvidenceSource(ws.Store.EvidenceRowsFor)
 	defer SetEngageEvidenceSource(nil)
+	// Register this engagement's graph source for the REPL /kg view, bound to the
+	// already-open store, and clear it before the store closes.
+	SetEngageGraphSource(func(q engagement.GraphQuery) (kgView, error) { return engageGraphOnStore(ws.Store, q) })
+	defer SetEngageGraphSource(nil)
 
 	scratch, err := os.MkdirTemp("", "blkreplengage-")
 	if err != nil {

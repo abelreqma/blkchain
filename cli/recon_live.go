@@ -38,6 +38,9 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 		Phase:   secgate.Phase(string(task.Phase)),
 		Surface: secgate.Surface(string(task.Surface)),
 		Armed:   task.Armed,
+
+		Kind:   task.Kind,
+		Target: task.Target,
 	}
 	grounder := newTaskGrounder(e.d.ToolHelp, e.d.Gate, execDir, cmdCtx)
 	activeTask := func() string { return task.ID }
@@ -78,13 +81,15 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8}); err != nil {
 			return tierOutcome{}, err
 		}
-		afterRows, err := e.d.Store.EvidenceRowsFor(task.ID)
+		// Code-side evidence capture: the model's record_evidence is not relied on.
+		// captureTierEvidence returns the model's rows when it recorded any, else a
+		// code-side backstop records this pass's captured command output as evidence
+		// (so a row exists regardless of the model), and surfaces a coverage-gap when
+		// nothing was captured at all.
+		newRows, err := e.captureTierEvidence(task.ID, string(task.Surface), asset, tier.Name, beforeRows, beforeCmds)
 		if err != nil {
 			return tierOutcome{}, err
 		}
-		// Evidence is append-only, so the rows past the pre-pass length are exactly
-		// what this pass recorded.
-		newRows := afterRows[len(beforeRows):]
 		out := tierOutcomeFromSignals(tier, e.d.Runs.Count(task.ID)-beforeCmds, len(newRows))
 		out.NewAssets = e.correlateNewEvidence(ctx, task.ID, newRows, exploitSel)
 		return out, nil
@@ -111,9 +116,72 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 	return reconSummary(task, res), nil
 }
 
+// coverageGapMarker is appended to a coverage-gap candidate's Objective so the
+// operator sees, in the plan/REPL, that it was detected deterministically but has
+// no grounding citation and is not actionable yet.
+const coverageGapMarker = " [corpus-coverage-gap: no grounding citation; non-actionable until grounded]"
+
+func markCoverageGap(cand *engagement.Task) {
+	cand.Status = engagement.StatusBlocked
+	cand.CoverageGap = true
+	cand.Citation = engagement.Citation{}
+	if !strings.Contains(cand.Objective, "corpus-coverage-gap") {
+		cand.Objective += coverageGapMarker
+	}
+}
+
 // tierOutcomeFromSignals turns the code-owned per-tier deltas into a tierOutcome:
 // a tier that recorded at least one new verified evidence quote has covered its
 // dimensions. The caller fills NewAssets from the parsed evidence.
+// captureTierEvidence returns the evidence rows a tier pass produced, with a
+// code-side backstop so evidence-row creation does not depend on the model
+// calling record_evidence (the latent no-silent-drop gap: a surface whose model
+// never records drops its findings and loops to the round cap).
+//
+//   - If the model recorded rows this pass, they are returned unchanged (the
+//     model-curated path; no backstop, so no double-count).
+//   - Else the backstop records the command output captured THIS pass to d.Runs
+//     as authoritative evidence, sourced ONLY from captured output (already
+//     capBytes-bounded) and never from model text (no fabrication).
+//   - If even then nothing was captured, the pass made no progress: it surfaces a
+//     recon coverage-gap audit (no-silent-drop) and returns no rows.
+//
+// It mirrors localexec's code-side evidence precedent, made conditional so it
+// coexists with the model path.
+func (e genericExecutor) captureTierEvidence(taskID, surface, asset, tierName string, beforeRows []engagement.EvidenceRow, beforeCmds int) ([]engagement.EvidenceRow, error) {
+	afterRows, err := e.d.Store.EvidenceRowsFor(taskID)
+	if err != nil {
+		return nil, err
+	}
+	// Evidence is append-only, so rows past the pre-pass length are this pass's.
+	if modelRows := afterRows[len(beforeRows):]; len(modelRows) > 0 {
+		return modelRows, nil
+	}
+	// Backstop: the model recorded nothing this pass. Record the command output
+	// captured this pass (outputs added to d.Runs after beforeCmds) as evidence.
+	outputs := e.d.Runs.Outputs(taskID)
+	for i := beforeCmds; i < len(outputs); i++ {
+		if strings.TrimSpace(outputs[i]) == "" {
+			continue
+		}
+		if _, err := e.d.Store.RecordEvidence(taskID, outputs[i]); err != nil {
+			return nil, err
+		}
+	}
+	afterRows, err = e.d.Store.EvidenceRowsFor(taskID)
+	if err != nil {
+		return nil, err
+	}
+	newRows := afterRows[len(beforeRows):]
+	if len(newRows) == 0 {
+
+		if err := e.d.Store.Audit("recon", "coverage-gap", surface+"/"+asset+"/"+tierName+": tier produced no evidence"); err != nil {
+			return nil, err
+		}
+	}
+	return newRows, nil
+}
+
 func tierOutcomeFromSignals(tier reconTier, commandDelta, evidenceDelta int) tierOutcome {
 	out := tierOutcome{Commands: commandDelta}
 	if evidenceDelta > 0 {
@@ -141,6 +209,10 @@ func (e genericExecutor) correlateNewEvidence(ctx context.Context, taskID string
 	if e.d.Gate != nil {
 		scope = e.d.Gate.Scope
 	}
+	// auditFn writes the shared "corpus-coverage-gap" audit row for a coverage-gap
+	// candidate (finalizeCandidate/groundCandidate call it), so every detector
+	// surfaces a gap through the one audit path.
+	auditFn := func(action, detail string) { _ = e.d.Store.Audit("correlate", action, detail) }
 	assetSeen := map[string]bool{}
 	candSeen := map[string]bool{}
 	var newAssets []string
@@ -158,22 +230,39 @@ func (e genericExecutor) correlateNewEvidence(ctx context.Context, taskID string
 			newAssets = append(newAssets, a.Host)
 		}
 		for _, svc := range parseServices(prov, r.Quote) {
-			cand, ok := correlateService(svc)
-			if !ok || candSeen[cand.ID] {
+			cand, inCatalog := correlateService(svc)
+			var tech string
+			var cit engagement.Citation
+			if sel != nil && svc.Prov.valid() {
+				tech, cit = sel(ctx, svc)
+			}
+			if !inCatalog {
+				// Path 2: no deterministic detector match, so the CORPUS grounding is
+				// the detection. Emit ONLY when grounded (an accepted citation) AND the
+				// model named a technique; otherwise there is genuinely no finding (emit
+				// nothing - not a drop). Fields stay code-derived (candidateTask).
+				if tech == "" || cit.Source == "" {
+					continue
+				}
+				cand = candidateTask(svc, tech)
+				cand.Citation = cit
+			} else {
+
+				if tech != "" && cit.Source != "" {
+					cand.Objective = cand.Objective + "; technique: " + tech
+				}
+				cand = finalizeCandidate(cand, cit, auditFn,
+					fmt.Sprintf("%s product=%q ver=%q reason=no-accepted-citation", cand.ID, svc.Product, svc.Version))
+			}
+			if candSeen[cand.ID] {
 				continue
 			}
 			candSeen[cand.ID] = true
-			if sel != nil {
-				if tech, cit := sel(ctx, svc); tech != "" {
-					cand.Objective = cand.Objective + "; technique: " + tech
-
-					cand.Citation = cit
-				}
-			}
 			candidates = append(candidates, cand)
 		}
 
-		for _, cand := range correlateLogicGaps(prov, r.Quote) {
+		for _, hit := range logicGapHits(prov, r.Quote) {
+			cand := groundCandidate(ctx, e.d.RC, e.d.Cfg, auditFn, hit.Task, hit.Query, hit.Term)
 			if candSeen[cand.ID] {
 				continue
 			}

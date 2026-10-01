@@ -1,21 +1,59 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/ragconfig"
 )
 
-// correlate.go owns the deterministic graph edge from a discovered service to a
-// candidate (unarmed) exploit task. The catalog is code-owned: the same
-// service+version always yields the same candidate task. The corpus/LLM only
-// advises the technique (correlate_selector.go), never whether a candidate
-// exists - code owns the edge, and correlation fails closed to this catalog.
+func finalizeCandidate(base engagement.Task, cit engagement.Citation, audit func(action, detail string), gapDetail string) engagement.Task {
+	if cit.Source != "" {
+		base.Citation = cit
+		if base.Status == "" {
+			base.Status = engagement.StatusTodo
+		}
+		return base
+	}
+	markCoverageGap(&base)
+	if audit != nil {
+		audit("corpus-coverage-gap", gapDetail)
+	}
+	return base
+}
 
-// exploitCatalog maps a normalized product name to a short technique label. A
-// product not listed yields no candidate (correlateService returns false): the
-// harness never invents an exploit path for an unknown service.
+// groundCandidate grounds a code-derived base candidate that has NO model label
+// (the deterministic logic-gap path): it runs the shared corpus grounding
+// (groundCitation over query+term) and finalizes via finalizeCandidate. The
+// bizlogic detector calls this per matched rule, handing a code-owned base
+// candidate plus a context-bearing query - detection stays code-owned in
+// bizlogic, while the citation bar + emission + audit stay here, shared with the
+// service path.
+func groundCandidate(ctx context.Context, rc searcher, cfg ragconfig.Config, audit func(action, detail string), base engagement.Task, query, term string) engagement.Task {
+	cit, _ := groundCitation(ctx, rc, cfg, query, term)
+	return finalizeCandidate(base, cit, audit, fmt.Sprintf("%s query=%q reason=no-accepted-citation", base.ID, query))
+}
+
+// correlate.go owns the code-derived FIELDS of a candidate (unarmed) exploit task
+// from a discovered service (candidateTask): id and target from host:port, Kind
+// exploit, UNARMED, phase exploit, basis from provenance. The DETECTION decision
+// (does a candidate exist?) has two paths, both ending in candidateTask: the
+// code-owned exploitCatalog fast-path here, and the corpus-grounded path in
+// correlateNewEvidence, which creates a candidate only when the selector returns a
+// technique backed by a corpus CITATION (fail closed: no citation -> no candidate).
+// The corpus/LLM supplies only the advisory technique label and the citation -
+// never the target, the arm state, or any gate/scope/tier verdict - so untrusted
+// corpus text cannot steer what is targeted or whether it runs. Candidates are
+// always unarmed and gated behind per-action HITL confirm at execution.
+
+// exploitCatalog maps a normalized product name to a short technique label. It is
+// the high-confidence FAST PATH (always a candidate for a listed product); a
+// product NOT listed is no longer dropped - correlateNewEvidence falls back to
+// cited-grounding detection, so coverage is not capped by this hand-maintained
+// list.
 var exploitCatalog = map[string]string{
 	"openssh":      "known-CVE exploitation of OpenSSH",
 	"apache httpd": "known-CVE exploitation of Apache httpd",
@@ -41,6 +79,20 @@ func correlateService(svc Service) (engagement.Task, bool) {
 	if !ok {
 		return engagement.Task{}, false
 	}
+	return candidateTask(svc, tech), true
+}
+
+// candidateTask builds the deterministic, code-owned candidate exploit task for a
+// service, with `technique` as its objective label. EVERY field is derived from
+// the parsed service: id and target from host:port, Kind exploit, UNARMED, phase
+// exploit, basis from provenance. `technique` is advisory label text only; it
+// never controls the target or the arm state, so untrusted corpus text that
+// reaches the technique cannot steer what is targeted or whether it runs. Shared
+// by the catalog edge (correlateService) and the grounded edge
+// (correlateNewEvidence): both produce identical, code-owned candidates - only the
+// detection DECISION (catalog membership vs cited grounding) differs.
+func candidateTask(svc Service, technique string) engagement.Task {
+	key := strings.ToLower(strings.TrimSpace(svc.Product))
 	target := svc.Host
 	if svc.Port > 0 {
 		if target != "" {
@@ -49,9 +101,9 @@ func correlateService(svc Service) (engagement.Task, bool) {
 			target = strconv.Itoa(svc.Port)
 		}
 	}
-	objective := tech
+	objective := technique
 	if pv := strings.TrimSpace(svc.Product + " " + svc.Version); pv != "" {
-		objective = tech + " against " + pv
+		objective = technique + " against " + pv
 	}
 	id := "exploit-" + sanitizeSegment(svc.Host) + "-" + strconv.Itoa(svc.Port) + "-" + sanitizeSegment(key)
 	return engagement.Task{
@@ -64,7 +116,7 @@ func correlateService(svc Service) (engagement.Task, bool) {
 		Surface:   engagement.SurfaceNetwork,
 		Armed:     false,
 		BasisIDs:  []string{svc.Prov.TaskID},
-	}, true
+	}
 }
 
 // correlateFromEvidence reads a task's stored evidence rows, parses services

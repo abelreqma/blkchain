@@ -69,6 +69,18 @@ func vizCandidateMark() string {
 	return "\u25B2"
 }
 
+// vizCoverageGapMark is the bracket-free mark for a coverage-gap node: a detection
+// the corpus has no playbook for (non-actionable). It is an empty-set glyph when
+// unicode is available, "x" in the ascii tier, and must stay bracket-free because
+// it is rendered inside a mermaid node label. It is distinct from vizCandidateMark
+// so a non-actionable gap never reads as an armable candidate.
+func vizCoverageGapMark() string {
+	if plCurrentTier() == plASCII {
+		return "x"
+	}
+	return "\u2205"
+}
+
 // domainIcon returns the node glyph for a task kind, generic when unknown.
 func domainIcon(kind string) string {
 	if g, ok := vizDomainIcons[strings.ToLower(strings.TrimSpace(kind))]; ok {
@@ -107,6 +119,10 @@ func vizMermaid(e eng.Engagement) string {
 			// A compiled-in, bracket-free caution mark on an unarmed exploit/post-ex
 			// candidate (it goes inside the mermaid node, so it must never be "[!]").
 			label = vizCandidateMark() + " " + label
+		} else if t.CoverageGap {
+			// A coverage-gap detection is non-actionable: mark it distinctly from an
+			// armable candidate (also bracket-free for the mermaid node).
+			label = vizCoverageGapMark() + " " + label
 		}
 		fmt.Fprintf(&b, "  %s[%s]\n", t.ID, label)
 	}
@@ -253,6 +269,9 @@ func vizTaskStyle(t eng.Task) lipgloss.Style {
 	if isExploitCandidateTask(t) {
 		return lipgloss.NewStyle().Foreground(Warn)
 	}
+	if t.CoverageGap {
+		return lipgloss.NewStyle().Foreground(Err)
+	}
 	return vizStatusStyle(t.Status)
 }
 
@@ -317,8 +336,13 @@ func vizOverlaps(spans []vizSpan, s vizSpan) bool {
 
 // vizFrame wraps the body in a header and a status caption ribbon.
 func vizFrame(e eng.Engagement, body string) string {
-	var done, active, todo, blocked, na, cand int
+	var done, active, todo, blocked, na, cand, gap int
 	for _, t := range e.Tasks {
+		if t.CoverageGap {
+			// Counted as a coverage gap, not as blocked (its status is blocked).
+			gap++
+			continue
+		}
 		if isExploitCandidateTask(t) {
 			cand++
 		}
@@ -344,6 +368,10 @@ func vizFrame(e eng.Engagement, body string) string {
 	if cand > 0 {
 		// A caution count of the unarmed exploit/post-ex detections awaiting arming.
 		segs = append(segs, plSegment{Text: fmt.Sprintf("%d candidates", cand), FG: Warn})
+	}
+	if gap > 0 {
+		// Non-actionable coverage gaps: detected, no corpus playbook.
+		segs = append(segs, plSegment{Text: fmt.Sprintf("%d coverage-gap", gap), FG: Err})
 	}
 	if blocked > 0 {
 		segs = append(segs, plSegment{Text: fmt.Sprintf("%d blocked", blocked), FG: Err})

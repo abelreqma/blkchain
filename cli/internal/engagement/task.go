@@ -179,7 +179,16 @@ type Task struct {
 	DependsOn  []string
 	BasisIDs   []string
 
-	Citation   Citation
+	CoverageGap bool
+
+	Citation Citation
+	// Advisory is an operator-facing advisory string: prior-episode recall from
+	// episodic memory, display-only. It is read by no gate, label, classifier,
+	// selector, or correlation edge, so untrusted recall text in it can never
+	// steer detection, arming, or targeting. Empty when there is no prior-episode
+	// hint. A writer (the D' correlation path) sets it; the plumbing here only
+	// persists and surfaces it.
+	Advisory   string
 	CreatedRev int64
 	UpdatedRev int64
 }
@@ -244,12 +253,14 @@ func (s *Store) GetTask(id string) (Task, error) {
 		deps, bas              sql.NullString
 		phase, surface, capVal sql.NullString
 		cit                    sql.NullString
+		advisory               sql.NullString
 		armed                  sql.NullInt64
+		coverageGap            sql.NullInt64
 	)
 	err := s.db.QueryRow(
-		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, citation
+		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, citation, advisory
 		 FROM task WHERE id = ?`, id).
-		Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed, &cit)
+		Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed, &coverageGap, &cit, &advisory)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNotFound
 	}
@@ -261,6 +272,8 @@ func (s *Store) GetTask(id string) (Task, error) {
 	t.Surface = Surface(surface.String)
 	t.Capability = Capability(capVal.String)
 	t.Armed = armed.Int64 != 0
+	t.CoverageGap = coverageGap.Int64 != 0
+	t.Advisory = advisory.String
 	if t.DependsOn, err = unmarshalStrings(deps.String); err != nil {
 		return Task{}, err
 	}

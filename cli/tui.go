@@ -1650,6 +1650,8 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		return m, tea.Sequence(tea.Println(echo), tea.Println(candidatesBlock(m.engagement)))
 	case "evidence":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(evidenceBlock(m.engagement)))
+	case "kg":
+		return m, tea.Sequence(tea.Println(echo), tea.Println(kgBlock(arg)))
 	case "copy":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(m.doCopy()))
 	case "history":
@@ -2679,7 +2681,29 @@ func (m model) statusLine() string {
 	case m.health != nil:
 		retrieval = append(retrieval, "rerank down")
 	}
+	// web is off by default (offline-by-default), so it follows the rag switch's
+	// discipline: the segment is shown only when web search is actually in use,
+	// naming the active provider, and nothing is added in the common off case.
+	if seg, ok := webStatusSegment(activeWebProvider(), m.prefs.Web); ok {
+		retrieval = append(retrieval, seg)
+	}
 	return m.composeStatus(style.Render(dot), tone, "rag", m.currentModel(), label, retrieval)
+}
+
+// webStatusSegment is the optional web entry in the rag status ribbon. It is
+// shown only when web search is actually in use: a provider is available
+// (activeWebProvider is not "off") and the web switch is on. provider is the
+// activeWebProvider label; the segment names it ("web tavily", or "web ddg" for
+// the DuckDuckGo fallback). When web is off or unconfigured it returns ok=false
+// so the common case adds no segment and the width budget is preserved.
+func webStatusSegment(provider string, on bool) (string, bool) {
+	if !on || provider == webProviderNone {
+		return "", false
+	}
+	if provider == webProviderDuckDuckGo {
+		return "web ddg", true
+	}
+	return "web " + provider, true
 }
 
 // modelPriorityCols is how much of the model name the status line keeps

@@ -2750,3 +2750,44 @@ func TestAutoCommandSetsHITLFromCwd(t *testing.T) {
 		t.Fatalf("/safe should clear engageHITL")
 	}
 }
+
+// webStatusSegment is shown only when web search is actually in use: a provider
+// is available and the switch is on. It names the active provider (ddg for the
+// DuckDuckGo fallback).
+func TestWebStatusSegment(t *testing.T) {
+	cases := []struct {
+		provider string
+		on       bool
+		wantSeg  string
+		wantOK   bool
+	}{
+		{webProviderTavily, true, "web tavily", true},
+		{webProviderDuckDuckGo, true, "web ddg", true},
+		{webProviderTavily, false, "", false},
+		{webProviderDuckDuckGo, false, "", false},
+		{webProviderNone, true, "", false},
+		{webProviderNone, false, "", false},
+	}
+	for _, c := range cases {
+		seg, ok := webStatusSegment(c.provider, c.on)
+		if seg != c.wantSeg || ok != c.wantOK {
+			t.Errorf("webStatusSegment(%q,%v) = (%q,%v), want (%q,%v)", c.provider, c.on, seg, ok, c.wantSeg, c.wantOK)
+		}
+	}
+}
+
+// The rag status ribbon carries the active web provider when the switch is on,
+// and no web segment when it is off (width-budget discipline).
+func TestStatusLineShowsWebProvider(t *testing.T) {
+	noColor(t)
+	t.Setenv(webFallbackEnv, "")
+	t.Setenv(tavilyAPIKeyEnv, "k")
+	on := model{mode: "rag", width: 200, servicesChecked: true, servicesOK: true, prefs: modelPrefs{Web: true}}
+	if line := on.statusLine(); !strings.Contains(line, "web tavily") {
+		t.Errorf("web on, tavily configured: status = %q, want web tavily", line)
+	}
+	off := model{mode: "rag", width: 200, servicesChecked: true, servicesOK: true, prefs: modelPrefs{Web: false}}
+	if line := off.statusLine(); strings.Contains(line, "web tavily") {
+		t.Errorf("web switch off: status = %q, want no web segment", line)
+	}
+}

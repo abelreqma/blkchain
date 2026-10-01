@@ -80,7 +80,7 @@ func newTaskGrounder(cache toolHelpCache, g *secgate.Gate, workDir string, cmdCt
 	}
 	capture := func(ctx context.Context, binary string) (string, bool) {
 		for _, form := range helpCaptureForms {
-			hc := secgate.Command{Binary: binary, Args: form, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed}
+			hc := secgate.Command{Binary: binary, Args: form, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed, Kind: cmdCtx.Kind, Target: cmdCtx.Target}
 			// authorizeCommand now returns the authorized (possibly operator-edited)
 			// command; a help read is not edited in practice, so run the form as
 			// authorized and ignore any substitution.

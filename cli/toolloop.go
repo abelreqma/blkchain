@@ -25,6 +25,14 @@ type toolLoopModel interface {
 type LoopCaps struct {
 	MaxRounds int
 	MaxCalls  int
+	// SummarizeAtChars, when > 0 and Summarizer is set, enables chain
+	// summarization: before each model call the running history is compacted
+	// once it grows past this many characters. Zero (the default) disables it,
+	// so an unset LoopCaps behaves exactly as before.
+	SummarizeAtChars int
+	// Summarizer condenses older turns when the budget is exceeded. nil (the
+	// default) disables summarization regardless of SummarizeAtChars.
+	Summarizer *ChainSummarizer
 }
 
 // runToolLoop drives the model through tool-calling rounds. Each round it sends
@@ -47,6 +55,15 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 			return "", rounds, err
 		}
 		rounds++
+		// Code-owned context budgeting: when the running history outgrows the
+		// budget, condense the middle span before the model call. Best-effort -
+		// a summarizer error leaves the full history in place rather than
+		// aborting the loop; the model never controls whether this runs.
+		if caps.Summarizer != nil && caps.SummarizeAtChars > 0 && historyChars(msgs) > caps.SummarizeAtChars {
+			if compacted, serr := caps.Summarizer.Compact(ctx, msgs); serr == nil {
+				msgs = compacted
+			}
+		}
 		resp, err := m.GenerateContent(ctx, msgs, opts...)
 		if err != nil {
 			return "", rounds, err

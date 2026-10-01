@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"blkchain/cli/internal/engagement"
 )
 
 func TestExecutorPreambleAllowsGatedCommands(t *testing.T) {
@@ -62,6 +64,32 @@ func TestReconPromptMentionsChainedFollowOnTasks(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("recon prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+// TestAllExistingDomainsPresent pins behavior preservation: every persona the
+// fixed set shipped is still registered and retrievable after the registry
+// conversion. A missing persona changes executor behavior for that kind.
+func TestAllExistingDomainsPresent(t *testing.T) {
+	for _, name := range []string{"generic", "recon", "web", "ad", "cloud", "k8s", "wifi", "exploit-dev", "target-analysis", "local"} {
+		d := domainFor(name)
+		if d.Name != name {
+			t.Errorf("domainFor(%q).Name = %q, want %q (persona missing)", name, d.Name, name)
+		}
+		if strings.TrimSpace(d.Prompt) == "" {
+			t.Errorf("persona %q has an empty prompt", name)
+		}
+	}
+}
+
+// TestRegisterDomainAddsPersona pins the registration seam: a persona registered
+// from another file is retrievable via domainFor without editing domains.go.
+func TestRegisterDomainAddsPersona(t *testing.T) {
+	const name = "registry-test-domain"
+	registerDomain(name, domain{Name: name, Prompt: executorPreamble + "test persona"})
+	t.Cleanup(func() { delete(domains, name) })
+	if d := domainFor(name); d.Name != name {
+		t.Fatalf("domainFor(%q).Name = %q, want the registered persona", name, d.Name)
 	}
 }
 
@@ -184,19 +212,47 @@ func TestProjectionTextShowsCoverageAndDiscoveries(t *testing.T) {
 	}
 }
 
+func TestProjectionTextShowsVantage(t *testing.T) {
+	st := openStore(t)
+	// Unset vantage still prints the line with an empty value, so every
+	// executor's projection carries the access-state field.
+	out, err := projectionText(context.Background(), st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Vantage:") {
+		t.Errorf("projection missing Vantage line when unset:\n%s", out)
+	}
+	// A set vantage prints its value.
+	v := engagement.VantageInternalFoothold
+	if _, err := st.Apply(engagement.Delta{SetVantage: &v}); err != nil {
+		t.Fatal(err)
+	}
+	out2, err := projectionText(context.Background(), st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out2, "Vantage: "+string(v)) {
+		t.Errorf("projection missing set vantage %q:\n%s", v, out2)
+	}
+}
+
 func TestProjectionTextCapsLongLists(t *testing.T) {
 	st := openStore(t)
 	ctx := context.Background()
 	n := projectionMaxPerList + 5
+	// Distinct objectives per task: plan_add now rejects a duplicate of an open
+	// task on (kind, target, objective, surface), so a cap test must add distinct
+	// tasks (as a real run would), not N identical ones.
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("t%d", i)
-		if _, err := newPlanAddTool(st).Call(ctx, fmt.Sprintf(`{"id":%q,"kind":"recon","target":"h","objective":"o"}`, id)); err != nil {
+		if _, err := newPlanAddTool(st).Call(ctx, fmt.Sprintf(`{"id":%q,"kind":"recon","target":"h","objective":"o%d"}`, id, i)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("d%d", i)
-		if _, err := newPlanAddTool(st).Call(ctx, fmt.Sprintf(`{"id":%q,"kind":"web","target":"h","objective":"o","status":"na"}`, id)); err != nil {
+		if _, err := newPlanAddTool(st).Call(ctx, fmt.Sprintf(`{"id":%q,"kind":"web","target":"h","objective":"o%d","status":"na"}`, id, i)); err != nil {
 			t.Fatal(err)
 		}
 	}

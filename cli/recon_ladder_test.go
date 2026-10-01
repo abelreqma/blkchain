@@ -38,8 +38,27 @@ func TestLadderForNetworkIsReferenceLadder(t *testing.T) {
 	}
 }
 
+// TestRegisterLadderMakesLadderRetrievable pins the registration seam: a ladder
+// registered for a surface is returned by ladderFor, while an unregistered
+// surface still falls back to the generic single-tier ladder.
+func TestRegisterLadderMakesLadderRetrievable(t *testing.T) {
+	const s = engagement.Surface("ladder-test-surface")
+	custom := reconLadder{{Index: 0, Name: "custom-tier", Dimensions: []string{"custom"}}}
+	registerLadder(s, custom)
+	t.Cleanup(func() { delete(surfaceLadders, s) })
+
+	l := ladderFor(s)
+	if len(l) != 1 || l[0].Name != "custom-tier" {
+		t.Fatalf("ladderFor(registered) = %+v, want the registered custom ladder", l)
+	}
+	if g := ladderFor(engagement.Surface("ladder-no-such-surface")); len(g) != 1 || g[0].Name != "enumerate" {
+		t.Fatalf("ladderFor(unregistered) = %+v, want generic fallback", g)
+	}
+}
+
 func TestLadderForUnknownSurfaceFallsBackToGeneric(t *testing.T) {
-	l := ladderFor(engagement.SurfaceWeb)
+
+	l := ladderFor(engagement.Surface("web-registry-probe-surface"))
 	if len(l) != 1 {
 		t.Fatalf("generic fallback ladder has %d tiers, want 1", len(l))
 	}

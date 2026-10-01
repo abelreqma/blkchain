@@ -41,6 +41,7 @@ var wordingDescs = map[string]string{
 	"gateway":    "set up and start the Hermes gateway for agent mode",
 	"mcp":        "serve the knowledge base to Hermes over MCP (stdio)",
 	"engage":     "run a gated, multi-step engagement against a goal",
+	"kg":         "query the engagement knowledge graph",
 	"analyze":    "generate schema-validated JSON from the LLM",
 	"install":    "put blk on your PATH (run once, from the project)",
 	"completion": "print a bash or zsh completion script",
@@ -51,7 +52,7 @@ var wordingDescs = map[string]string{
 var wordingGroups = [][]string{
 	{"ask", "search", "sources", "open", "add"},
 	{"up", "down", "status", "health", "doctor", "models", "logs"},
-	{"hermes", "gateway", "mcp", "engage", "analyze"},
+	{"hermes", "gateway", "mcp", "engage", "kg", "analyze"},
 	{"install", "completion", "version", "help"},
 }
 

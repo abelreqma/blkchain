@@ -36,6 +36,33 @@ func TestExecutorForReturnsRunnableForEverySurface(t *testing.T) {
 	}
 }
 
+type stubSurfaceExecutor struct{}
+
+func (stubSurfaceExecutor) Run(ctx context.Context, task engagement.Task) (string, error) {
+	return "stub", nil
+}
+
+// TestExecutorForUsesRegisteredFactory pins the registration seam: a factory
+// registered for a surface is used by executorFor, and an unregistered surface
+// still falls back to genericExecutor (today's behavior, since nothing registers).
+func TestExecutorForUsesRegisteredFactory(t *testing.T) {
+	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
+	const s = engagement.Surface("registry-test-surface")
+	registerExecutor(s, func(engageDeps) surfaceExecutor { return stubSurfaceExecutor{} })
+	t.Cleanup(func() { delete(surfaceExecutors, s) })
+
+	if ex := executorFor(d, engagement.Task{ID: "t", Surface: s, Kind: "recon"}); ex == nil {
+		t.Fatal("executorFor(registered surface) = nil")
+	} else if _, ok := ex.(stubSurfaceExecutor); !ok {
+		t.Fatalf("executorFor(registered surface) = %T, want stubSurfaceExecutor", ex)
+	}
+
+	other := executorFor(d, engagement.Task{ID: "t2", Surface: engagement.Surface("registry-fallback-probe-surface"), Kind: "recon"})
+	if _, ok := other.(genericExecutor); !ok {
+		t.Fatalf("executorFor(unregistered surface) = %T, want genericExecutor fallback", other)
+	}
+}
+
 func TestRunBatchSurfaceExecutorsRaceClean(t *testing.T) {
 	t.Setenv("BLKCHAIN_ENGAGE_PARALLEL", "4")
 	d := testDeps(t, perTaskModel{})

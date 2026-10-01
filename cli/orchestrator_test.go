@@ -139,6 +139,43 @@ func TestRunOrchestratorPlansThenDispatches(t *testing.T) {
 	}
 }
 
+// TestRegisterOnApplyListenerFiresInOrchestrator pins the multi-flow listener
+// seam: a listener registered via registerOnApply is attached by runOrchestrator
+// (the CLI/REPL/MCP funnel) and fires on a committed Apply, with zero shared
+// edits beyond the init() registration.
+func TestRegisterOnApplyListenerFiresInOrchestrator(t *testing.T) {
+	// Isolate the registry so this test neither sees nor leaves registrations.
+	saved := onApplyListeners
+	t.Cleanup(func() { onApplyListeners = saved })
+	onApplyListeners = nil
+
+	var mu sync.Mutex
+	fired := 0
+	var lastRev int64
+	registerOnApply(func(rev int64, e engagement.Engagement) {
+		mu.Lock()
+		fired++
+		lastRev = rev
+		mu.Unlock()
+	})
+
+	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{
+		toolCallResp("c1", "plan_add", `{"id":"t1","kind":"recon","target":"10.0.0.5","objective":"enumerate"}`),
+		finalResp("done"),
+	}})
+	if _, err := runOrchestrator(context.Background(), d, "assess 10.0.0.5"); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fired == 0 {
+		t.Fatal("listener registered via registerOnApply did not fire during runOrchestrator")
+	}
+	if lastRev == 0 {
+		t.Errorf("listener fired with rev=0, want the committed revision")
+	}
+}
+
 func TestExecutorRunsCommandAndRecordsEvidence(t *testing.T) {
 	d := testDeps(t, nil)
 	// seed an active task

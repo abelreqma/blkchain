@@ -29,6 +29,14 @@ var domains = map[string]domain{
 	"local":           {Name: "local", Prompt: executorPreamble + "Domain: local/post-access privilege escalation on a host you already have access to. Enumerate NON-destructively with structured argv and record exact-quote evidence for each finding: identity and groups (id, whoami); sudo rights (sudo -l); SUID/SGID binaries (find / -perm -4000 -type f and find / -perm -2000 -type f, with NO exec or delete predicate); file capabilities (getcap -r /); world-writable files and directories; cron jobs and writable cron paths; kernel and OS version (uname -a, and read /etc/os-release); running services and listening ports; and readable credential or config files. Never run a destructive action. When a finding is an escalation vector, propose a chained follow-on task with plan_add and set basis_ids to this task's id: an exploitable SUID/SGID or sudo entry or interesting binary becomes a target-analysis task (kind \"target-analysis\") naming that executable path; a discovered credential becomes an auth or lateral task; a newly discovered host or service becomes a recon task; a writable service or cron path becomes an escalation (target-analysis) task. Every command you run is subject to human confirmation; keep each one a single non-destructive enumeration step."},
 }
 
+// registerDomain registers a persona by name. It is the seam a new persona
+// (e.g. container, ai-security) fills from its OWN file via init(), so a new
+// domain can be added disjointly without editing this file. The fixed set above
+// stays in-file, preserving today's personas.
+func registerDomain(name string, d domain) {
+	domains[name] = d
+}
+
 // domainFor maps a task kind to a domain, falling back to generic for an unknown
 // kind. The lookup is case-insensitive.
 func domainFor(kind string) domain {
@@ -78,6 +86,9 @@ func projectionText(ctx context.Context, st *engagement.Store) (string, error) {
 	for _, k := range kinds {
 		fmt.Fprintf(&b, " %s=%d", k, cov.Kinds[k])
 	}
+	// Vantage-as-context: carry the current access-state into every executor's
+	// projection so per-surface reasoning skews vantage-appropriate. Prints "" when unset.
+	fmt.Fprintf(&b, "\nVantage: %s", snap.Vantage)
 	b.WriteString("\n\nOpen tasks:")
 	if len(open) == 0 {
 		b.WriteString(" none")

@@ -150,7 +150,7 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 				if !hasBinary {
 					return "run_command: invalid arguments: binary is required", nil
 				}
-				cmd := secgate.Command{Binary: a.Binary, Args: a.Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed}
+				cmd := secgate.Command{Binary: a.Binary, Args: a.Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed, Kind: cmdCtx.Kind, Target: cmdCtx.Target}
 				// Help-grounding runs before the gate: a command using a flag or
 				// subcommand absent from the tool's real interface is rejected and
 				// re-grounded (never executed). An advisory note (grounding could
@@ -208,7 +208,7 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 			cmds := make([]secgate.Command, len(a.Pipeline))
 			stageStrs := make([]string, len(a.Pipeline))
 			for i := range a.Pipeline {
-				cmds[i] = secgate.Command{Binary: a.Pipeline[i].Binary, Args: a.Pipeline[i].Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed}
+				cmds[i] = secgate.Command{Binary: a.Pipeline[i].Binary, Args: a.Pipeline[i].Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed, Kind: cmdCtx.Kind, Target: cmdCtx.Target}
 				stageStrs[i] = strings.Join(append([]string{cmds[i].Binary}, cmds[i].Args...), " ")
 			}
 			// Ground every stage BEFORE confirming or running any: a grounded-reject

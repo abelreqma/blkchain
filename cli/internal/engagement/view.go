@@ -67,7 +67,7 @@ func readRevision(ctx context.Context, q rowQueryer) (int64, error) {
 // through q.
 func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, citation
+		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, citation, advisory
 		 FROM task ORDER BY created_rev ASC, id ASC`)
 	if err != nil {
 		return nil, err
@@ -81,9 +81,11 @@ func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
 			deps, bas              sql.NullString
 			phase, surface, capVal sql.NullString
 			cit                    sql.NullString
+			advisory               sql.NullString
 			armed                  sql.NullInt64
+			coverageGap            sql.NullInt64
 		)
-		if err := rows.Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed, &cit); err != nil {
+		if err := rows.Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed, &coverageGap, &cit, &advisory); err != nil {
 			return nil, err
 		}
 		t.Status = Status(status)
@@ -91,6 +93,8 @@ func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
 		t.Surface = Surface(surface.String)
 		t.Capability = Capability(capVal.String)
 		t.Armed = armed.Int64 != 0
+		t.CoverageGap = coverageGap.Int64 != 0
+		t.Advisory = advisory.String
 		if t.DependsOn, err = unmarshalStrings(deps.String); err != nil {
 			return nil, err
 		}

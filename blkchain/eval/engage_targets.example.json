@@ -1,0 +1,31 @@
+{
+  "_README": "Template only. The real lab config is operator-supplied and local-only (never commit it). Use ONLY lab hosts: private/reserved/documentation IPs or CIDRs, and reserved-suffix names (.test/.internal/.local). NEVER a public host and NEVER a .lab name (a delegated public gTLD). The lab-host guard is the sole control that keeps this harness off non-lab hosts. Per-target scoring flags (both default false): vuln_ground_truth_complete=true means known_vulns is exhaustive, so a right-host detection of an unlisted class is scored a false positive (closed-world); enumeration_complete=true means expected_assets/expected_services are the complete enumeration, so a detection on an unlisted host/port is a contradiction false positive. Leave both false unless the lab is fully characterized.",
+  "lab": true,
+  "recon_goal": "enumerate assets and services; detect known vulnerabilities; do not exploit",
+  "targets": [
+    {
+      "host": "192.0.2.10",
+      "expected_assets": ["192.0.2.10", "web.test"],
+      "expected_services": [
+        {"port": 80, "product": "nginx"},
+        {"port": 443, "product": "nginx"},
+        {"host": "db.internal", "port": 5432, "product": "postgres"}
+      ],
+      "known_vulns": [
+        {"port": 80, "class": "idor", "cwe": "CWE-639", "severity": "high"},
+        {"class": "version-disclosure", "severity": "low"}
+      ],
+      "vuln_ground_truth_complete": true,
+      "enumeration_complete": true
+    },
+    {
+      "host": "10.0.0.0/24",
+      "expected_assets": ["printer.local"],
+      "expected_services": [
+        {"host": "printer.local", "port": 9100, "product": "jetdirect"}
+      ],
+      "known_vulns": []
+    }
+  ],
+  "out_of_scope": ["192.0.2.254", "203.0.113.0/24"]
+}

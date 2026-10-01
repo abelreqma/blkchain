@@ -388,3 +388,59 @@ func TestVizColorizeCandidateIsCaution(t *testing.T) {
 		t.Fatalf("unarmed exploit candidate label should be caution(Warn)-styled, not muted: %q", block)
 	}
 }
+
+// A coverage-gap task is marked distinctly in the DAG (not the actionable-candidate
+// caution mark), styled rose, and counted separately from candidates and blocked.
+func TestVizMermaidMarksCoverageGapDistinctly(t *testing.T) {
+	vizForceTier(t, plNerd)
+	m := vizMermaid(basisEngagement(
+		eng.Task{ID: "b", Kind: "web", Objective: "SQLi", Phase: eng.PhaseExploit},
+		eng.Task{ID: "g", Kind: "ai-security", Objective: "pi", Phase: eng.PhaseExploit, CoverageGap: true, Status: eng.StatusBlocked},
+	))
+	gl := vizNodeLine(t, m, "g")
+	if !strings.Contains(gl, "\u2205") {
+		t.Errorf("coverage-gap node should carry the gap mark: %q", gl)
+	}
+	if strings.Contains(gl, "\u25B2") {
+		t.Errorf("coverage-gap node must not carry the candidate caution mark: %q", gl)
+	}
+	if bl := vizNodeLine(t, m, "b"); strings.Contains(bl, "\u2205") {
+		t.Errorf("an actionable candidate must not carry the gap mark: %q", bl)
+	}
+}
+
+func TestVizMermaidCoverageGapMarkAsciiTier(t *testing.T) {
+	vizForceTier(t, plASCII)
+	m := vizMermaid(basisEngagement(
+		eng.Task{ID: "g", Kind: "ai-security", Objective: "pi", Phase: eng.PhaseExploit, CoverageGap: true, Status: eng.StatusBlocked},
+	))
+	if strings.Contains(m, "\u2205") {
+		t.Errorf("ascii tier must not use the unicode gap glyph: %q", m)
+	}
+	if gl := vizNodeLine(t, m, "g"); !strings.Contains(gl, "x ") {
+		t.Errorf("ascii gap mark should be 'x': %q", gl)
+	}
+}
+
+func TestVizFrameCountsCoverageGapSeparately(t *testing.T) {
+	noColor(t)
+	fr := vizFrame(basisEngagement(
+		eng.Task{ID: "b", Kind: "web", Objective: "SQLi", Phase: eng.PhaseExploit},
+		eng.Task{ID: "g", Kind: "ai-security", Objective: "pi", Phase: eng.PhaseExploit, CoverageGap: true, Status: eng.StatusBlocked},
+		eng.Task{ID: "x", Kind: "cloud", Objective: "enum", Phase: eng.PhaseRecon, Status: eng.StatusBlocked},
+	), "body")
+	for _, w := range []string{"1 candidates", "1 coverage-gap", "1 blocked"} {
+		if !strings.Contains(fr, w) {
+			t.Errorf("caption missing %q: %q", w, fr)
+		}
+	}
+}
+
+func TestVizTaskStyleCoverageGapIsErr(t *testing.T) {
+	gap := eng.Task{ID: "g", Phase: eng.PhaseExploit, CoverageGap: true, Status: eng.StatusBlocked}
+	got := vizTaskStyle(gap).GetForeground()
+	want := lipgloss.NewStyle().Foreground(Err).GetForeground()
+	if got != want {
+		t.Errorf("coverage-gap node style = %v, want Err(rose)", got)
+	}
+}

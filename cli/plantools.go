@@ -66,6 +66,15 @@ func newPlanAddTool(st *engagement.Store) tooldef.Tool {
 			if strings.EqualFold(strings.TrimSpace(a.Status), string(engagement.StatusDone)) {
 				return "plan_add: cannot set status done directly; record_evidence then plan_complete", nil
 			}
+			// Storm guard: under repeated command failure an executor loop otherwise
+			// re-adds near-identical recon tasks. Reject a plan_add that duplicates an
+			// OPEN task on (kind, target, objective, surface). Re-adding the same id
+			// is an update, not a storm, so it is allowed.
+			if dup, err := findOpenDuplicateTask(st, a); err != nil {
+				return "plan_add: " + err.Error(), nil
+			} else if dup != "" && dup != a.ID {
+				return fmt.Sprintf("plan_add: duplicate of open task %s (same kind/target/objective/surface); not added", dup), nil
+			}
 			rev, err := st.Apply(engagement.Delta{
 				Upserts: []engagement.Task{planTaskFromArgs(a)},
 				Kind:    "plan_add",
@@ -76,6 +85,30 @@ func newPlanAddTool(st *engagement.Store) tooldef.Tool {
 			}
 			return fmt.Sprintf("added task %s (revision %d)", a.ID, rev), nil
 		})
+}
+
+func findOpenDuplicateTask(st *engagement.Store, a planTaskArgs) (string, error) {
+	snap, err := st.Snapshot(context.Background())
+	if err != nil {
+		return "", err
+	}
+	k := strings.TrimSpace(a.Kind)
+	tg := strings.TrimSpace(a.Target)
+	ob := strings.TrimSpace(a.Objective)
+	sf := strings.TrimSpace(a.Surface)
+	for _, t := range snap.Tasks {
+		if t.Status != engagement.StatusTodo && t.Status != engagement.StatusActive {
+			continue
+		}
+		if strings.TrimSpace(t.Kind) != k || strings.TrimSpace(t.Target) != tg || strings.TrimSpace(t.Objective) != ob {
+			continue
+		}
+		if sf != "" && strings.TrimSpace(string(t.Surface)) != sf {
+			continue
+		}
+		return t.ID, nil
+	}
+	return "", nil
 }
 
 func newPlanUpdateTool(st *engagement.Store) tooldef.Tool {

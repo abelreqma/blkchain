@@ -98,6 +98,7 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 	})
 
 	registerEngageTool(s, defaultEngageService(rc, cfg, cat))
+	registerKGTool(s)
 
 	return s
 }

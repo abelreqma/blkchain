@@ -75,12 +75,12 @@ func sampleReports() []modeleval.ModelReport {
 func TestModelsTextShowsTheSwitches(t *testing.T) {
 	noColor(t)
 	p := modelPrefs{Hidden: []string{"qwen-a", "x\x1b]0;t\x07y"}, Rerank: false, Web: true}
-	out := renderModelsText(sampleReports(), p, true)
+	out := renderModelsText(sampleReports(), p, webProviderTavily)
 	if l := lineWith(out, "rerank"); !strings.Contains(l, "off") {
 		t.Errorf("rerank line lacks off: %q", l)
 	}
-	if l := lineWith(out, "web"); !strings.Contains(l, "on") {
-		t.Errorf("web line = %q, want on", l)
+	if l := lineWith(out, "web"); !strings.Contains(l, "on (tavily)") {
+		t.Errorf("web line = %q, want on (tavily)", l)
 	}
 	if l := lineWith(out, "hidden"); !strings.Contains(l, "qwen-a") {
 		t.Errorf("hidden line = %q", l)
@@ -88,9 +88,9 @@ func TestModelsTextShowsTheSwitches(t *testing.T) {
 	if strings.Contains(out, "\x07") {
 		t.Errorf("hidden id was not sanitized: %q", out)
 	}
-	out = renderModelsText(sampleReports(), defaultPrefs(), false)
-	if l := lineWith(out, "web"); !strings.Contains(l, "not configured") {
-		t.Errorf("web line = %q, want not configured", l)
+	out = renderModelsText(sampleReports(), defaultPrefs(), webProviderNone)
+	if l := lineWith(out, "web"); !strings.Contains(l, "no provider") {
+		t.Errorf("web line = %q, want no provider", l)
 	}
 	if strings.Contains(lineWith(out, "rerank"), "off") || strings.Contains(out, "hidden") {
 		t.Errorf("defaults should show nothing off or hidden:\n%s", out)
@@ -100,7 +100,7 @@ func TestModelsTextShowsTheSwitches(t *testing.T) {
 func TestModelsJSONIncludesTheSwitches(t *testing.T) {
 	var buf strings.Builder
 	p := modelPrefs{Hidden: []string{"qwen-a"}, Rerank: false, Web: false}
-	if err := emitReportsJSON(&buf, sampleReports(), p, true); err != nil {
+	if err := emitReportsJSON(&buf, sampleReports(), p, webProviderTavily); err != nil {
 		t.Fatal(err)
 	}
 	var got []map[string]any
@@ -118,7 +118,7 @@ func TestModelsJSONIncludesTheSwitches(t *testing.T) {
 		t.Errorf("chat hidden = %v", byModel["chat"]["hidden"])
 	}
 	web := byModel["web"]
-	if web == nil || web["ready"] != true || web["enabled"] != false {
+	if web == nil || web["ready"] != true || web["enabled"] != false || web["provider"] != "tavily" {
 		t.Errorf("web entry = %v", web)
 	}
 }
@@ -128,7 +128,7 @@ func TestModelsJSONIncludesTheSwitches(t *testing.T) {
 func TestModelsJSONEscapesControlRunes(t *testing.T) {
 	hostile := []string{"csi\u009b31m", "osc\u009d0;t\u0007", "del\u007f"}
 	var buf strings.Builder
-	if err := emitReportsJSON(&buf, sampleReports(), modelPrefs{Hidden: hostile}, true); err != nil {
+	if err := emitReportsJSON(&buf, sampleReports(), modelPrefs{Hidden: hostile}, webProviderTavily); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range []rune{0x9b, 0x9d, 0x7f} {
@@ -186,6 +186,73 @@ func TestModelsChatProbeSendsNoSampling(t *testing.T) {
 	for _, k := range []string{"top_p", "top_k", "presence_penalty"} {
 		if _, ok := bodies[0][k]; ok {
 			t.Errorf("probe body carries %s: %v", k, bodies[0])
+		}
+	}
+}
+
+// The /models text web row names the active provider and composes it with the
+// web switch: on/off for a configured provider, and a no-provider message
+// (switch moot) when nothing is configured.
+func TestRenderModelsTextWebProviderStates(t *testing.T) {
+	noColor(t)
+	cases := []struct {
+		provider string
+		web      bool
+		want     string
+	}{
+		{webProviderTavily, true, "on (tavily)"},
+		{webProviderTavily, false, "off (tavily configured)"},
+		{webProviderDuckDuckGo, true, "on (duckduckgo fallback)"},
+		{webProviderDuckDuckGo, false, "off (duckduckgo fallback configured)"},
+		{webProviderNone, true, "no provider"},
+		{webProviderNone, false, "no provider"},
+	}
+	for _, c := range cases {
+		out := renderModelsText(sampleReports(), modelPrefs{Web: c.web}, c.provider)
+		if l := lineWith(out, "web"); !strings.Contains(l, c.want) {
+			t.Errorf("provider %q web=%v: line = %q, want %q", c.provider, c.web, l, c.want)
+		}
+	}
+}
+
+// The web row in blk models --json reports ready by capability (any provider,
+// including the keyless DuckDuckGo fallback) and carries the provider label.
+func TestEmitReportsJSONWebProvider(t *testing.T) {
+	cases := []struct {
+		provider  string
+		web       bool
+		wantReady bool
+	}{
+		{webProviderTavily, true, true},
+		{webProviderDuckDuckGo, false, true},
+		{webProviderNone, false, false},
+	}
+	for _, c := range cases {
+		var buf strings.Builder
+		if err := emitReportsJSON(&buf, sampleReports(), modelPrefs{Web: c.web}, c.provider); err != nil {
+			t.Fatal(err)
+		}
+		var got []map[string]any
+		if err := json.Unmarshal([]byte(buf.String()), &got); err != nil {
+			t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
+		}
+		var web map[string]any
+		for _, r := range got {
+			if r["model"] == "web" {
+				web = r
+			}
+		}
+		if web == nil {
+			t.Fatalf("no web row: %s", buf.String())
+		}
+		if web["ready"] != c.wantReady {
+			t.Errorf("provider %q: ready = %v, want %v", c.provider, web["ready"], c.wantReady)
+		}
+		if web["provider"] != c.provider {
+			t.Errorf("provider %q: provider field = %v", c.provider, web["provider"])
+		}
+		if web["enabled"] != c.web {
+			t.Errorf("provider %q: enabled = %v, want %v", c.provider, web["enabled"], c.web)
 		}
 	}
 }

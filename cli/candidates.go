@@ -18,7 +18,21 @@ const candidateSourceFallback = "finding evidence"
 // task: a detection that needs operator arming before it runs. Shared by the
 // /candidates list and the DAG marking so they agree on what a candidate is.
 func isExploitCandidateTask(t eng.Task) bool {
-	return (t.Phase == eng.PhaseExploit || t.Phase == eng.PhasePostEx) && !t.Armed
+	return (t.Phase == eng.PhaseExploit || t.Phase == eng.PhasePostEx) && !t.Armed && !t.CoverageGap
+}
+
+// coverageGapTasks returns the coverage-gap tasks: detections a deterministic
+// detector matched but the corpus has no playbook for, so they are blocked and
+// non-actionable. They are never exploit candidates (the arm guard rejects them),
+// so the UI lists them distinctly and never offers an arm affordance on them.
+func coverageGapTasks(e eng.Engagement) []eng.Task {
+	var out []eng.Task
+	for _, t := range e.Tasks {
+		if t.CoverageGap {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // exploitCandidates returns the unarmed exploit and post-ex tasks (the detections
@@ -110,6 +124,9 @@ func renderCandidates(cands []eng.Task) string {
 			Meta.Render("basis   "+candidateBasis(t)),
 			candidateSourceLine(t),
 		)
+		if t.Surface == eng.SurfaceAISecurity {
+			fmt.Fprintf(&b, "   %s\n", Fail.Render(Glyph(GlyphWarn)+" analyzes untrusted AI output"))
+		}
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -129,6 +146,9 @@ func candidateNotice(t eng.Task) string {
 	s += Meta.Render("  " + Glyph(GlyphSep) + " source " + text)
 	if untrusted {
 		s += " " + Fail.Render("(untrusted)")
+	}
+	if t.Surface == eng.SurfaceAISecurity {
+		s += " " + Fail.Render(Glyph(GlyphWarn)+" analyzes untrusted AI output")
 	}
 	return s
 }
@@ -177,5 +197,27 @@ func candidatesBlock(v EngagementView) string {
 	if err != nil {
 		return styleErr(fmt.Errorf("candidates: %w", err))
 	}
-	return renderCandidates(exploitCandidates(e))
+	out := renderCandidates(exploitCandidates(e))
+	if gaps := coverageGapTasks(e); len(gaps) > 0 {
+		out += "\n\n" + renderCoverageGaps(gaps)
+	}
+	return out
+}
+
+// renderCoverageGaps renders the non-actionable coverage-gap section: each task a
+// deterministic detector matched but the corpus has no playbook for, so it cannot
+// be armed or run. Listed distinctly from actionable candidates, with the gap mark
+// and never an arm affordance.
+func renderCoverageGaps(gaps []eng.Task) string {
+	var b strings.Builder
+	b.WriteString(Fail.Render("coverage gaps") + " " + Meta.Render("(non-actionable - detected, no corpus playbook)"))
+	for _, t := range gaps {
+		label := vizSanitizeLabel(t.Kind + ": " + t.Objective)
+		line := "\n   " + Fail.Render(vizCoverageGapMark()) + " " + Key.Render(label)
+		if surface := strings.TrimSpace(string(t.Surface)); surface != "" {
+			line += "  " + Meta.Render("surface "+surface)
+		}
+		b.WriteString(line)
+	}
+	return b.String()
 }

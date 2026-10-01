@@ -108,6 +108,7 @@ type domainRule struct {
 // web), and reordering this slice changes routing. Keep it stable; the
 // cross-domain precedence tests pin it.
 var domainRules = []domainRule{
+	{"ai-security", []string{"ai security", "llm security", "ai pentest", "ai red team", "ai attack", "prompt injection", "model extraction", "rag poisoning", "adversarial input"}},
 	{"ad", []string{"active directory", "adcs", "ad cs", "kerberos", "ntlm", "ldap", "entra", "saml", "bloodhound"}},
 	{"cloud", []string{"aws", "azure", "gcp", "cloud", "s3", "iam", "metadata"}},
 	{"k8s", []string{"kubernetes", "k8s", "eks", "gke", "aks", "container", "docker"}},

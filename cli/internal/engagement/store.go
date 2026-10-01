@@ -63,7 +63,9 @@ CREATE TABLE IF NOT EXISTS task (
 	surface TEXT,
 	capability TEXT,
 	armed INTEGER,
-	citation TEXT
+	coverage_gap INTEGER,
+	citation TEXT,
+	advisory TEXT
 );
 CREATE TABLE IF NOT EXISTS meta (
 	k TEXT PRIMARY KEY,
@@ -157,6 +159,9 @@ func migrate(db *sql.DB) error {
 	if err := addMissingTaskColumns(tx); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(graphSchema); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`INSERT OR IGNORE INTO meta (k, v) VALUES ('revision', '0')`); err != nil {
 		return err
 	}
@@ -197,7 +202,9 @@ func addMissingTaskColumns(tx *sql.Tx) error {
 		{"surface", "TEXT"},
 		{"capability", "TEXT"},
 		{"armed", "INTEGER"},
+		{"coverage_gap", "INTEGER"},
 		{"citation", "TEXT"},
+		{"advisory", "TEXT"}, // D' follow-up: display-only prior-episode recall hint, additive.
 	}
 	for _, col := range cols {
 		if existing[col.name] {

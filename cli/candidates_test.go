@@ -168,3 +168,55 @@ func TestRenderCandidatesStructuredSource(t *testing.T) {
 		t.Errorf("a candidate with no citation should fall back:\n%s", out2)
 	}
 }
+
+// An ai-security candidate carries a distinct "untrusted AI output" indicator
+// (the scanned model output is adversarial) even though its corpus Citation is
+// trusted; a non-ai candidate does not, and the trusted citation keeps no
+// "(untrusted)" tag.
+func TestCandidatesAISecurityUntrustedIndicator(t *testing.T) {
+	noColor(t)
+	ai := eng.Task{ID: "t9", Kind: "ai-security", Objective: "prompt-injection exfil", Phase: eng.PhaseExploit, Surface: eng.SurfaceAISecurity,
+		Citation: eng.Citation{Source: "owasp-llm", Section: "LLM01", CWEClass: "CWE-77", Origin: "trusted"}}
+	out := renderCandidates([]eng.Task{ai})
+	if !strings.Contains(out, "analyzes untrusted AI output") {
+		t.Errorf("ai-security candidate must carry the untrusted-AI-output indicator:\n%s", out)
+	}
+	if strings.Contains(out, "(untrusted)") {
+		t.Errorf("a trusted citation must not render the citation untrusted tag:\n%s", out)
+	}
+	web := eng.Task{ID: "t8", Kind: "web", Objective: "SQLi", Phase: eng.PhaseExploit, Surface: eng.SurfaceWeb,
+		Citation: eng.Citation{Source: "owasp-wstg", Origin: "trusted"}}
+	if outw := renderCandidates([]eng.Task{web}); strings.Contains(outw, "analyzes untrusted AI output") {
+		t.Errorf("a non-ai-security candidate must not carry the AI indicator:\n%s", outw)
+	}
+	if n := candidateNotice(ai); !strings.Contains(n, "analyzes untrusted AI output") {
+		t.Errorf("candidateNotice for ai-security must carry the indicator: %q", n)
+	}
+	if nw := candidateNotice(web); strings.Contains(nw, "analyzes untrusted AI output") {
+		t.Errorf("candidateNotice for a non-ai candidate must not carry the indicator: %q", nw)
+	}
+}
+
+// A coverage-gap task is non-actionable: it is never an exploit candidate (no arm
+// affordance), and it is listed in a distinct coverage-gaps section.
+func TestCoverageGapFiltersAndSection(t *testing.T) {
+	noColor(t)
+	e := eng.Engagement{Tasks: []eng.Task{
+		{ID: "c", Kind: "web", Objective: "SQLi on /login", Phase: eng.PhaseExploit},
+		{ID: "g", Kind: "ai-security", Objective: "prompt-injection exfil", Phase: eng.PhaseExploit, Surface: eng.SurfaceAISecurity, CoverageGap: true, Status: eng.StatusBlocked},
+	}}
+	if cands := exploitCandidates(e); len(cands) != 1 || cands[0].ID != "c" {
+		t.Errorf("exploitCandidates must exclude the coverage-gap task: %+v", cands)
+	}
+	if gaps := coverageGapTasks(e); len(gaps) != 1 || gaps[0].ID != "g" {
+		t.Errorf("coverageGapTasks must return the coverage-gap task: %+v", gaps)
+	}
+	stub := newStubEngagement("acme")
+	stub.setSnapshot(e)
+	out := candidatesBlock(stub)
+	for _, w := range []string{"SQLi on /login", "coverage gaps", "prompt-injection exfil", "surface ai-security"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("candidatesBlock missing %q:\n%s", w, out)
+		}
+	}
+}
