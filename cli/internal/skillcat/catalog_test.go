@@ -114,6 +114,26 @@ func TestDeriveDomainTargetAnalysis(t *testing.T) {
 	}
 }
 
+// When a text matches keywords in more than one rule, the earlier rule in
+// domainRules wins. These pin that precedence so reordering the slice is caught.
+func TestDeriveDomainMultiKeywordPrecedence(t *testing.T) {
+	cases := []struct {
+		desc string
+		want string
+	}{
+		{"kerberos abuse leading to xss on the portal", "ad"},                        // ad (rule 0) over web (rule 3)
+		{"pivot through aws into the kubernetes cluster", "cloud"},                   // cloud (rule 1) over k8s (rule 2)
+		{"docker breakout on an azure node", "cloud"},                                // cloud over k8s
+		{"ldap enumeration plus sqli on the app", "ad"},                              // ad over web
+		{"privilege escalation via a vulnerable binary analysis", "target-analysis"}, // target-analysis (rule 5) over local (rule 7)
+	}
+	for _, c := range cases {
+		if got := DeriveDomain("x", c.desc); got != c.want {
+			t.Errorf("DeriveDomain(%q) = %q, want %q", c.desc, got, c.want)
+		}
+	}
+}
+
 func TestDeriveDomainWordBoundary(t *testing.T) {
 	// Short keywords must not false-match inside unrelated words.
 	generic := []string{

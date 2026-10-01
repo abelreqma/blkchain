@@ -1143,3 +1143,70 @@ func TestEnvHelpListsTheSamplingVariables(t *testing.T) {
 		}
 	}
 }
+
+// /safe and /auto are TUI-only autonomy-mode commands: they live in the Modes
+// group, carry a dispatch case, and appear in the palette and the TUI /help.
+// They are not in the plain REPL's curated help (it has no engage flow). /auto
+// advertises its override argument.
+func TestSafeAutoCommandsInRegistryAndHelp(t *testing.T) {
+	noColor(t)
+	safe, ok := slashCommand("safe")
+	if !ok {
+		t.Fatal("/safe is missing from slashCommands()")
+	}
+	if safe.group != groupModes {
+		t.Errorf("/safe group = %q, want %q", safe.group, groupModes)
+	}
+	if !strings.Contains(safe.desc, "confirm") {
+		t.Errorf("/safe desc = %q; want it to mention confirming", safe.desc)
+	}
+	auto, ok := slashCommand("auto")
+	if !ok {
+		t.Fatal("/auto is missing from slashCommands()")
+	}
+	if auto.group != groupModes {
+		t.Errorf("/auto group = %q, want %q", auto.group, groupModes)
+	}
+	if !strings.Contains(auto.args, "override") {
+		t.Errorf("/auto args = %q; want it to advertise override", auto.args)
+	}
+	if !strings.Contains(auto.desc, "scope") {
+		t.Errorf("/auto desc = %q; want it to mention scope", auto.desc)
+	}
+
+	block := collapse(helpBlock(200))
+	for _, c := range []command{safe, auto} {
+		if !strings.Contains(block, "/"+c.name) {
+			t.Errorf("/help lacks /%s", c.name)
+		}
+		if !strings.Contains(block, c.desc) {
+			t.Errorf("/help lacks /%s's desc %q", c.name, c.desc)
+		}
+		if items := filterCommands(slashCommands(), c.name); len(items) == 0 || items[0].name != c.name {
+			t.Errorf("the palette does not surface /%s", c.name)
+		}
+	}
+}
+
+// /engage is a TUI-only command that starts a gated engagement; it has a dispatch
+// case, a goal argument, and appears in the palette and TUI /help.
+func TestEngageCommandInRegistryAndHelp(t *testing.T) {
+	noColor(t)
+	c, ok := slashCommand("engage")
+	if !ok {
+		t.Fatal("/engage is missing from slashCommands()")
+	}
+	if c.args == "" {
+		t.Errorf("/engage should advertise a goal argument")
+	}
+	if !strings.Contains(c.desc, "engagement") {
+		t.Errorf("/engage desc = %q; want it to mention an engagement", c.desc)
+	}
+	block := collapse(helpBlock(200))
+	if !strings.Contains(block, "/engage") || !strings.Contains(block, c.desc) {
+		t.Errorf("/help lacks /engage's row")
+	}
+	if items := filterCommands(slashCommands(), "engage"); len(items) == 0 || items[0].name != "engage" {
+		t.Errorf("the palette does not surface /engage")
+	}
+}

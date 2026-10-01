@@ -38,6 +38,18 @@ type Confirmer interface {
 	Confirm(ctx context.Context, c Command) bool
 }
 
+// EditConfirmer is a Confirmer that may also return an operator-edited substitute
+// command to run instead of the one presented. When edited is non-nil (and allow
+// is true), the gate re-validates the substitute through the FULL deny pipeline
+// (classifier, scope, denylists, tier) with the ORIGINAL command's Phase/Surface/
+// Armed preserved, and executes it only if that passes; the operator cannot use an
+// edit to change the tier or bypass a denylist. edited == nil runs the original.
+// A Confirmer that does not implement this is used as a plain bool confirmer.
+type EditConfirmer interface {
+	Confirmer
+	ConfirmOrEdit(ctx context.Context, c Command) (allow bool, edited *Command)
+}
+
 // SessionApprovals remembers approved command signatures for this session.
 type SessionApprovals struct{ approved map[string]bool }
 

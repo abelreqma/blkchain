@@ -123,6 +123,43 @@ func TestSliceLengthCapEnforced(t *testing.T) {
 	}
 }
 
+// capLen guards nested slices and other schemas, and oneOf guards nested enum
+// fields; the per-schema tests above cover the top-level cases, these the nested
+// and cross-schema ones.
+func TestNestedCapLenAndEnumCases(t *testing.T) {
+	big := make([]string, maxSliceLen+1)
+	for i := range big {
+		big[i] = "x"
+	}
+
+	// Nested slice cap: a phase's techniques.
+	ap := AttackPlan{Objective: "o", Target: "t", Phases: []AttackPhase{{Name: "recon", Techniques: big}}}
+	if err := ap.Validate(); err == nil {
+		t.Fatalf("oversized phases[0].techniques accepted")
+	}
+
+	// Nested enum: a weakness severity.
+	ba := BinaryAssessment{Subject: "s", AssessmentType: "suid", Weaknesses: []Weakness{{Name: "w", Severity: "bogus"}}}
+	if err := ba.Validate(); err == nil {
+		t.Fatalf("bad weaknesses[0].severity accepted")
+	}
+
+	// A different schema's slice cap: finding evidence.
+	f := Finding{Title: "t", Severity: "low", Affected: "a", Description: "d", Evidence: big}
+	if err := f.Validate(); err == nil {
+		t.Fatalf("oversized finding evidence accepted")
+	}
+
+	// IOC indicator cap.
+	many := make([]Indicator, maxSliceLen+1)
+	for i := range many {
+		many[i] = Indicator{Type: "domain", Value: "x"}
+	}
+	if err := (&IOCExtraction{Indicators: many}).Validate(); err == nil {
+		t.Fatalf("oversized ioc indicators accepted")
+	}
+}
+
 func TestValidateThroughGenerate(t *testing.T) {
 	// A bad enum from the model must be rejected by Generate, proving the schema
 	// wires into the primitive.

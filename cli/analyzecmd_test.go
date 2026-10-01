@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,6 +79,82 @@ func TestRunAnalyzeUnknownSchema(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "finding") {
 		t.Fatalf("error should list valid schema names: %v", err)
+	}
+}
+
+func TestAnalyzeMaxInputBytesEnv(t *testing.T) {
+	// A positive value is honored; empty, unparsable, zero, and negative all fall
+	// back to the default.
+	cases := []struct {
+		val  string
+		want int
+	}{
+		{"", defaultAnalyzeMaxInputBytes},
+		{"4096", 4096},
+		{"  512  ", 512},
+		{"not-a-number", defaultAnalyzeMaxInputBytes},
+		{"0", defaultAnalyzeMaxInputBytes},
+		{"-10", defaultAnalyzeMaxInputBytes},
+	}
+	for _, c := range cases {
+		t.Setenv("BLKCHAIN_ANALYZE_MAX_INPUT_BYTES", c.val)
+		if got := analyzeMaxInputBytes(); got != c.want {
+			t.Fatalf("val=%q: analyzeMaxInputBytes = %d, want %d", c.val, got, c.want)
+		}
+	}
+}
+
+func TestReadCappedBoundary(t *testing.T) {
+	// Exactly maxBytes is accepted; one more byte is rejected.
+	got, err := readCapped(strings.NewReader(strings.Repeat("a", 10)), 10)
+	if err != nil || got != strings.Repeat("a", 10) {
+		t.Fatalf("exact cap: got %q err %v", got, err)
+	}
+	if _, err := readCapped(strings.NewReader(strings.Repeat("a", 11)), 10); err == nil {
+		t.Fatalf("over cap accepted")
+	}
+}
+
+func TestWriteIndentedJSONEscapesControlRunes(t *testing.T) {
+	// A literal C1 control rune (U+009B) inside a JSON string must be escaped, not
+	// written raw to the terminal.
+	raw := json.RawMessage(`{"x":"a` + string(rune(0x9b)) + `b"}`)
+	var buf bytes.Buffer
+	if err := writeIndentedJSON(&buf, raw); err != nil {
+		t.Fatalf("writeIndentedJSON: %v", err)
+	}
+	out := buf.String()
+	if strings.ContainsRune(out, 0x9b) {
+		t.Fatalf("output still contains the literal C1 control rune: %q", out)
+	}
+	if !strings.Contains(out, `\u009b`) {
+		t.Fatalf("output missing escaped control rune: %q", out)
+	}
+}
+
+func TestAnalyzeRunPropagatesGroundingError(t *testing.T) {
+	restore := analyzeGen
+	analyzeGen = func(_ ragconfig.Config, _ string) (structgen.Generator, error) {
+		return &fakeAnalyzeGen{reply: `{}`}, nil
+	}
+	defer func() { analyzeGen = restore }()
+
+	boom := errors.New("qdrant down")
+	restoreG := analyzeGrounding
+	analyzeGrounding = func(_ context.Context, _ ragconfig.Config, _ string, _ int) (string, int, error) {
+		return "", 0, boom
+	}
+	defer func() { analyzeGrounding = restoreG }()
+
+	schema, _ := structgen.Lookup("finding")
+	var out, errBuf bytes.Buffer
+	o := analyzeOpts{schema: "finding", model: "m", retrieve: true}
+	err := analyzeRun(context.Background(), ragconfig.Config{}, o, schema, "subject", 5, &out, &errBuf)
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the grounding error", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("no JSON should be written when grounding fails: %q", out.String())
 	}
 }
 

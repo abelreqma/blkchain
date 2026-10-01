@@ -107,6 +107,21 @@ func TestRunHermesExitError(t *testing.T) {
 	}
 }
 
+// An inherited PYTHONUNBUFFERED must never win over the value blk forces: the
+// built env carries exactly one PYTHONUNBUFFERED entry, and it is "1".
+func TestPythonUnbufferedEnvForcesOurValue(t *testing.T) {
+	t.Setenv("PYTHONUNBUFFERED", "0")
+	var seen []string
+	for _, e := range pythonUnbufferedEnv() {
+		if strings.HasPrefix(e, "PYTHONUNBUFFERED=") {
+			seen = append(seen, e)
+		}
+	}
+	if len(seen) != 1 || seen[0] != "PYTHONUNBUFFERED=1" {
+		t.Fatalf("PYTHONUNBUFFERED entries = %v, want exactly [PYTHONUNBUFFERED=1]", seen)
+	}
+}
+
 func TestRunHermesSetsUnbuffered(t *testing.T) {
 	fakeBinOnPath(t, "hermes", `echo "unbuffered=$PYTHONUNBUFFERED"`+"\n")
 	var err error

@@ -30,6 +30,9 @@ type engageDeps struct {
 	Asker askuser.Asker
 	Gate  *secgate.Gate // command-execution gate for executors; nil disables run_command
 	Runs  *RunOutputs   // per-episode captured command output for evidence verification
+	// ToolHelp is the shared tool-knowledge cache backing help-grounding; nil
+	// disables grounding (commands still pass through the gate unchanged).
+	ToolHelp toolHelpCache
 	// Confirmer is the optional human confirmer for /safe local mode; the mmdflux
 	// viz session sets this. When nil, engagecmd falls back to the terminal
 	// confirmer on a TTY.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -37,12 +38,38 @@ func editorArgv() []string {
 	return []string{"vi"}
 }
 
-// editorCmd writes the current draft to a temp .md and returns the tea.Cmd that
-// suspends the TUI, runs the editor on it, and yields an editorDoneMsg. On a temp
-// file error it returns a command that prints the error instead.
+// draftDir returns the private blkChain config directory that holds the $EDITOR
+// handoff draft, honoring XDG_CONFIG_HOME and created 0700 (mirroring the
+// pattern in paths.go's configPath). The draft is a transient file written there
+// rather than world-readable /tmp, and removed once the editor returns.
+func draftDir() (string, error) {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		base = filepath.Join(home, ".config")
+	}
+	dir := filepath.Join(base, "blkchain")
+	if err := privateDir(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// editorCmd writes the current draft to a temp .md in the private config dir and
+// returns the tea.Cmd that suspends the TUI, runs the editor on it, and yields an
+// editorDoneMsg. On a temp file error it returns a command that prints the error
+// instead. The draft is removed on every path: here on a write/close error, and
+// in applyEditorResult once the editor returns (whatever its exit).
 func (m model) editorCmd() tea.Cmd {
 	draft := m.ta.Value()
-	f, err := os.CreateTemp("", "blk-draft-*.md")
+	dir, err := draftDir()
+	if err != nil {
+		return tea.Println(styleErr(fmt.Errorf("editor: %w", err)))
+	}
+	f, err := os.CreateTemp(dir, "blk-draft-*.md")
 	if err != nil {
 		return tea.Println(styleErr(fmt.Errorf("editor: %w", err)))
 	}

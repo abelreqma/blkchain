@@ -100,7 +100,40 @@ func (g *Gate) Authorize(ctx context.Context, c Command) Decision {
 	if !d.Allowed {
 		return d
 	}
-	return g.recheck(c)
+	run := d.Command
+	if run.Binary == "" {
+		run = c // defensive: a confirmer that did not set the authorized command
+	}
+	if !sameCommand(run, c) {
+		// Operator-edited substitute: re-run the FULL deny pipeline on it (fresh
+		// classifier, scope, denylists, tier) with the inherited tier context. The
+		// operator authored it, so no second confirmation; a failed deny-layer
+		// returns the denial for the caller to surface and let the operator edit again.
+		g.mu.Lock()
+		rc := g.checkLocked(run)
+		g.mu.Unlock()
+		if !rc.Allowed {
+			return rc
+		}
+	}
+	fin := g.recheck(run)
+	fin.Command = run
+	return fin
+}
+
+// sameCommand reports whether two commands have the same binary and literal args
+// (the fields an operator edit may change); Phase/Surface/Armed are inherited on
+// an edit, so they never differ here.
+func sameCommand(a, b Command) bool {
+	if a.Binary != b.Binary || len(a.Args) != len(b.Args) {
+		return false
+	}
+	for i := range a.Args {
+		if a.Args[i] != b.Args[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Check runs the deny-layers for one command (episode caps and breaker, the
@@ -126,7 +159,11 @@ func (g *Gate) Check(ctx context.Context, c Command) Decision {
 	if !d.Allowed {
 		return d
 	}
-	return g.recheck(c)
+	fin := g.recheck(c)
+	if fin.Allowed {
+		fin.Command = c
+	}
+	return fin
 }
 
 // ConfirmCommand runs only the confirmation tail for one command: in Safe it
@@ -157,11 +194,24 @@ func (g *Gate) checkLocked(c Command) Decision {
 	if c.Phase.requiresArm() && !c.Armed {
 		return g.deny("tier", c, "exploit/post-ex phase requires an armed task", "arm the task before running an exploit or post-exploitation command")
 	}
+	// Human-governed paths (LOCAL always-confirm, Safe, the Auto HITL-fallback)
+	// relax the structural shell/interpreter/exec-wrapper/metacharacter/exec-flag
+	// denials: the operator approves the exact argv. Unattended paths (Auto with the
+	// binary permitted by allowed_binaries, no HITL) keep the structural denials -
+	// the deny-list-only-unattended invariant. The non-structural denials (empty
+	// binary, resource bounds, enumeration scope-evasion/credential/config-file) and
+	// the destructive, sensitive-path, scope, config-denylist, and tier layers below
+	// hold on every path.
+	confirmed := g.humanGovernedPath(c)
 	if g.Scope != nil && g.Scope.Local() {
-		// LOCAL profile: no binary allowlist. Only the structural denials that
-		// keep gating enforceable (raw-shell metacharacters, shells,
-		// interpreters, exec-wrappers, find exec predicates).
-		if d := ClassifyLocal(c); !d.Allowed {
+		// LOCAL profile: no binary allowlist. The structural denials keep gating
+		// enforceable when unattended; a confirmed path relaxes them (empty-binary
+		// check only), leaving destructive/sensitive-path/scope below.
+		classify := ClassifyLocal
+		if confirmed {
+			classify = ClassifyLocalConfirmed
+		}
+		if d := classify(c); !d.Allowed {
 			return g.deny("classifier", c, d.Reason, d.Suggestion)
 		}
 		if err := DestructiveViolation(c); err != nil {
@@ -185,8 +235,13 @@ func (g *Gate) checkLocked(c Command) Decision {
 		}
 	} else {
 		// EXTERNAL profile.
-		// 2. structural classifier
-		if d := Classify(c); !d.Allowed {
+		// 2. structural classifier (relaxed to the non-structural denials on a
+		// confirmed path; the allowlist below is a separate, always-enforced control).
+		classify := Classify
+		if confirmed {
+			classify = ClassifyExternalConfirmed
+		}
+		if d := classify(c); !d.Allowed {
 			return g.deny("classifier", c, d.Reason, d.Suggestion)
 		}
 		// 3. binary allowlist
@@ -267,6 +322,33 @@ func (g *Gate) rateAllowLocked(c Command) Decision {
 	return Decision{Allowed: true}
 }
 
+// humanGovernedPath reports whether command c will be put to a human confirmer:
+// LOCAL (always-confirm), Safe mode, or the Auto HITL-fallback (a binary not
+// permitted by the unattended allowed_binaries bound, or an exploit/post-ex
+// per-action-confirm command). Only on such a path are the structural code-exec
+// denials relaxed; an UNATTENDED Auto command (binary permitted unattended, or the
+// legacy nil bound) stays strict. It fails closed: with no confirmer there is no
+// human, so it returns false and the structural denials hold. It assumes g.mu is
+// held (it reads config fields set at construction). It is deliberately consistent
+// with confirmTailLocked's needConfirm, minus the session-approval memoization - a
+// remembered approval was still a human decision and does not make a path
+// unattended.
+func (g *Gate) humanGovernedPath(c Command) bool {
+	if g.Confirm == nil {
+		return false
+	}
+	if g.Mode != Auto || (g.Scope != nil && g.Scope.Local()) {
+		return true
+	}
+	if c.Phase.perActionConfirm() {
+		return true
+	}
+	if g.UnattendedAllow != nil && !g.UnattendedAllow.Permits(c.Binary) {
+		return true
+	}
+	return false
+}
+
 // confirmTailLocked runs the confirmation step and audits the final decision. It
 // is called with g.mu HELD and unlocks it on every return path. The ONLY work
 // done outside the lock is the g.Confirm.Confirm call: needConfirm is decided
@@ -292,22 +374,40 @@ func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
 	if !needConfirm {
 		g.audit("allow", Signature(c))
 		g.mu.Unlock()
-		return Decision{Allowed: true}
+		return Decision{Allowed: true, Command: c}
 	}
 	g.mu.Unlock()
-	ok := g.Confirm != nil && g.Confirm.Confirm(ctx, c)
+	// The confirmation runs outside g.mu. An EditConfirmer may also return an
+	// operator-edited substitute; a plain Confirmer returns only allow/deny. A nil
+	// g.Confirm matches neither case and fails closed (deny).
+	var ok bool
+	var edited *Command
+	switch cf := g.Confirm.(type) {
+	case EditConfirmer:
+		ok, edited = cf.ConfirmOrEdit(ctx, c)
+	case Confirmer:
+		ok = cf.Confirm(ctx, c)
+	}
 	g.mu.Lock()
 	if !ok {
 		d := g.deny("confirm", c, "command not confirmed by the operator", "")
 		g.mu.Unlock()
 		return d
 	}
-	if g.Approvals != nil {
+	// An edit substitutes only Binary+Args; it INHERITS the original's Phase/Surface/
+	// Armed so the operator cannot change the tier via the edit. The caller
+	// re-validates the substitute through the full deny pipeline before running it.
+	run := c
+	if edited != nil {
+		run = Command{Binary: edited.Binary, Args: edited.Args, Phase: c.Phase, Surface: c.Surface, Armed: c.Armed}
+	}
+	// Memoize only an un-edited approval; a one-off edit is not remembered.
+	if edited == nil && g.Approvals != nil {
 		g.Approvals.Remember(c)
 	}
-	g.audit("allow", Signature(c))
+	g.audit("allow", Signature(run))
 	g.mu.Unlock()
-	return Decision{Allowed: true}
+	return Decision{Allowed: true, Command: run}
 }
 
 // deniedByConfig reports whether c's binary base name matches any entry in the

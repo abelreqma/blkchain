@@ -19,6 +19,7 @@ import (
 	eng "blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
+	"blkchain/cli/internal/secgate"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -2595,5 +2596,157 @@ func TestStreamCmdUsesAdaptiveRouter(t *testing.T) {
 	}
 	if !gotEnabled.Local {
 		t.Error("enabled.Local should reflect the default rag switch")
+	}
+}
+
+// /safe and /auto set the session autonomy mode held on the model, and /safe
+// clears a prior /auto override. These feed buildEngageGate via runReplEngage.
+func TestSafeAutoCommandsSetEngageMode(t *testing.T) {
+	m := newTestModel(t)
+	if m.engageMode != secgate.Safe || m.engageOverride {
+		t.Fatalf("a fresh model should default to Safe with no override, got mode=%v override=%v", m.engageMode, m.engageOverride)
+	}
+
+	nm, _ := m.dispatchInput("/auto")
+	m = nm.(model)
+	if m.engageMode != secgate.Auto {
+		t.Fatalf("/auto should set engageMode Auto, got %v", m.engageMode)
+	}
+	if m.engageOverride {
+		t.Fatalf("bare /auto must not set the scope override")
+	}
+
+	nm, _ = m.dispatchInput("/auto override")
+	m = nm.(model)
+	if m.engageMode != secgate.Auto || !m.engageOverride {
+		t.Fatalf("/auto override should set Auto with override, got mode=%v override=%v", m.engageMode, m.engageOverride)
+	}
+
+	// EqualFold: the override keyword is case-insensitive.
+	nm, _ = m.dispatchInput("/safe")
+	m = nm.(model)
+	nm, _ = m.dispatchInput("/auto OVERRIDE")
+	m = nm.(model)
+	if m.engageMode != secgate.Auto || !m.engageOverride {
+		t.Fatalf("/auto OVERRIDE should set override (case-insensitive), got mode=%v override=%v", m.engageMode, m.engageOverride)
+	}
+
+	// A non-"override" argument is not the override keyword.
+	nm, _ = m.dispatchInput("/auto scope")
+	m = nm.(model)
+	if m.engageMode != secgate.Auto || m.engageOverride {
+		t.Fatalf("/auto <other> must not set the override, got mode=%v override=%v", m.engageMode, m.engageOverride)
+	}
+
+	// /safe returns to Safe and clears the override.
+	nm, _ = m.dispatchInput("/auto override")
+	m = nm.(model)
+	nm, _ = m.dispatchInput("/safe")
+	m = nm.(model)
+	if m.engageMode != secgate.Safe || m.engageOverride {
+		t.Fatalf("/safe should reset to Safe and clear the override, got mode=%v override=%v", m.engageMode, m.engageOverride)
+	}
+}
+
+// autoModeNote states the autonomy posture: override takes precedence, a missing
+// scope warns that commands still prompt, and an in-scope run notes LOCAL still
+// confirms.
+func TestAutoModeNote(t *testing.T) {
+	cases := []struct {
+		override, scope bool
+		want            string
+	}{
+		{true, false, "override on"},
+		{true, true, "override on"}, // override takes precedence over scope detection
+		{false, false, "no scope detected"},
+		{false, true, "within scope"},
+	}
+	for _, tc := range cases {
+		got := autoModeNote(tc.override, tc.scope)
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("autoModeNote(override=%v, scope=%v) = %q; want it to contain %q", tc.override, tc.scope, got, tc.want)
+		}
+		if tc.override && strings.Contains(got, "no scope detected") {
+			t.Errorf("autoModeNote(override=%v, scope=%v) = %q; override must not warn about a missing scope", tc.override, tc.scope, got)
+		}
+	}
+}
+
+// --- Slice 3: ribbon engage-mode (autonomy) safety segment ------------------
+
+// engageModeSeg is the autonomy-mode label: safe, auto, auto (hitl) when the
+// unattended bound is empty, and an override marker when the scope override is on.
+func TestEngageModeSeg(t *testing.T) {
+	cases := []struct {
+		mode             secgate.Mode
+		override, hitl   bool
+		want, wantAbsent string
+	}{
+		{secgate.Safe, false, false, "safe", "auto"},
+		{secgate.Safe, true, true, "safe", "auto"}, // override/hitl are meaningless in Safe
+		{secgate.Auto, false, false, "auto", "hitl"},
+		{secgate.Auto, false, true, "auto (hitl)", ""},
+		{secgate.Auto, true, false, "auto override", "hitl"},
+		{secgate.Auto, true, true, "auto (hitl) override", ""},
+	}
+	for _, tc := range cases {
+		got := engageModeSeg(tc.mode, tc.override, tc.hitl)
+		if got != tc.want {
+			t.Errorf("engageModeSeg(%v,%v,%v) = %q; want %q", tc.mode, tc.override, tc.hitl, got, tc.want)
+		}
+		if tc.wantAbsent != "" && strings.Contains(got, tc.wantAbsent) {
+			t.Errorf("engageModeSeg(%v,%v,%v) = %q; should not contain %q", tc.mode, tc.override, tc.hitl, got, tc.wantAbsent)
+		}
+	}
+}
+
+// The status ribbon carries the autonomy segment: safe by default, auto after
+// /auto, with the override and hitl markers. It is a safety indicator, shown in
+// both rag and agent lines.
+func TestStatusRibbonShowsEngageMode(t *testing.T) {
+	noColor(t)
+	m := layoutModel(t, 200, 24)
+	m.ragModel = "gemma"
+	if line := m.statusLine(); !strings.Contains(line, "safe") {
+		t.Errorf("Safe default: status %q lacks the safe segment", line)
+	}
+	if line := m.statusLine(); strings.Contains(line, "auto") {
+		t.Errorf("Safe default: status %q must not show auto", line)
+	}
+	m.engageMode = secgate.Auto
+	if line := m.statusLine(); !strings.Contains(line, "auto") || strings.Contains(line, "safe") {
+		t.Errorf("Auto: status %q should show auto and not safe", line)
+	}
+	m.engageOverride = true
+	if line := m.statusLine(); !strings.Contains(line, "override") {
+		t.Errorf("Auto+override: status %q lacks the override marker", line)
+	}
+	m.engageOverride = false
+	m.engageHITL = true
+	if line := m.statusLine(); !strings.Contains(line, "hitl") {
+		t.Errorf("Auto+hitl: status %q lacks the hitl marker", line)
+	}
+	// Agent mode also carries the safety segment.
+	m.engageMode, m.engageHITL = secgate.Auto, false
+	m.mode, m.agentXport, m.agentChecked = "agent", "gateway", true
+	if line := m.statusLine(); !strings.Contains(line, "auto") {
+		t.Errorf("agent mode: status %q lacks the autonomy segment", line)
+	}
+}
+
+// /auto computes the HITL-fallback state from the cwd config (empty bound => HITL);
+// /safe clears it.
+func TestAutoCommandSetsHITLFromCwd(t *testing.T) {
+	t.Chdir(t.TempDir()) // no .blkchain/config.yaml => unattended bound is empty => HITL
+	m := newTestModel(t)
+	nm, _ := m.dispatchInput("/auto")
+	m = nm.(model)
+	if !m.engageHITL {
+		t.Fatalf("/auto in a config-less cwd should set engageHITL (unattended bound empty)")
+	}
+	nm, _ = m.dispatchInput("/safe")
+	m = nm.(model)
+	if m.engageHITL {
+		t.Fatalf("/safe should clear engageHITL")
 	}
 }

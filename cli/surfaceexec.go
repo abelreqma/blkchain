@@ -66,8 +66,11 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 			Surface: secgate.Surface(string(task.Surface)),
 			Armed:   task.Armed,
 		}
+		// Help-grounding: ground each proposed command against the tool's real
+		// interface before the gate authorizes it. nil ToolHelp disables it.
+		grounder := newTaskGrounder(e.d.ToolHelp, e.d.Gate, execDir, cmdCtx)
 		tools = append(tools,
-			newRunCommandToolForTask(e.d.Gate, runCap, runTimeout, execDir, activeTask, e.d.Runs.Add, cmdCtx),
+			newRunCommandToolForTask(e.d.Gate, runCap, runTimeout, execDir, activeTask, e.d.Runs.Add, cmdCtx, grounder),
 			newVerifiedRecordEvidenceTool(e.d.Store, e.d.Runs.Contains),
 		)
 	} else {

@@ -240,11 +240,12 @@ func startPy(root string, svc pyService) {
 // stopService stops a resident service by the pid its pid file records, and
 // only after runsService confirms that pid is still the service blk started,
 // so a pid the system has since given to another process is never signaled.
-// Only that one pid is signaled, never a process group. When the pid file is
-// missing, invalid, or names another process while the port answers, nothing
-// is signaled, the pid file is kept, and one line says how to find the
-// process. A pid file whose process is gone and whose port is dead is stale
-// and removed.
+// Only that one pid is signaled, never a process group. It sends SIGTERM, waits
+// for the port to go down, and escalates to SIGKILL if it does not exit in time
+// (see terminateService). When the pid file is missing, invalid, or names
+// another process while the port answers, nothing is signaled, the pid file is
+// kept, and one line says how to find the process. A pid file whose process is
+// gone and whose port is dead is stale and removed.
 func stopService(root string, svc pyService) {
 	pidPath := pidFilePath(root, svc.name)
 	pid, ok := readPid(pidPath)
@@ -265,13 +266,52 @@ func stopService(root string, svc pyService) {
 		fmt.Printf("  %s %s\n", Fail.Render(Glyph(GlyphErr)), Body.Render(svc.name+": not running"))
 		return
 	}
-	if syscall.Kill(pid, syscall.SIGTERM) != nil {
+	escalated, err := terminateService(pid, svc.port, syscall.Kill, health, time.Sleep)
+	if err != nil {
 		os.Remove(pidPath)
 		fmt.Printf("  %s %s\n", Fail.Render(Glyph(GlyphErr)), Body.Render(svc.name+": not running"))
 		return
 	}
 	os.Remove(pidPath)
-	fmt.Printf("  %s %s\n", OK.Render(Glyph(GlyphOK)), Body.Render(svc.name+": stopped"))
+	stopped := svc.name + ": stopped"
+	if escalated {
+		stopped = svc.name + ": stopped (forced)"
+	}
+	fmt.Printf("  %s %s\n", OK.Render(Glyph(GlyphOK)), Body.Render(stopped))
+}
+
+// shutdownPolls and shutdownPollWait bound how long terminateService waits for a
+// SIGTERM'd service to exit before escalating: shutdownPolls probes spaced
+// shutdownPollWait apart, about 10s total.
+const (
+	shutdownPolls    = 50
+	shutdownPollWait = 200 * time.Millisecond
+)
+
+// terminateService sends SIGTERM to pid, then polls the service's port until it
+// stops answering or shutdownPolls elapse; if the port is still up at the end it
+// escalates to SIGKILL, so a service that ignores SIGTERM does not leave blk
+// reporting "stopped" while the process lingers. Only that one pid is signaled,
+// never a process group. kill, up, and sleep are injected so the escalation
+// logic is testable without real processes or wall-clock waits; the real caller
+// passes syscall.Kill, health, and time.Sleep. It returns an error only when the
+// initial SIGTERM fails (the pid is gone or not ours), in which case nothing
+// further is signaled. escalated reports whether SIGKILL was sent.
+func terminateService(pid, port int, kill func(int, syscall.Signal) error, up func(int) bool, sleep func(time.Duration)) (escalated bool, err error) {
+	if err := kill(pid, syscall.SIGTERM); err != nil {
+		return false, err
+	}
+	for i := 0; i < shutdownPolls; i++ {
+		if !up(port) {
+			return false, nil
+		}
+		sleep(shutdownPollWait)
+	}
+	if up(port) {
+		_ = kill(pid, syscall.SIGKILL)
+		return true, nil
+	}
+	return false, nil
 }
 
 // unmanagedNote is the one line blk down and blk status print when svc's port

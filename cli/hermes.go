@@ -11,6 +11,14 @@ import (
 // hermesBin is the Hermes CLI name; resolved on PATH at call time.
 const hermesBin = "hermes"
 
+// pythonUnbufferedEnv returns the current environment with PYTHONUNBUFFERED
+// forced to "1" for a Hermes child, which block-buffers its piped stdout
+// otherwise. Any inherited PYTHONUNBUFFERED is stripped first so ours wins
+// regardless of which duplicate key execve resolves.
+func pythonUnbufferedEnv() []string {
+	return append(stripEnv(os.Environ(), "PYTHONUNBUFFERED"), "PYTHONUNBUFFERED=1")
+}
+
 // runHermes runs a one-shot Hermes agent turn with the given prompt. The agent
 // has the blkChain KB tools (via the `blkchain` MCP server) plus its own tools,
 // so this is the "full agent" counterpart to blk ask's single-shot RAG answer.
@@ -33,7 +41,7 @@ func runHermes(args []string) error {
 	c.Stdin = os.Stdin
 	// A piped Python child block-buffers stdout, so its output would arrive only
 	// at exit and out of order with stderr.
-	c.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
+	c.Env = pythonUnbufferedEnv()
 	// -z is one-shot and non-interactive, so its output is safe to pipe through
 	// the sanitizer.
 	canceled, err := runSanitized(c)

@@ -121,5 +121,8 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 		asker = askuser.AutoAsker{}
 	}
 	deps := buildEngageDeps(model, rc, cfg, prefs, ws.Store, gate, scratch, cat, asker, confirm, progress)
+	toolHelp, toolHelpClose := openToolHelpCache()
+	defer toolHelpClose()
+	deps.ToolHelp = toolHelp
 	return runOrchestrator(ctx, deps, goal)
 }

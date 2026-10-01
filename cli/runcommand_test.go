@@ -601,7 +601,7 @@ func TestRunCommandStampsPhaseArmedAndTierGates(t *testing.T) {
 	// Unarmed exploit context: run_command is denied at the tier layer.
 	g := safeLocalGate(t, &countingConfirmer{ok: true})
 	tool := newRunCommandToolForTask(g, 1<<20, time.Minute, "", func() string { return "t1" }, nil,
-		secgate.Command{Phase: secgate.PhaseExploit, Armed: false})
+		secgate.Command{Phase: secgate.PhaseExploit, Armed: false}, nil)
 	out, _ := tool.Call(context.Background(), `{"binary":"id"}`)
 	if !strings.Contains(out, "denied") || !strings.Contains(strings.ToLower(out), "arm") {
 		t.Errorf("unarmed exploit run_command: out=%q, want a tier deny mentioning arming", out)
@@ -613,9 +613,120 @@ func TestRunCommandStampsPhaseArmedAndTierGates(t *testing.T) {
 	})
 	g2 := safeLocalGate(t, &countingConfirmer{ok: true})
 	tool2 := newRunCommandToolForTask(g2, 1<<20, time.Minute, "", func() string { return "t1" }, nil,
-		secgate.Command{Phase: secgate.PhaseExploit, Armed: true})
+		secgate.Command{Phase: secgate.PhaseExploit, Armed: true}, nil)
 	out2, _ := tool2.Call(context.Background(), `{"binary":"id"}`)
 	if !strings.Contains(out2, "ran id") {
 		t.Errorf("armed+confirmed exploit run_command: out=%q, want it to run", out2)
+	}
+}
+
+// groundedNmapGrounder returns a helpGrounder whose cache already knows nmap's
+// interface (flag -sV only) keyed under version "vtest", so grounding is
+// deterministic and never needs a live help capture.
+func groundedNmapGrounder() *helpGrounder {
+	cache := &stubCache{}
+	_ = cache.Store("nmap", "vtest", toolInterface{Flags: []string{"-sV", "-p"}})
+	return &helpGrounder{
+		Cache:          cache,
+		Capture:        func(context.Context, string) (string, bool) { return "", false },
+		ResolveVersion: func(string) string { return "vtest" },
+		Parse:          parseToolHelp,
+	}
+}
+
+// TestRunCommandGroundingRejectsHallucinatedFlag: a flag absent from the tool's
+// cached interface is rejected before the gate, and the command never executes.
+func TestRunCommandGroundingRejectsHallucinatedFlag(t *testing.T) {
+	g := autoGate(t)
+	ran := false
+	withStubExec(t, func(ctx context.Context, bin string, args []string, dir string, capBytes int, timeout time.Duration) runResult {
+		ran = true
+		return runResult{Output: "should not run"}
+	})
+	tool := newRunCommandToolForTask(g, 1000, time.Second, "", func() string { return "t1" }, func(string, string) {}, secgate.Command{}, groundedNmapGrounder())
+	out, err := tool.Call(context.Background(), `{"binary":"nmap","args":["--pwn","10.0.0.5"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ran {
+		t.Fatal("a grounded-reject must not execute the command")
+	}
+	if !strings.Contains(out, "--pwn") {
+		t.Fatalf("reject output should name the bad flag: %q", out)
+	}
+}
+
+// TestRunCommandGroundingAllowsKnownFlag: a flag present in the cached interface
+// passes grounding and the command executes.
+func TestRunCommandGroundingAllowsKnownFlag(t *testing.T) {
+	g := autoGate(t)
+	ran := false
+	withStubExec(t, func(ctx context.Context, bin string, args []string, dir string, capBytes int, timeout time.Duration) runResult {
+		ran = true
+		return runResult{Output: "scan done"}
+	})
+	tool := newRunCommandToolForTask(g, 1000, time.Second, "", func() string { return "t1" }, func(string, string) {}, secgate.Command{}, groundedNmapGrounder())
+	// -p 80 keeps the scan bounded so the gate's unbounded-nmap rule does not
+	// deny it (this test isolates grounding, not the port-bound classifier).
+	out, err := tool.Call(context.Background(), `{"binary":"nmap","args":["-sV","-p","80","10.0.0.5"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ran {
+		t.Fatal("a validated flag must execute")
+	}
+	if !strings.Contains(out, "scan done") {
+		t.Fatalf("want command output, got %q", out)
+	}
+}
+
+// TestRunCommandPipelineGroundingRejectsStage: a hallucinated flag in any stage
+// aborts the whole pipeline before any stage runs (fail closed).
+func TestRunCommandPipelineGroundingRejectsStage(t *testing.T) {
+	g := autoGate(t)
+	ran := false
+	withStubPipeline(t, func(ctx context.Context, stages []pipelineStage, dir string, capBytes int, timeout time.Duration) runResult {
+		ran = true
+		return runResult{Output: "nope"}
+	})
+	tool := newRunCommandToolForTask(g, 1000, time.Second, "", func() string { return "t1" }, func(string, string) {}, secgate.Command{}, groundedNmapGrounder())
+	out, err := tool.Call(context.Background(), `{"pipeline":[{"binary":"nmap","args":["--pwn","10.0.0.5"]},{"binary":"nmap","args":["-sV"]}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ran {
+		t.Fatal("a grounded-reject stage must abort the pipeline before exec")
+	}
+	if !strings.Contains(out, "--pwn") || !strings.Contains(strings.ToLower(out), "stage") {
+		t.Fatalf("want a stage reject naming the flag: %q", out)
+	}
+}
+
+// mainEditConfirmer is an EditConfirmer (package main) that substitutes a fixed
+// edited command.
+type mainEditConfirmer struct{ edited *secgate.Command }
+
+func (e mainEditConfirmer) Confirm(ctx context.Context, c secgate.Command) bool { return true }
+func (e mainEditConfirmer) ConfirmOrEdit(ctx context.Context, c secgate.Command) (bool, *secgate.Command) {
+	return true, e.edited
+}
+
+// run_command must EXECUTE the gate-authorized (operator-edited) command, not the
+// one the model proposed. The confirmer edits id -> whoami; the stub exec must see
+// whoami.
+func TestRunCommandExecutesEditedCommand(t *testing.T) {
+	var ranBin string
+	withStubExec(t, func(ctx context.Context, bin string, args []string, dir string, capBytes int, timeout time.Duration) runResult {
+		ranBin = bin
+		return runResult{Output: "ran " + bin}
+	})
+	g := safeLocalGate(t, mainEditConfirmer{edited: &secgate.Command{Binary: "whoami"}})
+	tool := newRunCommandTool(g, 1<<20, time.Minute, "", func() string { return "t1" }, nil)
+	out, _ := tool.Call(context.Background(), `{"binary":"id"}`)
+	if ranBin != "whoami" {
+		t.Errorf("executed %q, want the edited whoami", ranBin)
+	}
+	if !strings.Contains(out, "ran whoami") {
+		t.Errorf("output %q, want the edited command's output", out)
 	}
 }

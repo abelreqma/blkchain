@@ -53,7 +53,10 @@ func TestRouteSkillDeliversAndRecordsReceipt(t *testing.T) {
 }
 
 func TestRouteSkillNoSkillForDomain(t *testing.T) {
-	cat, _ := skillcat.Load("") // empty
+	cat, err := skillcat.Load("") // empty dir: documented to be a no-error empty catalog
+	if err != nil {
+		t.Fatalf("Load(empty): %v", err)
+	}
 	st := openStore(t)
 	tool := newRouteSkillTool(cat, st, func() string { return "" })
 	out, err := tool.Call(context.Background(), `{"domain":"web"}`)
@@ -171,7 +174,10 @@ func TestRouteSkillKeywordNeverPinsSkillByName(t *testing.T) {
 // TestRouteSkillNoSkillMessageNamesResolvedDomain checks both not-found sites
 // report the resolved domain, not the raw keyword or a generic fallback.
 func TestRouteSkillNoSkillMessageNamesResolvedDomain(t *testing.T) {
-	cat, _ := skillcat.Load("") // empty
+	cat, err := skillcat.Load("") // empty dir: documented to be a no-error empty catalog
+	if err != nil {
+		t.Fatalf("Load(empty): %v", err)
+	}
 	tool := newRouteSkillTool(cat, openStore(t), func() string { return "" })
 	out, err := tool.Call(context.Background(), `{"domain":"kerberos"}`)
 	if err != nil {

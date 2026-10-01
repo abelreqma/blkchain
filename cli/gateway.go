@@ -103,7 +103,7 @@ func runGateway(args []string) error {
 	c.Stdin = os.Stdin
 	// A piped Python child block-buffers stdout, which would hold log lines
 	// until about 8 KB and reorder them against stderr.
-	c.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
+	c.Env = pythonUnbufferedEnv()
 	// A foreground server is normally ended with ctrl+c, which is not an error.
 	if _, err := runSanitized(c); err != nil {
 		return fmt.Errorf("hermes gateway: %w", err)

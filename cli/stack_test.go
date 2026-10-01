@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -330,6 +332,81 @@ func liveHealthPort(t *testing.T) int {
 		t.Fatal(err)
 	}
 	return port
+}
+
+// terminateService sends SIGTERM, polls the port, and escalates to SIGKILL only
+// when the service does not go down within the window. kill/up/sleep are
+// injected so the escalation logic is exercised without real processes.
+func TestTerminateServiceEscalatesOnlyWhenPortStaysUp(t *testing.T) {
+	cases := []struct {
+		name         string
+		sigtermErr   error
+		up           []bool // consumed in order; the last value repeats
+		wantSignals  []syscall.Signal
+		wantErr      bool
+		wantEscalate bool
+	}{
+		{
+			name:        "SIGTERM failure signals nothing further",
+			sigtermErr:  errors.New("no such process"),
+			up:          []bool{true},
+			wantSignals: []syscall.Signal{syscall.SIGTERM},
+			wantErr:     true,
+		},
+		{
+			name:        "port down immediately, no SIGKILL",
+			up:          []bool{false},
+			wantSignals: []syscall.Signal{syscall.SIGTERM},
+		},
+		{
+			name:        "port dies within the window, no SIGKILL",
+			up:          []bool{true, true, false},
+			wantSignals: []syscall.Signal{syscall.SIGTERM},
+		},
+		{
+			name:         "port never dies, escalates to SIGKILL",
+			up:           []bool{true},
+			wantSignals:  []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL},
+			wantEscalate: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var signals []syscall.Signal
+			kill := func(_ int, sig syscall.Signal) error {
+				signals = append(signals, sig)
+				if sig == syscall.SIGTERM {
+					return tc.sigtermErr
+				}
+				return nil
+			}
+			upCall := 0
+			up := func(_ int) bool {
+				i := upCall
+				if i >= len(tc.up) {
+					i = len(tc.up) - 1
+				}
+				upCall++
+				return tc.up[i]
+			}
+			escalated, err := terminateService(1234, 9, kill, up, func(time.Duration) {})
+
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if escalated != tc.wantEscalate {
+				t.Fatalf("escalated = %v, want %v", escalated, tc.wantEscalate)
+			}
+			if len(signals) != len(tc.wantSignals) {
+				t.Fatalf("signals = %v, want %v", signals, tc.wantSignals)
+			}
+			for i, s := range tc.wantSignals {
+				if signals[i] != s {
+					t.Fatalf("signals = %v, want %v", signals, tc.wantSignals)
+				}
+			}
+		})
+	}
 }
 
 func TestStopServiceSignalsTheRecordedMatchingPid(t *testing.T) {

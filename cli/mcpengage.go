@@ -265,6 +265,9 @@ func (svc engageService) handle(ctx context.Context, ss *mcp.ServerSession, in m
 	}
 
 	deps := buildEngageDeps(model, svc.rc, svc.cfg, loadPrefs(), ws.Store, gate, scratch, svc.cat, askuser.AutoAsker{}, nil, nil)
+	toolHelp, toolHelpClose := openToolHelpCache()
+	defer toolHelpClose()
+	deps.ToolHelp = toolHelp
 	final, err := svc.run(ctx, deps, p.Goal)
 	if err != nil {
 		return nil, fmt.Errorf("engage: %w", err)

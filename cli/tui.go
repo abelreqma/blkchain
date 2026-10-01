@@ -16,10 +16,12 @@ import (
 	"strings"
 	"time"
 
+	"blkchain/cli/internal/askuser"
 	"blkchain/cli/internal/histstore"
 	"blkchain/cli/internal/modeleval"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
+	"blkchain/cli/internal/secgate"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -138,6 +140,11 @@ func (m model) footerKeys() footerKeyMap {
 				return footerKeyMap{short: []key.Binding{hint("enter", "submit"), hint("esc", "back")}}
 			}
 			return footerKeyMap{short: []key.Binding{hint("up/down", "move"), hint("enter", "choose"), hint("esc", "cancel")}}
+		case confirmPicker:
+			if ov.editing {
+				return footerKeyMap{short: []key.Binding{hint("enter", "re-check & run"), hint("esc", "cancel edit")}}
+			}
+			return footerKeyMap{short: []key.Binding{hint("y", "allow"), hint("e", "edit"), hint("n", "deny"), hint("esc", "deny & stop")}}
 		case filePicker:
 			return footerKeyMap{short: []key.Binding{hint("type", "filter"), hint("up/down", "move"), hint("enter", "open/select"), hint("backspace", "erase/up"), closeKey}}
 		case modelsPanel:
@@ -488,7 +495,18 @@ type model struct {
 	// Agent mode. mode is "rag" (default) or "agent"; the agent
 	// fields track the gateway session handle and the health/transport shown in
 	// the status line.
-	mode         string
+	mode string
+	// engageMode is the session autonomy mode (secgate.Safe default, or Auto) that a
+	// gate-governed REPL engagement (replengage.go runReplEngage) feeds into
+	// buildEngageGate; engageOverride is the auto-scope override (/auto override). The
+	// /safe//auto commands set these; the ribbon and the /engage dispatch read them.
+	engageMode     secgate.Mode
+	engageOverride bool
+	// engageHITL is true when /auto for the current directory would fall back to
+	// per-command confirmation because the unattended allowed_binaries bound is
+	// empty (unattendedBoundEmpty at /auto time). The ribbon shows it as the
+	// "auto (hitl)" marker. It is set by /auto and cleared by /safe.
+	engageHITL   bool
 	agentSession string // cached hermes gateway session id (conversation handle)
 	agentModel   string // display model id, discovered from events / model options
 	agentXport   string // last-used transport: "gateway" | "subprocess"
@@ -542,24 +560,25 @@ func initialModel() model {
 	hp.Styles.Ellipsis = Meta
 
 	return model{
-		ta:        ta,
-		sp:        sp,
-		help:      hp,
-		keys:      defaultKeys(),
-		history:   hist,
-		histIdx:   len(hist),
-		mode:      "rag",
-		sess:      sess,
-		hist:      histDB,
-		sessTitle: title,
-		reasoning: "medium",
-		ambient:   ambient,
-		prefs:     loadPrefs(),
-		cfg:       cfg,
-		rc:        rc,
-		liveCache: &liveCache{},
-		rcErr:     rcErr,
-		viz:       newVizRenderer(newMmdfluxRunner()),
+		ta:         ta,
+		sp:         sp,
+		help:       hp,
+		keys:       defaultKeys(),
+		history:    hist,
+		histIdx:    len(hist),
+		mode:       "rag",
+		engageMode: secgate.Safe, // explicit: Safe is the zero value, but spell out the security default
+		sess:       sess,
+		hist:       histDB,
+		sessTitle:  title,
+		reasoning:  "medium",
+		ambient:    ambient,
+		prefs:      loadPrefs(),
+		cfg:        cfg,
+		rc:         rc,
+		liveCache:  &liveCache{},
+		rcErr:      rcErr,
+		viz:        newVizRenderer(newMmdfluxRunner()),
 
 		reduceMotion: reduceMotion(),
 	}
@@ -862,6 +881,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		out := formatAnswer(resp, elapsed, m.renderWidth(), msg.rerankOff) + "\n" + costFooter(cost)
 		return m, m.finish(tea.Println(out))
 
+	case engageDoneMsg:
+		m.working = false
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
+		m.live = ""
+		m.workingVerb = ""
+		elapsed := time.Since(m.turnStart)
+		if msg.err != nil {
+			if errors.Is(msg.err, context.Canceled) {
+				return m, m.finish(tea.Println("   " + Meta.Render("engagement stopped")))
+			}
+			return m, m.finish(tea.Println(styleErr(fmt.Errorf("engage: %w", timeoutOrErr(msg.err)))))
+		}
+		return m, m.finish(tea.Println(formatEngageDone(msg.final, elapsed, m.renderWidth())))
+
 	case searchMsg:
 		m.working = false
 		if m.cancel != nil {
@@ -1080,6 +1116,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clarifyResolvedMsg:
 		m.overlay = nil
 		reply, res := msg.reply, msg.res
+		// The send runs in a command so a slow receiver never blocks the loop.
+		return m, tea.Batch(textarea.Blink, func() tea.Msg {
+			if reply != nil {
+				reply <- res
+			}
+			return nil
+		})
+
+	case confirmMsg:
+		// A confirm overlay already open is displaced: deny it so its requester is
+		// not left blocked on the reply channel.
+		var cancel tea.Cmd
+		if old, ok := m.overlay.(confirmPicker); ok && old.reply != nil {
+			reply := old.reply
+			cancel = func() tea.Msg {
+				reply <- confirmResult{}
+				return nil
+			}
+		}
+		m.overlay = newConfirmPicker(msg.cmd, m.width, msg.reply)
+		return m, cancel
+
+	case confirmResolvedMsg:
+		m.overlay = nil
+		reply, res := msg.reply, msg.res
+		// esc stops the engagement: cancel the running turn so the orchestrator
+		// winds down after this denied command.
+		if res.stop && m.cancel != nil {
+			m.cancel()
+		}
 		// The send runs in a command so a slow receiver never blocks the loop.
 		return m, tea.Batch(textarea.Blink, func() tea.Msg {
 			if reply != nil {
@@ -1493,6 +1559,17 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			m.mode = "agent"
 		}
 		return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
+	case "safe":
+		m.engageMode = secgate.Safe
+		m.engageOverride = false
+		m.engageHITL = false
+		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render("safe: every command is confirmed before it runs")))
+	case "auto":
+		m.engageMode = secgate.Auto
+		m.engageOverride = strings.EqualFold(strings.TrimSpace(arg), "override")
+		cwd, _ := os.Getwd()
+		m.engageHITL = unattendedBoundEmpty(cwd)
+		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render(autoModeNote(m.engageOverride, scopeDetected(cwd)))))
 	case "agent":
 		m.mode = "agent"
 		return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
@@ -1661,6 +1738,42 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.cancel = cancel
 		m.pendingQ = question
 		return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.generateCmd(ctx, question, results, m.turnStart))
+	case "engage":
+		goal := strings.TrimSpace(arg)
+		if goal == "" {
+			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(errors.New("engage: give me a goal"))))
+		}
+		// Build the engage dependencies up front so a failure (no model, no
+		// retrieval client, a bad skill catalog) is reported before a turn starts.
+		run, err := m.buildReplEngageRun(goal)
+		if err != nil {
+			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
+		}
+		m.working = true
+		m.tickGen++
+		m.workingVerb = workingVerbLabel("engage")
+		m.live = ""
+		m.turnStart = time.Now()
+		m.liveTokens = 0
+		m.firstTokAt = time.Time{}
+		// An engagement can run for a long time (multi-step gated tool use); only
+		// Ctrl-C or esc-stop ends it, so use a cancelable, un-timed context.
+		ctx, cancel := context.WithCancel(context.Background())
+		m.cancel = cancel
+		run.ctx = ctx
+		// The live engagement view receives per-revision snapshots from the engage
+		// progress callback; the viz poll renders the DAG + bar from it.
+		stub := newStubEngagement("engagement")
+		m.engagement = stub
+		run.stub = stub
+		// Safe routes the orchestrator's clarifications to the clarify overlay;
+		// /auto suppresses them (AutoAsker).
+		if m.engageMode == secgate.Safe {
+			run.asker = startEngageAsker(ctx, m.prog)
+		} else {
+			run.asker = askuser.AutoAsker{}
+		}
+		return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), engageCmd(run))
 	}
 	// Unknown /verb.
 	return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("unknown command /%s, try /help", verb))))
@@ -2539,8 +2652,17 @@ func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, mode
 	shortHealth := strings.TrimSpace(strings.Replace(health, "services", "", 1))
 	queued := m.queuedIndicator()
 	build := func(model string, l statusLayout) string {
+		// The autonomy (engage-mode) segment is a SAFETY indicator: it is always
+		// shown, right after the mode, so the operator can never lose sight of
+		// whether an engagement would run commands without confirming. Safe is sage
+		// text on the neutral fill; Auto is a tan fill (active/caution).
+		engSeg := plSegment{Text: engageModeSeg(m.engageMode, m.engageOverride, m.engageHITL), FG: wSageFg, BG: wSegBg}
+		if m.engageMode == secgate.Auto {
+			engSeg.FG, engSeg.BG = wTanFg, wTanBg
+		}
 		left := []plSegment{
 			{Text: mode, FG: wSageFg, BG: wSageBg, Icon: "\U000F2B00"},
+			engSeg,
 			{Text: "model " + model, FG: wHeadFg, BG: wSegBg, Icon: "\U000F2B01"},
 		}
 		if l.reasoning {
@@ -2665,6 +2787,39 @@ func modeNote(mode string) string {
 		return "   " + Meta.Render("mode: agent (full hermes agent with tools, web, memory)")
 	}
 	return "   " + Meta.Render("mode: rag (retrieve then stream a cited answer)")
+}
+
+// engageModeSeg is the autonomy-mode label for the status ribbon: "safe" (every
+// command confirmed), or "auto" with an "(hitl)" marker when the unattended bound
+// is empty (so every command still confirms) and an "override" marker when the
+// scope override is on. It is a safety indicator; override and hitl apply only in
+// Auto.
+func engageModeSeg(mode secgate.Mode, override, hitl bool) string {
+	if mode != secgate.Auto {
+		return "safe"
+	}
+	label := "auto"
+	if hitl {
+		label = "auto (hitl)"
+	}
+	if override {
+		label += " override"
+	}
+	return label
+}
+
+// autoModeNote is the one-line confirmation printed after /auto: it warns when
+// bounded autonomy has no scope and no override (engagements still confirm each
+// command), and notes when the scope override is on. LOCAL always confirms.
+func autoModeNote(override, scopeDetected bool) string {
+	switch {
+	case override:
+		return "auto: bounded autonomy, scope override on (logged); LOCAL still confirms every command"
+	case !scopeDetected:
+		return "auto: no scope detected - add an ROE.md or use /auto override; until then commands still prompt"
+	default:
+		return "auto: bounded autonomy within scope; LOCAL still confirms every command"
+	}
 }
 
 // formatAgentAnswer glamour-renders an agent turn's answer with a muted timing
@@ -3214,6 +3369,8 @@ func workingVerbLabel(verb string) string {
 		return "checking" + ellipsis()
 	case "generate":
 		return "answering" + ellipsis()
+	case "engage":
+		return "engaging" + ellipsis()
 	default:
 		return "thinking" + ellipsis()
 	}

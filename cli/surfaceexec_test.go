@@ -90,3 +90,32 @@ func TestVantageUnsetDoesNotGate(t *testing.T) {
 		t.Errorf("unset vantage must not gate: out=%q", out)
 	}
 }
+
+func TestGenericExecutorGroundsBeforeExec(t *testing.T) {
+	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{
+		toolCallResp("c1", "run_command", `{"binary":"nmap","args":["--pwn","10.0.0.5"]}`),
+		finalResp("done"),
+	}})
+	d.Gate = autoGate(t)
+	d.Runs = NewRunOutputs()
+	cache := &stubCache{}
+	_ = cache.Store("nmap", resolveBinVersion("nmap"), toolInterface{Flags: []string{"-sV"}})
+	d.ToolHelp = cache
+
+	ran := false
+	withStubExec(t, func(ctx context.Context, bin string, args []string, dir string, capBytes int, timeout time.Duration) runResult {
+		ran = true
+		return runResult{Output: "should not run"}
+	})
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{
+		{ID: "t1", Kind: "recon", Surface: engagement.SurfaceNetwork, Target: "10.0.0.5", Objective: "scan", Status: engagement.StatusTodo},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runExecutor(context.Background(), d, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if ran {
+		t.Fatal("grounding must reject the hallucinated flag before execRunner runs")
+	}
+}

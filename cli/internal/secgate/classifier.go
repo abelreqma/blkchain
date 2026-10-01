@@ -52,23 +52,51 @@ var unboundedRules = map[string]struct {
 // Classify inspects a command's structure (binary and literal args) and denies
 // structurally-dangerous or structurally-unbounded commands, independent of
 // whether the binary is allowlisted. It fails closed. When a bounded form
-// exists, Decision.Suggestion names it.
+// exists, Decision.Suggestion names it. This is the full (unattended-path)
+// classifier; ClassifyExternalConfirmed relaxes the structural code-exec denials
+// for a human-confirmed path.
 func Classify(c Command) Decision {
 	if d := metaDecision(c); !d.Allowed {
 		return d
 	}
-	if name := strings.ToLower(baseName(strings.TrimSpace(c.Binary))); deniedBinaries[name] {
+	name := strings.ToLower(baseName(strings.TrimSpace(c.Binary)))
+	if deniedBinaries[name] {
 		return Decision{Allowed: false, Reason: name + " is a shell, interpreter, or exec-wrapper and is not permitted directly"}
 	}
-	if name := strings.ToLower(baseName(strings.TrimSpace(c.Binary))); name != "" {
+	if name != "" {
 		if flag, bad := execFlag(name, c.Args); bad {
 			return Decision{Allowed: false, Reason: name + " " + flag + " runs arbitrary code and is not permitted"}
 		}
 	}
+	return classifyNonStructuralExternal(c)
+}
+
+// ClassifyExternalConfirmed is the EXTERNAL classifier for a human-confirmed path
+// (Safe, LOCAL always-confirm, or the Auto HITL-fallback - selected by the gate's
+// humanGovernedPath). The structural code-execution denials (shell metacharacters,
+// shells/interpreters/exec-wrappers, and per-binary exec flags) are relaxed because
+// the operator approves the exact argv; the non-structural EXTERNAL denials
+// (empty binary, per-binary resource bounds, and the enumeration scope-evasion,
+// credential-file, and config-file denials) still apply. The gate's allowlist,
+// scope, destructive, and sensitive-path layers are enforced separately and are
+// unaffected.
+func ClassifyExternalConfirmed(c Command) Decision {
+	return classifyNonStructuralExternal(c)
+}
+
+// classifyNonStructuralExternal runs the EXTERNAL denials that are NOT structural
+// code-execution denials, so they hold on every path (attended or not): the
+// empty-binary check, per-binary resource bounds, and the enumeration
+// scope-evasion / credential-file / config-file denials.
+func classifyNonStructuralExternal(c Command) Decision {
+	if strings.TrimSpace(c.Binary) == "" {
+		return Decision{Allowed: false, Reason: "empty binary"}
+	}
 	if d, tripped := classifyUnbounded(c); tripped {
 		return d
 	}
-	if strings.ToLower(baseName(strings.TrimSpace(c.Binary))) == "dnsrecon" {
+	name := strings.ToLower(baseName(strings.TrimSpace(c.Binary)))
+	if name == "dnsrecon" {
 		if a, bad := dnsreconGluedFlag(c.Args); bad {
 			return Decision{
 				Allowed:    false,
@@ -77,7 +105,7 @@ func Classify(c Command) Decision {
 			}
 		}
 	}
-	if name := strings.ToLower(baseName(strings.TrimSpace(c.Binary))); enumConfigDeny[name].letters != "" {
+	if enumConfigDeny[name].letters != "" {
 		if a, bad := enumConfigFlag(name, c.Args); bad {
 			return Decision{Allowed: false, Reason: name + " " + a + configOptionNote, Suggestion: enumConfigHint[name]}
 		}
@@ -89,7 +117,7 @@ func Classify(c Command) Decision {
 			}
 		}
 	}
-	if d, bad := enumAudit(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); bad {
+	if d, bad := enumAudit(name, c.Args); bad {
 		return d
 	}
 	return Decision{Allowed: true}
@@ -155,6 +183,17 @@ func ClassifyLocal(c Command) Decision {
 	}
 	if flag, bad := execFlag(name, c.Args); bad {
 		return Decision{Allowed: false, Reason: name + " " + flag + " runs arbitrary code and is not permitted"}
+	}
+	return Decision{Allowed: true}
+}
+
+// ClassifyLocalConfirmed is the LOCAL classifier for a human-confirmed path. LOCAL
+// always confirms (every command is surfaced to the operator), so the structural
+// code-exec denials are relaxed and only the empty-binary check remains. The
+// gate's destructive, sensitive-path, and scope layers still apply.
+func ClassifyLocalConfirmed(c Command) Decision {
+	if strings.TrimSpace(c.Binary) == "" {
+		return Decision{Allowed: false, Reason: "empty binary"}
 	}
 	return Decision{Allowed: true}
 }

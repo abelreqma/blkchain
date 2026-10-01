@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/tmc/langchaingo/llms"
 )
@@ -212,6 +213,46 @@ func TestGenerateRepairTurnStructure(t *testing.T) {
 	}
 	if len([]rune(aiTurn)) > maxRepairEcho {
 		t.Fatalf("AI turn exceeds maxRepairEcho: %d runes > %d", len([]rune(aiTurn)), maxRepairEcho)
+	}
+}
+
+func TestCapTextTruncatesOnRuneBoundary(t *testing.T) {
+	if got := capText("short"); got != "short" {
+		t.Fatalf("capText(short) = %q, want unchanged", got)
+	}
+	long := strings.Repeat("a", maxRepairEcho+50)
+	if got := capText(long); len([]rune(got)) != maxRepairEcho {
+		t.Fatalf("capText len = %d runes, want %d", len([]rune(got)), maxRepairEcho)
+	}
+	// Multibyte runes must be cut on a rune boundary, never mid-byte.
+	multi := strings.Repeat("é", maxRepairEcho+10) // 2 bytes per rune
+	got := capText(multi)
+	if len([]rune(got)) != maxRepairEcho {
+		t.Fatalf("capText(multibyte) = %d runes, want %d", len([]rune(got)), maxRepairEcho)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("capText produced invalid UTF-8")
+	}
+}
+
+// The existing repair test feeds a short invalid reply that never reaches the
+// cap. This one feeds a prior output longer than maxRepairEcho, so the repair's
+// AI turn must be truncated to exactly the cap.
+func TestGenerateRepairTurnTruncatesLongPriorOutput(t *testing.T) {
+	longInvalid := `{"name":"","pad":"` + strings.Repeat("a", maxRepairEcho+100) + `"}`
+	if len([]rune(longInvalid)) <= maxRepairEcho {
+		t.Fatalf("fixture not longer than the cap; it cannot exercise truncation")
+	}
+	g := &fakeGen{replies: []string{longInvalid, `{"name":"fixed"}`}}
+	if _, err := Generate(context.Background(), g, "subject", testSchema(), Options{MaxRetries: 1}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(g.lastMsgs) != 4 {
+		t.Fatalf("history len = %d, want 4", len(g.lastMsgs))
+	}
+	aiTurn := textOf(g.lastMsgs[2])
+	if len([]rune(aiTurn)) != maxRepairEcho {
+		t.Fatalf("AI repair turn = %d runes, want exactly %d (truncated)", len([]rune(aiTurn)), maxRepairEcho)
 	}
 }
 

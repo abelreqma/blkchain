@@ -80,13 +80,21 @@ var execRunner = realExec
 var execPipeline = realExecPipeline
 
 // authorizeCommand runs g.Authorize (deny-layers, confirmation, then the
-// exec-time rechecks) for one command. It returns a non-empty deny message
-// (already audited) when the command is not allowed, or "" when it may run.
-func authorizeCommand(ctx context.Context, g *secgate.Gate, cmd secgate.Command) string {
-	if d := g.Authorize(ctx, cmd); !d.Allowed {
-		return denyMessage(d)
+// exec-time rechecks) for one command. It returns the authorized command to
+// execute (the input command, or an operator-edited substitute the gate
+// re-validated) and an empty deny message; or a zero command and a non-empty deny
+// message (already audited) when the command is not allowed. The caller MUST run
+// the returned command, not the one it passed in, so an operator edit takes effect.
+func authorizeCommand(ctx context.Context, g *secgate.Gate, cmd secgate.Command) (secgate.Command, string) {
+	d := g.Authorize(ctx, cmd)
+	if !d.Allowed {
+		return secgate.Command{}, denyMessage(d)
 	}
-	return ""
+	run := d.Command
+	if run.Binary == "" {
+		run = cmd // defensive: a Decision that did not set the authorized command
+	}
+	return run, ""
 }
 
 // checkCommand runs g.Check (deny-layers plus the exec-time rechecks, NO
@@ -113,15 +121,18 @@ func denyMessage(d secgate.Decision) string {
 // allows the command AND the exec-time scope re-check finds no out-of-scope
 // resolved address. activeTask names the task to attribute captured output to.
 func newRunCommandTool(g *secgate.Gate, capBytes int, timeout time.Duration, workDir string, activeTask func() string, capture func(taskID, output string)) tooldef.Tool {
-	return newRunCommandToolForTask(g, capBytes, timeout, workDir, activeTask, capture, secgate.Command{})
+	return newRunCommandToolForTask(g, capBytes, timeout, workDir, activeTask, capture, secgate.Command{}, nil)
 }
 
 // newRunCommandToolForTask is newRunCommandTool with the engagement context
 // (phase/surface/armed) in cmdCtx stamped onto every Command the tool builds, so
 // the gate derives the per-action tier for the task's phase (exploit/post-ex
 // require an armed task and force per-action confirmation). A zero cmdCtx is the
-// recon/unarmed legacy posture.
-func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Duration, workDir string, activeTask func() string, capture func(taskID, output string), cmdCtx secgate.Command) tooldef.Tool {
+// recon/unarmed legacy posture. grounder, when non-nil, grounds each proposed
+// command against the tool's real interface before the gate authorizes it (a
+// hallucinated flag is rejected and re-grounded, not executed); nil disables
+// grounding.
+func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Duration, workDir string, activeTask func() string, capture func(taskID, output string), cmdCtx secgate.Command, grounder *helpGrounder) tooldef.Tool {
 	return newStoreTool("run_command",
 		"Run a bounded, shell-free security tool command against an in-scope target. Provide a bare binary name and literal args (no shell, no pipes or redirection). For a multi-stage filter, pass a structured `pipeline` of 2-3 stages (each a bare binary + literal args); stages are piped stdout to stdin with no shell, and every stage is authorized independently. Output is returned as untrusted data.",
 		runCommandArgs{},
@@ -140,13 +151,27 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 					return "run_command: invalid arguments: binary is required", nil
 				}
 				cmd := secgate.Command{Binary: a.Binary, Args: a.Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed}
-				if msg := authorizeCommand(ctx, g, cmd); msg != "" {
+				// Help-grounding runs before the gate: a command using a flag or
+				// subcommand absent from the tool's real interface is rejected and
+				// re-grounded (never executed). An advisory note (grounding could
+				// not verify, but fails open to the gate) is prepended to output.
+				// Grounding checks the model's PROPOSED command; an operator who
+				// edits it at the gate is a trusted human, so the edited run is
+				// executed without re-grounding.
+				oc := grounder.ground(ctx, cmd)
+				if oc.Reject {
+					return oc.Msg, nil
+				}
+				// run is the authorized command: cmd, or an operator-edited substitute
+				// the gate re-validated. Execute run, not cmd, so an edit takes effect.
+				run, msg := authorizeCommand(ctx, g, cmd)
+				if msg != "" {
 					return msg, nil
 				}
 				if g.Audit != nil {
-					g.Audit("exec", secgate.Signature(cmd))
+					g.Audit("exec", secgate.Signature(run))
 				}
-				res := execRunner(ctx, cmd.Binary, cmd.Args, workDir, capBytes, timeout)
+				res := execRunner(ctx, run.Binary, run.Args, workDir, capBytes, timeout)
 				if res.TimedOut {
 					return "run_command: the command timed out and was terminated after " + timeout.String(), nil
 				}
@@ -154,6 +179,9 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 					capture(activeTask(), res.Output)
 				}
 				var b strings.Builder
+				if oc.Msg != "" {
+					fmt.Fprintf(&b, "(grounding: %s)\n", oc.Msg)
+				}
 				if res.Err != nil {
 					fmt.Fprintf(&b, "(command exited with an error: %s)\n", res.Err.Error())
 				}
@@ -182,6 +210,20 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 			for i := range a.Pipeline {
 				cmds[i] = secgate.Command{Binary: a.Pipeline[i].Binary, Args: a.Pipeline[i].Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed}
 				stageStrs[i] = strings.Join(append([]string{cmds[i].Binary}, cmds[i].Args...), " ")
+			}
+			// Ground every stage BEFORE confirming or running any: a grounded-reject
+			// in any stage aborts the whole pipeline with zero side effects (fail
+			// closed), like a denied stage. Advisory notes (grounding could not
+			// verify) are collected and prepended to the pipeline output.
+			var groundNotes []string
+			for i := range cmds {
+				oc := grounder.ground(ctx, cmds[i])
+				if oc.Reject {
+					return "run_command grounded-reject (stage " + strconv.Itoa(i+1) + "): " + oc.Msg, nil
+				}
+				if oc.Msg != "" {
+					groundNotes = append(groundNotes, "stage "+strconv.Itoa(i+1)+": "+oc.Msg)
+				}
 			}
 			display := secgate.Command{Binary: "pipeline", Args: stageStrs, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed}
 			if d := g.ConfirmCommand(ctx, display); !d.Allowed {
@@ -213,6 +255,9 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 				capture(activeTask(), res.Output)
 			}
 			var b strings.Builder
+			for _, note := range groundNotes {
+				fmt.Fprintf(&b, "(grounding: %s)\n", note)
+			}
 			if res.Err != nil {
 				fmt.Fprintf(&b, "(command exited with an error: %s)\n", res.Err.Error())
 			}

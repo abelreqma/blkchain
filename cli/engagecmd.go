@@ -166,6 +166,9 @@ func runEngage(args []string) error {
 
 	r := newVizRenderer(newMmdfluxRunner())
 	deps := buildEngageDeps(model, rc, cfg, prefs, ws.Store, gate, scratch, cat, asker, confirm, makeEngageProgress(os.Stdout, r, prefs.Viz))
+	toolHelp, toolHelpClose := openToolHelpCache()
+	defer toolHelpClose()
+	deps.ToolHelp = toolHelp
 
 	// Resumable engagement report: a projection of the store written to the
 	// workspace, refreshed on each commit and rebuilt from the store on resume.

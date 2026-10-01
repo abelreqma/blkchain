@@ -100,7 +100,13 @@ type domainRule struct {
 	keywords []string
 }
 
-// domainRules are applied in order; first match wins.
+// domainRules map keywords to a domain. They are ordered most-specific to
+// most-general, and DeriveDomain applies them in this slice order: when a text
+// matches keywords belonging to more than one rule, the earliest rule here wins,
+// regardless of where in the text each keyword appears. So the order is the
+// precedence contract (for example "kerberos" plus "xss" resolves to ad, not
+// web), and reordering this slice changes routing. Keep it stable; the
+// cross-domain precedence tests pin it.
 var domainRules = []domainRule{
 	{"ad", []string{"active directory", "adcs", "ad cs", "kerberos", "ntlm", "ldap", "entra", "saml", "bloodhound"}},
 	{"cloud", []string{"aws", "azure", "gcp", "cloud", "s3", "iam", "metadata"}},
@@ -141,6 +147,9 @@ func normalizeText(s string) string {
 // DeriveDomain maps a skill's name+description to a domain, generic if none
 // match. Matching is on whole-word (and whole-phrase) boundaries via
 // normalizeText, so short keywords do not false-match inside unrelated words.
+// It returns the domain of the first rule in domainRules with any matching
+// keyword, so domainRules order is the tie-break when a text spans several
+// domains (see that slice's comment).
 func DeriveDomain(name, description string) string {
 	hay := normalizeText(name + " " + description)
 	for _, r := range domainRules {
