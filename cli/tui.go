@@ -1648,6 +1648,8 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		}
 	case "candidates":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(candidatesBlock(m.engagement)))
+	case "evidence":
+		return m, tea.Sequence(tea.Println(echo), tea.Println(evidenceBlock(m.engagement)))
 	case "copy":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(m.doCopy()))
 	case "history":

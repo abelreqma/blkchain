@@ -106,6 +106,9 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 	}
 	defer ws.Close()
 
+	SetEngageEvidenceSource(ws.Store.EvidenceRowsFor)
+	defer SetEngageEvidenceSource(nil)
+
 	scratch, err := os.MkdirTemp("", "blkreplengage-")
 	if err != nil {
 		return "", fmt.Errorf("engage: cannot create scratch dir: %w", err)
