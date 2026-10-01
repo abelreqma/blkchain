@@ -59,6 +59,32 @@ func TestTierMatrixArmRequirement(t *testing.T) {
 	}
 }
 
+func TestTierMatrixSurfaceAgnostic(t *testing.T) {
+	surfaces := []Surface{
+		SurfaceLocal, SurfaceNetwork, SurfaceWeb, SurfaceAD,
+		SurfaceCloud, SurfaceCloudAWS, SurfaceCloudGCP, SurfaceCloudAzure,
+		SurfaceContainer, SurfaceAISecurity,
+	}
+	for _, sf := range surfaces {
+		// recon stays auto-tier regardless of surface.
+		cf := &okConfirmer{}
+		g := tierGate(t, cf)
+		rc := Command{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.5"}, Surface: sf, Phase: PhaseRecon}
+		if d := g.Authorize(context.Background(), rc); !d.Allowed {
+			t.Errorf("surface %q recon: denied: %s", sf, d.Reason)
+		}
+		if cf.called {
+			t.Errorf("surface %q recon: confirmer called (recon must stay auto-tier)", sf)
+		}
+		// unarmed exploit stays refused regardless of surface.
+		g2 := tierGate(t, &okConfirmer{})
+		ec := Command{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.5"}, Surface: sf, Phase: PhaseExploit, Armed: false}
+		if d := g2.Authorize(context.Background(), ec); d.Allowed {
+			t.Errorf("surface %q unarmed exploit: allowed, want deny", sf)
+		}
+	}
+}
+
 func TestTierMatrixReconReportAuto(t *testing.T) {
 	// recon and report are auto-tier: allowed in Auto with no confirmation, no arm needed.
 	for _, ph := range []Phase{PhaseRecon, PhaseReport, Phase("")} {

@@ -39,6 +39,11 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 	if v != "" && !v.Reaches(task.Surface) {
 		return fmt.Sprintf("executor: task %s surface %q is not reachable at the current vantage %q; advance the vantage first", task.ID, task.Surface, v), nil
 	}
+
+	if e.d.ReconTiers && task.Phase == engagement.PhaseRecon && e.d.Gate != nil && e.d.Runs != nil {
+		return e.runReconPhase(ctx, task)
+	}
+
 	dom := domainFor(task.Kind)
 
 	reg := tooldef.NewRegistry()

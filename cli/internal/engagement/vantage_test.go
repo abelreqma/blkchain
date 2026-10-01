@@ -6,19 +6,29 @@ import (
 )
 
 func TestVantageReaches(t *testing.T) {
+	// Externally reachable surfaces open at any vantage; local and ad require an
+	// internal foothold. cloud (and its per-CSP variants), container, and
+	// ai-security are external per the operator's taxonomy decision.
+	external := []Surface{
+		SurfaceNetwork, SurfaceWeb, SurfaceCloud, SurfaceCloudAWS,
+		SurfaceCloudGCP, SurfaceCloudAzure, SurfaceContainer, SurfaceAISecurity,
+	}
+	internalOnly := []Surface{SurfaceLocal, SurfaceAD}
+
 	ext := VantageExternalUnauth
-	for _, s := range []Surface{SurfaceNetwork, SurfaceWeb} {
+	for _, s := range external {
 		if !ext.Reaches(s) {
 			t.Errorf("external-unauth should reach %q", s)
 		}
 	}
-	for _, s := range []Surface{SurfaceLocal, SurfaceADCloud} {
+	for _, s := range internalOnly {
 		if ext.Reaches(s) {
 			t.Errorf("external-unauth must NOT reach %q (needs foothold)", s)
 		}
 	}
+	// internal-foothold reaches every surface in the canonical set.
 	foot := VantageInternalFoothold
-	for _, s := range []Surface{SurfaceLocal, SurfaceADCloud, SurfaceNetwork, SurfaceWeb} {
+	for _, s := range AllSurfaces() {
 		if !foot.Reaches(s) {
 			t.Errorf("internal-foothold should reach %q", s)
 		}

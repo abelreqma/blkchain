@@ -138,3 +138,124 @@ func TestTaskJSONHelpers(t *testing.T) {
 		t.Error("unmarshalStrings of malformed JSON should error")
 	}
 }
+
+func TestPhaseForKind(t *testing.T) {
+	// exploit-dev is the one exploit-phase persona; every other Kind (and the empty
+	// and unknown cases) defaults to recon. The lookup is case-insensitive and
+	// trimmed, so a mis-cased exploit Kind still derives the stricter phase
+	// (fail-safe, not fail-open).
+	cases := map[string]Phase{
+		"exploit-dev":     PhaseExploit,
+		"exploit":         PhaseExploit,
+		"Exploit":         PhaseExploit,
+		"Exploit-Dev":     PhaseExploit,
+		"  exploit-dev  ": PhaseExploit,
+		"recon":           PhaseRecon,
+		"web":             PhaseRecon,
+		"ad":              PhaseRecon,
+		"local":           PhaseRecon,
+		"target-analysis": PhaseRecon,
+		"generic":         PhaseRecon,
+		"":                PhaseRecon,
+		"unknown-kind":    PhaseRecon,
+	}
+	for kind, want := range cases {
+		if got := phaseForKind(kind); got != want {
+			t.Errorf("phaseForKind(%q) = %q, want %q", kind, got, want)
+		}
+	}
+}
+
+func TestSurfaceValid(t *testing.T) {
+	for _, sf := range []Surface{
+		SurfaceLocal, SurfaceNetwork, SurfaceWeb, SurfaceAD,
+		SurfaceCloud, SurfaceCloudAWS, SurfaceCloudGCP, SurfaceCloudAzure,
+		SurfaceContainer, SurfaceAISecurity,
+	} {
+		if !sf.valid() {
+			t.Errorf("%q should be valid", sf)
+		}
+	}
+	// ad-cloud was split into ad + cloud (+ per-CSP) and removed entirely.
+	if Surface("ad-cloud").valid() {
+		t.Error("ad-cloud was removed and must be invalid")
+	}
+	if Surface("bogus").valid() {
+		t.Error("bogus should be invalid")
+	}
+	if Surface("").valid() {
+		t.Error("empty should be invalid")
+	}
+}
+
+func TestAllSurfaces(t *testing.T) {
+	// Independent source of truth: the explicit ordered set. AllSurfaces must
+	// equal it, and valid() must accept every member (drift guard between the
+	// canonical list and the validity check).
+	want := []Surface{
+		SurfaceLocal, SurfaceNetwork, SurfaceWeb, SurfaceAD,
+		SurfaceCloud, SurfaceCloudAWS, SurfaceCloudGCP, SurfaceCloudAzure,
+		SurfaceContainer, SurfaceAISecurity,
+	}
+	got := AllSurfaces()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AllSurfaces() = %v, want %v", got, want)
+	}
+	for _, sf := range want {
+		if !sf.valid() {
+			t.Errorf("AllSurfaces member %q is not valid()", sf)
+		}
+	}
+	// The returned slice is a copy: mutating it must not affect a later call.
+	got[0] = Surface("mutated")
+	if again := AllSurfaces(); again[0] != SurfaceLocal {
+		t.Errorf("AllSurfaces() shares its backing array: again[0] = %q after mutation", again[0])
+	}
+}
+
+func TestSurfaceForKind(t *testing.T) {
+	// ad/cloud/k8s split out of the old ad-cloud surface; container and
+	// ai-security are new. An unknown or empty kind falls back to network.
+	cases := map[string]Surface{
+		"web":             SurfaceWeb,
+		"ad":              SurfaceAD,
+		"cloud":           SurfaceCloud,
+		"k8s":             SurfaceContainer,
+		"container":       SurfaceContainer,
+		"ai-security":     SurfaceAISecurity,
+		"ai":              SurfaceAISecurity,
+		"local":           SurfaceLocal,
+		"target-analysis": SurfaceLocal,
+		"exploit-dev":     SurfaceLocal,
+		"wifi":            SurfaceNetwork,
+		"recon":           SurfaceNetwork,
+		"generic":         SurfaceNetwork,
+		"":                SurfaceNetwork,
+		"unknown-kind":    SurfaceNetwork,
+	}
+	for kind, want := range cases {
+		if got := surfaceForKind(kind); got != want {
+			t.Errorf("surfaceForKind(%q) = %q, want %q", kind, got, want)
+		}
+	}
+}
+
+func TestApplyLockedDerivesPhaseFromKind(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.Apply(Delta{Upserts: []Task{
+		{ID: "e", Kind: "exploit-dev", Status: StatusTodo},                    // empty phase -> exploit (fail-safe)
+		{ID: "w", Kind: "web", Status: StatusTodo},                            // empty phase -> recon
+		{ID: "x", Kind: "exploit-dev", Phase: PhaseRecon, Status: StatusTodo}, // explicit phase is respected (derivation is for empty only)
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := s.GetTask("e"); e.Phase != PhaseExploit {
+		t.Errorf("exploit-dev with empty phase = %q, want exploit", e.Phase)
+	}
+	if w, _ := s.GetTask("w"); w.Phase != PhaseRecon {
+		t.Errorf("web with empty phase = %q, want recon", w.Phase)
+	}
+	if x, _ := s.GetTask("x"); x.Phase != PhaseRecon {
+		t.Errorf("explicit phase overridden = %q, want recon (explicit respected)", x.Phase)
+	}
+}

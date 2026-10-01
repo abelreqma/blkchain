@@ -124,5 +124,9 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 	toolHelp, toolHelpClose := openToolHelpCache()
 	defer toolHelpClose()
 	deps.ToolHelp = toolHelp
+
+	if serr := seedInitialVantage(ctx, ws.Store, scope); serr != nil {
+		fmt.Fprintf(os.Stderr, "engage: vantage seed failed: %v\n", serr)
+	}
 	return runOrchestrator(ctx, deps, goal)
 }

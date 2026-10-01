@@ -19,7 +19,7 @@ type planTaskArgs struct {
 	DoneWhen   string   `json:"done_when,omitempty" desc:"the observable condition that completes the task"`
 	Status     string   `json:"status,omitempty" desc:"todo, active, done, na, or blocked; defaults to todo"`
 	Phase      string   `json:"phase,omitempty" desc:"recon, exploit, post-ex, or report; defaults to recon"`
-	Surface    string   `json:"surface,omitempty" desc:"local, network, web, or ad-cloud; defaults from kind"`
+	Surface    string   `json:"surface,omitempty" desc:"local, network, web, ad, cloud (or cloud-aws/cloud-gcp/cloud-azure), container, or ai-security; defaults from kind"`
 	Capability string   `json:"capability,omitempty" desc:"passive, enumerate, or active"`
 	DependsOn  []string `json:"depends_on,omitempty" desc:"ids of tasks that must finish first"`
 	BasisIDs   []string `json:"basis_ids,omitempty" desc:"ids of the task(s) or finding(s) this task was derived from (provenance; not a scheduling dependency)"`

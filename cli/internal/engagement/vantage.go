@@ -21,14 +21,17 @@ var vantageRank = map[Vantage]int{
 func (v Vantage) valid() bool { _, ok := vantageRank[v]; return ok }
 func (v Vantage) rank() int   { return vantageRank[v] }
 
-// Reaches reports whether surface s is reachable from vantage v. Network and web
-// surfaces are reachable externally; local and ad-cloud require an internal
-// foothold or better (the pivot that external->internal access unlocks).
+// Reaches reports whether surface s is reachable from vantage v. The externally
+// reachable surfaces (network, web, cloud and its per-CSP variants, container,
+// and ai-security) are reachable at any vantage; local and ad require an
+// internal foothold or better (the pivot that external->internal access
+// unlocks). An unknown surface is not reachable (fail closed).
 func (v Vantage) Reaches(s Surface) bool {
 	switch s {
-	case SurfaceNetwork, SurfaceWeb:
+	case SurfaceNetwork, SurfaceWeb, SurfaceCloud, SurfaceCloudAWS,
+		SurfaceCloudGCP, SurfaceCloudAzure, SurfaceContainer, SurfaceAISecurity:
 		return true
-	case SurfaceLocal, SurfaceADCloud:
+	case SurfaceLocal, SurfaceAD:
 		return v.rank() >= VantageInternalFoothold.rank()
 	}
 	return false

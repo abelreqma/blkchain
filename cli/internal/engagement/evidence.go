@@ -29,6 +29,35 @@ func (s *Store) RecordEvidence(taskID, quote string) (int64, error) {
 	return res.LastInsertId()
 }
 
+// EvidenceRow is one stored evidence quote with its row id. The id is the
+// stable, verifiable provenance handle for a parsed finding (the "evidence-quote
+// id"): a parser that attributes a record to this quote records (task_id, id) so
+// no parsed field exists without a quote it can be traced to.
+type EvidenceRow struct {
+	ID    int64
+	Quote string
+}
+
+// EvidenceRowsFor returns the stored evidence rows for a task, oldest first,
+// each with its row id for provenance. It mirrors EvidenceFor's ordering.
+func (s *Store) EvidenceRowsFor(taskID string) ([]EvidenceRow, error) {
+	rows, err := s.db.Query(
+		`SELECT id, quote FROM evidence WHERE task_id = ? ORDER BY id ASC`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []EvidenceRow{}
+	for rows.Next() {
+		var r EvidenceRow
+		if err := rows.Scan(&r.ID, &r.Quote); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // EvidenceFor returns the stored quotes for a task, oldest first.
 func (s *Store) EvidenceFor(taskID string) ([]string, error) {
 	rows, err := s.db.Query(

@@ -17,10 +17,16 @@ const (
 type Surface string
 
 const (
-	SurfaceLocal   Surface = "local"
-	SurfaceNetwork Surface = "network"
-	SurfaceWeb     Surface = "web"
-	SurfaceADCloud Surface = "ad-cloud"
+	SurfaceLocal      Surface = "local"
+	SurfaceNetwork    Surface = "network"
+	SurfaceWeb        Surface = "web"
+	SurfaceAD         Surface = "ad"
+	SurfaceCloud      Surface = "cloud"
+	SurfaceCloudAWS   Surface = "cloud-aws"
+	SurfaceCloudGCP   Surface = "cloud-gcp"
+	SurfaceCloudAzure Surface = "cloud-azure"
+	SurfaceContainer  Surface = "container"
+	SurfaceAISecurity Surface = "ai-security"
 )
 
 // requiresArm reports whether a command in this phase may run only when its task

@@ -183,6 +183,10 @@ func runEngage(args []string) error {
 	stopReport := rw.Start()
 	defer stopReport()
 
+	if serr := seedInitialVantage(context.Background(), ws.Store, scope); serr != nil {
+		fmt.Fprintf(os.Stderr, "engage: vantage seed failed: %v\n", serr)
+	}
+
 	final, err := runOrchestrator(context.Background(), deps, goal)
 	stopReport() // stop the live render loop before the terminal flush (idempotent)
 	if err != nil {

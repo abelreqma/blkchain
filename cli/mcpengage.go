@@ -268,6 +268,10 @@ func (svc engageService) handle(ctx context.Context, ss *mcp.ServerSession, in m
 	toolHelp, toolHelpClose := openToolHelpCache()
 	defer toolHelpClose()
 	deps.ToolHelp = toolHelp
+
+	if serr := seedInitialVantage(ctx, ws.Store, p.Scope); serr != nil {
+		fmt.Fprintf(os.Stderr, "engage: vantage seed failed: %v\n", serr)
+	}
 	final, err := svc.run(ctx, deps, p.Goal)
 	if err != nil {
 		return nil, fmt.Errorf("engage: %w", err)

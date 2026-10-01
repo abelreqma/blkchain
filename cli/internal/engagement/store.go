@@ -95,6 +95,16 @@ CREATE TABLE IF NOT EXISTS audit (
 	action TEXT,
 	detail TEXT
 );
+CREATE TABLE IF NOT EXISTS recon_coverage (
+	surface TEXT NOT NULL,
+	asset TEXT NOT NULL,
+	dimensions TEXT,
+	iteration_count INTEGER,
+	last_novelty_rev INTEGER,
+	created_rev INTEGER,
+	updated_rev INTEGER,
+	PRIMARY KEY (surface, asset)
+);
 `
 
 // Open opens (creating if needed) the engagement database at path and brings

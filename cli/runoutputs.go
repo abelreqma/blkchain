@@ -25,6 +25,13 @@ func (r *RunOutputs) Add(taskID, output string) {
 	r.byTask[taskID] = append(r.byTask[taskID], output)
 }
 
+// Count returns how many outputs have been captured for taskID.
+func (r *RunOutputs) Count(taskID string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.byTask[taskID])
+}
+
 // Contains reports whether quote is a non-empty substring of some captured
 // output for taskID.
 func (r *RunOutputs) Contains(taskID, quote string) bool {

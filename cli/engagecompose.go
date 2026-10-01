@@ -103,17 +103,18 @@ func buildEngageGate(ws *engagement.Workspace, scope *secgate.Scope, mode secgat
 // no progress callback.
 func buildEngageDeps(model toolLoopModel, rc searcher, cfg ragconfig.Config, prefs modelPrefs, store *engagement.Store, gate *secgate.Gate, workDir string, catalog *skillcat.Catalog, asker askuser.Asker, confirmer secgate.Confirmer, progress func(rev int64, snap engagement.Engagement)) engageDeps {
 	return engageDeps{
-		Model:     model,
-		RC:        rc,
-		Cfg:       cfg,
-		Prefs:     prefs,
-		Store:     store,
-		Asker:     asker,
-		Gate:      gate,
-		Confirmer: confirmer,
-		Runs:      NewRunOutputs(),
-		WorkDir:   workDir,
-		Catalog:   catalog,
-		Progress:  progress,
+		Model:      model,
+		RC:         rc,
+		Cfg:        cfg,
+		Prefs:      prefs,
+		Store:      store,
+		Asker:      asker,
+		Gate:       gate,
+		Confirmer:  confirmer,
+		Runs:       NewRunOutputs(),
+		WorkDir:    workDir,
+		Catalog:    catalog,
+		Progress:   progress,
+		ReconTiers: true,
 	}
 }

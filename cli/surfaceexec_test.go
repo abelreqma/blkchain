@@ -14,7 +14,7 @@ import (
 
 func TestExecutorForReturnsRunnableForEverySurface(t *testing.T) {
 	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
-	for _, s := range []engagement.Surface{engagement.SurfaceLocal, engagement.SurfaceNetwork, engagement.SurfaceWeb, engagement.SurfaceADCloud} {
+	for _, s := range engagement.AllSurfaces() {
 		task := engagement.Task{ID: "t", Surface: s, Kind: "recon"}
 		if ex := executorFor(d, task); ex == nil {
 			t.Errorf("executorFor(surface=%q) = nil, want a surfaceExecutor", s)
@@ -75,6 +75,23 @@ func TestVantageGatesInternalSurface(t *testing.T) {
 	out2, _ := runExecutor(context.Background(), d, "t1")
 	if strings.Contains(strings.ToLower(out2), "vantage") {
 		t.Errorf("local surface after advance to foothold: out=%q, should no longer refuse on vantage", out2)
+	}
+}
+
+func TestVantageAllowsExternalSurface(t *testing.T) {
+	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
+	ext := engagement.VantageExternalUnauth
+	if _, err := d.Store.Apply(engagement.Delta{SetVantage: &ext}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{
+		{ID: "t1", Kind: "cloud", Surface: engagement.SurfaceCloud, Objective: "enumerate", Status: engagement.StatusTodo},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := runExecutor(context.Background(), d, "t1")
+	if strings.Contains(strings.ToLower(out), "vantage") {
+		t.Errorf("cloud surface at external-unauth: out=%q, should NOT refuse on vantage", out)
 	}
 }
 

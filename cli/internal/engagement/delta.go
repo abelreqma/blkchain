@@ -2,7 +2,9 @@ package engagement
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -22,6 +24,10 @@ type Delta struct {
 	// known vantage and must not move backward (a lower rank than the current
 	// vantage is rejected), so advancement is monotonic.
 	SetVantage *Vantage
+	// ReconUpserts are recon-coverage rows to insert or update, keyed by
+	// (surface, asset). created_rev is preserved across an update; only
+	// updated_rev advances.
+	ReconUpserts []ReconCoverage
 }
 
 func (s *Store) Apply(d Delta) (newRev int64, err error) {
@@ -77,7 +83,11 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 			return 0, fmt.Errorf("engagement: task %q has invalid status %q", t.ID, t.Status)
 		}
 		if t.Phase == "" {
-			t.Phase = PhaseRecon
+			// Derive the default Phase from the Kind (fail-safe): a non-recon-nature
+			// Kind such as exploit-dev gets its stricter phase instead of silently
+			// defaulting to recon, so it does not route to the recon tier or escape the
+			// arm requirement. surfaceForKind does the same for Surface just below.
+			t.Phase = phaseForKind(t.Kind)
 		}
 		if !t.Phase.valid() {
 			return 0, fmt.Errorf("engagement: task %q has invalid phase %q", t.ID, t.Phase)
@@ -225,6 +235,69 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 			return 0, err
 		}
 	}
+
+	for _, rc := range d.ReconUpserts {
+		if rc.Asset == "" {
+			return 0, fmt.Errorf("engagement: recon coverage has empty asset")
+		}
+		if !rc.Surface.valid() {
+			return 0, fmt.Errorf("engagement: recon coverage has invalid surface %q", rc.Surface)
+		}
+		for dim, st := range rc.Dimensions {
+			if !st.valid() {
+				return 0, fmt.Errorf("engagement: recon coverage dimension %q has invalid status %q", dim, st)
+			}
+		}
+		// Resolve the "stamp this revision" novelty sentinel.
+		noveltyRev := rc.LastNoveltyRev
+		if noveltyRev == ReconNoveltyThisRev {
+			noveltyRev = newRev
+		}
+		// Read-merge-write inside this transaction (which holds the write lock via
+		// BEGIN IMMEDIATE), so two concurrent writers on the same (surface, asset)
+		// row never clobber a covered dimension or regress a counter: coverage is
+		// merged ReconCovered-wins and the counters stay monotonic.
+		dims := rc.Dimensions
+		iter := rc.IterationCount
+		nov := noveltyRev
+		var (
+			prevDims string
+			prevIter int
+			prevNov  int64
+		)
+		switch err := conn.QueryRowContext(ctx,
+			`SELECT dimensions, iteration_count, last_novelty_rev FROM recon_coverage WHERE surface = ? AND asset = ?`,
+			string(rc.Surface), rc.Asset).Scan(&prevDims, &prevIter, &prevNov); {
+		case err == nil:
+			prev, perr := unmarshalReconDims(prevDims)
+			if perr != nil {
+				return 0, perr
+			}
+			dims = mergeReconDims(prev, rc.Dimensions)
+			if prevIter > iter {
+				iter = prevIter
+			}
+			if prevNov > nov {
+				nov = prevNov
+			}
+		case errors.Is(err, sql.ErrNoRows):
+			// first write for this row; use the incoming values as-is
+		default:
+			return 0, err
+		}
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO recon_coverage (surface, asset, dimensions, iteration_count, last_novelty_rev, created_rev, updated_rev)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(surface, asset) DO UPDATE SET
+			   dimensions = excluded.dimensions,
+			   iteration_count = excluded.iteration_count,
+			   last_novelty_rev = excluded.last_novelty_rev,
+			   updated_rev = excluded.updated_rev`,
+			string(rc.Surface), rc.Asset, marshalReconDims(dims), iter, nov, newRev, newRev); err != nil {
+			return 0, err
+		}
+	}
+
 	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO transition (rev, at, kind, detail) VALUES (?, ?, ?, ?)`,
 		newRev, time.Now().UTC().Format(time.RFC3339), d.Kind, d.Detail); err != nil {

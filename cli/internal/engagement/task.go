@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 )
 
 // Status is the lifecycle state of a task.
@@ -48,18 +49,45 @@ func (p Phase) valid() bool {
 type Surface string
 
 const (
-	SurfaceLocal   Surface = "local"
-	SurfaceNetwork Surface = "network"
-	SurfaceWeb     Surface = "web"
-	SurfaceADCloud Surface = "ad-cloud"
+	SurfaceLocal      Surface = "local"
+	SurfaceNetwork    Surface = "network"
+	SurfaceWeb        Surface = "web"
+	SurfaceAD         Surface = "ad"
+	SurfaceCloud      Surface = "cloud"
+	SurfaceCloudAWS   Surface = "cloud-aws"
+	SurfaceCloudGCP   Surface = "cloud-gcp"
+	SurfaceCloudAzure Surface = "cloud-azure"
+	SurfaceContainer  Surface = "container"
+	SurfaceAISecurity Surface = "ai-security"
 )
+
+// allSurfaces is the canonical ordered set of every valid Surface. valid() and
+// Vantage.Reaches stay exhaustive over it; AllSurfaces returns a copy of it.
+var allSurfaces = []Surface{
+	SurfaceLocal, SurfaceNetwork, SurfaceWeb, SurfaceAD,
+	SurfaceCloud, SurfaceCloudAWS, SurfaceCloudGCP, SurfaceCloudAzure,
+	SurfaceContainer, SurfaceAISecurity,
+}
 
 func (s Surface) valid() bool {
 	switch s {
-	case SurfaceLocal, SurfaceNetwork, SurfaceWeb, SurfaceADCloud:
+	case SurfaceLocal, SurfaceNetwork, SurfaceWeb, SurfaceAD,
+		SurfaceCloud, SurfaceCloudAWS, SurfaceCloudGCP, SurfaceCloudAzure,
+		SurfaceContainer, SurfaceAISecurity:
 		return true
 	}
 	return false
+}
+
+// AllSurfaces returns a copy of the canonical surface set in a stable order.
+// Callers that must iterate every surface (for example the vantage seed, which
+// decides which surfaces a new vantage newly reaches) use this so they track any
+// surface added here without their own literal list. The returned slice is a
+// copy; callers must not rely on mutating the backing array.
+func AllSurfaces() []Surface {
+	out := make([]Surface, len(allSurfaces))
+	copy(out, allSurfaces)
+	return out
 }
 
 // Capability is the class of action a task performs.
@@ -81,9 +109,12 @@ func (c Capability) valid() bool {
 
 var surfaceForKindMap = map[string]Surface{
 	"web":             SurfaceWeb,
-	"ad":              SurfaceADCloud,
-	"cloud":           SurfaceADCloud,
-	"k8s":             SurfaceADCloud,
+	"ad":              SurfaceAD,
+	"cloud":           SurfaceCloud,
+	"k8s":             SurfaceContainer,
+	"container":       SurfaceContainer,
+	"ai-security":     SurfaceAISecurity,
+	"ai":              SurfaceAISecurity,
 	"local":           SurfaceLocal,
 	"target-analysis": SurfaceLocal,
 	"exploit-dev":     SurfaceLocal,
@@ -100,6 +131,23 @@ func surfaceForKind(kind string) Surface {
 		return s
 	}
 	return SurfaceNetwork
+}
+
+var phaseForKindMap = map[string]Phase{
+	"exploit-dev": PhaseExploit,
+	"exploit":     PhaseExploit,
+}
+
+// phaseForKind returns the default Phase for kind, falling back to PhaseRecon for
+// any Kind not in phaseForKindMap. The lookup is case-insensitive and trimmed so a
+// mis-cased exploit Kind still derives the stricter phase (fail-safe); an empty
+// Phase on a task is derived from its Kind in applyLocked, so a non-recon-nature
+// Kind cannot silently route to the recon tier.
+func phaseForKind(kind string) Phase {
+	if p, ok := phaseForKindMap[strings.ToLower(strings.TrimSpace(kind))]; ok {
+		return p
+	}
+	return PhaseRecon
 }
 
 // Task is one unit of engagement work.

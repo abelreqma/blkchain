@@ -120,6 +120,46 @@ func TestRecordEvidenceUnknownTask(t *testing.T) {
 	}
 }
 
+func TestEvidenceRowsForReturnsIDsAndQuotes(t *testing.T) {
+	s := openTemp(t)
+	seedAB(t, s)
+
+	for _, q := range []string{"first", "second"} {
+		if _, err := s.RecordEvidence("A", q); err != nil {
+			t.Fatalf("RecordEvidence %q: %v", q, err)
+		}
+	}
+	rows, err := s.EvidenceRowsFor("A")
+	if err != nil {
+		t.Fatalf("EvidenceRowsFor: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("EvidenceRowsFor = %d rows, want 2", len(rows))
+	}
+	if rows[0].Quote != "first" || rows[1].Quote != "second" {
+		t.Fatalf("quotes out of order: %q, %q", rows[0].Quote, rows[1].Quote)
+	}
+	if rows[0].ID <= 0 || rows[1].ID <= 0 {
+		t.Fatalf("ids must be positive: %d, %d", rows[0].ID, rows[1].ID)
+	}
+	if rows[1].ID <= rows[0].ID {
+		t.Fatalf("ids must be ascending: %d then %d", rows[0].ID, rows[1].ID)
+	}
+}
+
+func TestEvidenceRowsForEmpty(t *testing.T) {
+	s := openTemp(t)
+	seedAB(t, s)
+
+	rows, err := s.EvidenceRowsFor("A")
+	if err != nil {
+		t.Fatalf("EvidenceRowsFor: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("EvidenceRowsFor = %d rows, want 0", len(rows))
+	}
+}
+
 func TestEvidenceForEmpty(t *testing.T) {
 	s := openTemp(t)
 	seedAB(t, s)

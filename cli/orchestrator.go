@@ -47,6 +47,11 @@ type engageDeps struct {
 	// new revision and a fresh snapshot, for a live view of the engagement. It is
 	// nil-safe (nil disables it) and must not mutate the store.
 	Progress func(rev int64, snap engagement.Engagement)
+	// ReconTiers routes recon-phase tasks through the code-orchestrated recon tier
+	// ladder (ReconLoop) instead of the generic single-pass executor loop. The
+	// production composition root (buildEngageDeps) sets it; tests default it off
+	// so the generic-loop regression tests keep their behavior.
+	ReconTiers bool
 }
 
 var orchestratorSystemPrompt = "You are the orchestrator of an authorized, single-user, offline security-testing engagement. " +
