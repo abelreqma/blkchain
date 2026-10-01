@@ -7,6 +7,10 @@ type Command struct {
 	Phase   Phase
 	Surface Surface
 	Armed   bool
+
+	PoCIsInterpreter bool
+	PoCHash          string
+	PoCBody          string
 }
 
 // Decision is the gate's verdict for one command. Suggestion is a bounded

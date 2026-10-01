@@ -48,6 +48,11 @@ func defineEngageFlags(fs *flag.FlagSet, o *engageOpts) {
 // the workspace), so a usage mistake is caught without qdrant, embed_server,
 // or the LLM server running.
 func runEngage(args []string) error {
+
+	if len(args) > 0 && args[0] == "arm" {
+		return runEngageArm(args[1:])
+	}
+
 	var o engageOpts
 	fs := newFlagSet("engage")
 	defineEngageFlags(fs, &o)
@@ -166,6 +171,7 @@ func runEngage(args []string) error {
 
 	r := newVizRenderer(newMmdfluxRunner())
 	deps := buildEngageDeps(model, rc, cfg, prefs, ws.Store, gate, scratch, cat, asker, confirm, makeEngageProgress(os.Stdout, r, prefs.Viz))
+	deps.ExploitTools = policy.ExploitTools
 	toolHelp, toolHelpClose := openToolHelpCache()
 	defer toolHelpClose()
 	deps.ToolHelp = toolHelp
@@ -262,6 +268,7 @@ func resolveEngageConfigPolicy(o engageOpts, cwd string) (gatePolicy, error) {
 		return gatePolicy{}, err
 	}
 	var denied []string
+	var exploitTools []string
 	poc := false
 	// Default (no config): an empty, non-nil unattended bound, so unattended /auto
 	// falls back to HITL (the no-allowlist floor).
@@ -269,6 +276,7 @@ func resolveEngageConfigPolicy(o engageOpts, cwd string) (gatePolicy, error) {
 	if cfg != nil {
 		denied = cfg.DeniedBinaries
 		poc = cfg.AllowInterpreterPoC
+		exploitTools = cfg.ExploitTools
 		if cfg.AllowedBinaries.All {
 			// allowed_binaries: true -> everything allowed unattended (no bound).
 			unattended = nil
@@ -281,7 +289,80 @@ func resolveEngageConfigPolicy(o engageOpts, cwd string) (gatePolicy, error) {
 		UnattendedAllow:     unattended,
 		AllowInterpreterPoC: poc,
 		AutoScopeOverride:   o.autoOverride,
+		ExploitTools:        exploitTools,
 	}, nil
+}
+
+// runEngageArm implements `blk engage arm [--workspace <dir>] <task-id>`: the
+// operator-only arm action over armTask. It opens the engagement workspace (the
+// most recent one under the config dir when --workspace is omitted), confirms the
+// task is an exploit/post-ex task, sets Armed via armTask, and logs the arm to the
+// workspace audit log. The model has no arming path (planTaskArgs carries no Armed
+// field); only this operator command and the REPL arm affordance call armTask.
+func runEngageArm(args []string) error {
+	fs := newFlagSet("engage arm")
+	var wsDir string
+	fs.StringVar(&wsDir, "workspace", "", "engagement workspace directory (default: the most recent engagement)")
+	if err := parseFlags(fs, reorder(args, map[string]bool{"workspace": true})); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 1 || strings.TrimSpace(rest[0]) == "" {
+		return missingArg("engage arm", "missing task id", `engage arm t1   (or: engage arm --workspace <dir> t1)`)
+	}
+	taskID := strings.TrimSpace(rest[0])
+
+	if wsDir == "" {
+		latest, err := latestEngagementDir()
+		if err != nil {
+			return fmt.Errorf("engage arm: %w", err)
+		}
+		wsDir = latest
+	}
+	ws, err := engagement.OpenWorkspace(wsDir)
+	if err != nil {
+		return fmt.Errorf("engage arm: cannot open workspace %s: %w", wsDir, err)
+	}
+	defer ws.Close()
+
+	task, err := ws.Store.GetTask(taskID)
+	if err != nil {
+		return fmt.Errorf("engage arm: task %q not found in %s: %w", taskID, wsDir, err)
+	}
+	if task.Phase != engagement.PhaseExploit && task.Phase != engagement.PhasePostEx {
+		return fmt.Errorf("engage arm: task %q is phase %q; only exploit and post-ex tasks are armed", taskID, task.Phase)
+	}
+	if err := armTask(context.Background(), ws.Store, taskID); err != nil {
+		return fmt.Errorf("engage arm: %w", err)
+	}
+	_ = ws.AuditLine("operator", "arm", taskID)
+	fmt.Fprintf(os.Stdout, "armed task %s (%s/%s) in %s\n", taskID, task.Phase, task.Surface, wsDir)
+	return nil
+}
+
+// latestEngagementDir returns the most recent timestamped engagement workspace
+// under the config dir (~/.config/blkchain/engagements). The directory names are
+// UTC timestamps (engageWorkspaceDir), so the lexical maximum is the newest.
+func latestEngagementDir() (string, error) {
+	cfgPath, err := configPath()
+	if err != nil {
+		return "", err
+	}
+	root := filepath.Join(filepath.Dir(cfgPath), "engagements")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", fmt.Errorf("no engagements found under %s (run `blk engage` first, or pass --workspace): %w", root, err)
+	}
+	latest := ""
+	for _, e := range entries {
+		if e.IsDir() && e.Name() > latest {
+			latest = e.Name()
+		}
+	}
+	if latest == "" {
+		return "", fmt.Errorf("no engagement workspace found under %s; run `blk engage` first, or pass --workspace", root)
+	}
+	return filepath.Join(root, latest), nil
 }
 
 // engageWorkspaceDir returns dir when set, else a fresh, timestamped

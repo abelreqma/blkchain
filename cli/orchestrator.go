@@ -52,6 +52,10 @@ type engageDeps struct {
 	// production composition root (buildEngageDeps) sets it; tests default it off
 	// so the generic-loop regression tests keep their behavior.
 	ReconTiers bool
+
+	ExploitTools []string
+
+	ArmReq ArmRequester
 }
 
 var orchestratorSystemPrompt = "You are the orchestrator of an authorized, single-user, offline security-testing engagement. " +

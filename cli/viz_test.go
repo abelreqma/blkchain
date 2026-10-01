@@ -319,3 +319,72 @@ func TestVizMultipleActiveNodesStyledWarn(t *testing.T) {
 		}
 	}
 }
+
+// Unarmed exploit/post-ex tasks are candidates: vizMermaid marks their node with
+// a bracket-free caution glyph (triangle in unicode tiers, "!" in ascii), and only
+// them.
+func TestVizMermaidMarksExploitCandidates(t *testing.T) {
+	vizForceTier(t, plNerd)
+	m := vizMermaid(basisEngagement(
+		eng.Task{ID: "a", Kind: "recon", Objective: "scan", Phase: eng.PhaseRecon},
+		eng.Task{ID: "b", Kind: "web", Objective: "SQLi", Phase: eng.PhaseExploit},
+		eng.Task{ID: "c", Kind: "web", Objective: "armed", Phase: eng.PhaseExploit, Armed: true},
+		eng.Task{ID: "d", Kind: "local", Objective: "privesc", Phase: eng.PhasePostEx},
+	))
+	if ln := vizNodeLine(t, m, "b"); !strings.Contains(ln, "▲") {
+		t.Fatalf("unarmed exploit node b should carry the caution mark: %q", ln)
+	}
+	if ln := vizNodeLine(t, m, "d"); !strings.Contains(ln, "▲") {
+		t.Fatalf("unarmed post-ex node d should carry the caution mark: %q", ln)
+	}
+	if ln := vizNodeLine(t, m, "a"); strings.Contains(ln, "▲") {
+		t.Fatalf("recon node a must not be marked: %q", ln)
+	}
+	if ln := vizNodeLine(t, m, "c"); strings.Contains(ln, "▲") {
+		t.Fatalf("armed exploit node c must not be marked a candidate: %q", ln)
+	}
+}
+
+// In the ascii tier the candidate mark is a bracket-free "!" (not "[!]", which
+// would break the mermaid node), and never the unicode triangle.
+func TestVizMermaidCandidateMarkAsciiTier(t *testing.T) {
+	vizForceTier(t, plASCII)
+	m := vizMermaid(basisEngagement(
+		eng.Task{ID: "b", Kind: "web", Objective: "SQLi", Phase: eng.PhaseExploit},
+	))
+	ln := vizNodeLine(t, m, "b")
+	if strings.Contains(m, "▲") {
+		t.Fatalf("ascii tier must not use the triangle: %q", m)
+	}
+	if strings.Contains(ln, "[!]") {
+		t.Fatalf("ascii candidate mark must be bracket-free, not [!]: %q", ln)
+	}
+	if !strings.Contains(ln, "! web: SQLi") {
+		t.Fatalf("ascii candidate node should read '! web: SQLi': %q", ln)
+	}
+}
+
+// The frame caption counts the unarmed exploit/post-ex candidates.
+func TestVizFrameCountsCandidates(t *testing.T) {
+	noColor(t)
+	fr := vizFrame(basisEngagement(
+		eng.Task{ID: "a", Kind: "recon", Objective: "scan", Phase: eng.PhaseRecon, Status: eng.StatusDone},
+		eng.Task{ID: "b", Kind: "web", Objective: "SQLi", Phase: eng.PhaseExploit},
+		eng.Task{ID: "c", Kind: "local", Objective: "privesc", Phase: eng.PhasePostEx},
+	), "body")
+	if !strings.Contains(fr, "2 candidates") {
+		t.Fatalf("caption should count 2 unarmed exploit/post-ex candidates: %q", fr)
+	}
+}
+
+func TestVizColorizeCandidateIsCaution(t *testing.T) {
+	vizForceColor(t)
+	vizForceTier(t, plNerd)
+	e := basisEngagement(eng.Task{ID: "b", Kind: "web", Objective: "SQLi", Phase: eng.PhaseExploit, Status: eng.StatusTodo})
+	fr := &fakeRunner{out: "| \U000F2B11 web: SQLi |"}
+	block := newVizRenderer(fr).blockFor(context.Background(), e)
+	want := lipgloss.NewStyle().Foreground(Warn).Render("web: SQLi")
+	if !strings.Contains(block, want) {
+		t.Fatalf("unarmed exploit candidate label should be caution(Warn)-styled, not muted: %q", block)
+	}
+}

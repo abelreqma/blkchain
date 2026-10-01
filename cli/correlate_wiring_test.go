@@ -48,6 +48,44 @@ func TestCorrelateNewEvidenceInScopeAndCandidates(t *testing.T) {
 	}
 }
 
+// TestCorrelateNewEvidenceCandidateCarriesCitation: when the selector advises a
+// technique, the persisted candidate carries the structured corpus citation
+// (source/path/section/cwe_class + origin) so the REPL can render the source line.
+func TestCorrelateNewEvidenceCandidateCarriesCitation(t *testing.T) {
+	d := testDeps(t, nil)
+	d.Gate = autoGate(t) // scope 10.0.0.0/24
+	ex := genericExecutor{d: d}
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{
+		ID: "t1", Kind: "recon", Target: "10.0.0.5", Status: engagement.StatusTodo,
+		Phase: engagement.PhaseRecon, Surface: engagement.SurfaceNetwork,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	quote := "Nmap scan report for 10.0.0.5\n22/tcp open ssh OpenSSH 8.2p1\n"
+	id, err := d.Store.RecordEvidence("t1", quote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := []engagement.EvidenceRow{{ID: id, Quote: quote}}
+	cit := engagement.Citation{Source: "offensive-rce", Path: "ssh.md", Section: "SSH", CWEClass: "rce", Origin: "trusted"}
+	sel := func(ctx context.Context, svc Service) (string, engagement.Citation) {
+		return "CVE-2020-15778", cit
+	}
+
+	ex.correlateNewEvidence(context.Background(), "t1", rows, sel)
+
+	cand, err := d.Store.GetTask("exploit-10.0.0.5-22-openssh")
+	if err != nil {
+		t.Fatalf("candidate exploit task not persisted: %v", err)
+	}
+	if cand.Citation != cit {
+		t.Fatalf("candidate citation = %+v, want %+v", cand.Citation, cit)
+	}
+	if !strings.Contains(cand.Objective, "CVE-2020-15778") {
+		t.Errorf("candidate objective missing the advised technique: %q", cand.Objective)
+	}
+}
+
 // TestVantageAdvanceUnlocksLockedSurface: a local-surface task is refused at
 // external-unauth; a simulated access-yielding exploit advances the vantage,
 // which seeds new-vantage recon (per-asset T0) and unlocks the local surface so

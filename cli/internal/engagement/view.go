@@ -67,7 +67,7 @@ func readRevision(ctx context.Context, q rowQueryer) (int64, error) {
 // through q.
 func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed
+		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, citation
 		 FROM task ORDER BY created_rev ASC, id ASC`)
 	if err != nil {
 		return nil, err
@@ -80,9 +80,10 @@ func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
 			status                 string
 			deps, bas              sql.NullString
 			phase, surface, capVal sql.NullString
+			cit                    sql.NullString
 			armed                  sql.NullInt64
 		)
-		if err := rows.Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed); err != nil {
+		if err := rows.Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed, &cit); err != nil {
 			return nil, err
 		}
 		t.Status = Status(status)
@@ -94,6 +95,9 @@ func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
 			return nil, err
 		}
 		if t.BasisIDs, err = unmarshalStrings(bas.String); err != nil {
+			return nil, err
+		}
+		if t.Citation, err = unmarshalCitation(cit.String); err != nil {
 			return nil, err
 		}
 		out = append(out, t)

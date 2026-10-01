@@ -15,6 +15,8 @@ type engageConfig struct {
 	DeniedBinaries      []string        `yaml:"denied_binaries"`
 	AllowedBinaries     allowedBinaries `yaml:"allowed_binaries"`
 	AllowInterpreterPoC bool            `yaml:"allow_interpreter_poc"`
+
+	ExploitTools []string `yaml:"exploit_tools"`
 }
 
 // allowedBinaries is the unattended-/auto bound. In YAML it is either a list of

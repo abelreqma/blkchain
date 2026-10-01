@@ -91,17 +91,14 @@ func TestRunReconPhaseDrivesLadderAndPersistsCoverage(t *testing.T) {
 	}
 }
 
-// TestRunNonReconTaskUsesGenericLoop: even with the tier loop enabled, a
-// non-recon-phase task goes through the generic executor loop and records no
-// recon coverage.
 func TestRunNonReconTaskUsesGenericLoop(t *testing.T) {
 	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
 	d.ReconTiers = true
 	d.Gate = autoGate(t)
 	d.Runs = NewRunOutputs()
 	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{
-		ID: "t1", Kind: "web", Target: "10.0.0.5", Objective: "exploit login",
-		Status: engagement.StatusTodo, Phase: engagement.PhaseExploit, Surface: engagement.SurfaceWeb,
+		ID: "t1", Kind: "web", Target: "10.0.0.5", Objective: "write the report",
+		Status: engagement.StatusTodo, Phase: engagement.PhaseReport, Surface: engagement.SurfaceWeb,
 	}}}); err != nil {
 		t.Fatal(err)
 	}

@@ -164,13 +164,20 @@ func (e genericExecutor) correlateNewEvidence(ctx context.Context, taskID string
 			}
 			candSeen[cand.ID] = true
 			if sel != nil {
-				if tech, basis := sel(ctx, svc); tech != "" {
+				if tech, cit := sel(ctx, svc); tech != "" {
 					cand.Objective = cand.Objective + "; technique: " + tech
-					if basis != "" {
-						cand.Objective = cand.Objective + " [corpus:" + basis + "]"
-					}
+
+					cand.Citation = cit
 				}
 			}
+			candidates = append(candidates, cand)
+		}
+
+		for _, cand := range correlateLogicGaps(prov, r.Quote) {
+			if candSeen[cand.ID] {
+				continue
+			}
+			candSeen[cand.ID] = true
 			candidates = append(candidates, cand)
 		}
 	}

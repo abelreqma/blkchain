@@ -56,6 +56,8 @@ func runTUI() error {
 	m := initialModel()
 	p := tea.NewProgram(&m)
 	m.prog = p
+
+	SetReplArmRequester(widgetArmRequester{prog: p})
 	llmWarn = func(line string) { p.Send(tea.Println(line)()) }
 	_, err := p.Run()
 	if m.rc != nil {
@@ -145,6 +147,8 @@ func (m model) footerKeys() footerKeyMap {
 				return footerKeyMap{short: []key.Binding{hint("enter", "re-check & run"), hint("esc", "cancel edit")}}
 			}
 			return footerKeyMap{short: []key.Binding{hint("y", "allow"), hint("e", "edit"), hint("n", "deny"), hint("esc", "deny & stop")}}
+		case armPicker:
+			return footerKeyMap{short: []key.Binding{hint("y", "arm & continue"), hint("n", "skip"), hint("esc", "stop")}}
 		case filePicker:
 			return footerKeyMap{short: []key.Binding{hint("type", "filter"), hint("up/down", "move"), hint("enter", "open/select"), hint("backspace", "erase/up"), closeKey}}
 		case modelsPanel:
@@ -454,6 +458,10 @@ type model struct {
 	// plain spinner line.
 	engagement EngagementView
 	viz        *vizRenderer
+	// noticedCandidates is the set of exploit/post-ex candidate task ids already
+	// announced inline this engagement, so each detection is noticed once. Reset
+	// when a new /engage turn starts.
+	noticedCandidates map[string]bool
 
 	lastAnswer  string
 	openTargets []openTarget // files for /open N (from the last answer or search)
@@ -780,13 +788,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.working || m.engagement == nil || msg.gen != m.tickGen {
 			return m, nil
 		}
-		return m, tea.Batch(m.vizCommitCmd(), m.vizTick())
+		return m, tea.Batch(m.vizCommitCmd(), m.candidateScanCmd(), m.vizTick())
 
 	case vizBlockMsg:
 		if msg.block == "" {
 			return m, nil
 		}
 		return m, tea.Println(msg.block)
+
+	case candidateScanMsg:
+		// Announce each newly-seen exploit/post-ex candidate once. The diff and the
+		// noticed-set mutation happen here (not in the scan command).
+		if m.noticedCandidates == nil {
+			m.noticedCandidates = map[string]bool{}
+		}
+		var cmds []tea.Cmd
+		for _, t := range unnoticedCandidates(m.noticedCandidates, msg.cands) {
+			m.noticedCandidates[t.ID] = true
+			cmds = append(cmds, tea.Println(candidateNotice(t)))
+		}
+		if len(cmds) == 0 {
+			return m, nil
+		}
+		return m, tea.Sequence(cmds...)
 
 	case chunkMsg:
 		if !m.working {
@@ -1147,6 +1171,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel()
 		}
 		// The send runs in a command so a slow receiver never blocks the loop.
+		return m, tea.Batch(textarea.Blink, func() tea.Msg {
+			if reply != nil {
+				reply <- res
+			}
+			return nil
+		})
+
+	case armMsg:
+		// A displaced arm request (new before the old is answered) fails safe: the
+		// old request is answered ArmSkip so its executor is not left blocked.
+		var cancel tea.Cmd
+		if old, ok := m.overlay.(armPicker); ok && old.reply != nil {
+			reply := old.reply
+			cancel = func() tea.Msg {
+				reply <- ArmSkip
+				return nil
+			}
+		}
+		m.overlay = newArmPicker(msg.task, msg.reply)
+		return m, cancel
+
+	case armResolvedMsg:
+		m.overlay = nil
+		reply, res := msg.reply, msg.res
+		// ArmStop halts the engagement: cancel the running turn.
+		if res == ArmStop && m.cancel != nil {
+			m.cancel()
+		}
 		return m, tea.Batch(textarea.Blink, func() tea.Msg {
 			if reply != nil {
 				reply <- res
@@ -1594,6 +1646,8 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			m.mode = "rag"
 			return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
 		}
+	case "candidates":
+		return m, tea.Sequence(tea.Println(echo), tea.Println(candidatesBlock(m.engagement)))
 	case "copy":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(m.doCopy()))
 	case "history":
@@ -1765,6 +1819,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		// progress callback; the viz poll renders the DAG + bar from it.
 		stub := newStubEngagement("engagement")
 		m.engagement = stub
+		m.noticedCandidates = map[string]bool{}
 		run.stub = stub
 		// Safe routes the orchestrator's clarifications to the clarify overlay;
 		// /auto suppresses them (AutoAsker).

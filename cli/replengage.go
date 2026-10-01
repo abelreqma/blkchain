@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"blkchain/cli/internal/askuser"
 	"blkchain/cli/internal/engagement"
@@ -121,6 +122,8 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 		asker = askuser.AutoAsker{}
 	}
 	deps := buildEngageDeps(model, rc, cfg, prefs, ws.Store, gate, scratch, cat, asker, confirm, progress)
+	deps.ExploitTools = policy.ExploitTools
+	deps = applyArmReq(deps, replArmReq())
 	toolHelp, toolHelpClose := openToolHelpCache()
 	defer toolHelpClose()
 	deps.ToolHelp = toolHelp
@@ -129,4 +132,37 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 		fmt.Fprintf(os.Stderr, "engage: vantage seed failed: %v\n", serr)
 	}
 	return runOrchestrator(ctx, deps, goal)
+}
+
+func applyArmReq(deps engageDeps, armReq ...ArmRequester) engageDeps {
+	if len(armReq) > 0 && armReq[0] != nil {
+		deps.ArmReq = armReq[0]
+	}
+	return deps
+}
+
+// replArmReqMu guards the process-wide REPL arm requester: the TUI sets it from
+// the UI goroutine before dispatching /engage; runReplEngage reads it from the
+// engage command goroutine.
+var (
+	replArmReqMu  sync.Mutex
+	replArmReqVal ArmRequester
+)
+
+// SetReplArmRequester wires the REPL's operator arm gate so the at-exploit arm
+// gate fires in REPL engagements (Safe and Auto). The TUI calls it once with its
+// widget ArmRequester, paralleling the widget confirmer. A nil value disables the
+// push (fail-safe: an unarmed exploit's commands are gate-denied). This is the
+// REPL injection seam for deps.ArmReq; runReplEngage reads it via replArmReq.
+func SetReplArmRequester(r ArmRequester) {
+	replArmReqMu.Lock()
+	replArmReqVal = r
+	replArmReqMu.Unlock()
+}
+
+// replArmReq returns the wired REPL arm requester (nil when unset).
+func replArmReq() ArmRequester {
+	replArmReqMu.Lock()
+	defer replArmReqMu.Unlock()
+	return replArmReqVal
 }

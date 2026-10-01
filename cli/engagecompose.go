@@ -56,6 +56,8 @@ type gatePolicy struct {
 	UnattendedAllow     *secgate.Allowlist
 	AllowInterpreterPoC bool
 	AutoScopeOverride   bool
+
+	ExploitTools []string
 }
 
 func buildEngageGate(ws *engagement.Workspace, scope *secgate.Scope, mode secgate.Mode, confirm secgate.Confirmer, approvals *secgate.SessionApprovals, scratch string, policy gatePolicy, audit func(action, detail string)) *secgate.Gate {

@@ -14,7 +14,7 @@ type domain struct {
 	Prompt string
 }
 
-const executorPreamble = "You are a security-testing executor for authorized, single-user engagements. Work only on the assigned task. Use kb_search and kb_answer to ground your reasoning when it helps. You can run gated, in-scope commands against targets with run_command; every call is bounded by scope and the security gate, so stay within scope and expect out-of-scope or dangerous commands to be denied. Record exact-quote evidence for what you find with record_evidence, and propose plan updates for new tasks you discover. "
+const executorPreamble = "You are a security-testing executor for authorized, single-user engagements, and you are EXECUTING the assigned task NOW, not planning it. Work only on this task. Act against the in-scope target with run_command; every call is bounded by scope and the security gate, so stay within scope and expect out-of-scope or dangerous commands to be denied. Record exact-quote evidence of real output with record_evidence. Use kb_search and kb_answer to ground your reasoning when it helps. plan_add is ONLY for a genuinely NEW task you discover from a finding, never the action you are performing now; do not re-plan the current task. "
 
 var domains = map[string]domain{
 	"generic":         {Name: "generic", Prompt: executorPreamble + "This is a general task with no specialized domain."},

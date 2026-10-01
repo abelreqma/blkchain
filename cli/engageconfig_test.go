@@ -124,3 +124,16 @@ func TestAutodetectEngageConfigAbsent(t *testing.T) {
 		t.Errorf("absent config must return (nil, \"\"), got (%+v, %q)", cfg, path)
 	}
 }
+
+func TestLoadEngageConfigExploitTools(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeFile(t, path, "exploit_tools:\n  - customexploit\n  - sqlmap\n")
+	cfg, err := loadEngageConfig(path)
+	if err != nil {
+		t.Fatalf("loadEngageConfig: %v", err)
+	}
+	if len(cfg.ExploitTools) != 2 || cfg.ExploitTools[0] != "customexploit" || cfg.ExploitTools[1] != "sqlmap" {
+		t.Fatalf("ExploitTools = %v, want [customexploit sqlmap]", cfg.ExploitTools)
+	}
+}

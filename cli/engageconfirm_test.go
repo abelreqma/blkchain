@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -275,5 +276,62 @@ func TestConfirmPickerView(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("editing view is missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// When the command is an interpreter PoC, the confirm overlay shows the plan
+// (title, sha256, and the read-only script body) in addition to the y/e/n/esc
+// controls.
+func TestConfirmPickerPoCView(t *testing.T) {
+	noColor(t)
+	cmd := secgate.Command{
+		Binary: "python3", Args: []string{"/s/poc.py", "--target", "10.0.0.5"},
+		Phase: secgate.PhaseExploit, Surface: secgate.SurfaceWeb, Armed: true,
+		PoCIsInterpreter: true,
+		PoCHash:          "9f3ac4b2e1d8a77e21",
+		PoCBody:          "import sys\nprint('hello')\n",
+	}
+	out := newConfirmPicker(cmd, 80, make(chan confirmResult, 1)).View(80, 40)
+	for _, want := range []string{"interpreter PoC", "sha256", "9f3ac4b2e1d8a77e21", "script", "import sys", "print('hello')"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("PoC view missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A long PoC body is capped to the overlay height with a remaining-lines note.
+func TestConfirmPickerPoCBodyTruncates(t *testing.T) {
+	noColor(t)
+	var b strings.Builder
+	for i := 0; i < 60; i++ {
+		fmt.Fprintf(&b, "line%d\n", i)
+	}
+	cmd := secgate.Command{Binary: "python3", Args: []string{"/s/poc.py"}, PoCIsInterpreter: true, PoCHash: "h", PoCBody: b.String()}
+	out := newConfirmPicker(cmd, 80, make(chan confirmResult, 1)).View(80, 20)
+	if !strings.Contains(out, "more lines") {
+		t.Fatalf("a body taller than the overlay should note the remaining lines:\n%s", out)
+	}
+}
+
+// A non-PoC command renders the plain confirm overlay (no PoC plan).
+func TestConfirmPickerNonPoCViewPlain(t *testing.T) {
+	noColor(t)
+	out := newConfirmPicker(testConfirmCommand(), 80, make(chan confirmResult, 1)).View(80, 24)
+	if strings.Contains(out, "sha256") || strings.Contains(out, "interpreter PoC") {
+		t.Fatalf("a non-PoC command must not show the PoC plan:\n%s", out)
+	}
+	if !strings.Contains(out, "confirm command") {
+		t.Fatalf("a non-PoC command keeps the plain title:\n%s", out)
+	}
+}
+
+// The PoC body is sanitized before display (it is model-generated script text), so
+// a raw terminal escape never reaches the screen.
+func TestConfirmPickerPoCBodySanitized(t *testing.T) {
+	noColor(t)
+	cmd := secgate.Command{Binary: "python3", Args: []string{"/s/poc.py"}, PoCIsInterpreter: true, PoCHash: "h", PoCBody: "safe\x1b[31mred\x1b[0m\n"}
+	out := newConfirmPicker(cmd, 80, make(chan confirmResult, 1)).View(80, 40)
+	if strings.Contains(out, "\x1b[31m") {
+		t.Fatalf("the PoC body must be sanitized of raw escapes:\n%q", out)
 	}
 }

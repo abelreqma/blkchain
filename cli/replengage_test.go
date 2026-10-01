@@ -116,3 +116,39 @@ func TestRunReplEngageSmoke(t *testing.T) {
 		t.Errorf("final = %q, want the model's answer", final)
 	}
 }
+
+// TestApplyArmReqInjectsRequester: the REPL arm-requester injection seam sets
+// deps.ArmReq when a requester is passed, and leaves it nil otherwise (fail-safe).
+func TestApplyArmReqInjectsRequester(t *testing.T) {
+	req := &testArmRequester{decision: ArmApprove}
+	if got := applyArmReq(engageDeps{}, req); got.ArmReq != req {
+		t.Fatal("applyArmReq did not set deps.ArmReq from the passed requester")
+	}
+	if got := applyArmReq(engageDeps{}); got.ArmReq != nil {
+		t.Fatal("applyArmReq with no requester must leave deps.ArmReq nil")
+	}
+	if got := applyArmReq(engageDeps{}, ArmRequester(nil)); got.ArmReq != nil {
+		t.Fatal("applyArmReq with an explicit nil requester must leave deps.ArmReq nil")
+	}
+}
+
+// TestSetReplArmRequester: the TUI's injection seam round-trips through the
+// process-wide setter that runReplEngage reads into deps.ArmReq.
+func TestSetReplArmRequester(t *testing.T) {
+	t.Cleanup(func() { SetReplArmRequester(nil) })
+	if replArmReq() != nil {
+		t.Fatal("replArmReq must start nil")
+	}
+	req := &testArmRequester{decision: ArmApprove}
+	SetReplArmRequester(req)
+	if replArmReq() != req {
+		t.Fatal("SetReplArmRequester did not wire the requester")
+	}
+	if got := applyArmReq(engageDeps{}, replArmReq()); got.ArmReq != req {
+		t.Fatal("runReplEngage's applyArmReq(replArmReq()) must carry the wired requester into deps")
+	}
+	SetReplArmRequester(nil)
+	if replArmReq() != nil {
+		t.Fatal("SetReplArmRequester(nil) must clear the requester")
+	}
+}

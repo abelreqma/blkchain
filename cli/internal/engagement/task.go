@@ -150,6 +150,20 @@ func phaseForKind(kind string) Phase {
 	return PhaseRecon
 }
 
+// Citation records where a candidate task came from: a corpus (kb) source
+// pointer and its origin trust, captured at seed time. It is empty for a
+// code-owned candidate whose source is its finding evidence (BasisIDs). Origin is
+// "trusted" for the local corpus and "untrusted" for a web source; "" means no
+// corpus citation (the source is the finding evidence). All fields are
+// comparable, so a zero Citation compares equal to Citation{}.
+type Citation struct {
+	Source   string `json:"source,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Section  string `json:"section,omitempty"`
+	CWEClass string `json:"cwe_class,omitempty"`
+	Origin   string `json:"origin,omitempty"`
+}
+
 // Task is one unit of engagement work.
 type Task struct {
 	ID         string
@@ -164,6 +178,8 @@ type Task struct {
 	Armed      bool
 	DependsOn  []string
 	BasisIDs   []string
+
+	Citation   Citation
 	CreatedRev int64
 	UpdatedRev int64
 }
@@ -196,6 +212,30 @@ func unmarshalStrings(s string) ([]string, error) {
 	return out, nil
 }
 
+// marshalCitation encodes a Citation as JSON text; an empty Citation gives "".
+func marshalCitation(c Citation) string {
+	if c == (Citation{}) {
+		return ""
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// unmarshalCitation decodes JSON text into a Citation; "" gives an empty Citation.
+func unmarshalCitation(s string) (Citation, error) {
+	if s == "" {
+		return Citation{}, nil
+	}
+	var c Citation
+	if err := json.Unmarshal([]byte(s), &c); err != nil {
+		return Citation{}, err
+	}
+	return c, nil
+}
+
 // GetTask returns the task with the given id, or ErrNotFound.
 func (s *Store) GetTask(id string) (Task, error) {
 	var (
@@ -203,12 +243,13 @@ func (s *Store) GetTask(id string) (Task, error) {
 		status                 string
 		deps, bas              sql.NullString
 		phase, surface, capVal sql.NullString
+		cit                    sql.NullString
 		armed                  sql.NullInt64
 	)
 	err := s.db.QueryRow(
-		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed
+		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, citation
 		 FROM task WHERE id = ?`, id).
-		Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed)
+		Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed, &cit)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNotFound
 	}
@@ -224,6 +265,9 @@ func (s *Store) GetTask(id string) (Task, error) {
 		return Task{}, err
 	}
 	if t.BasisIDs, err = unmarshalStrings(bas.String); err != nil {
+		return Task{}, err
+	}
+	if t.Citation, err = unmarshalCitation(cit.String); err != nil {
 		return Task{}, err
 	}
 	return t, nil

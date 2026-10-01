@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/ragconfig"
 
 	"github.com/tmc/langchaingo/llms"
@@ -47,9 +48,16 @@ func parseExploitSelection(raw string) string {
 	return strings.TrimSpace(tech)
 }
 
-// exploitSelector advises a technique label plus its corpus basis for one
-// service. An empty technique means "use the catalog's own label".
-type exploitSelector func(ctx context.Context, svc Service) (technique, basis string)
+// exploitSelector advises a technique label plus its structured corpus citation
+// for one service. An empty technique means "use the catalog's own label"; the
+// citation is then empty too.
+type exploitSelector func(ctx context.Context, svc Service) (technique string, citation engagement.Citation)
+
+// selectResult is one cached (technique, citation) pair.
+type selectResult struct {
+	tech     string
+	citation engagement.Citation
+}
 
 // newKBExploitSelector builds the corpus-driven technique advisor: one read-only
 // kb_search over the product+version, then one deterministic (temperature 0)
@@ -57,50 +65,56 @@ type exploitSelector func(ctx context.Context, svc Service) (technique, basis st
 // service does not re-query, and fails closed (empty result) on any error - nil
 // deps, corpus miss, model error, or parse failure.
 func newKBExploitSelector(m toolLoopModel, rc searcher, cfg ragconfig.Config) exploitSelector {
-	cache := map[string][2]string{}
+	cache := map[string]selectResult{}
 	var mu sync.Mutex
-	return func(ctx context.Context, svc Service) (string, string) {
+	return func(ctx context.Context, svc Service) (string, engagement.Citation) {
 		if m == nil || rc == nil {
-			return "", ""
+			return "", engagement.Citation{}
 		}
 		key := strings.ToLower(strings.TrimSpace(svc.Product))
 		if key == "" {
-			return "", ""
+			return "", engagement.Citation{}
 		}
 		mu.Lock()
 		if v, ok := cache[key]; ok {
 			mu.Unlock()
-			return v[0], v[1]
+			return v.tech, v.citation
 		}
 		mu.Unlock()
 
-		tech, basis := computeExploitSelection(ctx, m, rc, cfg, svc)
+		tech, cit := computeExploitSelection(ctx, m, rc, cfg, svc)
 
 		mu.Lock()
-		cache[key] = [2]string{tech, basis}
+		cache[key] = selectResult{tech: tech, citation: cit}
 		mu.Unlock()
-		return tech, basis
+		return tech, cit
 	}
 }
 
 // computeExploitSelection runs the read-only corpus consult and the model pick.
-func computeExploitSelection(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig.Config, svc Service) (string, string) {
+// The citation is the top result's source pointer; the selector only consults the
+// LOCAL corpus (never web), so its origin is always "trusted".
+func computeExploitSelection(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig.Config, svc Service) (string, engagement.Citation) {
 	if err := ctx.Err(); err != nil {
-		return "", ""
+		return "", engagement.Citation{}
 	}
 	query := strings.TrimSpace(svc.Product + " " + svc.Version + " exploit")
 	results, err := rc.Search(ctx, query, cfg.TopK, nil)
 	if err != nil || len(results) == 0 {
-		return "", ""
+		return "", engagement.Citation{}
+	}
+	top := results[0].Payload
+	cit := engagement.Citation{
+		Source:   top.Source,
+		Path:     top.Path,
+		Section:  top.Section,
+		CWEClass: top.CWEClass,
+		Origin:   "trusted",
 	}
 	var notes strings.Builder
-	basis := "kb_search"
 	for i, r := range results {
 		if i >= 3 {
 			break
-		}
-		if i == 0 && strings.TrimSpace(r.Payload.Source) != "" {
-			basis = "kb_search:" + r.Payload.Source
 		}
 		notes.WriteString("- " + firstLine(r.Payload.Text) + "\n")
 	}
@@ -111,11 +125,11 @@ func computeExploitSelection(ctx context.Context, m toolLoopModel, rc searcher, 
 		llms.WithMaxTokens(cfg.GradeMaxTokens),
 	)
 	if err != nil || cr == nil || len(cr.Choices) == 0 {
-		return "", ""
+		return "", engagement.Citation{}
 	}
 	tech := parseExploitSelection(cr.Choices[0].Content)
 	if tech == "" {
-		return "", ""
+		return "", engagement.Citation{}
 	}
-	return tech, basis
+	return tech, cit
 }

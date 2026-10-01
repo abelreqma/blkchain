@@ -208,8 +208,8 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 
 	for _, t := range upserts {
 		if _, err := conn.ExecContext(ctx,
-			`INSERT INTO task (id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO task (id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, citation)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			   kind = excluded.kind,
 			   target = excluded.target,
@@ -222,10 +222,11 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 			   phase = excluded.phase,
 			   surface = excluded.surface,
 			   capability = excluded.capability,
-			   armed = excluded.armed`,
+			   armed = excluded.armed,
+			   citation = excluded.citation`,
 			t.ID, t.Kind, t.Target, t.Objective, t.DoneWhen, string(t.Status),
 			marshalStrings(t.DependsOn), marshalStrings(t.BasisIDs), newRev, newRev,
-			string(t.Phase), string(t.Surface), string(t.Capability), boolToInt(t.Armed)); err != nil {
+			string(t.Phase), string(t.Surface), string(t.Capability), boolToInt(t.Armed), marshalCitation(t.Citation)); err != nil {
 			return 0, err
 		}
 	}

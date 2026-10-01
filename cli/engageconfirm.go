@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -179,6 +180,15 @@ func (p confirmPicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 func (p confirmPicker) View(width, height int) string {
 	argv := sanitizeTerminal(commandLine(p.cmd))
 	ctxLine := confirmContextLine(p.cmd)
+	poc := p.cmd.PoCIsInterpreter && !p.editing
+	title := "confirm command"
+	wantRows := 2
+	if poc {
+		// An interpreter PoC shows its plan + read-only script body; give it room
+		// (overlayBox still fits it to the terminal height).
+		title = "confirm interpreter PoC"
+		wantRows = 24
+	}
 	body := func(w, rows int) string {
 		if p.editing {
 			p.input.Width = max(w-3, 1)
@@ -186,14 +196,48 @@ func (p confirmPicker) View(width, height int) string {
 			return head + "\n" + p.input.View()
 		}
 		lines := []string{Key.Render(ellipsize(argv, w))}
-		if ctxLine != "" && rows > 1 {
+		if ctxLine != "" && rows > len(lines) {
 			lines = append(lines, Meta.Render(ellipsize(ctxLine, w)))
+		}
+		if poc {
+			lines = append(lines, pocPlanLines(p.cmd, w, rows-len(lines))...)
 		}
 		return strings.Join(lines, "\n")
 	}
-	return overlayBox(overlaySpec{
-		title: "confirm command", wantW: 72, wantRows: 2, body: body,
-	}, width, height)
+	return overlayBox(overlaySpec{title: title, wantW: 72, wantRows: wantRows, body: body}, width, height)
+}
+
+// pocPlanLines renders the interpreter-PoC plan beneath the command line: the
+// sha256 and the read-only script body, within rows available lines. The body is
+// already capped executor-side; it is capped again to the overlay height here and
+// sanitized per line (it is model-generated script text, so a raw terminal escape
+// must never reach the screen). A truncated body notes the remaining line count.
+func pocPlanLines(c secgate.Command, width, rows int) []string {
+	if rows < 1 {
+		return nil
+	}
+	out := []string{Meta.Render(ellipsize("sha256 "+c.PoCHash, width))}
+	if rows <= len(out) {
+		return out
+	}
+	out = append(out, Meta.Render("script (read-only):"))
+	avail := rows - len(out)
+	if avail < 1 {
+		return out
+	}
+	bodyLines := strings.Split(strings.TrimRight(c.PoCBody, "\n"), "\n")
+	shown, truncated := bodyLines, 0
+	if len(bodyLines) > avail {
+		keep := max(avail-1, 1) // reserve a row for the "+N more" note
+		shown, truncated = bodyLines[:keep], len(bodyLines)-keep
+	}
+	for _, ln := range shown {
+		out = append(out, Body.Render(ellipsize(sanitizeTerminal(ln), width)))
+	}
+	if truncated > 0 {
+		out = append(out, Meta.Render(fmt.Sprintf("+%d more lines (full script in the audit log)", truncated)))
+	}
+	return out
 }
 
 // confirmContextLine summarizes the engagement tier context the gate derived the

@@ -44,6 +44,10 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 		return e.runReconPhase(ctx, task)
 	}
 
+	if (task.Phase == engagement.PhaseExploit || task.Phase == engagement.PhasePostEx) && e.d.Gate != nil && e.d.Runs != nil {
+		return e.runExploitPhase(ctx, task)
+	}
+
 	dom := domainFor(task.Kind)
 
 	reg := tooldef.NewRegistry()
@@ -91,12 +95,16 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 	if err != nil {
 		return "", err
 	}
-	human := fmt.Sprintf("Engagement state:\n%s\n\nYour task %s [%s]:\n target: %s\n objective: %s\n done when: %s\n\nWork this task now.",
-		proj, task.ID, task.Kind, task.Target, task.Objective, task.DoneWhen)
+	human := genericTaskPrompt(proj, task)
 	msgs := []llms.MessageContent{
 		{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(dom.Prompt)}},
 		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(human)}},
 	}
 	final, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 6, MaxCalls: 12})
 	return final, err
+}
+
+func genericTaskPrompt(proj string, task engagement.Task) string {
+	return fmt.Sprintf("Engagement state:\n%s\n\nYour task %s [%s]:\n target: %s\n objective: %s\n done when: %s\n\nExecute this task now with run_command; record_evidence of its output. Do not call plan_add for this task.",
+		proj, task.ID, task.Kind, task.Target, task.Objective, task.DoneWhen)
 }

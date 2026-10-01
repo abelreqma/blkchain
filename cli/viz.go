@@ -58,6 +58,17 @@ var vizDomainIcons = map[string]string{
 	"target-analysis": "\U000F2B19",
 }
 
+// vizCandidateMark is the bracket-free caution glyph that marks an unarmed
+// exploit/post-ex candidate node: a filled triangle when unicode is available,
+// "!" in the ascii tier. It must stay bracket-free because it is rendered inside
+// a mermaid node label ("id[...]").
+func vizCandidateMark() string {
+	if plCurrentTier() == plASCII {
+		return "!"
+	}
+	return "\u25B2"
+}
+
 // domainIcon returns the node glyph for a task kind, generic when unknown.
 func domainIcon(kind string) string {
 	if g, ok := vizDomainIcons[strings.ToLower(strings.TrimSpace(kind))]; ok {
@@ -91,6 +102,11 @@ func vizMermaid(e eng.Engagement) string {
 			// The glyph is a compiled-in constant, never task data, so it is
 			// added after the sanitizer on purpose.
 			label = domainIcon(t.Kind) + " " + label
+		}
+		if isExploitCandidateTask(t) {
+			// A compiled-in, bracket-free caution mark on an unarmed exploit/post-ex
+			// candidate (it goes inside the mermaid node, so it must never be "[!]").
+			label = vizCandidateMark() + " " + label
 		}
 		fmt.Fprintf(&b, "  %s[%s]\n", t.ID, label)
 	}
@@ -233,10 +249,13 @@ func vizStatusStyle(s eng.Status) lipgloss.Style {
 
 type vizSpan struct{ start, end, task int }
 
-// vizColorize styles each task's label span by status. Labels are matched
-// longest first (ties by task order) so a label that is a substring of another
-// does not win, and each match is claimed once so spans never overlap. Only the
-// matched span is styled, so boxes sharing a text row keep their own colors.
+func vizTaskStyle(t eng.Task) lipgloss.Style {
+	if isExploitCandidateTask(t) {
+		return lipgloss.NewStyle().Foreground(Warn)
+	}
+	return vizStatusStyle(t.Status)
+}
+
 func vizColorize(body string, e eng.Engagement) string {
 	labels := make([]string, len(e.Tasks))
 	order := make([]int, 0, len(e.Tasks))
@@ -278,7 +297,7 @@ func vizColorize(body string, e eng.Engagement) string {
 		pos := 0
 		for _, sp := range spans {
 			b.WriteString(ln[pos:sp.start])
-			b.WriteString(vizStatusStyle(e.Tasks[sp.task].Status).Render(ln[sp.start:sp.end]))
+			b.WriteString(vizTaskStyle(e.Tasks[sp.task]).Render(ln[sp.start:sp.end]))
 			pos = sp.end
 		}
 		b.WriteString(ln[pos:])
@@ -298,8 +317,11 @@ func vizOverlaps(spans []vizSpan, s vizSpan) bool {
 
 // vizFrame wraps the body in a header and a status caption ribbon.
 func vizFrame(e eng.Engagement, body string) string {
-	var done, active, todo, blocked, na int
+	var done, active, todo, blocked, na, cand int
 	for _, t := range e.Tasks {
+		if isExploitCandidateTask(t) {
+			cand++
+		}
 		switch t.Status {
 		case eng.StatusDone:
 			done++
@@ -318,6 +340,10 @@ func vizFrame(e eng.Engagement, body string) string {
 		{Text: fmt.Sprintf("%d done", done), FG: Success},
 		{Text: fmt.Sprintf("%d active", active), FG: Warn},
 		{Text: fmt.Sprintf("%d todo", todo), FG: Muted},
+	}
+	if cand > 0 {
+		// A caution count of the unarmed exploit/post-ex detections awaiting arming.
+		segs = append(segs, plSegment{Text: fmt.Sprintf("%d candidates", cand), FG: Warn})
 	}
 	if blocked > 0 {
 		segs = append(segs, plSegment{Text: fmt.Sprintf("%d blocked", blocked), FG: Err})

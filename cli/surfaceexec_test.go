@@ -12,6 +12,20 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
+func TestGenericExecutorPromptIsImperative(t *testing.T) {
+	for _, want := range []string{"EXECUTING", "run_command", "plan_add"} {
+		if !strings.Contains(executorPreamble, want) {
+			t.Errorf("executorPreamble missing %q:\n%s", want, executorPreamble)
+		}
+	}
+	p := genericTaskPrompt("state", engagement.Task{ID: "t1", Kind: "recon", Target: "10.0.0.5", Objective: "enumerate", DoneWhen: "done"})
+	for _, want := range []string{"run_command", "Execute this task now", "Do not call plan_add"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("genericTaskPrompt missing %q:\n%s", want, p)
+		}
+	}
+}
+
 func TestExecutorForReturnsRunnableForEverySurface(t *testing.T) {
 	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
 	for _, s := range engagement.AllSurfaces() {

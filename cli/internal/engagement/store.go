@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS task (
 	phase TEXT,
 	surface TEXT,
 	capability TEXT,
-	armed INTEGER
+	armed INTEGER,
+	citation TEXT
 );
 CREATE TABLE IF NOT EXISTS meta (
 	k TEXT PRIMARY KEY,
@@ -196,6 +197,7 @@ func addMissingTaskColumns(tx *sql.Tx) error {
 		{"surface", "TEXT"},
 		{"capability", "TEXT"},
 		{"armed", "INTEGER"},
+		{"citation", "TEXT"},
 	}
 	for _, col := range cols {
 		if existing[col.name] {

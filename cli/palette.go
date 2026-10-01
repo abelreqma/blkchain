@@ -69,6 +69,7 @@ func slashCommands() []command {
 		{"safe", "", "confirm every command before an engagement runs it", groupModes},
 		{"auto", "[override]", "run an engagement autonomously within scope", groupModes},
 		{"engage", "<goal>", "run a gated, multi-step engagement toward a goal", groupModes},
+		{"candidates", "", "list the engagement's exploit candidates and their source", groupModes},
 		{"agent", "", "use the Hermes agent for questions", groupHidden},
 		{"rag", "[on|off|question]", "answer from the knowledge base", groupHidden},
 		{"history", "[clear [n]]", "reopen a saved session; clear or clear [n] erases", groupSession},

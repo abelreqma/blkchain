@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 
@@ -29,18 +30,21 @@ func TestParseExploitSelection(t *testing.T) {
 	}
 }
 
-func TestKBExploitSelectorParsesAndSetsBasis(t *testing.T) {
+func TestKBExploitSelectorParsesAndSetsCitation(t *testing.T) {
 	rc := &recSearcher{results: []retrieval.Result{
 		chunk("offensive-rce", "ssh.md", "SSH", "OpenSSH known CVEs and exploitation."),
 	}}
 	m := &fakeModel{queue: []*llms.ContentResponse{textResp(`{"technique": "CVE-2020-15778"}`)}}
 	sel := newKBExploitSelector(m, rc, ragconfig.Config{TopK: 5})
-	tech, basis := sel(context.Background(), Service{Product: "OpenSSH", Version: "8.2p1", Port: 22})
+	tech, cit := sel(context.Background(), Service{Product: "OpenSSH", Version: "8.2p1", Port: 22})
 	if tech != "CVE-2020-15778" {
 		t.Fatalf("technique = %q, want CVE-2020-15778", tech)
 	}
-	if basis != "kb_search:offensive-rce" {
-		t.Fatalf("basis = %q, want kb_search:offensive-rce (provenance)", basis)
+	// The citation is the top result's structured source pointer; the local
+	// corpus is trusted.
+	want := engagement.Citation{Source: "offensive-rce", Path: "ssh.md", Section: "SSH", Origin: "trusted"}
+	if cit != want {
+		t.Fatalf("citation = %+v, want %+v", cit, want)
 	}
 }
 
