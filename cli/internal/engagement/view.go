@@ -24,6 +24,9 @@ type Engagement struct {
 	Tasks    []Task
 	ActiveID string
 	Stage    Stage
+	// Vantage is the engagement's access context ("" when unset). It is read from
+	// meta and advanced via Delta.SetVantage.
+	Vantage Vantage
 }
 
 // rowQueryer is the single-row read subset shared by *sql.DB and *sql.Conn so
@@ -64,7 +67,7 @@ func readRevision(ctx context.Context, q rowQueryer) (int64, error) {
 // through q.
 func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability
+		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed
 		 FROM task ORDER BY created_rev ASC, id ASC`)
 	if err != nil {
 		return nil, err
@@ -77,14 +80,16 @@ func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
 			status                 string
 			deps, bas              sql.NullString
 			phase, surface, capVal sql.NullString
+			armed                  sql.NullInt64
 		)
-		if err := rows.Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal); err != nil {
+		if err := rows.Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed); err != nil {
 			return nil, err
 		}
 		t.Status = Status(status)
 		t.Phase = Phase(phase.String)
 		t.Surface = Surface(surface.String)
 		t.Capability = Capability(capVal.String)
+		t.Armed = armed.Int64 != 0
 		if t.DependsOn, err = unmarshalStrings(deps.String); err != nil {
 			return nil, err
 		}
@@ -136,10 +141,21 @@ func (s *Store) Snapshot(ctx context.Context) (Engagement, error) {
 	if e.Tasks, err = scanAllTasks(ctx, conn); err != nil {
 		return Engagement{}, err
 	}
+	vantageRaw, err := getMeta(ctx, conn, "vantage")
+	if err != nil {
+		return Engagement{}, err
+	}
+	e.Vantage = Vantage(vantageRaw)
 
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return Engagement{}, err
 	}
 	committed = true
 	return e, nil
+}
+
+// Vantage returns the engagement's current access context, or "" when unset.
+func (s *Store) Vantage(ctx context.Context) (Vantage, error) {
+	v, err := getMeta(ctx, s.db, "vantage")
+	return Vantage(v), err
 }

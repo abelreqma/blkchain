@@ -153,6 +153,10 @@ func (g *Gate) checkLocked(c Command) Decision {
 	if deniedByConfig(c.Binary, g.ConfigDenied) {
 		return g.deny("config-denylist", c, "binary "+c.Binary+" is denied by .blkchain/config.yaml", "")
 	}
+
+	if c.Phase.requiresArm() && !c.Armed {
+		return g.deny("tier", c, "exploit/post-ex phase requires an armed task", "arm the task before running an exploit or post-exploitation command")
+	}
 	if g.Scope != nil && g.Scope.Local() {
 		// LOCAL profile: no binary allowlist. Only the structural denials that
 		// keep gating enforceable (raw-shell metacharacters, shells,
@@ -204,6 +208,10 @@ func (g *Gate) checkLocked(c Command) Decision {
 			}
 			if len(targets) > 0 {
 				return g.deny("scope", c, "no scope defined; target cannot be confirmed in scope: "+targets[0], "")
+			}
+
+			if a, bad := gluedShortFlag(c.Args, ""); bad {
+				return g.deny("scope", c, "no scope defined; a glued or bundled short flag may hide a target that cannot be confirmed in scope: "+a, "")
 			}
 		case g.Scope != nil:
 			targets, ok := ExtractTargets(c)
@@ -267,12 +275,20 @@ func (g *Gate) rateAllowLocked(c Command) Decision {
 // confirmation is needed and it audits allow directly.
 func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
 	localProfile := g.Scope != nil && g.Scope.Local()
-	needConfirm := g.Mode != Auto || localProfile
+	// Exploit and post-ex are the per-action-confirm tier: confirm every command
+	// regardless of mode (Safe, Auto, local or external).
+	force := c.Phase.perActionConfirm()
+	needConfirm := g.Mode != Auto || localProfile || force
 
 	if !needConfirm && g.UnattendedAllow != nil && !g.UnattendedAllow.Permits(c.Binary) {
 		needConfirm = true
 	}
-	needConfirm = needConfirm && (g.Approvals == nil || !g.Approvals.Approved(c))
+	// Session-approval memoization is skipped for the per-action-confirm tier:
+	// "per-action" means EVERY exploit/post-ex command is confirmed, even a repeat
+	// of an identical binary+args. Signature omits phase/armed and Approvals is
+	// shared across tasks, so without this a prior recon-context approval of the
+	// same command line would suppress a later exploit-tier prompt.
+	needConfirm = needConfirm && (force || g.Approvals == nil || !g.Approvals.Approved(c))
 	if !needConfirm {
 		g.audit("allow", Signature(c))
 		g.mu.Unlock()

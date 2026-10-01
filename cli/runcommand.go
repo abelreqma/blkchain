@@ -113,6 +113,15 @@ func denyMessage(d secgate.Decision) string {
 // allows the command AND the exec-time scope re-check finds no out-of-scope
 // resolved address. activeTask names the task to attribute captured output to.
 func newRunCommandTool(g *secgate.Gate, capBytes int, timeout time.Duration, workDir string, activeTask func() string, capture func(taskID, output string)) tooldef.Tool {
+	return newRunCommandToolForTask(g, capBytes, timeout, workDir, activeTask, capture, secgate.Command{})
+}
+
+// newRunCommandToolForTask is newRunCommandTool with the engagement context
+// (phase/surface/armed) in cmdCtx stamped onto every Command the tool builds, so
+// the gate derives the per-action tier for the task's phase (exploit/post-ex
+// require an armed task and force per-action confirmation). A zero cmdCtx is the
+// recon/unarmed legacy posture.
+func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Duration, workDir string, activeTask func() string, capture func(taskID, output string), cmdCtx secgate.Command) tooldef.Tool {
 	return newStoreTool("run_command",
 		"Run a bounded, shell-free security tool command against an in-scope target. Provide a bare binary name and literal args (no shell, no pipes or redirection). For a multi-stage filter, pass a structured `pipeline` of 2-3 stages (each a bare binary + literal args); stages are piped stdout to stdin with no shell, and every stage is authorized independently. Output is returned as untrusted data.",
 		runCommandArgs{},
@@ -130,7 +139,7 @@ func newRunCommandTool(g *secgate.Gate, capBytes int, timeout time.Duration, wor
 				if !hasBinary {
 					return "run_command: invalid arguments: binary is required", nil
 				}
-				cmd := secgate.Command{Binary: a.Binary, Args: a.Args}
+				cmd := secgate.Command{Binary: a.Binary, Args: a.Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed}
 				if msg := authorizeCommand(ctx, g, cmd); msg != "" {
 					return msg, nil
 				}
@@ -171,10 +180,10 @@ func newRunCommandTool(g *secgate.Gate, capBytes int, timeout time.Duration, wor
 			cmds := make([]secgate.Command, len(a.Pipeline))
 			stageStrs := make([]string, len(a.Pipeline))
 			for i := range a.Pipeline {
-				cmds[i] = secgate.Command{Binary: a.Pipeline[i].Binary, Args: a.Pipeline[i].Args}
+				cmds[i] = secgate.Command{Binary: a.Pipeline[i].Binary, Args: a.Pipeline[i].Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed}
 				stageStrs[i] = strings.Join(append([]string{cmds[i].Binary}, cmds[i].Args...), " ")
 			}
-			display := secgate.Command{Binary: "pipeline", Args: stageStrs}
+			display := secgate.Command{Binary: "pipeline", Args: stageStrs, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed}
 			if d := g.ConfirmCommand(ctx, display); !d.Allowed {
 				return "run_command denied: " + d.Reason, nil
 			}

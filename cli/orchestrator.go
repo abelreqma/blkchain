@@ -274,58 +274,15 @@ func newDispatchBatchToolWith(d engageDeps, exec func(ctx context.Context, d eng
 		})
 }
 
-// runExecutor runs one domain-specialized executor for a task. It gets its own
-// bounded projection and its own message slice; nothing is aliased across
-// agents.
+// runExecutor runs one surface-specialized executor for a task id. It is the
+// adapter dispatch_agent/dispatch_batch call; it fetches the task and routes to
+// executorFor(d, task).Run.
 func runExecutor(ctx context.Context, d engageDeps, taskID string) (string, error) {
 	task, err := d.Store.GetTask(taskID)
 	if err != nil {
 		return fmt.Sprintf("executor: task %q not found", taskID), nil
 	}
-	dom := domainFor(task.Kind)
-
-	reg := tooldef.NewRegistry()
-
-	activeTask := func() string { return taskID }
-	tools := []tooldef.Tool{
-		newKBSearchTool(d.RC, d.Cfg),
-		newKBAnswerTool(d.RC, d.Cfg, !d.Prefs.Web),
-		newPlanAddTool(d.Store),
-		newPlanUpdateTool(d.Store),
-		newRouteSkillTool(d.Catalog, d.Store, activeTask),
-	}
-	if d.Gate != nil && d.Runs != nil {
-		runTimeout, runCap := resolveRunCaps()
-		execDir, cleanup, err := newExecutorScratchDir(d.WorkDir)
-		if err != nil {
-			return "", err
-		}
-		defer cleanup()
-		tools = append(tools,
-			newRunCommandTool(d.Gate, runCap, runTimeout, execDir, activeTask, d.Runs.Add),
-			newVerifiedRecordEvidenceTool(d.Store, d.Runs.Contains),
-		)
-	} else {
-		tools = append(tools, newRecordEvidenceTool(d.Store))
-	}
-	for _, t := range tools {
-		if err := reg.Register(t); err != nil {
-			return "", err
-		}
-	}
-
-	proj, err := projectionText(ctx, d.Store)
-	if err != nil {
-		return "", err
-	}
-	human := fmt.Sprintf("Engagement state:\n%s\n\nYour task %s [%s]:\n target: %s\n objective: %s\n done when: %s\n\nWork this task now.",
-		proj, task.ID, task.Kind, task.Target, task.Objective, task.DoneWhen)
-	msgs := []llms.MessageContent{
-		{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(dom.Prompt)}},
-		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(human)}},
-	}
-	final, _, err := runToolLoop(ctx, d.Model, reg, msgs, LoopCaps{MaxRounds: 6, MaxCalls: 12})
-	return final, err
+	return executorFor(d, task).Run(ctx, task)
 }
 
 // runOrchestrator runs the top-level engagement loop for a goal.

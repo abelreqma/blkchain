@@ -593,3 +593,29 @@ func TestRunCommandUnresolvableHostnameDenied(t *testing.T) {
 		t.Errorf("want a resolve/scope denial, got %q", out)
 	}
 }
+
+// TestRunCommandStampsPhaseArmedAndTierGates: the task-aware tool stamps the
+// engagement phase/armed onto every Command, so the gate tiers it. An unarmed
+// exploit command is denied at the tier layer; an armed+confirmed one runs.
+func TestRunCommandStampsPhaseArmedAndTierGates(t *testing.T) {
+	// Unarmed exploit context: run_command is denied at the tier layer.
+	g := safeLocalGate(t, &countingConfirmer{ok: true})
+	tool := newRunCommandToolForTask(g, 1<<20, time.Minute, "", func() string { return "t1" }, nil,
+		secgate.Command{Phase: secgate.PhaseExploit, Armed: false})
+	out, _ := tool.Call(context.Background(), `{"binary":"id"}`)
+	if !strings.Contains(out, "denied") || !strings.Contains(strings.ToLower(out), "arm") {
+		t.Errorf("unarmed exploit run_command: out=%q, want a tier deny mentioning arming", out)
+	}
+
+	// Armed exploit context + approving confirmer: it runs (stub exec).
+	withStubExec(t, func(ctx context.Context, bin string, args []string, dir string, capBytes int, timeout time.Duration) runResult {
+		return runResult{Output: "ran " + bin}
+	})
+	g2 := safeLocalGate(t, &countingConfirmer{ok: true})
+	tool2 := newRunCommandToolForTask(g2, 1<<20, time.Minute, "", func() string { return "t1" }, nil,
+		secgate.Command{Phase: secgate.PhaseExploit, Armed: true})
+	out2, _ := tool2.Call(context.Background(), `{"binary":"id"}`)
+	if !strings.Contains(out2, "ran id") {
+		t.Errorf("armed+confirmed exploit run_command: out=%q, want it to run", out2)
+	}
+}

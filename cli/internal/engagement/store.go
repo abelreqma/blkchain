@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS task (
 	updated_rev INTEGER,
 	phase TEXT,
 	surface TEXT,
-	capability TEXT
+	capability TEXT,
+	armed INTEGER
 );
 CREATE TABLE IF NOT EXISTS meta (
 	k TEXT PRIMARY KEY,
@@ -151,11 +152,11 @@ func migrate(db *sql.DB) error {
 	return tx.Commit()
 }
 
-// addMissingTaskColumns adds the phase, surface, and capability columns to a
-// task table created before they existed. SQLite errors on a duplicate ADD
-// COLUMN, so each column is added only when PRAGMA table_info does not
-// already report it; a fresh database gets them from the CREATE TABLE above
-// and this is a no-op.
+// addMissingTaskColumns adds the phase, surface, capability, and armed
+// columns to a task table created before they existed. SQLite errors on a
+// duplicate ADD COLUMN, so each column is added only when PRAGMA table_info
+// does not already report it; a fresh database gets them from the CREATE
+// TABLE above and this is a no-op.
 func addMissingTaskColumns(tx *sql.Tx) error {
 	rows, err := tx.Query(`PRAGMA table_info(task)`)
 	if err != nil {
@@ -177,11 +178,20 @@ func addMissingTaskColumns(tx *sql.Tx) error {
 		return err
 	}
 	rows.Close()
-	for _, col := range []string{"phase", "surface", "capability"} {
-		if existing[col] {
+	cols := []struct {
+		name string
+		typ  string
+	}{
+		{"phase", "TEXT"},
+		{"surface", "TEXT"},
+		{"capability", "TEXT"},
+		{"armed", "INTEGER"},
+	}
+	for _, col := range cols {
+		if existing[col.name] {
 			continue
 		}
-		if _, err := tx.Exec(`ALTER TABLE task ADD COLUMN ` + col + ` TEXT`); err != nil {
+		if _, err := tx.Exec(`ALTER TABLE task ADD COLUMN ` + col.name + ` ` + col.typ); err != nil {
 			return err
 		}
 	}

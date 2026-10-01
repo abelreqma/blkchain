@@ -3,6 +3,10 @@ package secgate
 type Command struct {
 	Binary string
 	Args   []string
+
+	Phase   Phase
+	Surface Surface
+	Armed   bool
 }
 
 // Decision is the gate's verdict for one command. Suggestion is a bounded

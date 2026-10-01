@@ -681,3 +681,20 @@ func TestAutoOverrideTargetFailsClosed(t *testing.T) {
 		t.Error("a targeted command must fail closed under the no-scope override")
 	}
 }
+
+// Under the no-scope override, a command that hides its target in a glued short
+// flag (which ExtractTargets drops and the per-tool classifier does not audit for
+// this binary) must be denied: with no scope the gate cannot verify it.
+func TestAutoOverrideDeniesGluedShortFlag(t *testing.T) {
+	g := &Gate{Mode: Auto, Allow: NewAllowlist("whois", "curl"), AutoScopeOverride: true}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if d := g.Authorize(context.Background(), Command{Binary: "whois", Args: []string{"-h10.0.0.5"}}); d.Allowed {
+		t.Error("override must deny a command hiding a target in a glued short flag")
+	}
+	// A genuine no-target recon command still proceeds.
+	if d := g.Authorize(context.Background(), Command{Binary: "curl", Args: []string{"--version"}}); !d.Allowed {
+		t.Errorf("no-target recon should proceed under the override: %q", d.Reason)
+	}
+}

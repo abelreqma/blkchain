@@ -1,0 +1,92 @@
+package main
+
+import (
+	"context"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"blkchain/cli/internal/engagement"
+
+	"github.com/tmc/langchaingo/llms"
+)
+
+func TestExecutorForReturnsRunnableForEverySurface(t *testing.T) {
+	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
+	for _, s := range []engagement.Surface{engagement.SurfaceLocal, engagement.SurfaceNetwork, engagement.SurfaceWeb, engagement.SurfaceADCloud} {
+		task := engagement.Task{ID: "t", Surface: s, Kind: "recon"}
+		if ex := executorFor(d, task); ex == nil {
+			t.Errorf("executorFor(surface=%q) = nil, want a surfaceExecutor", s)
+		}
+	}
+}
+
+func TestRunBatchSurfaceExecutorsRaceClean(t *testing.T) {
+	t.Setenv("BLKCHAIN_ENGAGE_PARALLEL", "4")
+	d := testDeps(t, perTaskModel{})
+	d.Gate = autoGate(t)
+	d.Runs = NewRunOutputs()
+	withStubExec(t, func(ctx context.Context, bin string, args []string, dir string, capBytes int, timeout time.Duration) runResult {
+		return runResult{Output: "22/tcp open banner-for-" + args[len(args)-1]}
+	})
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{
+		{ID: "t1", Kind: "recon", Surface: engagement.SurfaceNetwork, Target: "10.0.0.5", Objective: "scan", Status: engagement.StatusTodo},
+		{ID: "t2", Kind: "recon", Surface: engagement.SurfaceNetwork, Target: "10.0.0.6", Objective: "scan", Status: engagement.StatusTodo},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	results := make([]string, 2)
+	for i, id := range []string{"t1", "t2"} {
+		wg.Add(1)
+		go func(i int, id string) {
+			defer wg.Done()
+			out, _ := runExecutor(context.Background(), d, id)
+			results[i] = out
+		}(i, id)
+	}
+	wg.Wait()
+	joined := results[0] + results[1]
+	if !strings.Contains(joined, "done t1") || !strings.Contains(joined, "done t2") {
+		t.Errorf("both executors should finish via executorFor path: %q", results)
+	}
+}
+
+func TestVantageGatesInternalSurface(t *testing.T) {
+	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
+	ext := engagement.VantageExternalUnauth
+	if _, err := d.Store.Apply(engagement.Delta{SetVantage: &ext}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{
+		{ID: "t1", Kind: "target-analysis", Surface: engagement.SurfaceLocal, Objective: "assess", Status: engagement.StatusTodo},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := runExecutor(context.Background(), d, "t1")
+	if !strings.Contains(strings.ToLower(out), "vantage") {
+		t.Errorf("local surface at external vantage: out=%q, want a vantage refusal", out)
+	}
+	foot := engagement.VantageInternalFoothold
+	if _, err := d.Store.Apply(engagement.Delta{SetVantage: &foot}); err != nil {
+		t.Fatal(err)
+	}
+	out2, _ := runExecutor(context.Background(), d, "t1")
+	if strings.Contains(strings.ToLower(out2), "vantage") {
+		t.Errorf("local surface after advance to foothold: out=%q, should no longer refuse on vantage", out2)
+	}
+}
+
+func TestVantageUnsetDoesNotGate(t *testing.T) {
+	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{
+		{ID: "t1", Kind: "target-analysis", Surface: engagement.SurfaceLocal, Objective: "assess", Status: engagement.StatusTodo},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := runExecutor(context.Background(), d, "t1")
+	if strings.Contains(strings.ToLower(out), "vantage") {
+		t.Errorf("unset vantage must not gate: out=%q", out)
+	}
+}

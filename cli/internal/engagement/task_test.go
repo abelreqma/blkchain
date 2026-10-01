@@ -95,6 +95,35 @@ func TestTaskRevisionFreshZero(t *testing.T) {
 	}
 }
 
+func TestTaskArmedRoundTrips(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.Apply(Delta{Upserts: []Task{
+		{ID: "a", Kind: "recon", Status: StatusTodo}, // default: unarmed
+		{ID: "b", Kind: "exploit", Phase: PhaseExploit, Status: StatusTodo, Armed: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.GetTask("a")
+	if err != nil || a.Armed {
+		t.Errorf("task a: Armed = %v err=%v, want false", a.Armed, err)
+	}
+	b, err := s.GetTask("b")
+	if err != nil || !b.Armed {
+		t.Errorf("task b: Armed = %v err=%v, want true", b.Armed, err)
+	}
+	snap, err := s.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, tk := range snap.Tasks {
+		got[tk.ID] = tk.Armed
+	}
+	if got["a"] || !got["b"] {
+		t.Errorf("snapshot armed = %v, want a:false b:true", got)
+	}
+}
+
 func TestTaskJSONHelpers(t *testing.T) {
 	if got := marshalStrings(nil); got != "[]" {
 		t.Errorf("marshalStrings(nil) = %q, want []", got)

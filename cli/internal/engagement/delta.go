@@ -18,6 +18,10 @@ type Delta struct {
 	SetName     *string
 	SetActiveID *string
 	SetStage    *Stage
+	// SetVantage advances the engagement's access context. It is validated as a
+	// known vantage and must not move backward (a lower rank than the current
+	// vantage is rejected), so advancement is monotonic.
+	SetVantage *Vantage
 }
 
 func (s *Store) Apply(d Delta) (newRev int64, err error) {
@@ -194,8 +198,8 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 
 	for _, t := range upserts {
 		if _, err := conn.ExecContext(ctx,
-			`INSERT INTO task (id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO task (id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			   kind = excluded.kind,
 			   target = excluded.target,
@@ -207,10 +211,11 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 			   updated_rev = excluded.updated_rev,
 			   phase = excluded.phase,
 			   surface = excluded.surface,
-			   capability = excluded.capability`,
+			   capability = excluded.capability,
+			   armed = excluded.armed`,
 			t.ID, t.Kind, t.Target, t.Objective, t.DoneWhen, string(t.Status),
 			marshalStrings(t.DependsOn), marshalStrings(t.BasisIDs), newRev, newRev,
-			string(t.Phase), string(t.Surface), string(t.Capability)); err != nil {
+			string(t.Phase), string(t.Surface), string(t.Capability), boolToInt(t.Armed)); err != nil {
 			return 0, err
 		}
 	}
@@ -248,12 +253,38 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 			return 0, err
 		}
 	}
+	if d.SetVantage != nil {
+		nv := *d.SetVantage
+		if !nv.valid() {
+			return 0, fmt.Errorf("engagement: invalid vantage %q", nv)
+		}
+		cur, err := getMeta(ctx, conn, "vantage")
+		if err != nil {
+			return 0, err
+		}
+		// Monotonic: a vantage never moves backward (that would re-lock surfaces).
+		if cur != "" && Vantage(cur).rank() > nv.rank() {
+			return 0, fmt.Errorf("engagement: vantage cannot move backward from %q to %q", cur, nv)
+		}
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO meta (k, v) VALUES ('vantage', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`, string(nv)); err != nil {
+			return 0, err
+		}
+	}
 
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return 0, err
 	}
 	committed = true
 	return newRev, nil
+}
+
+// boolToInt converts a bool to the 0/1 SQLite stores for an INTEGER column.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // findCycle returns a task id on a depends-on cycle, or "" when the graph is

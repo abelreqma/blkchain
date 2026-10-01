@@ -113,6 +113,7 @@ type Task struct {
 	Phase      Phase
 	Surface    Surface
 	Capability Capability
+	Armed      bool
 	DependsOn  []string
 	BasisIDs   []string
 	CreatedRev int64
@@ -154,11 +155,12 @@ func (s *Store) GetTask(id string) (Task, error) {
 		status                 string
 		deps, bas              sql.NullString
 		phase, surface, capVal sql.NullString
+		armed                  sql.NullInt64
 	)
 	err := s.db.QueryRow(
-		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability
+		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed
 		 FROM task WHERE id = ?`, id).
-		Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal)
+		Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNotFound
 	}
@@ -169,6 +171,7 @@ func (s *Store) GetTask(id string) (Task, error) {
 	t.Phase = Phase(phase.String)
 	t.Surface = Surface(surface.String)
 	t.Capability = Capability(capVal.String)
+	t.Armed = armed.Int64 != 0
 	if t.DependsOn, err = unmarshalStrings(deps.String); err != nil {
 		return Task{}, err
 	}
