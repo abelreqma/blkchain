@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 	"blkchain/cli/internal/skillcat"
+
+	"github.com/tmc/langchaingo/llms"
 )
 
 // aiSecGroundingSearcher returns a corpus hit that mentions every OWASP LLM0x class
@@ -413,5 +417,85 @@ func TestAISecTierHumanThreadsVantage(t *testing.T) {
 	}
 	if strings.Contains(h2, "Vantage ") {
 		t.Errorf("unset vantage must append no skew, got %q", h2)
+	}
+}
+
+// aiSecRunCmdJSON builds run_command args for an allowlisted nmap probe (the
+// ai-security persona uses nmap for exposed inference ports).
+func aiSecRunCmdJSON(args []string) string {
+	b, _ := json.Marshal(struct {
+		Binary string   `json:"binary"`
+		Args   []string `json:"args"`
+	}{Binary: "nmap", Args: args})
+	return string(b)
+}
+
+type aiSecCaptureModel struct{}
+
+func (aiSecCaptureModel) GenerateContent(_ context.Context, msgs []llms.MessageContent, _ ...llms.CallOption) (*llms.ContentResponse, error) {
+	for _, mm := range msgs {
+		if mm.Role != llms.ChatMessageTypeHuman {
+			continue
+		}
+		for _, p := range mm.Parts {
+			if tc, ok := p.(llms.TextContent); ok && strings.Contains(tc.Text, "Respond with ONLY one JSON object") {
+				return finalResp(`{"continue": false}`), nil
+			}
+		}
+	}
+	toolTurns := 0
+	for _, mm := range msgs {
+		if mm.Role == llms.ChatMessageTypeTool {
+			toolTurns++
+		}
+	}
+	if toolTurns == 0 {
+		return toolCallResp("c1", "run_command", aiSecRunCmdJSON([]string{"-sV", "-p", "8080", "10.0.0.5"})), nil
+	}
+	// Deliberately NO record_evidence: exercise the capture backstop.
+	return finalResp("tier done"), nil
+}
+
+func TestAISecReconCaptureBackstopEndToEnd(t *testing.T) {
+	d := testDeps(t, aiSecCaptureModel{})
+	d.ReconTiers = true
+	d.Gate = autoGate(t) // scope 10.0.0.0/24
+	d.Runs = NewRunOutputs()
+	const stub = "Nmap scan report for 10.0.0.5\n8080/tcp open http-proxy"
+	withStubExec(t, func(_ context.Context, _ string, _ []string, _ string, _ int, _ time.Duration) runResult {
+		return runResult{Output: stub}
+	})
+	ext := engagement.VantageExternalUnauth
+	if _, err := d.Store.Apply(engagement.Delta{SetVantage: &ext}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{
+		ID: "t1", Kind: "ai-security", Target: "10.0.0.5", Objective: "probe exposed inference port",
+		Status: engagement.StatusTodo, Phase: engagement.PhaseRecon, Surface: engagement.SurfaceAISecurity,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := d.Store.GetTask("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := executorFor(d, task).(aiSecExecutor); !ok {
+		t.Fatal("task must route to aiSecExecutor")
+	}
+	if _, err := executorFor(d, task).Run(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := d.Store.EvidenceFor("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, q := range ev {
+		if q == stub {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("recon tier recorded no backstop evidence; EvidenceFor = %v (want the command output verbatim)", ev)
 	}
 }

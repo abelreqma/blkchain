@@ -323,6 +323,78 @@ func TestNetworkDetectionNoFalseGroundingOnAdjacentCitation(t *testing.T) {
 	}
 }
 
+type networkNoRecordModel struct{}
+
+func (networkNoRecordModel) GenerateContent(_ context.Context, msgs []llms.MessageContent, _ ...llms.CallOption) (*llms.ContentResponse, error) {
+	var human string
+	toolTurns := 0
+	for _, m := range msgs {
+		if m.Role == llms.ChatMessageTypeTool {
+			toolTurns++
+		}
+		if m.Role != llms.ChatMessageTypeHuman {
+			continue
+		}
+		for _, p := range m.Parts {
+			if tc, ok := p.(llms.TextContent); ok {
+				human += tc.Text
+			}
+		}
+	}
+	if strings.Contains(human, "Respond with ONLY one JSON object") {
+		return finalResp(`{"continue": false}`), nil
+	}
+	if !strings.Contains(human, "Perform ONLY this tier's step") {
+		return finalResp("noted"), nil
+	}
+	if toolTurns == 0 {
+		return toolCallResp("c1", "run_command", `{"binary":"nmap","args":["-sV","-p","22","10.0.0.5"]}`), nil
+	}
+	return finalResp("done"), nil // deliberately never record_evidence
+}
+
+func TestNetworkCodeSideEvidenceWhenModelDoesNotRecord(t *testing.T) {
+	d := testDeps(t, networkNoRecordModel{})
+	d.ReconTiers = true
+	d.Gate = autoGate(t)
+	d.Runs = NewRunOutputs()
+	withStubExec(t, func(_ context.Context, _ string, _ []string, _ string, _ int, _ time.Duration) runResult {
+		return runResult{Output: networkSSHScan}
+	})
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{
+		ID: "t1", Kind: "recon", Target: "10.0.0.5", Objective: "enumerate",
+		Status: engagement.StatusTodo, Phase: engagement.PhaseRecon, Surface: engagement.SurfaceNetwork,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := d.Store.GetTask("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executorFor(d, task).Run(context.Background(), task); err != nil {
+		t.Fatal(err) // must terminate, not loop to the backstop cap
+	}
+	// Evidence recorded code-side despite the model never calling record_evidence.
+	ev, err := d.Store.EvidenceFor("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var captured bool
+	for _, q := range ev {
+		if q == networkSSHScan {
+			captured = true
+		}
+	}
+	if !captured {
+		t.Fatalf("code-side capture missing: evidence=%v, want the nmap output recorded verbatim by the backstop", ev)
+	}
+	// The finding was not dropped: the OpenSSH candidate was correlated from the
+	// code-side evidence (coverage-gap here since RC=nil, but present).
+	if _, err := d.Store.GetTask("exploit-10.0.0.5-22-openssh"); err != nil {
+		t.Fatalf("candidate not correlated from code-side evidence (silent drop): %v", err)
+	}
+}
+
 // networkProposeModel proposes one run_command (a fixed binary+args) then ends.
 // The grader is answered stop. It lets a test assert whether the gate let the
 // proposed command reach exec.

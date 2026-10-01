@@ -146,11 +146,11 @@ func (e cloudExecutor) cloudRunReconPhase(ctx context.Context, task engagement.T
 		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8}); err != nil {
 			return tierOutcome{}, err
 		}
-		afterRows, err := e.d.Store.EvidenceRowsFor(task.ID)
+
+		newRows, err := e.captureTierEvidence(task.ID, string(task.Surface), asset, tier.Name, beforeRows, beforeCmds)
 		if err != nil {
 			return tierOutcome{}, err
 		}
-		newRows := afterRows[len(beforeRows):]
 		out := tierOutcomeFromSignals(tier, e.d.Runs.Count(task.ID)-beforeCmds, len(newRows))
 		out.NewAssets = e.cloudCorrelateNewEvidence(ctx, task, newRows, exploitSel)
 		return out, nil
