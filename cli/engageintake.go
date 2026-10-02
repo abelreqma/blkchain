@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // engageintake.go is the guided pre-dispatch intake for `/engage`: instead of
 // erroring on a bare goal or blindly dispatching a vague one, the TUI asks a
@@ -36,8 +39,8 @@ func domainClarification() Clarification {
 func targetClarification() Clarification {
 	return Clarification{
 		Question:    "Is there a specific target or scope?",
-		Detail:      "Choose, then type the target (host, URL, CIDR) if yes.",
-		Options:     []ClarifyOption{{Label: "yes - I'll type the target", Value: "yes"}, {Label: "no - derive it from the goal", Value: "no"}},
+		Detail:      "Type a target (host, URL, CIDR) with the custom row, or derive it from the goal.",
+		Options:     []ClarifyOption{{Label: "no specific target - derive from the goal", Value: "none"}},
 		AllowCustom: true,
 	}
 }
@@ -80,3 +83,65 @@ func assembleEngageGoal(a engageIntakeAnswers) string {
 	}
 	return strings.TrimSpace(strings.Join(parts, " "))
 }
+
+// engageIntakeFlow drives the pre-dispatch intake sequence for /engage. step
+// indexes the questions (0 domain, 1 target, 2 interactive); reply marks the
+// overlays so the TUI distinguishes an intake resolve from an engagement-time
+// clarify. The flow is created at /engage and cleared when it dispatches or is
+// canceled.
+type engageIntakeFlow struct {
+	answers engageIntakeAnswers
+	step    int
+	reply   chan ClarifyResult
+}
+
+const engageIntakeSteps = 3
+
+// clarification returns the question for the current step, or ok=false when the
+// sequence is complete.
+func (f *engageIntakeFlow) clarification() (Clarification, bool) {
+	switch f.step {
+	case 0:
+		return domainClarification(), true
+	case 1:
+		return targetClarification(), true
+	case 2:
+		return interactiveClarification(), true
+	}
+	return Clarification{}, false
+}
+
+// record applies one step's answer and advances. A custom instruction wins over
+// a selected option value; the target's "none" value leaves the target empty.
+func (f *engageIntakeFlow) record(res ClarifyResult) {
+	switch f.step {
+	case 0:
+		if res.Custom != "" {
+			f.answers.Domain = res.Custom
+		} else {
+			f.answers.Domain = res.Value
+		}
+	case 1:
+		if res.Custom != "" {
+			f.answers.Target = res.Custom
+		}
+	case 2:
+		f.answers.Interactive = res.Value == "yes"
+	}
+	f.step++
+}
+
+// done reports whether every step has been answered.
+func (f *engageIntakeFlow) done() bool { return f.step >= engageIntakeSteps }
+
+// goal assembles the collected answers into the engagement goal.
+func (f *engageIntakeFlow) goal() string { return assembleEngageGoal(f.answers) }
+
+// targetTokenRe matches a concrete engagement target in a goal: an IPv4 address
+// (optionally with a CIDR suffix), an http(s) URL, or a dotted hostname with an
+// alphabetic TLD. It is the clarity signal for /engage: a goal naming a target
+// is specific enough to dispatch; a goal without one runs the guided intake.
+var targetTokenRe = regexp.MustCompile(`(?i)(?:\b\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?\b|https?://[^\s]+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\b)`)
+
+// goalHasTarget reports whether the goal already names a concrete target.
+func goalHasTarget(goal string) bool { return targetTokenRe.MatchString(goal) }

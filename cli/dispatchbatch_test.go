@@ -472,3 +472,42 @@ func TestDispatchBatchRegisteredInOrchestrator(t *testing.T) {
 		t.Errorf("tool name = %q, want dispatch_batch", tool.Name())
 	}
 }
+
+// The refreshed engagement projection is appended to a dispatch result so the
+// orchestrator sees current coverage and the already-discovered list every
+// round, not just at the start, and stops re-planning completed recon.
+func TestDispatchBatchAppendsRefreshedProjection(t *testing.T) {
+	d := testDeps(t, nil)
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{
+		{ID: "tD", Kind: "recon", Target: "10.0.0.9", Objective: "ALREADY-SCANNED-PORTS", Status: engagement.StatusDone},
+		{ID: "t1", Kind: "recon", Target: "10.0.0.5", Objective: "scan", Status: engagement.StatusTodo},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	exec := func(ctx context.Context, d engageDeps, id string) (string, error) { return "ran " + id, nil }
+	out, err := newDispatchBatchToolWith(d, exec).Call(context.Background(), `{"task_ids":["t1"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ran t1", "engagement state (refreshed", "do not repeat", "ALREADY-SCANNED-PORTS"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("dispatch result missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestWithProjectionAppendsState(t *testing.T) {
+	d := testDeps(t, nil)
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{
+		{ID: "tD", Kind: "recon", Target: "h", Objective: "DONE-WORK", Status: engagement.StatusDone},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	out := withProjection(context.Background(), d.Store, "RESULT-BODY")
+	if !strings.HasPrefix(out, "RESULT-BODY") {
+		t.Fatalf("withProjection must keep the original result first:\n%s", out)
+	}
+	if !strings.Contains(out, "DONE-WORK") {
+		t.Fatalf("withProjection must append the projection with discovered work:\n%s", out)
+	}
+}

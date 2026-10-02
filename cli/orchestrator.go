@@ -72,13 +72,20 @@ var orchestratorSystemPrompt = "You are the orchestrator of a scoped offensive p
 	"validation, initial access, privilege escalation, lateral movement, and post-exploitation when they fit the objective " +
 	"and rules of engagement; preserve the evidence needed for reporting. Use plan_add, plan_update, and plan_complete to shape " +
 	"a task DAG over the store; use kb_search and kb_answer to ground technique choices when useful. " +
-	"Start with recon breadth across every in-scope target and surface, then prioritize the strongest evidence-backed " +
-	"paths by likelihood, impact, prerequisites, and test cost. Dispatch small batches of open task_ids with dispatch_batch; " +
+	"Begin where the goal, the chosen domain, and the current evidence point: when the goal already names a target, " +
+	"domain, or foothold, plan directly toward it and use reconnaissance only to fill the specific gaps that path needs, " +
+	"rather than defaulting to broad network scanning; when the goal is open-ended, build attack-surface breadth first. " +
+	"Choose each task's tooling to fit the surface and the goal, not a fixed default. Then prioritize the strongest " +
+	"evidence-backed paths by likelihood, impact, prerequisites, and test cost. Dispatch small batches of open task_ids with dispatch_batch; " +
 	"use dispatch_agent for a single deep task. Executors return evidence; fold each result into the plan, use the updated " +
 	"engagement vantage after demonstrated access, and create the next distinct task when a path is established. " +
 	"Set basis_ids to the task or finding that supports each follow-on so the chain from observation to impact stays auditable. " +
 	"You do not run commands against targets. Complete tasks only when exact-quote evidence supports the outcome; distinguish " +
 	"confirmed access, failed hypotheses, blocked actions, and untested paths. " +
+	"Before planning any task, read the current engagement state: never create a task that duplicates an open task or re-runs " +
+	"something in the 'already discovered (do not repeat)' list. Each dispatch result ends with the refreshed state - use it, " +
+	"advance to the next distinct step, and when coverage is sufficient for the goal, stop and return a final summary rather " +
+	"than re-scanning. " +
 	"Domains available for tasks: " + strings.Join(domainNames(), ", ") + "."
 
 type dispatchArgs struct {
@@ -140,8 +147,23 @@ func newDispatchAgentTool(d engageDeps) tooldef.Tool {
 			}); err != nil {
 				return "dispatch_agent: could not set stage: " + err.Error(), nil
 			}
-			return runExecutor(ctx, d, task.ID)
+			out, rerr := runExecutor(ctx, d, task.ID)
+			return withProjection(ctx, d.Store, out), rerr
 		})
+}
+
+// withProjection appends the current engagement projection to a dispatch result.
+// The orchestrator otherwise sees the projection (coverage, open tasks, and the
+// "already discovered (do not repeat)" list) only in its opening message, so over
+// a long loop it re-plans completed recon. Refreshing it after every dispatch
+// keeps current state in front of the model. A projection error is non-fatal: the
+// result is returned unchanged.
+func withProjection(ctx context.Context, st *engagement.Store, result string) string {
+	proj, err := projectionText(ctx, st)
+	if err != nil || strings.TrimSpace(proj) == "" {
+		return result
+	}
+	return result + "\n\n--- engagement state (refreshed; do not re-plan completed work) ---\n" + proj
 }
 
 const (
@@ -301,7 +323,7 @@ func newDispatchBatchToolWith(d engageDeps, exec func(ctx context.Context, d eng
 				}
 				b.WriteString(r.Result)
 			}
-			return b.String(), nil
+			return withProjection(ctx, d.Store, b.String()), nil
 		})
 }
 

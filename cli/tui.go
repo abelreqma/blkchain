@@ -57,8 +57,9 @@ func runTUI() error {
 	p := tea.NewProgram(&m)
 	m.prog = p
 	// Wire the operator arm gate so a REPL engagement's at-exploit arm prompt
-	// (runExploitPhase -> ArmRequester) reaches the TUI overlay in Safe and Auto.
-	SetReplArmRequester(widgetArmRequester{prog: p})
+	// (runExploitPhase -> ArmRequester) reads over a released terminal, like the
+	// confirm, so the keypress is reliable in any terminal during an engagement.
+	SetReplArmRequester(releaseArmRequester{prog: p})
 	llmWarn = func(line string) { p.Send(tea.Println(line)()) }
 	_, err := p.Run()
 	if m.rc != nil {
@@ -443,6 +444,11 @@ type model struct {
 	// overlay is the open picker (/resume, /model) or nil. While set it captures
 	// keys; the base Update passes through only quit.
 	overlay overlayModel
+
+	// engageIntake holds the active /engage guided-intake flow (domain, target,
+	// interactive) while its clarify overlays run at idle; nil when no intake is
+	// in progress.
+	engageIntake *engageIntakeFlow
 
 	// Model/reasoning selection from the /model picker. ragModel overrides the
 	// oMLX model in rag mode ("" = default); reasoning is the reasoning-effort
@@ -1155,6 +1161,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cancel
 
 	case clarifyResolvedMsg:
+		// An intake overlay (pre-dispatch /engage) is driven by the model, not a
+		// goroutine reply channel: advance the sequence instead of answering it.
+		if m.engageIntake != nil && msg.reply == m.engageIntake.reply {
+			return m.advanceEngageIntake(msg.res)
+		}
 		m.overlay = nil
 		reply, res := msg.reply, msg.res
 		// The send runs in a command so a slow receiver never blocks the loop.
@@ -1417,6 +1428,72 @@ func (m model) currentModel() string {
 		return id
 	}
 	return m.cfg.DefaultModel
+}
+
+// startEngageIntake opens the guided /engage intake: it seeds the flow with any
+// typed goal and opens the first clarify overlay (domain). Subsequent steps and
+// dispatch are driven by advanceEngageIntake from the clarifyResolvedMsg handler.
+func (m model) startEngageIntake(goal, echo string) (tea.Model, tea.Cmd) {
+	f := &engageIntakeFlow{answers: engageIntakeAnswers{GoalPrefill: goal}, reply: make(chan ClarifyResult, 1)}
+	m.engageIntake = f
+	c, _ := f.clarification()
+	m.overlay = newClarifyPicker(c, m.width, f.reply)
+	return m, tea.Println(echo)
+}
+
+// advanceEngageIntake records one intake answer and either opens the next
+// question or, when the sequence is complete, assembles the goal and dispatches
+// the engagement. A canceled answer aborts the intake.
+func (m model) advanceEngageIntake(res ClarifyResult) (tea.Model, tea.Cmd) {
+	f := m.engageIntake
+	if res.Canceled {
+		m.engageIntake = nil
+		m.overlay = nil
+		return m, tea.Println("   " + Meta.Render("engage canceled"))
+	}
+	f.record(res)
+	if c, ok := f.clarification(); ok {
+		m.overlay = newClarifyPicker(c, m.width, f.reply)
+		return m, nil
+	}
+	goal := f.goal()
+	m.engageIntake = nil
+	m.overlay = nil
+	return m.dispatchEngage(goal)
+}
+
+// dispatchEngage builds the engage dependencies and starts the gated
+// orchestrator for goal. HITL confirmation reads over a released terminal
+// (reliable line input) rather than a Bubble Tea overlay, whose key events are
+// unreliable in some terminals during a long engagement; stop cancels the turn.
+func (m model) dispatchEngage(goal string) (tea.Model, tea.Cmd) {
+	run, err := m.buildReplEngageRun(goal)
+	if err != nil {
+		return m, tea.Println(styleErr(err))
+	}
+	m.working = true
+	m.tickGen++
+	m.workingVerb = workingVerbLabel("engage")
+	m.live = ""
+	m.turnStart = time.Now()
+	m.liveTokens = 0
+	m.firstTokAt = time.Time{}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	run.ctx = ctx
+	run.confirm = releaseConfirmer{prog: m.prog, stop: cancel}
+	stub := newStubEngagement("engagement")
+	m.engagement = stub
+	m.noticedCandidates = map[string]bool{}
+	run.stub = stub
+	if m.engageMode == secgate.Safe {
+		// Mid-run clarifications read over a released terminal, like the confirm,
+		// so follow-up questions work in any terminal during a long engagement.
+		run.asker = releaseAsker{prog: m.prog}
+	} else {
+		run.asker = askuser.AutoAsker{}
+	}
+	return m, tea.Batch(m.workTick(), m.startVizPoll(), engageCmd(run))
 }
 
 // conversationHistory returns the full prior conversation for the current
@@ -1836,42 +1913,15 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.pendingQ = question
 		return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.generateCmd(ctx, question, results, m.turnStart))
 	case "engage":
+		// A goal that already names a target is clear enough to dispatch; otherwise
+		// run the guided intake (domain, target, interactivity) at idle, where key
+		// input is reliable, to shape the goal before any run.
 		goal := strings.TrimSpace(arg)
-		if goal == "" {
-			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(errors.New("engage: give me a goal"))))
+		if goalHasTarget(goal) {
+			nm, cmd := m.dispatchEngage(goal)
+			return nm, tea.Batch(tea.Println(echo), cmd)
 		}
-		// Build the engage dependencies up front so a failure (no model, no
-		// retrieval client, a bad skill catalog) is reported before a turn starts.
-		run, err := m.buildReplEngageRun(goal)
-		if err != nil {
-			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
-		}
-		m.working = true
-		m.tickGen++
-		m.workingVerb = workingVerbLabel("engage")
-		m.live = ""
-		m.turnStart = time.Now()
-		m.liveTokens = 0
-		m.firstTokAt = time.Time{}
-		// An engagement can run for a long time (multi-step gated tool use); only
-		// Ctrl-C or esc-stop ends it, so use a cancelable, un-timed context.
-		ctx, cancel := context.WithCancel(context.Background())
-		m.cancel = cancel
-		run.ctx = ctx
-		// The live engagement view receives per-revision snapshots from the engage
-		// progress callback; the viz poll renders the DAG + bar from it.
-		stub := newStubEngagement("engagement")
-		m.engagement = stub
-		m.noticedCandidates = map[string]bool{}
-		run.stub = stub
-		// Safe routes the orchestrator's clarifications to the clarify overlay;
-		// /auto suppresses them (AutoAsker).
-		if m.engageMode == secgate.Safe {
-			run.asker = startEngageAsker(ctx, m.prog)
-		} else {
-			run.asker = askuser.AutoAsker{}
-		}
-		return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), engageCmd(run))
+		return m.startEngageIntake(goal, echo)
 	}
 	// Unknown /verb.
 	return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("unknown command /%s, try /help", verb))))
