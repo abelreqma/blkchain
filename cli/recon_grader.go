@@ -18,11 +18,11 @@ import (
 // yields Parsed=false, and the loop stops unless the grader clearly said to
 // continue. Autonomy must not be extended by a garbled model reply.
 
-const reconGradePrompt = "You are deciding whether further reconnaissance on one attack surface and asset " +
-	"is warranted in an authorized, single-user security engagement. Respond with ONLY one JSON object, " +
-	"no prose, exactly in this shape: {\"continue\": true or false}. Set \"continue\" to false when the " +
-	"current coverage is sufficient and further probing is unlikely to reveal new in-scope assets or " +
-	"services.\n\nSurface: %s\nAsset: %s\nCurrent coverage:\n%s"
+const reconGradePrompt = "You are deciding whether to continue attack-surface reconnaissance for one asset in a scoped penetration test. " +
+	"Respond with ONLY one JSON object, no prose, exactly in this shape: {\"continue\": true or false}. " +
+	"Set continue=true when a material coverage dimension remains, an observed service or identity exposes an untested path, " +
+	"or a specific in-scope probe can resolve an important uncertainty. Set continue=false only when the current tier is covered " +
+	"and no evidence-backed lead remains, or when the stated scope or test limits require stopping. Do not require discovery of a new host to continue useful validation.\n\nSurface: %s\nAsset: %s\nCurrent coverage:\n%s"
 
 // reconVerdict is the grader's decision. Parsed is false on any parse failure or
 // grader error; the loop treats !Parsed (and !Continue) as STOP.

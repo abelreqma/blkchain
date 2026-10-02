@@ -219,15 +219,68 @@ func TestDirectAnswerStreamsWithoutRetrieval(t *testing.T) {
 	}
 }
 
-func TestAdaptiveAnswerSkipDoesNotSearch(t *testing.T) {
-	srv := fakeLLM(t, []string{"SKIP"}, "direct answer, no sources")
+func TestAdaptiveAnswerSkipStaysSkipWhenCorpusInsufficient(t *testing.T) {
+	// Router says SKIP; validation retrieves and the grader says the corpus is
+	// not sufficient, so it stays skip and answers ungrounded.
+	srv := fakeLLM(t, []string{"SKIP", "IRRELEVANT"}, "direct answer, no sources")
 	t.Setenv("OMLX_BASE_URL", srv.URL)
 	t.Setenv("OMLX_MODEL", "m")
 	t.Setenv("OMLX_API_KEY", "test-key")
 	t.Setenv("TAVILY_SETUP_TOKEN", "")
 
 	rs := &recSearcher{results: []retrieval.Result{chunk("wstg", "a.md", "s", "local")}}
-	ans, cits, usedWeb, results, _, route, err := adaptiveAnswer(context.Background(), rs, answerCfg(2), "capital of France?", enabledRoutes{Local: true, Web: false}, false, AnswerOpts{})
+	ans, cits, usedWeb, results, _, route, err := adaptiveAnswer(context.Background(), rs, answerCfg(2), "write a limerick", enabledRoutes{Local: true, Web: false}, false, AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route != "skip" {
+		t.Errorf("route = %q, want skip", route)
+	}
+	// Validation must have retrieved before committing to the skip.
+	if rs.query != "write a limerick" {
+		t.Errorf("skip should validate via Search, got query %q", rs.query)
+	}
+	if !strings.Contains(ans, "direct answer") {
+		t.Errorf("answer = %q", ans)
+	}
+	if len(cits) != 0 || usedWeb || len(results) != 0 {
+		t.Errorf("skip must have empty cits/results and used_web false")
+	}
+}
+
+func TestAdaptiveAnswerSkipGroundsWhenCorpusSufficient(t *testing.T) {
+	// Router says SKIP, but validation finds the corpus sufficient, so it is
+	// overridden to grounding (AnswerLoop then grades + synthesizes).
+	srv := fakeLLM(t, []string{
+		"SKIP",
+		"RELEVANT", // validation relevance check
+		`{"sufficient":true,"rewrite":"","use_web":false}`, // AnswerLoop grade
+	}, "grounded [1]")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	t.Setenv("TAVILY_SETUP_TOKEN", "")
+
+	rs := &recSearcher{results: []retrieval.Result{chunk("wstg", "a.md", "s", "kerberoasting text")}}
+	_, _, _, _, _, route, err := adaptiveAnswer(context.Background(), rs, answerCfg(2), "how does kerberoasting work", enabledRoutes{Local: true, Web: false}, false, AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route != "rag" {
+		t.Errorf("route = %q, want rag (skip overridden by corpus validation)", route)
+	}
+}
+
+func TestAdaptiveAnswerArithmeticSkipDoesNotValidate(t *testing.T) {
+	// The pure-arithmetic guard skip must not retrieve or grade.
+	srv := fakeLLM(t, nil, "4")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	t.Setenv("TAVILY_SETUP_TOKEN", "")
+
+	rs := &recSearcher{results: []retrieval.Result{chunk("wstg", "a.md", "s", "local")}}
+	_, _, _, _, _, route, err := adaptiveAnswer(context.Background(), rs, answerCfg(2), "2+2", enabledRoutes{Local: true, Web: false}, false, AnswerOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,13 +288,7 @@ func TestAdaptiveAnswerSkipDoesNotSearch(t *testing.T) {
 		t.Errorf("route = %q, want skip", route)
 	}
 	if rs.query != "" {
-		t.Errorf("skip must not call Search, got %q", rs.query)
-	}
-	if !strings.Contains(ans, "direct answer") {
-		t.Errorf("answer = %q", ans)
-	}
-	if len(cits) != 0 || usedWeb || len(results) != 0 {
-		t.Errorf("skip must have empty cits/results and used_web false")
+		t.Errorf("arithmetic skip must not call Search, got %q", rs.query)
 	}
 }
 
@@ -285,5 +332,48 @@ func TestAdaptiveAnswerForceBypassesRouter(t *testing.T) {
 	}
 	if rs.query != "anything" {
 		t.Errorf("force must call Search, got %q", rs.query)
+	}
+}
+
+func TestSkipGroundsInCorpusValidatesRelevance(t *testing.T) {
+	cfg := answerCfg(2)
+	ctx := context.Background()
+	rc := fakeSearcher{[]retrieval.Result{chunk("wstg", "a.md", "s", "relevant text")}}
+
+	// Snippets relevant -> override skip to ground.
+	rel := &fakeModel{queue: []*llms.ContentResponse{textResp("RELEVANT")}}
+	if !skipGroundsInCorpus(ctx, rel, rc, cfg, "how does kerberoasting work") {
+		t.Error("RELEVANT verdict should override the skip to grounding")
+	}
+
+	// Snippets off-topic -> stay skip (this is the autumn-leaves regression guard).
+	irr := &fakeModel{queue: []*llms.ContentResponse{textResp("IRRELEVANT")}}
+	if skipGroundsInCorpus(ctx, irr, rc, cfg, "write a haiku about autumn leaves") {
+		t.Error("IRRELEVANT verdict must leave the skip in place, not ground on junk")
+	}
+
+	// Anything that is not an explicit RELEVANT stays skip (safe default).
+	unclear := &fakeModel{queue: []*llms.ContentResponse{textResp("maybe")}}
+	if skipGroundsInCorpus(ctx, unclear, rc, cfg, "q") {
+		t.Error("a non-RELEVANT reply must default to staying skip")
+	}
+
+	// Empty corpus: stay skip without calling the model at all.
+	if skipGroundsInCorpus(ctx, &fakeModel{}, fakeSearcher{}, cfg, "anything") {
+		t.Error("empty corpus should leave the skip in place")
+	}
+}
+
+func TestDirectAnswerSystemPromptSupportsPayloadsAndContext(t *testing.T) {
+	p := directAnswerSystemPrompt
+	// Skip-path answers must also generate payloads and ground in user context.
+	for _, must := range []string{"ready-to-use", "context the user provided"} {
+		if !strings.Contains(p, must) {
+			t.Errorf("skip prompt missing %q:\n%s", must, p)
+		}
+	}
+	// ...while still refusing to fabricate citations or CVEs (no sources on skip).
+	if !strings.Contains(p, "citations") || !strings.Contains(p, "CVE") {
+		t.Errorf("skip prompt should keep the no-fabrication guard:\n%s", p)
 	}
 }

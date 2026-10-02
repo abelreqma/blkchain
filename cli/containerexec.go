@@ -56,18 +56,8 @@ var containerLadder = reconLadder{
 }
 
 // containerPersonaPrompt is the dedicated container/Kubernetes persona. A
-// Kind="container" task resolves to this real persona (not the generic fallback);
-// Kind="k8s" still resolves to the existing k8s persona. It keeps the executor's
-// imperative-ACT framing and bounds every step to non-destructive, scope-gated,
-// already-allowlisted tooling.
-const containerPersonaPrompt = executorPreamble + "Domain: container and Kubernetes assessment for an authorized engagement. " +
-	"Enumerate the cluster and its workloads NON-destructively with structured argv and record exact-quote evidence for each finding, " +
-	"using the already-allowlisted tools (curl against the in-scope Kubernetes API, nmap for exposed ports); do not assume kubectl, docker, or crictl are available. " +
-	"Cover, in ladder order: exposed control-plane and node surface (the API server, kubelet, etcd, and container-runtime sockets); " +
-	"RBAC and service-account rights; workload and cluster misconfiguration (privileged pods, hostPath and host-namespace mounts, overbroad role bindings); and container-escape vectors. " +
-	"Read the current Vantage from the engagement state and skew accordingly: at an external vantage focus on exposed-API and misconfiguration discovery; with an internal foothold focus on in-pod privilege and escape assessment. " +
-	"Use route_skill with domain \"k8s\" and kb_search to ground each technique. Never run a destructive action. " +
-	"When a finding is an escalation vector, propose a chained follow-on task with plan_add and set basis_ids to this task's id for provenance."
+// Kind="container" task resolves to this persona; Kind="k8s" uses the shared one.
+const containerPersonaPrompt = executorPreamble + "Domain: Kubernetes and container compromise. Map exposed API, kubelet, etcd, and runtime surfaces, then identify the active identity and enumerate namespace, workload, service-account, and RBAC permissions. Use curl and nmap when registered; do not assume kubectl, docker, or crictl exist. Trace each permission or workload setting to the shortest path toward workload control, node access, credential access, or cluster-admin. At an external vantage, prioritize exposed control-plane and anonymous access. From an in-cluster foothold, prioritize service-account token permissions, privileged workloads, hostPath/host-namespace mounts, and escape paths. Use route_skill with domain \"k8s\" and kb_search to choose a technique that fits the observed configuration. Recon records exact requests, responses, identity, and permission evidence; exploit/post-ex tasks validate the boundary crossing through run_command under the current execution policy. Create a basis_ids-linked task for each distinct escalation step. Redact secrets in evidence and capture only the minimum proof needed."
 
 func init() {
 	registerExecutor(engagement.SurfaceContainer, func(d engageDeps) surfaceExecutor {

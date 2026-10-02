@@ -130,9 +130,12 @@ func routeQuery(ctx context.Context, m toolLoopModel, cfg ragconfig.Config, ques
 
 // directAnswerSystemPrompt is the skip-path system prompt: answer from the
 // model's own knowledge, no corpus, no fabricated citations.
-const directAnswerSystemPrompt = "You are a knowledgeable security research assistant. " +
-	"Answer the user's question directly and concisely from your own knowledge. " +
-	"Do not invent citations or claim sources you were not given."
+const directAnswerSystemPrompt = "You are a knowledgeable security research assistant for authorized testing. " +
+	"Answer the user's question directly and completely from your own knowledge, grounded in any context the user " +
+	"provided (their stated target, constraints, and attached project context). When the question calls for " +
+	"payloads, exploit strings, test inputs, or commands, generate concrete, ready-to-use ones adapted to that " +
+	"context. Do not invent citations or claim sources you were not given, and do not fabricate CVE identifiers, " +
+	"version numbers, or statistics."
 
 // directAnswer answers question with a single streamed model call and no
 // retrieval. It is the skip route's handler. It mirrors AnswerLoop's streaming
@@ -144,12 +147,11 @@ func directAnswer(ctx context.Context, cfg ragconfig.Config, question string, op
 	}
 	human := question
 	if strings.TrimSpace(opts.Preface) != "" {
-		human = "Additional context:\n" + opts.Preface + "\n\n" + question
+		human = "Context the user provided:\n" + opts.Preface + "\n\n" + question
 	}
-	msgs := []llms.MessageContent{
-		llms.TextParts(llms.ChatMessageTypeSystem, directAnswerSystemPrompt),
-		llms.TextParts(llms.ChatMessageTypeHuman, human),
-	}
+	// Carry conversation memory on the skip path too: this is where
+	// conversational follow-ups ("the codeword", "an example of it") land.
+	msgs := messagesWithHistory(directAnswerSystemPrompt, opts.History, human)
 	var full strings.Builder
 	stream := func(_ context.Context, chunk []byte) error {
 		if err := ctx.Err(); err != nil {
@@ -173,11 +175,46 @@ func directAnswer(ctx context.Context, cfg ragconfig.Config, question string, op
 	return full.String(), completionTokens(cr), mapLLMError(genErr, omlxBaseURL())
 }
 
+const skipValidateSystemPrompt = "You are checking whether retrieved snippets are relevant to the user's question. " +
+	"Reply with ONLY one word, no punctuation: RELEVANT if the snippets directly address the question's topic, " +
+	"or IRRELEVANT if they are off-topic. When unsure, answer IRRELEVANT."
+
+// skipGroundsInCorpus validates a provisional skip against the corpus using the
+// local LLM: it retrieves for question and asks whether the retrieved snippets
+// are actually relevant to it. It returns true (override the skip to grounding)
+// only on an explicit RELEVANT verdict. An empty corpus, any error, or any reply
+// that is not RELEVANT leaves the skip in place, so validation never grounds on
+// off-topic results and never fails the turn.
+func skipGroundsInCorpus(ctx context.Context, l toolLoopModel, rc searcher, cfg ragconfig.Config, question string) bool {
+	results, err := rc.Search(ctx, question, cfg.TopK, nil)
+	if err != nil || len(results) == 0 {
+		return false
+	}
+	maxTok := cfg.RouteMaxTokens
+	if maxTok <= 0 {
+		maxTok = 8
+	}
+	msgs := []llms.MessageContent{
+		llms.TextParts(llms.ChatMessageTypeSystem, skipValidateSystemPrompt),
+		llms.TextParts(llms.ChatMessageTypeHuman, "Question: "+question+"\n\nSnippets:\n"+buildContext(results)),
+	}
+	resp, err := l.GenerateContent(ctx, msgs,
+		llms.WithTemperature(cfg.GradeTemperature),
+		llms.WithMaxTokens(maxTok),
+	)
+	if err != nil || resp == nil || len(resp.Choices) == 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(resp.Choices[0].Content), "RELEVANT")
+}
+
 // adaptiveAnswer routes question, then dispatches: skip -> directAnswer;
 // ground -> AnswerLoop (web-only when local retrieval is disabled). force
 // bypasses the router and always grounds locally (the /rag <q> and --rag
-// paths). route is "skip", "rag", or "web" (web when the grounded answer used
-// the web fallback).
+// paths). A provisional skip is validated against the corpus with the local LLM
+// (skipGroundsInCorpus) and overridden to grounding when the corpus can answer
+// it; the pure-arithmetic guard skip is never validated. route is "skip", "rag",
+// or "web" (web when the grounded answer used the web fallback).
 func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, question string, enabled enabledRoutes, force bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
 	if !force {
 		l, err := newOMLX(cfg, opts.Model)
@@ -185,6 +222,13 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 			return "", nil, false, nil, 0, "", err
 		}
 		kind, _ := routeQuery(ctx, l, cfg, question, enabled)
+		if kind == routeSkip && enabled.Local && !isPureArithmetic(question) {
+			// Do not answer ungrounded until the local LLM confirms the corpus
+			// cannot ground it; if it can, ground instead.
+			if skipGroundsInCorpus(ctx, l, rc, cfg, question) {
+				kind = routeGround
+			}
+		}
 		if kind == routeSkip {
 			ans, tokens, derr := directAnswer(ctx, cfg, question, opts)
 			return ans, []citation{}, false, []retrieval.Result{}, tokens, "skip", derr

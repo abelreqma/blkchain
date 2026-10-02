@@ -302,10 +302,11 @@ func reconTierPrompt(task engagement.Task, asset string, tier reconTier, sel rec
 			"Tier: %s (coverage: %s)\n"+
 			"Objective: %s\n"+
 			"%s\n"+
-			"Perform ONLY this tier's step for this asset now. Propose commands with run_command "+
-			"(structured argv, no shell, in scope). When a command returns useful output, record an "+
-			"exact quote of it with record_evidence for this task id. Do not move on to other tiers or "+
-			"other assets; the harness advances the ladder.",
+			"Perform ONLY this tier's step for this asset now. Use current coverage and observed evidence to select "+
+			"the highest-value unresolved question in this tier. State the hypothesis, prerequisite, and expected signal; "+
+			"then issue one bounded run_command call (structured argv, no shell, in scope) and inspect its actual output. "+
+			"Record an exact quote of material output with record_evidence for this task id. Do not repeat completed "+
+			"probes or move to other tiers or assets; the harness advances the ladder.",
 		task.ID, task.Surface, asset, tier.Name, strings.Join(tier.Dimensions, ", "), task.Objective, hint)
 }
 

@@ -98,9 +98,75 @@ type AnswerOpts struct {
 	Model, Preface string
 	Stream         func([]byte)
 	Stage          func(stage string)
-	NoWeb          bool
-	NoLocal        bool
-	llm            *openai.LLM // reuse this client if set; nil builds one
+	// Persona, when set, is called once with the chosen domain KEY (e.g. "ad")
+	// before the answer streams, so the UI can show the cue via personaLabel and
+	// a short status token. It is not called for the generic persona.
+	Persona func(domain string)
+	NoWeb   bool
+	NoLocal bool
+
+	History []priorTurn
+	llm     *openai.LLM // reuse this client if set; nil builds one
+}
+
+// priorTurn is one earlier message in the conversation. Role is "human" or
+// "ai" (the values the history store and langchaingo record, which match
+// llms.ChatMessageType).
+type priorTurn struct {
+	Role    string
+	Content string
+}
+
+// conversationMaxChars bounds the characters of prior conversation carried back
+// as memory. The LLM context window is 256k tokens, so this is generous
+// (~50k tokens): the WHOLE conversation stays in context for realistic sessions
+// instead of being forgotten after a few turns, while leaving ample headroom for
+// the current turn's retrieved sources and answer. Sessions that outgrow this are
+// handled by the conversation summarizer (a follow-on change) so nothing is
+// silently dropped.
+const conversationMaxChars = 200000
+
+// boundTurns trims history to the most recent turns whose total content fits
+// maxChars, preserving oldest-first order. The single newest turn is always
+// kept, even when it alone exceeds the budget, so some memory always survives.
+func boundTurns(turns []priorTurn, maxChars int) []priorTurn {
+	if len(turns) == 0 {
+		return turns
+	}
+	total := 0
+	start := len(turns)
+	for i := len(turns) - 1; i >= 0; i-- {
+		total += len(turns[i].Content)
+		if total > maxChars && i != len(turns)-1 {
+			break
+		}
+		start = i
+	}
+	return turns[start:]
+}
+
+// priorContextMaxChars bounds how much of a prior user question is folded into
+// a follow-up's retrieval query, so a long prior turn cannot dominate the
+// embedded query.
+const priorContextMaxChars = 400
+
+// retrievalQuery makes the first retrieval history-aware: it prepends the most
+// recent prior USER question (bounded) to the current question, so a follow-up
+// like "and for Windows?" still retrieves the right chunks. Prior AI answers
+// are deliberately excluded; they are long and would drown the embedded query.
+// With no prior user turn it returns the question unchanged.
+func retrievalQuery(history []priorTurn, question string) string {
+	prev := ""
+	for i := len(history) - 1; i >= 0; i-- {
+		if chatType(history[i].Role) == llms.ChatMessageTypeHuman {
+			prev = strings.TrimSpace(history[i].Content)
+			break
+		}
+	}
+	if prev == "" {
+		return question
+	}
+	return capRunes(prev, priorContextMaxChars) + "\n" + question
 }
 
 // AnswerLoop is the bounded, code-orchestrated RAG answer loop: retrieval
@@ -116,7 +182,10 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 
 	if !opts.NoLocal {
 		stage(stageRetrieving)
-		results, err = rc.Search(ctx, question, cfg.TopK, nil)
+		// History-aware first retrieval: a follow-up carries the prior user
+		// question so it retrieves the right chunks. Grading/synthesis still use
+		// the raw question below.
+		results, err = rc.Search(ctx, retrievalQuery(opts.History, question), cfg.TopK, nil)
 		if err != nil {
 			return "", nil, false, nil, 0, err
 		}
@@ -222,13 +291,22 @@ func synthesize(ctx context.Context, l *openai.LLM, cfg ragconfig.Config, questi
 
 	stage(stageAnswering)
 
-	msgs := buildMessages(question, chunks)
+	// Pick the domain-expert persona from what retrieval returned, and announce
+	// it (cue) before streaming. Generic (empty) keeps answerSystemPrompt and
+	// shows no cue. All personas share answerConstraints, so grounding,
+	// citations, payload generation, and the untrusted-source framing are
+	// identical regardless of persona.
+	domain := domainFromResults(chunks)
+	if opts.Persona != nil && personaLabel(domain) != "" {
+		opts.Persona(domain)
+	}
+
+	msgs := buildMessages(personaPrompt(domain), question, chunks, opts.History)
 	if strings.TrimSpace(opts.Preface) != "" {
-		human := "Additional context:\n" + opts.Preface + "\n\n" + buildUserPrompt(question, chunks)
-		msgs = []llms.MessageContent{
-			llms.TextParts(llms.ChatMessageTypeSystem, answerSystemPrompt),
-			llms.TextParts(llms.ChatMessageTypeHuman, human),
-		}
+		// Preface (project context + @file attachments) rides on the current
+		// human turn; the history turns stay in place ahead of it.
+		human := "Context the user provided:\n" + opts.Preface + "\n\n" + buildUserPrompt(question, chunks)
+		msgs[len(msgs)-1] = llms.TextParts(llms.ChatMessageTypeHuman, human)
 	}
 
 	var full strings.Builder

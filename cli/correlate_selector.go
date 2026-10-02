@@ -162,9 +162,10 @@ var priorEpisodeHint func(svc Service) []string
 
 // exploitSelectPrompt asks for a single, zero-nesting JSON object naming only
 // the technique (not a command).
-const exploitSelectPrompt = "You are prioritizing the exploitation technique for ONE discovered network service " +
-	"in an authorized, single-user security engagement. Choose the single most relevant known technique or CVE " +
-	"family for this product and version, grounded in the corpus notes below. Respond with ONLY one JSON object, " +
+const exploitSelectPrompt = "You are prioritizing the next offensive technique for ONE discovered network service " +
+	"in a scoped penetration test. Choose the technique or CVE family that best matches the observed product, version, " +
+	"and service evidence, grounded in the corpus notes below. Prefer a path with concrete prerequisites and a testable " +
+	"impact over a generic vulnerability association. Respond with ONLY one JSON object, " +
 	"no prose, exactly: {\"technique\": \"<short technique or CVE-family name>\"}. If the corpus notes are unrelated " +
 	"to this product or describe no exploitable weakness for it at all, respond with {\"technique\": \"\"} (empty) " +
 	"rather than guessing - an empty technique is correct for a benign service with no applicable exploit. Output " +

@@ -365,3 +365,13 @@ func TestSamplingFileOutOfRangeFallsBack(t *testing.T) {
 	}
 	assertOneNote(t, warn, "synth_top_p", "1.5")
 }
+
+func TestAnswerBudgetDefaults(t *testing.T) {
+	d := builtinDefaults()
+	if d.AnswerMaxTokens != 1800 {
+		t.Errorf("AnswerMaxTokens default = %d, want 1800 (augmented-generation budget)", d.AnswerMaxTokens)
+	}
+	if d.AnswerMaxChunks != 6 {
+		t.Errorf("AnswerMaxChunks default = %d, want 6", d.AnswerMaxChunks)
+	}
+}

@@ -746,3 +746,102 @@ func TestAnswerLoopNonCVEUsesReputableDomains(t *testing.T) {
 		t.Errorf("web domains = %v, want ReputableDomains", gotDomains)
 	}
 }
+
+func TestRetrievalQueryNoHistoryReturnsQuestion(t *testing.T) {
+	if got := retrievalQuery(nil, "what is xss?"); got != "what is xss?" {
+		t.Errorf("retrievalQuery(nil) = %q, want the question unchanged", got)
+	}
+}
+
+func TestRetrievalQueryFoldsInPriorUserQuestion(t *testing.T) {
+	history := []priorTurn{
+		{Role: "human", Content: "how do I escalate privileges on Linux?"},
+		{Role: "ai", Content: "use sudo misconfigurations, SUID binaries, and kernel exploits"},
+	}
+	got := retrievalQuery(history, "and for Windows?")
+	if !strings.Contains(got, "and for Windows?") {
+		t.Errorf("query dropped the current question: %q", got)
+	}
+	if !strings.Contains(got, "Linux") {
+		t.Errorf("query is not history-aware; the prior topic is missing: %q", got)
+	}
+}
+
+func TestRetrievalQueryIgnoresPriorAIAnswerText(t *testing.T) {
+	history := []priorTurn{
+		{Role: "human", Content: "first question"},
+		{Role: "ai", Content: "an answer mentioning ZZUNIQUEMARKER that must not steer retrieval"},
+	}
+	got := retrievalQuery(history, "follow up")
+	if strings.Contains(got, "ZZUNIQUEMARKER") {
+		t.Errorf("AI answer text leaked into the retrieval query: %q", got)
+	}
+	if !strings.Contains(got, "first question") {
+		t.Errorf("prior user question missing from the query: %q", got)
+	}
+}
+
+func TestRetrievalQueryBoundsPriorContext(t *testing.T) {
+	long := strings.Repeat("x", 600)
+	got := retrievalQuery([]priorTurn{{Role: "human", Content: long}}, "q")
+	if strings.Contains(got, strings.Repeat("x", 500)) {
+		t.Errorf("prior question was not bounded; query carries an unbounded prefix (len %d)", len(got))
+	}
+	if !strings.Contains(got, "q") {
+		t.Errorf("current question missing after bounding: %q", got)
+	}
+}
+
+func TestBoundTurnsKeepsAllUnderBudget(t *testing.T) {
+	in := []priorTurn{{Role: "human", Content: "a"}, {Role: "ai", Content: "b"}, {Role: "human", Content: "c"}}
+	got := boundTurns(in, 100)
+	if !reflect.DeepEqual(got, in) {
+		t.Errorf("boundTurns under budget = %v, want all turns unchanged", got)
+	}
+}
+
+func TestBoundTurnsDropsOldestOverBudget(t *testing.T) {
+	in := []priorTurn{
+		{Role: "human", Content: strings.Repeat("o", 50)}, // oldest
+		{Role: "ai", Content: strings.Repeat("m", 50)},
+		{Role: "human", Content: strings.Repeat("n", 50)}, // newest
+	}
+	// Budget fits the 2 newest (100) but not all 3 (150).
+	got := boundTurns(in, 120)
+	if !reflect.DeepEqual(got, in[1:]) {
+		t.Errorf("boundTurns over budget kept %d turns, want the 2 newest in order", len(got))
+	}
+}
+
+func TestBoundTurnsKeepsNewestEvenIfOverBudget(t *testing.T) {
+	in := []priorTurn{{Role: "human", Content: strings.Repeat("x", 500)}}
+	got := boundTurns(in, 100)
+	if len(got) != 1 {
+		t.Errorf("boundTurns dropped the only (over-budget) turn; want it kept so some memory survives")
+	}
+}
+
+func TestBoundTurnsEmpty(t *testing.T) {
+	if got := boundTurns(nil, 100); len(got) != 0 {
+		t.Errorf("boundTurns(nil) = %v, want empty", got)
+	}
+}
+
+func TestAnswerLoopFiresPersonaForDomain(t *testing.T) {
+	srv := fakeLLM(t, []string{`{"sufficient":true,"rewrite":"","use_web":false}`}, "grounded [1]")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "k")
+	t.Setenv("TAVILY_SETUP_TOKEN", "")
+	rc := fakeSearcher{[]retrieval.Result{chunk("skills", "attacking-active-directory/SKILL.md", "s", "kerberos ticket")}}
+	var got string
+	_, _, _, _, _, err := AnswerLoop(context.Background(), rc, answerCfg(1), "how does kerberoasting work", AnswerOpts{
+		Persona: func(dom string) { got = dom },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "ad" {
+		t.Errorf("persona cue domain = %q, want \"ad\"", got)
+	}
+}

@@ -51,6 +51,18 @@ func plainREPL() error {
 	mode := "rag"
 	var rc replClient
 	defer rc.close()
+	// convo is the in-process conversation memory for this piped/non-TTY
+	// session: prior user questions and model answers, carried back into each
+	// rag ask so the model remembers the session (the TUI reads the same memory
+	// from the history store). Agent-mode memory lives in the Hermes gateway.
+	var convo []priorTurn
+	recordConvo := func(q, ans string) {
+		if strings.TrimSpace(ans) == "" {
+			return
+		}
+		convo = append(convo, priorTurn{Role: "human", Content: q}, priorTurn{Role: "ai", Content: ans})
+		convo = boundTurns(convo, conversationMaxChars)
+	}
 	// eng stays nil until the plain REPL gets an engage mode; the final DAG
 	// snapshot below is dormant until then.
 	var eng EngagementView
@@ -120,7 +132,9 @@ func plainREPL() error {
 				_ = savePrefs(p)
 				fmt.Println(Meta.Render("rag " + boolOnOff(on)))
 			} else if q != "" {
-				printErr(replForceAsk(q, &rc))
+				ans, err := replForceAsk(q, &rc, convo)
+				printErr(err)
+				recordConvo(q, ans)
 			} else {
 				mode = "rag"
 				fmt.Println(Meta.Render("mode: rag"))
@@ -128,7 +142,9 @@ func plainREPL() error {
 		case "search", "s":
 			last = replSearch(rest, last, &rc)
 		case "ask", "a":
-			printErr(replAsk(mode, rest, &rc))
+			ans, err := replAsk(mode, rest, &rc, convo)
+			printErr(err)
+			recordConvo(rest, ans)
 		case "hermes":
 			printErr(runHermes([]string{rest}))
 		case "open", "o":
@@ -136,7 +152,9 @@ func plainREPL() error {
 		default:
 			// Bare input with no recognized verb is an ask (matches the TUI); in
 			// agent mode it runs the hermes agent instead.
-			printErr(replAsk(mode, line, &rc))
+			ans, err := replAsk(mode, line, &rc, convo)
+			printErr(err)
+			recordConvo(line, ans)
 		}
 		// After a turn, print one final DAG block. There is no live bar off a TTY.
 		if eng != nil && loadPrefs().Viz {
@@ -173,13 +191,14 @@ func boolOnOff(on bool) string {
 }
 
 // replForceAsk forces grounding for one query (the /rag <question> form),
-// bypassing the router and the rag toggle.
-func replForceAsk(query string, c *replClient) error {
+// bypassing the router and the rag toggle. history is the prior conversation;
+// it returns the answer text so the caller can record the turn.
+func replForceAsk(query string, c *replClient, history []priorTurn) (string, error) {
 	rc, err := c.get()
 	if err != nil {
-		return err
+		return "", err
 	}
-	return askWith(rc, []string{"--rag", query})
+	return askWith(rc, history, []string{"--rag", query})
 }
 
 // plainVizSnapshot writes the current DAG block once, for output that has no
@@ -239,16 +258,19 @@ func (c *replClient) close() {
 
 // replAsk routes a question by mode: rag mode uses the RAG answer path
 // (askWith); agent mode runs the hermes agent (subprocess one-shot). It mirrors
-// the TUI's dual-mode dispatch for the non-TTY fallback.
-func replAsk(mode, query string, c *replClient) error {
+// the TUI's dual-mode dispatch for the non-TTY fallback. history is the prior
+// conversation (rag mode only); it returns the answer text so the caller can
+// record the turn. Agent mode keeps its memory in the Hermes gateway, so it
+// returns no text.
+func replAsk(mode, query string, c *replClient, history []priorTurn) (string, error) {
 	if mode == "agent" {
-		return runHermes([]string{query})
+		return "", runHermes([]string{query})
 	}
 	rc, err := c.get()
 	if err != nil {
-		return err
+		return "", err
 	}
-	return askWith(rc, []string{query})
+	return askWith(rc, history, []string{query})
 }
 
 // replSearch runs a search, prints it, and returns the new results (or the

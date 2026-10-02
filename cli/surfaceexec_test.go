@@ -19,7 +19,7 @@ func TestGenericExecutorPromptIsImperative(t *testing.T) {
 		}
 	}
 	p := genericTaskPrompt("state", engagement.Task{ID: "t1", Kind: "recon", Target: "10.0.0.5", Objective: "enumerate", DoneWhen: "done"})
-	for _, want := range []string{"run_command", "Execute this task now", "Do not call plan_add"} {
+	for _, want := range []string{"run_command", "Execute this task now", "attack hypothesis", "basis_ids", "Do not call plan_add"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("genericTaskPrompt missing %q:\n%s", want, p)
 		}

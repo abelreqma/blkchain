@@ -430,35 +430,44 @@ func defineAskFlags(fs *flag.FlagSet, o *askOpts) {
 	fs.BoolVar(&o.rag, "rag", false, "force a grounded answer from the knowledge base, skipping adaptive routing")
 }
 
-func runAsk(args []string) error { return askWith(nil, args) }
+func runAsk(args []string) error {
+	// One-shot ask has no prior conversation.
+	_, err := askWith(nil, nil, args)
+	return err
+}
 
 // askWith runs `blk ask` with args. rc is a long-lived retrieval client to
 // reuse, such as the plain REPL's; nil makes one for this call and closes it.
-func askWith(rc *retrieval.Client, args []string) error {
+func askWith(rc *retrieval.Client, history []priorTurn, args []string) (string, error) {
 	var o askOpts
 	fs := newFlagSet("ask")
 	defineAskFlags(fs, &o)
 	if err := parseFlags(fs, reorder(args, nil)); err != nil {
-		return err
+		return "", err
 	}
 	jsonOut, showSources, agent := &o.json, &o.sources, &o.agent
 
 	query := strings.Join(fs.Args(), " ")
 	if query == "" {
-		return missingArg("ask", "missing question", `ask "what is SSRF?"`)
+		return "", missingArg("ask", "missing question", `ask "what is SSRF?"`)
 	}
 
 	// --agent hands the question to the Hermes agent (which has the blkChain KB
 	// tools plus web/tool access), rather than the Go answer loop.
 	if *agent {
-		return runHermes([]string{query})
+		return "", runHermes([]string{query})
 	}
+
+	// Conversation memory: bound the prior turns once, then feed them to the
+	// answer loop so the model remembers the session and retrieval is
+	// history-aware. Empty history is the stateless single-turn behavior.
+	history = boundTurns(history, conversationMaxChars)
 
 	cfg := loadConfig()
 	if rc == nil {
 		c, err := newRetrievalClient(cfg)
 		if err != nil {
-			return err
+			return "", err
 		}
 		defer c.Close()
 		rc = c
@@ -475,15 +484,19 @@ func askWith(rc *retrieval.Client, args []string) error {
 		var full strings.Builder
 		p := loadPrefs()
 		_, cits, usedWeb, _, _, _, err := adaptiveAnswerFn(context.Background(), rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{
-			Stream: newAskStream(os.Stdout, &full),
-			NoWeb:  !p.Web,
+			Stream:  newAskStream(os.Stdout, &full),
+			NoWeb:   !p.Web,
+			History: history,
+			Persona: func(domain string) {
+				fmt.Println(Meta.Render("answering as " + personaLabel(domain)))
+			},
 		})
 		if errors.Is(err, ErrNoResults) {
-			return reportNoResults(os.Stderr, false, "")
+			return "", reportNoResults(os.Stderr, false, "")
 		}
 		err = timeoutOrErr(err)
 		if err != nil && full.Len() == 0 {
-			return err
+			return "", err
 		}
 		if !strings.HasSuffix(full.String(), "\n") {
 			fmt.Println()
@@ -492,19 +505,19 @@ func askWith(rc *retrieval.Client, args []string) error {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s stream ended early: %s\n", errMark(), sanitizeTerminal(err.Error()))
 		}
-		return nil
+		return full.String(), nil
 	}
 
 	// Resolve the model once, up front, so the id in the JSON is the id the
 	// answer loop was asked to use.
 	model := resolveModel(cfg)
 	p := loadPrefs()
-	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(context.Background(), rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Model: model, NoWeb: !p.Web})
+	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(context.Background(), rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Model: model, NoWeb: !p.Web, History: history})
 	if errors.Is(err, ErrNoResults) {
-		return reportNoResults(os.Stderr, *jsonOut, model)
+		return "", reportNoResults(os.Stderr, *jsonOut, model)
 	}
 	if err != nil {
-		return timeoutOrErr(err)
+		return "", timeoutOrErr(err)
 	}
 	resp := &answerResponse{
 		Answer:    answer,
@@ -516,7 +529,7 @@ func askWith(rc *retrieval.Client, args []string) error {
 	}
 
 	if *jsonOut {
-		return printJSON(resp)
+		return resp.Answer, printJSON(resp)
 	}
 
 	// Glow-format markdown output: let glamour own the
@@ -529,7 +542,7 @@ func askWith(rc *retrieval.Client, args []string) error {
 		printResults(query, resp.Results, 0)
 	}
 	printSources(resp.Citations, resp.UsedWeb, rc.SkipRerank)
-	return nil
+	return resp.Answer, nil
 }
 
 // reportNoResults handles AnswerLoop's ErrNoResults for the non-interactive ask

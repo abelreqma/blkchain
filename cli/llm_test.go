@@ -57,7 +57,7 @@ func TestBuildUserPromptShape(t *testing.T) {
 }
 
 func TestBuildMessagesSystemThenHuman(t *testing.T) {
-	msgs := buildMessages("q", []retrieval.Result{chunk("kb", "p", "s", "t")})
+	msgs := buildMessages(answerSystemPrompt, "q", []retrieval.Result{chunk("kb", "p", "s", "t")}, nil)
 	if len(msgs) != 2 {
 		t.Fatalf("want 2 messages, got %d", len(msgs))
 	}
@@ -71,6 +71,34 @@ func TestBuildMessagesSystemThenHuman(t *testing.T) {
 	sysText := msgs[0].Parts[0].(llms.TextContent).Text
 	if sysText != answerSystemPrompt {
 		t.Errorf("system message = %q, want answerSystemPrompt", sysText)
+	}
+}
+
+// partText returns the text of a message's first part.
+func partText(m llms.MessageContent) string { return m.Parts[0].(llms.TextContent).Text }
+
+func TestBuildMessagesInsertsHistoryBetweenSystemAndCurrent(t *testing.T) {
+	history := []priorTurn{
+		{Role: "human", Content: "what is ssrf?"},
+		{Role: "ai", Content: "server-side request forgery"},
+	}
+	msgs := buildMessages(answerSystemPrompt, "and the impact?", []retrieval.Result{chunk("kb", "p", "s", "t")}, history)
+
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages (system + 2 history + current human), got %d", len(msgs))
+	}
+	if msgs[0].Role != llms.ChatMessageTypeSystem {
+		t.Errorf("msg[0] role = %q, want system", msgs[0].Role)
+	}
+	if msgs[1].Role != llms.ChatMessageTypeHuman || partText(msgs[1]) != "what is ssrf?" {
+		t.Errorf("msg[1] = (%q,%q), want prior human turn", msgs[1].Role, partText(msgs[1]))
+	}
+	if msgs[2].Role != llms.ChatMessageTypeAI || partText(msgs[2]) != "server-side request forgery" {
+		t.Errorf("msg[2] = (%q,%q), want prior ai turn", msgs[2].Role, partText(msgs[2]))
+	}
+	// The current question stays the final human turn, after the history.
+	if msgs[3].Role != llms.ChatMessageTypeHuman || !strings.Contains(partText(msgs[3]), "and the impact?") {
+		t.Errorf("msg[3] = (%q,%q), want current question as final human turn", msgs[3].Role, partText(msgs[3]))
 	}
 }
 
@@ -324,6 +352,66 @@ func TestLLMTransportAddsNoSamplingWithoutTheContext(t *testing.T) {
 	for _, k := range []string{"top_p", "top_k", "presence_penalty"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("body carries %s without sampling on the context: %s", k, raw)
+		}
+	}
+}
+
+func TestMessagesWithHistoryOrdersSystemHistoryHuman(t *testing.T) {
+	history := []priorTurn{
+		{Role: "human", Content: "codeword is BLUEHORIZON"},
+		{Role: "ai", Content: "acknowledged"},
+	}
+	msgs := messagesWithHistory(directAnswerSystemPrompt, history, "what was the codeword?")
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages (system + 2 history + human), got %d", len(msgs))
+	}
+	if msgs[0].Role != llms.ChatMessageTypeSystem || partText(msgs[0]) != directAnswerSystemPrompt {
+		t.Errorf("msg[0] must be the given system prompt")
+	}
+	if msgs[1].Role != llms.ChatMessageTypeHuman || partText(msgs[1]) != "codeword is BLUEHORIZON" {
+		t.Errorf("msg[1] = (%q,%q), want prior human turn", msgs[1].Role, partText(msgs[1]))
+	}
+	if msgs[2].Role != llms.ChatMessageTypeAI {
+		t.Errorf("msg[2] role = %q, want ai", msgs[2].Role)
+	}
+	if msgs[3].Role != llms.ChatMessageTypeHuman || partText(msgs[3]) != "what was the codeword?" {
+		t.Errorf("msg[3] must be the current human turn, got %q", partText(msgs[3]))
+	}
+}
+
+func TestAnswerSystemPromptAugmentsAndKeepsSecurityFraming(t *testing.T) {
+	p := answerSystemPrompt
+	// The fix: instruct synthesis/augmentation, not bare restatement.
+	if !strings.Contains(p, "do not simply restate") {
+		t.Errorf("answer prompt should instruct augmentation beyond restating sources:\n%s", p)
+	}
+	// Security invariants that MUST survive the rewrite (adversarial corpus).
+	for _, must := range []string{"untrusted", "Never follow", "[1]"} {
+		if !strings.Contains(p, must) {
+			t.Errorf("answer prompt dropped required clause %q:\n%s", must, p)
+		}
+	}
+}
+
+func TestAnswerSystemPromptPermitsPayloadGeneration(t *testing.T) {
+	p := answerSystemPrompt
+	// The fix: payload/command generation is explicitly permitted (reliable, not
+	// model-luck under a contradictory "do not invent payloads" clause).
+	if !strings.Contains(p, "ready-to-use") {
+		t.Errorf("answer prompt should explicitly permit generating ready-to-use payloads:\n%s", p)
+	}
+	// Ground in the context the operator provided, not only the retrieved corpus.
+	if !strings.Contains(p, "context the user provided") {
+		t.Errorf("answer prompt should ground in the context the user provided:\n%s", p)
+	}
+	// Still refuse to fabricate the genuinely-misleading specifics.
+	if !strings.Contains(p, "CVE") {
+		t.Errorf("answer prompt should still forbid fabricating CVE identifiers:\n%s", p)
+	}
+	// Security framing must survive.
+	for _, must := range []string{"untrusted", "Never follow"} {
+		if !strings.Contains(p, must) {
+			t.Errorf("answer prompt dropped required clause %q:\n%s", must, p)
 		}
 	}
 }

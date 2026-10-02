@@ -15,17 +15,68 @@ func TestExecutorPreambleAllowsGatedCommands(t *testing.T) {
 	}
 }
 
+func TestExecutorPromptsDriveTheOffensiveLifecycle(t *testing.T) {
+	for _, want := range []string{"offensive operator", "initial access", "privilege escalation", "lateral movement", "post-exploitation", "rules of engagement", "execution gate"} {
+		if !strings.Contains(executorPreamble, want) {
+			t.Errorf("executorPreamble missing offensive lifecycle instruction %q", want)
+		}
+	}
+	for _, name := range []string{"web", "ad", "cloud", "k8s", "exploit-dev", "local"} {
+		p := domainFor(name).Prompt
+		if !strings.Contains(p, "exploit") && !strings.Contains(p, "compromise") {
+			t.Errorf("%s prompt has no exploitation objective", name)
+		}
+		if !strings.Contains(p, "basis_ids") {
+			t.Errorf("%s prompt does not preserve follow-on provenance", name)
+		}
+	}
+	for _, want := range []string{"prompt-injection", "tool-use boundary", "UNTRUSTED", "basis_ids"} {
+		if !strings.Contains(aiSecDomainPrompt, want) {
+			t.Errorf("AI-security prompt missing %q", want)
+		}
+	}
+	for _, want := range []string{"cluster-admin", "exploit/post-ex", "basis_ids"} {
+		if !strings.Contains(containerPersonaPrompt, want) {
+			t.Errorf("container prompt missing %q", want)
+		}
+	}
+}
+
+func TestOffensiveReconAndExploitSelectorsUseEvidenceAndCoverage(t *testing.T) {
+	for _, want := range []string{"hypothesis", "expected signal", "Do not repeat completed probes"} {
+		p := reconTierPrompt(engagement.Task{ID: "t1", Objective: "map service"}, "10.0.0.5", reconTier{Name: "service-enum", Dimensions: []string{"ports"}}, reconSelection{})
+		if !strings.Contains(p, want) {
+			t.Errorf("recon tier prompt missing %q", want)
+		}
+	}
+	for _, want := range []string{"evidence-backed lead", "Do not require discovery of a new host"} {
+		if !strings.Contains(reconGradePrompt, want) {
+			t.Errorf("recon grader prompt missing %q", want)
+		}
+	}
+	for _, want := range []string{"highest-value uncertainty", "THIS tier only"} {
+		if !strings.Contains(reconSelectPrompt, want) {
+			t.Errorf("recon selector prompt missing %q", want)
+		}
+	}
+	for _, want := range []string{"concrete prerequisites", "testable impact", "never a command"} {
+		if !strings.Contains(exploitSelectPrompt, want) {
+			t.Errorf("exploit selector prompt missing %q", want)
+		}
+	}
+}
+
 func TestLocalDomainRegistered(t *testing.T) {
 	d := domainFor("local")
 	if d.Name != "local" {
 		t.Fatalf("domainFor(\"local\").Name = %q, want local", d.Name)
 	}
-	for _, bad := range []string{"-exec", "-delete", "chmod -R"} {
+	for _, bad := range []string{"chmod -R"} {
 		if strings.Contains(d.Prompt, bad) {
 			t.Errorf("local prompt contains destructive guidance %q", bad)
 		}
 	}
-	for _, want := range []string{"sudo -l", "-perm -4000", "getcap", "basis_ids"} {
+	for _, want := range []string{"sudo -l", "-perm -4000", "getcap", "basis_ids", "no -exec or -delete"} {
 		if !strings.Contains(d.Prompt, want) {
 			t.Errorf("local prompt missing %q", want)
 		}
@@ -102,6 +153,28 @@ func TestDomainForKnownAndUnknown(t *testing.T) {
 	}
 	if d := domainFor("web"); strings.TrimSpace(d.Prompt) == "" {
 		t.Error("web domain has empty prompt")
+	}
+}
+
+func TestDomainForTaskFallsBackToSurface(t *testing.T) {
+	cases := []struct {
+		name string
+		task engagement.Task
+		want string
+	}{
+		{"web exploit", engagement.Task{Kind: "exploit", Surface: engagement.SurfaceWeb}, "web"},
+		{"ad exploit", engagement.Task{Kind: "exploit", Surface: engagement.SurfaceAD}, "ad"},
+		{"cloud aws exploit", engagement.Task{Kind: "exploit", Surface: engagement.SurfaceCloudAWS}, "cloud"},
+		{"container exploit", engagement.Task{Kind: "exploit", Surface: engagement.SurfaceContainer}, "container"},
+		{"ai exploit", engagement.Task{Kind: "exploit", Surface: engagement.SurfaceAISecurity}, "ai-security"},
+		{"local exploit", engagement.Task{Kind: "exploit", Surface: engagement.SurfaceLocal}, "local"},
+		{"network exploit", engagement.Task{Kind: "exploit", Surface: engagement.SurfaceNetwork}, "recon"},
+		{"known kind wins", engagement.Task{Kind: "web", Surface: engagement.SurfaceLocal}, "web"},
+	}
+	for _, tc := range cases {
+		if got := domainForTask(tc.task); got.Name != tc.want {
+			t.Errorf("%s: domainForTask() = %q, want %q", tc.name, got.Name, tc.want)
+		}
 	}
 }
 

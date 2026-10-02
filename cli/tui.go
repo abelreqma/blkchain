@@ -334,6 +334,10 @@ type healthMsg struct { // status-dot check: qdrant, embed_server, llm
 
 // stageMsg is the AnswerLoop phase name ("retrieving", "grading", ...), pushed
 // through prog.Send by the Stage callback and shown as the working verb.
+// personaMsg carries the chosen domain-expert key for the current rag turn,
+// sent once before the answer streams.
+type personaMsg string
+
 type stageMsg string
 
 // noResultsMsg ends a turn when AnswerLoop found nothing to answer from. It is
@@ -504,6 +508,10 @@ type model struct {
 	// fields track the gateway session handle and the health/transport shown in
 	// the status line.
 	mode string
+	// persona is the domain key of the expert that answered the current/last rag
+	// turn (e.g. "ad"), set from a personaMsg; "" for the generic persona. The
+	// status ribbon shows it; it is cleared at the start of each new rag turn.
+	persona string
 	// engageMode is the session autonomy mode (secgate.Safe default, or Auto) that a
 	// gate-governed REPL engagement (replengage.go runReplEngage) feeds into
 	// buildEngageGate; engageOverride is the auto-scope override (/auto override). The
@@ -823,6 +831,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.liveTokens++
 		return m, nil
+
+	case personaMsg:
+		if !m.working {
+			return m, nil // stray persona cue after cancel/done
+		}
+		m.persona = string(msg)
+		// Print the cue above the streaming answer; set the status token too.
+		return m, tea.Println(Meta.Render("answering as " + personaLabel(string(msg))))
 
 	case stageMsg:
 		if !m.working {
@@ -1402,6 +1418,25 @@ func (m model) currentModel() string {
 	return m.cfg.DefaultModel
 }
 
+// conversationHistory returns the bounded prior conversation for the current
+// session, read from the persistent history store, so a rag turn can carry it
+// back as memory. It is called before the current turn is recorded, so it holds
+// only completed prior turns. Returns nil when there is no store or no session.
+func (m model) conversationHistory() []priorTurn {
+	if m.hist == nil || m.sess == nil {
+		return nil
+	}
+	turns, err := m.hist.Messages(context.Background(), m.sess.id)
+	if err != nil || len(turns) == 0 {
+		return nil
+	}
+	pt := make([]priorTurn, len(turns))
+	for i, t := range turns {
+		pt[i] = priorTurn{Role: t.Role, Content: t.Content}
+	}
+	return boundTurns(pt, conversationMaxChars)
+}
+
 // recordTurn appends the completed user question and answer to the current
 // session transcript. It is best-effort: a nil session or an IO error just skips
 // persistence (an errSessionFull is surfaced as a muted note by the caller path).
@@ -1775,6 +1810,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			// RAG mode: route through the adaptive router (skip/ground/web).
 			force := m.forceRag
 			m.forceRag = false
+			m.persona = "" // cleared for the new turn; set when its persona cue arrives
 			return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.streamCmd(ctx, arg, preface, m.turnStart, force))
 		}
 		return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.dispatchCmd(ctx, verb, arg, m.turnStart))
@@ -1788,6 +1824,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.working = true
 		m.tickGen++
 		m.workingVerb = workingVerbLabel("generate")
+		m.persona = ""
 		m.live = ""
 		m.turnStart = time.Now()
 		m.liveTokens = 0
@@ -2175,6 +2212,12 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 			Model:   turnModel,
 			Preface: preface,
 			NoWeb:   !p.Web,
+			History: m.conversationHistory(),
+			Persona: func(domain string) {
+				if prog != nil {
+					prog.Send(personaMsg(domain))
+				}
+			},
 			Stream: func(b []byte) {
 				streamed = true
 				if prog != nil {
@@ -2222,6 +2265,11 @@ func (m model) generateCmd(ctx context.Context, question string, results []retri
 		streamed := false
 		full, cits, tokens, err := synthFromResultsFn(ctx, cfg, question, results, AnswerOpts{
 			Model: turnModel,
+			Persona: func(domain string) {
+				if prog != nil {
+					prog.Send(personaMsg(domain))
+				}
+			},
 			Stream: func(b []byte) {
 				streamed = true
 				if prog != nil {
@@ -2686,6 +2734,12 @@ func (m model) statusLine() string {
 	// naming the active provider, and nothing is added in the common off case.
 	if seg, ok := webStatusSegment(activeWebProvider(), m.prefs.Web); ok {
 		retrieval = append(retrieval, seg)
+	}
+	// The domain-expert persona for this turn, shown only when one was chosen
+	// (generic adds nothing). It is a low-priority retrieval segment, so it drops
+	// with the others when the ribbon is narrow.
+	if m.persona != "" {
+		retrieval = append(retrieval, "persona "+m.persona)
 	}
 	return m.composeStatus(style.Render(dot), tone, "rag", m.currentModel(), label, retrieval)
 }

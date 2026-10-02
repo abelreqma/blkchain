@@ -335,3 +335,37 @@ func TestConfirmPickerPoCBodySanitized(t *testing.T) {
 		t.Fatalf("the PoC body must be sanitized of raw escapes:\n%q", out)
 	}
 }
+
+// Reproduction: a y keypress delivered to the BASE model.Update while an
+// engagement is working and the confirm overlay is open must resolve the gate.
+// This is the real key path the TUI uses; the other tests inject
+// confirmResolvedMsg directly and skip it.
+func TestEngageConfirmKeyResolvesWhileWorking(t *testing.T) {
+	m := newTestModel(t)
+	m.working = true // an engagement turn is in flight
+	reply := make(chan confirmResult, 1)
+	nm, _ := m.Update(confirmMsg{cmd: testConfirmCommand(), reply: reply})
+	m = nm.(model)
+	if _, ok := m.overlay.(confirmPicker); !ok {
+		t.Fatalf("confirm overlay should be open, got %T", m.overlay)
+	}
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = nm.(model)
+	if cmd == nil {
+		t.Fatalf("pressing y with the confirm overlay open must produce a resolve command")
+	}
+	nm, rcmd := m.Update(cmd())
+	m = nm.(model)
+	if m.overlay != nil {
+		t.Fatalf("y should resolve and clear the overlay")
+	}
+	drainCmd(rcmd)
+	select {
+	case got := <-reply:
+		if !got.allow {
+			t.Fatalf("y should allow, got %+v", got)
+		}
+	default:
+		t.Fatalf("y should send allow on the reply channel")
+	}
+}

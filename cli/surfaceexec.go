@@ -60,7 +60,7 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 		return e.runExploitPhase(ctx, task)
 	}
 
-	dom := domainFor(task.Kind)
+	dom := domainForTask(task)
 
 	reg := tooldef.NewRegistry()
 
@@ -120,6 +120,6 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 }
 
 func genericTaskPrompt(proj string, task engagement.Task) string {
-	return fmt.Sprintf("Engagement state:\n%s\n\nYour task %s [%s]:\n target: %s\n objective: %s\n done when: %s\n\nExecute this task now with run_command; record_evidence of its output. Do not call plan_add for this task.",
+	return fmt.Sprintf("Engagement state:\n%s\n\nYour task %s [%s]:\n target: %s\n objective: %s\n done when: %s\n\nExecute this task now. Advance the objective with the strongest evidence-backed action available. State the attack hypothesis, prerequisite, and expected signal, then make one bounded run_command call against the task target. Inspect the real output and adapt; record an exact quote of material output with record_evidence. If blocked, preserve the denial and its reason rather than retrying through another path. Do not call plan_add for this task; create a separate task only for a distinct, newly evidenced next step and link it with basis_ids.",
 		proj, task.ID, task.Kind, task.Target, task.Objective, task.DoneWhen)
 }

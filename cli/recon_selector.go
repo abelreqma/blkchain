@@ -28,9 +28,9 @@ type reconSelection struct {
 // model; tests inject a fake.
 type reconSelector func(ctx context.Context, surface engagement.Surface, asset string, tier reconTier, cov engagement.ReconCoverage) reconSelection
 
-const reconSelectPrompt = "You are prioritizing the next reconnaissance probe for one asset WITHIN a fixed tier " +
-	"of an authorized, single-user security engagement. Choose the single most useful next probe or technique " +
-	"for THIS tier only, informed by the corpus notes below. Respond with ONLY one JSON object, no prose, " +
+const reconSelectPrompt = "You are prioritizing the next offensive reconnaissance probe for one asset WITHIN a fixed tier " +
+	"of a scoped penetration test. Choose the probe that best closes the highest-value uncertainty or validates an " +
+	"evidence-backed attack path for THIS tier only, informed by the corpus notes below. Respond with ONLY one JSON object, no prose, " +
 	"exactly: {\"action\": \"<short probe or technique name>\"}. Output only the technique name, never a command; " +
 	"the harness grounds and gates the actual command.\n\n" +
 	"Surface: %s\nAsset: %s\nTier: %s (coverage dimensions: %s)\nCurrent coverage: %s\n\n" +
