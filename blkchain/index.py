@@ -113,8 +113,8 @@ def ensure_collection(collection: str | None = None) -> None:
 
 
 def _existing_hashes(client: QdrantClient, collection: str) -> dict[str, str | None]:
-    """Map each existing point id to its stored content_hash (None for a legacy
-    point that predates content hashing). Lets resume skip unchanged chunks and
+    """Map each existing point id to its stored content_hash (None for a point
+    that predates content hashing). Lets resume skip unchanged chunks and
     re-embed changed ones; since the id is stable, a re-embed overwrites the same
     point rather than creating a duplicate."""
     out: dict[str, str | None] = {}
@@ -200,7 +200,7 @@ def _index_chunks(
             pid = _point_id(chunk.id)
             if pid in existing:
                 stored = existing[pid]
-                # Skip unchanged chunks (and legacy points with no stored hash);
+                # Skip unchanged chunks (and points with no stored hash);
                 # re-embed when the content changed, overwriting the same id.
                 if stored is None or stored == content_hash(chunk.text):
                     if index_scope is not None:

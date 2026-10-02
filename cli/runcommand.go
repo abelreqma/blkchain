@@ -128,7 +128,7 @@ func newRunCommandTool(g *secgate.Gate, capBytes int, timeout time.Duration, wor
 // (phase/surface/armed) in cmdCtx stamped onto every Command the tool builds, so
 // the gate derives the per-action tier for the task's phase (exploit/post-ex
 // require an armed task and force per-action confirmation). A zero cmdCtx is the
-// recon/unarmed legacy posture. grounder, when non-nil, grounds each proposed
+// recon/unarmed default posture. grounder, when non-nil, grounds each proposed
 // command against the tool's real interface before the gate authorizes it (a
 // hallucinated flag is rejected and re-grounded, not executed); nil disables
 // grounding.

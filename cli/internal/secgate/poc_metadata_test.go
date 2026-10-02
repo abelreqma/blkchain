@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+// TestPoCMetadataDoesNotAffectDecision proves the interpreter-PoC display
+// fields on Command (PoCIsInterpreter/PoCHash/PoCBody) are pure metadata: setting
+// them must not change any allow/deny decision, because no gate layer reads them.
+// Both an allowed command and a denied (destructive) command are checked with the
+// fields set versus unset, including a PoCBody that contains shell metacharacters
+// and newlines - which would trip metaDecision if any decision path inspected it.
 func TestPoCMetadataDoesNotAffectDecision(t *testing.T) {
 	withPoC := func(c Command) Command {
 		c.PoCIsInterpreter = true

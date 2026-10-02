@@ -7,6 +7,15 @@ import (
 	"blkchain/cli/internal/engagement"
 )
 
+// engageevidence.go is the REPL's bounded, session-scoped, on-demand evidence
+// accessor. The REPL/TUI model holds only the read-only Snapshot,
+// not the engagement Store (ws.Store lives inside runReplEngage's goroutine), so
+// a structured /evidence view cannot read evidence directly. runReplEngage
+// registers the current engagement's evidence source here while it runs; the TUI
+// calls EngageEvidence(taskID) on demand (when the operator opens the view), and
+// the result is bounded so a large evidence set cannot bloat the UI or stall the
+// ~10Hz render. Evidence is deliberately NOT embedded in the polled Snapshot.
+
 const (
 	// maxEvidenceRows caps how many evidence rows the accessor returns for a task.
 	maxEvidenceRows = 50

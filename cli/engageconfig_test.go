@@ -125,6 +125,8 @@ func TestAutodetectEngageConfigAbsent(t *testing.T) {
 	}
 }
 
+// TestLoadEngageConfigExploitTools: the exploit_tools key is in the known
+// schema (KnownFields is fail-closed, so an unknown key would error) and parses.
 func TestLoadEngageConfigExploitTools(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

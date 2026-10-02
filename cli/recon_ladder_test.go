@@ -57,7 +57,9 @@ func TestRegisterLadderMakesLadderRetrievable(t *testing.T) {
 }
 
 func TestLadderForUnknownSurfaceFallsBackToGeneric(t *testing.T) {
-
+	// A synthetic surface nothing registers: real surfaces (e.g. SurfaceWeb)
+	// now have dedicated ladders, so the fallback must be probed with a surface
+	// that stays unregistered.
 	l := ladderFor(engagement.Surface("web-registry-probe-surface"))
 	if len(l) != 1 {
 		t.Fatalf("generic fallback ladder has %d tiers, want 1", len(l))

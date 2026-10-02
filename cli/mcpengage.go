@@ -252,6 +252,10 @@ func (svc engageService) handle(ctx context.Context, ss *mcp.ServerSession, in m
 	}
 	defer os.RemoveAll(scratch)
 
+	// The MCP engage tool always runs with an inline scope and no project cwd, so
+	// it keeps the default policy (empty gatePolicy): confirm=auto stays bounded by
+	// the external allowlist + scope + gate, not the unattended-/auto floor,
+	// which is a property of the interactive `blk engage` CLI.
 	gate := buildEngageGate(ws, p.Scope, mode, confirm, approvals, scratch, gatePolicy{}, func(action, detail string) {
 		_ = ws.AuditLine("secgate", action, detail)
 	})
@@ -268,7 +272,8 @@ func (svc engageService) handle(ctx context.Context, ss *mcp.ServerSession, in m
 	toolHelp, toolHelpClose := openToolHelpCache()
 	defer toolHelpClose()
 	deps.ToolHelp = toolHelp
-
+	// Seed the engagement's initial vantage from scope; a seed error is
+	// logged, not fatal.
 	if serr := seedInitialVantage(ctx, ws.Store, p.Scope); serr != nil {
 		fmt.Fprintf(os.Stderr, "engage: vantage seed failed: %v\n", serr)
 	}

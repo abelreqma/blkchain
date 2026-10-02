@@ -351,7 +351,7 @@ func TestApplyAllowsDoneToActive(t *testing.T) {
 	}
 }
 
-// A-applyLocked (EXPAND): a task upserted with an invalid (non-empty) Surface is
+// A task upserted with an invalid (non-empty) Surface is
 // rejected transactionally - nothing is written and the revision is unchanged.
 func TestApplyRejectsInvalidSurfaceTransactionally(t *testing.T) {
 	s := openTemp(t)

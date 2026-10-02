@@ -48,7 +48,8 @@ class PayloadContractKeysTest(unittest.TestCase):
 
 
 class EmbedWireContractTest(unittest.TestCase):
-    ''
+    """The embed_server wire shapes live in the pure blkchain.embed_wire module,
+    reciprocal to TestEmbedWireContractKeys. Skipped if that module is absent."""
 
     def setUp(self):
         try:

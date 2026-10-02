@@ -10,12 +10,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// engageconfig.go loads the per-project .blkchain/config.yaml gate policy. This
+// file is distinct from rag.json: it is gate policy only. Its three keys feed
+// the composition root (buildEngageGate): denied_binaries is always
+// respected, allowed_binaries bounds unattended /auto, and allow_interpreter_poc
+// enables the interpreter-PoC HITL exception (default false).
+
 // engageConfig is the parsed .blkchain/config.yaml.
 type engageConfig struct {
 	DeniedBinaries      []string        `yaml:"denied_binaries"`
 	AllowedBinaries     allowedBinaries `yaml:"allowed_binaries"`
 	AllowInterpreterPoC bool            `yaml:"allow_interpreter_poc"`
-
+	// ExploitTools extends the per-finding exploit-tier allowlist with the
+	// operator's own vetted structured-argv exploit tools, in addition to the
+	// code-owned default catalog. It is additive and always bounded by
+	// denied_binaries, the gate, and per-action HITL confirmation: it can only add
+	// candidates the operator vetted, never relax a denylist.
 	ExploitTools []string `yaml:"exploit_tools"`
 }
 

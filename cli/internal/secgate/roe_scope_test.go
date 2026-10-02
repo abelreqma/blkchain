@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+// roe_scope_test.go is the consolidated adversarial gate matrix for scope and
+// rate-of-engagement policy. The behavior's unit tests live in scope_test.go and
+// gate_test.go; these pin the adversarial assertions in one place and run under
+// the package's `-race` gate.
+
+// Out-of-scope fails closed. A target listed in both In Scope and Out of
+// Scope is denied (out wins).
 func TestA5_OutOfScopeFailsClosed(t *testing.T) {
 	s, err := BuildScope(ScopeSpec{In: []string{"10.0.0.5"}, Out: []string{"10.0.0.5"}})
 	if err != nil {
@@ -21,6 +28,8 @@ func TestA5_OutOfScopeFailsClosed(t *testing.T) {
 	}
 }
 
+// /auto with an empty allowed_binaries falls back to HITL; with no confirmer
+// that denies.
 func TestA6_AutoEmptyAllowlistFallsBackToHITL(t *testing.T) {
 	g := &Gate{Mode: Auto, Scope: okScope(t), Allow: NewAllowlist("nmap"), UnattendedAllow: NewAllowlist()}
 	if err := g.Start(); err != nil {
@@ -32,6 +41,9 @@ func TestA6_AutoEmptyAllowlistFallsBackToHITL(t *testing.T) {
 	}
 }
 
+// /auto without scope is refused unless an override is logged; with the
+// override, recon proceeds (no-target command) and a targeted command still
+// fails closed.
 func TestA7_AutoNoScopeOverrideReconProceedsAndLogs(t *testing.T) {
 	// Refused without override.
 	g0 := &Gate{Mode: Auto, Allow: NewAllowlist("curl")}
@@ -61,6 +73,7 @@ func TestA7_AutoNoScopeOverrideReconProceedsAndLogs(t *testing.T) {
 	}
 }
 
+// A command exceeding the RoE rate is denied.
 func TestA8_RateExceededDenied(t *testing.T) {
 	s, err := BuildScope(ScopeSpec{In: []string{"10.0.0.0/24"}, Rate: "1/s"})
 	if err != nil {

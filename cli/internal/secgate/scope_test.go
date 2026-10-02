@@ -162,6 +162,8 @@ func TestScopeAllowEmptyBaseNameIsError(t *testing.T) {
 	}
 }
 
+// --- BuildScope, Rate, Targets ---
+
 func TestBuildScopeInOutTargets(t *testing.T) {
 	s, err := BuildScope(ScopeSpec{
 		In:      []string{"10.0.0.0/24", "host.example.com"},
@@ -184,7 +186,7 @@ func TestBuildScopeInOutTargets(t *testing.T) {
 }
 
 func TestBuildScopeOutWinsOverIn(t *testing.T) {
-
+	// A target listed in BOTH in and out must fail closed.
 	s, err := BuildScope(ScopeSpec{
 		In:  []string{"dup.example.com"},
 		Out: []string{"dup.example.com"},

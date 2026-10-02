@@ -19,6 +19,25 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
+// localexec.go is the LOCAL surface executor: post-access privilege-escalation
+// enumeration and read-only target/binary analysis. It registers through the
+// surfaceExecutor/recon-ladder seams and prefixes every package identifier with
+// "local" so it cannot collide with a sibling surface.
+//
+// Two behaviors:
+//   - local enumeration (Kind "local"/"exploit-dev"): reuses genericExecutor, so
+//     a recon-phase task runs the localLadder below and an exploit task runs the
+//     armed lifecycle.
+//   - target analysis (Kind "target-analysis"): a dedicated read-only loop whose
+//     run_command is wrapped with the target-self-exec guarantee - the analysis
+//     target is inspected, never executed. Defects parsed from the verbatim
+//     evidence feed the correlation chain with provenance.
+//
+// The LOCAL gate profile (cli/internal/secgate) already confirms every command
+// and fails closed with no confirmer; this file does not change the gate. The
+// guard here is an executor-owned structural control; the durable gate-level rule
+// lives in secgate.
+
 func init() {
 	registerExecutor(engagement.SurfaceLocal, func(d engageDeps) surfaceExecutor {
 		return localExecutor{genericExecutor{d: d}}
@@ -55,7 +74,7 @@ func (e localExecutor) Run(ctx context.Context, task engagement.Task) (string, e
 	}
 	// Vantage reachability (fail-closed), mirroring genericExecutor.Run: a surface
 	// the current vantage does not reach cannot be entered; a store read error
-	// does not proceed ungated. An unset vantage ("") is legacy and unrestricted.
+	// does not proceed ungated. An unset vantage ("") is unrestricted.
 	v, err := e.d.Store.Vantage(ctx)
 	if err != nil {
 		return fmt.Sprintf("executor: task %s could not read the engagement vantage: %v", task.ID, err), nil
@@ -66,6 +85,11 @@ func (e localExecutor) Run(ctx context.Context, task engagement.Task) (string, e
 	return e.localRunTargetAnalysis(ctx, task)
 }
 
+// localRunTargetAnalysis drives one read-only target-analysis task. It builds the
+// same read-only tool set the generic loop uses, but swaps in the X2-guarded
+// run_command so the analysis target can never be executed. After the loop it
+// scans the evidence this run recorded for local privesc defects and applies the
+// unarmed follow-on candidates they imply (with provenance).
 func (e localExecutor) localRunTargetAnalysis(ctx context.Context, task engagement.Task) (string, error) {
 	dom := domainFor(task.Kind) // the existing "target-analysis" persona
 	activeTask := func() string { return task.ID }
@@ -89,7 +113,9 @@ func (e localExecutor) localRunTargetAnalysis(ctx context.Context, task engageme
 			Phase:   secgate.Phase(string(task.Phase)),
 			Surface: secgate.Surface(string(task.Surface)),
 			Armed:   task.Armed,
-
+			// Kind/Target carry the read-only invariant to the gate so the
+			// gate-level TargetSelfExecViolation governs this primary target-analysis
+			// path too, with localIsTargetBinary below as the pre-gate belt.
 			Kind:   task.Kind,
 			Target: task.Target,
 		}
@@ -313,6 +339,13 @@ type localDefectRule struct {
 	phrases []string       // lowercased substrings; any match triggers the rule
 }
 
+// localDefectRules are evaluated in this fixed order, so a quote that trips
+// several yields candidates in a stable sequence. Each rule reads read-only
+// enumeration/analysis output (getcap, ls -l, sudo -l, id, strings, file
+// contents) and names a privesc vector. Vectors that only need more read-only
+// inspection become a target-analysis follow-on (stays in scope); vectors that
+// require an active step become an UNARMED exploit candidate (the armed
+// lifecycle gates execution); a credential becomes an auth follow-on.
 var localDefectRules = []localDefectRule{
 	{
 		key:       "capability-privesc",

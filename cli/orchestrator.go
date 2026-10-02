@@ -52,9 +52,18 @@ type engageDeps struct {
 	// production composition root (buildEngageDeps) sets it; tests default it off
 	// so the generic-loop regression tests keep their behavior.
 	ReconTiers bool
-
+	// ExploitTools is the operator's .blkchain/config.yaml exploit_tools list:
+	// vetted structured-argv tools that extend the per-finding exploit-tier
+	// allowlist for every exploit task. Empty is the code-owned default catalog only.
+	// The engage entrypoints copy it from gatePolicy after buildEngageDeps.
 	ExploitTools []string
-
+	// ArmReq is the operator arm gate for armed exploitation: the exploit
+	// executor calls it for an UNARMED exploit/post-ex task before running anything,
+	// in any mode (not AutoAsker-suppressed), so /auto cannot reach armed
+	// exploitation without a human. Only the operator's approval arms (via armTask);
+	// the model never arms. nil disables the push (the gate then denies every
+	// exploit command until the operator arms out of band). The REPL/TUI session
+	// wires a widget ArmRequester here; the CLI arms proactively via `blk engage arm`.
 	ArmReq ArmRequester
 }
 
@@ -249,7 +258,10 @@ func newDispatchBatchToolWith(d engageDeps, exec func(ctx context.Context, d eng
 					skipped = append(skipped, batchResult{TaskID: id, Result: "skipped: task is " + batchErrTaskNA})
 					continue
 				}
-
+				// A blocked task is not actionable: the model never auto-dispatches an
+				// ungrounded corpus-coverage-gap candidate (citation-gate
+				// enforcement). It stays operator-visible and can be re-planned once
+				// grounded; arming is separately refused by armTask.
 				if task.Status == engagement.StatusBlocked {
 					skipped = append(skipped, batchResult{TaskID: id, Result: "skipped: task is " + batchErrTaskBlocked})
 					continue

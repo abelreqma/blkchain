@@ -38,8 +38,8 @@ const MinCitationScore = 0.0
 // bug; the vendor word alone must never ground. (Live-corpus validated: real
 // product exploit pages carry both the vendor and the product word; too-strict
 // cases fail safe to a coverage-gap, never a false ground. A generic 3rd suffix
-// token like "server" is the one case that could over-restrict - see DEFERED;
-// drop it only if the live sweep shows a real coverage gap.)
+// token like "server" is the one case that could over-restrict; drop it only if
+// a real coverage gap appears.)
 func citationTerm(subject string) string {
 	return strings.Join(strings.Fields(strings.ToLower(subject)), " ")
 }

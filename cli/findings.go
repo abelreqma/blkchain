@@ -1,5 +1,12 @@
 package main
 
+// findings.go holds the shared, code-parsed engagement models. Findings,
+// assets, services, and TLS details are parsed in code from verbatim evidence
+// (never asserted by the model), and every record carries Provenance tracing it
+// to the exact evidence quote it came from. The per-type parsers live in their
+// own files (findings_asset.go, findings_service.go, findings_tls.go,
+// findings_finding.go); correlation (correlate.go) consumes the Service model.
+
 // Provenance ties a parsed record to the exact evidence it came from: the task
 // that produced the evidence and the evidence-quote row id. A record whose
 // provenance is not valid has no verifiable source and is rejected by the

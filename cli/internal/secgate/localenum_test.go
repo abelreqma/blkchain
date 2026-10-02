@@ -8,6 +8,13 @@ import (
 	"testing"
 )
 
+// localenum_test.go is the acceptance + adversarial suite for the
+// gate-level target-self-execution denial: a Kind=="target-analysis" command
+// whose resolved binary is its own analysis target must be denied, before
+// confirmation, on every path, and arming/mode/profile must not relax it. The
+// read-only inspection of that same target (the target as an ARG to a tool) must
+// stay allowed, and the EXTERNAL profile must be unaffected.
+
 // x2Cmd builds a target-analysis Command for the given binary and target.
 func x2Cmd(binary, target string, args ...string) Command {
 	return Command{Kind: "target-analysis", Target: target, Binary: binary, Args: args}
@@ -23,7 +30,7 @@ func x2WriteFixture(t *testing.T, dir, name string) string {
 	return p
 }
 
-// x2WantDeny asserts c is denied by the X2 self-exec rule (the Reason names the
+// x2WantDeny asserts c is denied by the self-exec rule (the Reason names the
 // analysis target), not by some other layer.
 func x2WantDeny(t *testing.T, g *Gate, c Command) {
 	t.Helper()

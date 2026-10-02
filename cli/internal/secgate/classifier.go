@@ -28,13 +28,13 @@ var deniedBinaries = map[string]bool{
 	"python": true, "python2": true, "python3": true, "perl": true,
 	"ruby": true, "node": true, "nodejs": true, "php": true, "lua": true,
 	"awk": true, "gawk": true, "find": true,
-	// exec wrappers (S1)
+	// exec wrappers
 	"nsenter": true, "unshare": true, "setpriv": true, "flock": true,
 	"capsh": true, "ionice": true, "taskset": true, "setarch": true,
 	"chrt": true, "runcon": true, "eatmydata": true,
-	// interpreters (S1)
+	// interpreters
 	"expect": true, "tclsh": true, "wish": true,
-	// macOS interpreters and tracers (S1)
+	// macOS interpreters and tracers
 	"osascript": true, "lldb": true, "dtrace": true,
 }
 

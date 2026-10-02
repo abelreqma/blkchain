@@ -59,6 +59,9 @@ func TestTierMatrixArmRequirement(t *testing.T) {
 	}
 }
 
+// Surface is informational for the tier, so ad/cloud/per-CSP/container/ai-security
+// do not perturb it. For every surface, recon stays auto and unarmed exploit stays
+// refused.
 func TestTierMatrixSurfaceAgnostic(t *testing.T) {
 	surfaces := []Surface{
 		SurfaceLocal, SurfaceNetwork, SurfaceWeb, SurfaceAD,

@@ -51,15 +51,30 @@ func externalEngageAllowlist() []string {
 	}
 }
 
+// gatePolicy carries the .blkchain/config.yaml gate policy and the
+// auto-scope override into buildEngageGate. A zero gatePolicy is the default
+// posture (nil UnattendedAllow runs unattended /auto, no config
+// denylist, no interpreter PoC, no override).
 type gatePolicy struct {
 	DeniedBinaries      []string
 	UnattendedAllow     *secgate.Allowlist
 	AllowInterpreterPoC bool
 	AutoScopeOverride   bool
-
+	// ExploitTools is the operator's config exploit_tools list. It is not a
+	// gate field (the gate does not read it); buildEngageGate ignores it and the
+	// engage entrypoints copy it onto engageDeps for the exploit executor.
 	ExploitTools []string
 }
 
+// buildEngageGate is the single composition root for the engage gate. It
+// selects the allowlist by profile: the external allowlist plus the scope's
+// `allow <bin>` lines when the scope is not local, and no allowlist at all for
+// local (ClassifyLocal governs there; every local command is human-confirmed
+// regardless). It also builds the one and only copy of the Protected-paths
+// recipe (the engagement's own artifacts, guarded from an executor's file
+// arguments in the LOCAL profile) and sets Scratch. The config policy and
+// auto-scope override are threaded onto the Gate here. The caller starts the
+// returned gate.
 func buildEngageGate(ws *engagement.Workspace, scope *secgate.Scope, mode secgate.Mode, confirm secgate.Confirmer, approvals *secgate.SessionApprovals, scratch string, policy gatePolicy, audit func(action, detail string)) *secgate.Gate {
 	var allow *secgate.Allowlist
 	if scope == nil || !scope.Local() {

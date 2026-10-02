@@ -19,6 +19,11 @@ func init() {
 	registerLadder(engagement.SurfaceCloudAzure, cloudAzureLadder)
 }
 
+// cloudAzureLadder refines the generic cloud ladder's metadata/IAM tier for Azure:
+// the IMDS endpoint (169.254.169.254, identity/oauth2/token for managed-identity
+// token theft) and Blob storage for exposure, probed within scope with the
+// allowlisted curl (the az CLI is not allowlisted).
+// Built on already-allowlisted tools.
 var cloudAzureLadder = reconLadder{
 	{Index: 0, Name: "public-asset-discovery", Dimensions: []string{"cloud-assets"}},
 	{Index: 1, Name: "service-endpoint-fingerprint", Dimensions: []string{"cloud-endpoints", "cloud-services"}},

@@ -80,6 +80,10 @@ func TestLocalProfileKeepsEnforceabilityDenials(t *testing.T) {
 	}
 }
 
+// Exec-wrappers and macOS interpreters that re-exec or script
+// arbitrary code must be denied in the LOCAL profile on the no-human path (no
+// confirmer), by base name, whatever their args and whatever their path. Under HITL
+// they are surfaced for approval instead.
 func TestLocalProfileDeniesExecWrappersAndMacInterpreters(t *testing.T) {
 	g := localGateNoConfirmer(t, "local\n")
 	denied := []Command{

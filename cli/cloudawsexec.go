@@ -20,6 +20,10 @@ func init() {
 	registerLadder(engagement.SurfaceCloudAWS, cloudAWSLadder)
 }
 
+// cloudAWSLadder refines the generic cloud ladder's metadata/IAM tier for AWS: the
+// IMDS endpoint (169.254.169.254) for role-credential theft and S3 for storage
+// exposure, probed within scope with the allowlisted curl (the aws CLI is not
+// allowlisted). Built on already-allowlisted tools.
 var cloudAWSLadder = reconLadder{
 	{Index: 0, Name: "public-asset-discovery", Dimensions: []string{"cloud-assets"}},
 	{Index: 1, Name: "service-endpoint-fingerprint", Dimensions: []string{"cloud-endpoints", "cloud-services"}},

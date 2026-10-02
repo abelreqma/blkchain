@@ -94,6 +94,9 @@ func TestRouteQueryClassifier(t *testing.T) {
 		{"GROUND", routeGround},
 		{"SKIP", routeSkip},
 		{"skip", routeSkip},
+		{"ADVISE", routeAdvise},
+		{"advise", routeAdvise},
+		{" Advise ", routeAdvise},
 		{" Ground ", routeGround},
 		{"maybe", routeGround}, // garbage defaults to ground
 		{"", routeGround},      // empty defaults to ground

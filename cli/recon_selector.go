@@ -13,6 +13,20 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
+// recon_selector.go is the corpus-driven next-action selector for the recon tier
+// loop. Each loop iteration, AFTER the deterministic ladder has chosen the tier
+// (nextTier), the selector consults the corpus read-only (kb_search) and asks the
+// model to prioritize the single best probe WITHIN that tier. Selection only
+// reorders/chooses within the allowed tier; it can never jump a tier, skip
+// saturation, or override the backstop (those stay code-owned in ReconLoop).
+//
+// Two distinct fail-closed behaviors live in this engine: the saturation grader
+// (recon_grader.go) fails closed to STOP, while this selector fails closed to the
+// DETERMINISTIC ladder step (an empty, unparsed selection) - it never invents an
+// action. The chosen technique is only a prompt hint; the real command still
+// flows through grounding and the gate, and corpus text is untrusted and is
+// never executed.
+
 // reconSelection is the selector's result. Action is the prioritized probe or
 // technique hint; Basis is provenance (the corpus source that drove it); Parsed
 // is false on any selector failure, which the loop treats as the deterministic

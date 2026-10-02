@@ -53,7 +53,7 @@ func TestLocalLadderAndExecutorRegistered(t *testing.T) {
 	}
 }
 
-// TestLocalIsTargetBinary covers the X2 resolution: a proposed binary that is the
+// TestLocalIsTargetBinary covers the target-self-exec resolution: a proposed binary that is the
 // analysis target (by direct path, by PATH resolution, or through a symlink) is
 // recognized, while a read-only tool that merely takes the target as an argument
 // is not.
@@ -98,7 +98,7 @@ func TestLocalIsTargetBinary(t *testing.T) {
 	}
 }
 
-// TestLocalTargetAnalysisRunCommandDeniesTarget is the acceptance-critical X2
+// TestLocalTargetAnalysisRunCommandDeniesTarget is the acceptance-critical self-exec
 // structural check at the tool boundary: the guarded run_command refuses to
 // execute the task's own analysis target (flagged distinctly), yet runs a
 // read-only inspection that passes the target as an argument.
@@ -152,7 +152,7 @@ func TestLocalTargetAnalysisRunCommandDeniesTarget(t *testing.T) {
 }
 
 // TestLocalExecutorNeverExecutesTargetEndToEnd drives a full target-analysis
-// executor whose model tries to execute the target; the X2 guarantee holds
+// executor whose model tries to execute the target; the self-exec guarantee holds
 // structurally through runExecutor, not by prompt alone.
 func TestLocalExecutorNeverExecutesTargetEndToEnd(t *testing.T) {
 	d := testDeps(t, nil)

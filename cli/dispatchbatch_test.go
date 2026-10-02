@@ -134,6 +134,10 @@ func TestDispatchBatchSkipsNATask(t *testing.T) {
 	}
 }
 
+// TestDispatchBatchSkipsBlockedTask enforces the citation-gate: the model
+// must NOT auto-dispatch a non-actionable coverage-gap candidate (Status
+// blocked). Removing the skip in orchestrator.go makes this test dispatch the
+// blocked task and fail (the adversarial direction).
 func TestDispatchBatchSkipsBlockedTask(t *testing.T) {
 	d := testDeps(t, nil)
 	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{

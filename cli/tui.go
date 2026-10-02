@@ -56,7 +56,8 @@ func runTUI() error {
 	m := initialModel()
 	p := tea.NewProgram(&m)
 	m.prog = p
-
+	// Wire the operator arm gate so a REPL engagement's at-exploit arm prompt
+	// (runExploitPhase -> ArmRequester) reaches the TUI overlay in Safe and Auto.
 	SetReplArmRequester(widgetArmRequester{prog: p})
 	llmWarn = func(line string) { p.Send(tea.Println(line)()) }
 	_, err := p.Run()
@@ -1418,10 +1419,11 @@ func (m model) currentModel() string {
 	return m.cfg.DefaultModel
 }
 
-// conversationHistory returns the bounded prior conversation for the current
+// conversationHistory returns the full prior conversation for the current
 // session, read from the persistent history store, so a rag turn can carry it
 // back as memory. It is called before the current turn is recorded, so it holds
-// only completed prior turns. Returns nil when there is no store or no session.
+// only completed prior turns. The shared answer path compresses it to the budget
+// when needed. Returns nil when there is no store or no session.
 func (m model) conversationHistory() []priorTurn {
 	if m.hist == nil || m.sess == nil {
 		return nil
@@ -1434,7 +1436,7 @@ func (m model) conversationHistory() []priorTurn {
 	for i, t := range turns {
 		pt[i] = priorTurn{Role: t.Role, Content: t.Content}
 	}
-	return boundTurns(pt, conversationMaxChars)
+	return pt
 }
 
 // recordTurn appends the completed user question and answer to the current

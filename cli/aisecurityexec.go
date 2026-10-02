@@ -16,6 +16,28 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
+// aisecurityexec.go is the AI-security surface executor for authorized, single-
+// user AI/LLM assessment. It registers from this file alone via the
+// registration seams (registerExecutor / registerLadder / registerDomain), so it
+// adds a whole new surface without editing surfaceexec.go, recon_ladder.go, or
+// domains.go.
+//
+// Untrusted by construction: an AI model's responses are adversarial input. The
+// executor only reaches an AI endpoint through the gated run_command tool, which
+// already wraps command output as UNTRUSTED before it re-enters the model context
+// (runcommand.go). On top of that, this surface (1) derives findings from a
+// deterministic, code-owned scan of verbatim evidence (aiSecCorrelateFindings),
+// never from the model's say-so, and RAG-GATES every finding through the shared
+// citation bar: a marker match is a FAST-PATH pre-filter only, and a finding is
+// actionable only WITH an accepted, class-specific corpus citation (groundCandidate
+// over acceptCitation, keyed by the OWASP LLM0x class term). A matched marker with
+// no accepted citation is never silently dropped - it becomes a non-actionable
+// coverage gap (Status blocked + Task.CoverageGap + audit) so the signal reaches the
+// operator. (2) It creates every candidate UNARMED so the gate
+// enforces arm + per-action confirm at execution time, and (3) never recurses the
+// recon frontier onto hosts named in untrusted model output, so an indirect
+// prompt injection cannot steer the engagement onto new targets.
+
 // aiSecLadder is the ai-security recon tier ladder: discover AI endpoints/models,
 // probe capabilities, run prompt-injection / jailbreak probes, then finding-driven
 // model-abuse probes. The tiers, their order, and coverage dimensions are fixed
@@ -130,7 +152,10 @@ func (e aiSecExecutor) aiSecRunReconPhase(ctx context.Context, task engagement.T
 		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8}); err != nil {
 			return tierOutcome{}, err
 		}
-
+		// Code-side evidence capture: do not rely on the model's record_evidence.
+		// captureTierEvidence returns the model's rows when it recorded any, else it
+		// records this pass's captured command output as a backstop, and audits a recon
+		// coverage-gap when nothing was captured at all - no silent drop.
 		newRows, err := e.captureTierEvidence(task.ID, string(task.Surface), asset, tier.Name, beforeRows, beforeCmds)
 		if err != nil {
 			return tierOutcome{}, err
@@ -162,7 +187,7 @@ func (e aiSecExecutor) aiSecRunReconPhase(ctx context.Context, task engagement.T
 
 // aiSecTierHuman builds the per-tier human message: the shared recon tier prompt
 // plus a vantage-skew note so probes actually skew to the current access context.
-// An unset vantage ("") appends nothing (legacy unrestricted).
+// An unset vantage ("") appends nothing (unrestricted).
 func aiSecTierHuman(task engagement.Task, asset string, tier reconTier, sel reconSelection, v engagement.Vantage) string {
 	human := reconTierPrompt(task, asset, tier, sel)
 	if skew := aiSecVantageSkew(v); skew != "" {
@@ -228,6 +253,14 @@ type aiSecFindingRule struct {
 	phrases   []string
 }
 
+// aiSecFindingRules are evaluated in this fixed order, so a quote that trips
+// several yields candidates in a stable sequence. Markers are the canonical
+// success signals from the offensive-ai-security methodology: a reflected
+// proof-of-injection token (LLM01), a leaked system prompt (LLM07), a
+// jailbreak/developer-mode acknowledgement (LLM01), and a model/version
+// fingerprint (LLM02). The table is a FAST-PATH pre-filter only; each match is
+// then grounded against the corpus through the shared citation bar, keyed by
+// the OWASP class term, before an actionable finding is emitted.
 var aiSecFindingRules = []aiSecFindingRule{
 	{
 		key:       "prompt-injection",

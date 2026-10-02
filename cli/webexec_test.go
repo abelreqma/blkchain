@@ -14,6 +14,11 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
+// TestWebLadderIsWSTGAligned pins the web recon ladder shape: a
+// WSTG-aligned T0..T3 ladder over the already-allowlisted web tools. T0
+// liveness + server/TLS fingerprint (WSTG-INFO-02, CRYP-01, CONF-07) -> T1
+// content/dir discovery (INFO-04, CONF-03/04) -> T2 param/entry-point discovery
+// (INFO-06) -> T3 finding-driven WSTG probes (INPV/ATHZ, corpus-grounded).
 func TestWebLadderIsWSTGAligned(t *testing.T) {
 	l := ladderFor(engagement.SurfaceWeb)
 	want := []struct {
@@ -280,6 +285,12 @@ func TestWebSurfaceLogicGapNoSilentDrop(t *testing.T) {
 	})
 }
 
+// TestWebCitationRejectsFalseGrounding is the INVERSE no-false-grounding
+// test against the acceptCitation term gate, with a web-server product term:
+// a corpus hit that does NOT name the subject-specific term must NOT ground (it
+// would otherwise become an actionable candidate on a keyword-adjacent hit), while
+// a hit that names it does ground. This is the gate that keeps a web service
+// detection from false-grounding on an unrelated neighbor.
 func TestWebCitationRejectsFalseGrounding(t *testing.T) {
 	term := citationTerm("nginx")
 	offTerm := []retrieval.Result{chunk("offensive-web", "apache.md", "Apache", "apache httpd mod_cgi exploitation")}

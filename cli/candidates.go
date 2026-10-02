@@ -10,6 +10,15 @@ import (
 	eng "blkchain/cli/internal/engagement"
 )
 
+// candidates.go is the exploit/business-logic detection display: it surfaces the
+// engagement's exploit and post-ex candidates (store tasks that are not yet armed)
+// from the read-only snapshot the REPL polls. Detection is visible without arming
+// anything; arming happens later through the gate's at-exploit arm prompt.
+//
+// Each candidate cites its source. When the snapshot carries no structured
+// provenance (kb source/path/section/cwe_class + trusted/untrusted origin), the
+// source line falls back to "finding evidence".
+
 // candidateSourceFallback is the source line shown until structured provenance is
 // on the snapshot.
 const candidateSourceFallback = "finding evidence"

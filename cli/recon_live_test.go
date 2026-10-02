@@ -91,6 +91,10 @@ func TestRunReconPhaseDrivesLadderAndPersistsCoverage(t *testing.T) {
 	}
 }
 
+// TestRunNonReconTaskUsesGenericLoop: even with the tier loop enabled, a task
+// that is neither recon (the tier ladder) nor exploit/post-ex (the exploitation
+// lifecycle) goes through the generic executor loop and records no recon
+// coverage. A report-phase task is such a case.
 func TestRunNonReconTaskUsesGenericLoop(t *testing.T) {
 	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
 	d.ReconTiers = true

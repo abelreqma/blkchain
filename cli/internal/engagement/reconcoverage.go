@@ -50,6 +50,9 @@ func mergeReconDims(prev, incoming map[string]ReconDimStatus) map[string]ReconDi
 	return out
 }
 
+// ReconCoverage tracks per-asset recon-dimension coverage for the recon-tier
+// engine: how far recon has gone on one asset on one surface, and
+// which revision last produced new (novel) coverage.
 type ReconCoverage struct {
 	Surface        Surface
 	Asset          string

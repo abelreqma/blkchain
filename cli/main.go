@@ -458,10 +458,10 @@ func askWith(rc *retrieval.Client, history []priorTurn, args []string) (string, 
 		return "", runHermes([]string{query})
 	}
 
-	// Conversation memory: bound the prior turns once, then feed them to the
-	// answer loop so the model remembers the session and retrieval is
-	// history-aware. Empty history is the stateless single-turn behavior.
-	history = boundTurns(history, conversationMaxChars)
+	// Conversation memory: the full prior turns are fed to the answer loop so
+	// the model remembers the session and retrieval is history-aware. The shared
+	// answer path (adaptiveAnswer) compresses them to the budget when needed, so
+	// no truncation happens here. Empty history is the stateless single-turn case.
 
 	cfg := loadConfig()
 	if rc == nil {

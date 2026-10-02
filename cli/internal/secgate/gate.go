@@ -23,13 +23,35 @@ type Gate struct {
 	Protected []string
 	Scratch   string
 
+	// Now returns the current time for the RoE rate limiter. A nil Now uses
+	// time.Now; tests inject a controllable clock. rateHits is the sliding window
+	// of admitted-command timestamps, guarded by g.mu.
 	Now      func() time.Time
 	rateHits []time.Time
 
+	// .blkchain/config.yaml gate policy.
+	//
+	// ConfigDenied is the per-project denied_binaries list, matched by lowercased
+	// base name in BOTH profiles and always respected (arming never relaxes it).
+	//
+	// UnattendedAllow is the unattended-/auto allowlist bound (config
+	// allowed_binaries). A nil UnattendedAllow runs Auto unattended. A non-nil
+	// UnattendedAllow (even empty) means a command whose binary it does not permit
+	// must be confirmed (HITL) in Auto non-local; a present-but-empty bound forces
+	// confirmation for every Auto command, the no-allowlist floor.
+	//
+	// AllowInterpreterPoC is plumbed from config for the interpreter-PoC HITL
+	// exception; this policy layer does not act on it.
 	ConfigDenied        []string
 	UnattendedAllow     *Allowlist
 	AllowInterpreterPoC bool
 
+	// AutoScopeOverride is the explicit, logged operator override that relaxes
+	// "/auto requires a scope" to "/auto requires scope OR an override". It
+	// permits Auto to start with no scope; a one-time `override`
+	// audit line records it. Even under the override every command naming a
+	// network target still fails closed (no scope can confirm it is in scope), so
+	// only no-target recon proceeds autonomously.
 	AutoScopeOverride bool
 }
 
@@ -186,15 +208,24 @@ func (g *Gate) checkLocked(c Command) Decision {
 	if ok, reason := g.Episode.AllowCommand(); !ok {
 		return g.deny("cap", c, reason, "")
 	}
-
+	// Config denylist: always respected, in both profiles, before the profile
+	// split. Arming never relaxes it.
 	if deniedByConfig(c.Binary, g.ConfigDenied) {
 		return g.deny("config-denylist", c, "binary "+c.Binary+" is denied by .blkchain/config.yaml", "")
 	}
-
+	// Phase tier: exploit and post-ex require an armed task, in both profiles
+	// and both modes. Arming is a precondition the operator sets; it never relaxes
+	// the denylists below (they all still run). An empty/unknown phase fails safe
+	// to recon (no arm requirement).
 	if c.Phase.requiresArm() && !c.Armed {
 		return g.deny("tier", c, "exploit/post-ex phase requires an armed task", "arm the task before running an exploit or post-exploitation command")
 	}
-
+	// A target-analysis task must never EXECUTE its own analysis target.
+	// Always-on structural denial, placed before the human-governed-path relaxation
+	// and the LOCAL/EXTERNAL split, so it runs on every path (Authorize, Check, and
+	// the operator-edit re-validation) and arming, mode, profile, and the
+	// human-confirmed classifier relaxations never reach it. Inert for any
+	// non-target-analysis Kind and for an empty Target, so it moves no other verdict.
 	if tgt, bad := TargetSelfExecViolation(c, g.Scratch); bad {
 		return g.deny("target-self-exec", c, "a target-analysis task must not execute its own analysis target: "+tgt, "inspect the target read-only (file, stat, nm, readelf, objdump, strings, ldd, getcap) instead of executing it")
 	}
@@ -268,7 +299,13 @@ func (g *Gate) checkLocked(c Command) Decision {
 			if len(targets) > 0 {
 				return g.deny("scope", c, "no scope defined; target cannot be confirmed in scope: "+targets[0], "")
 			}
-
+			// Backstop: a glued or bundled single-dash short flag (-h10.0.0.5,
+			// -sx10.0.0.5) can hide a host the extractor drops. Under a real scope
+			// such a command is denied as "no verifiable target"; with no scope we
+			// cannot verify it either, so deny it here rather than let it run as
+			// "no-target recon". This closes the override-path reach of the known
+			// glued-flag extractor gap for allowlisted tools whose per-tool
+			// classifier audit does not cover the flag.
 			if a, bad := gluedShortFlag(c.Args, ""); bad {
 				return g.deny("scope", c, "no scope defined; a glued or bundled short flag may hide a target that cannot be confirmed in scope: "+a, "")
 			}
@@ -330,8 +367,8 @@ func (g *Gate) rateAllowLocked(c Command) Decision {
 // LOCAL (always-confirm), Safe mode, or the Auto HITL-fallback (a binary not
 // permitted by the unattended allowed_binaries bound, or an exploit/post-ex
 // per-action-confirm command). Only on such a path are the structural code-exec
-// denials relaxed; an UNATTENDED Auto command (binary permitted unattended, or the
-// legacy nil bound) stays strict. It fails closed: with no confirmer there is no
+// denials relaxed; an UNATTENDED Auto command (binary permitted unattended, or a
+// nil bound) stays strict. It fails closed: with no confirmer there is no
 // human, so it returns false and the structural denials hold. It assumes g.mu is
 // held (it reads config fields set at construction). It is deliberately consistent
 // with confirmTailLocked's needConfirm, minus the session-approval memoization - a
@@ -365,7 +402,10 @@ func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
 	// regardless of mode (Safe, Auto, local or external).
 	force := c.Phase.perActionConfirm()
 	needConfirm := g.Mode != Auto || localProfile || force
-
+	// Unattended-/auto bound: in Auto non-local, a command whose binary is
+	// not permitted by the config allowed_binaries list must be confirmed (HITL).
+	// A nil UnattendedAllow adds no extra confirmation. A present-but-empty
+	// bound forces confirmation for every Auto command (the no-allowlist floor).
 	if !needConfirm && g.UnattendedAllow != nil && !g.UnattendedAllow.Permits(c.Binary) {
 		needConfirm = true
 	}

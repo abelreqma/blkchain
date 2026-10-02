@@ -121,9 +121,10 @@ type priorTurn struct {
 // as memory. The LLM context window is 256k tokens, so this is generous
 // (~50k tokens): the WHOLE conversation stays in context for realistic sessions
 // instead of being forgotten after a few turns, while leaving ample headroom for
-// the current turn's retrieved sources and answer. Sessions that outgrow this are
-// handled by the conversation summarizer (a follow-on change) so nothing is
-// silently dropped.
+// the current turn's retrieved sources and answer. Sessions that outgrow this
+// are compressed by the conversation summarizer (compressTurns, convcompress.go)
+// rather than truncated, so nothing is silently dropped. Override with
+// BLKCHAIN_CONVERSATION_MAX_CHARS (see conversationBudget).
 const conversationMaxChars = 200000
 
 // boundTurns trims history to the most recent turns whose total content fits

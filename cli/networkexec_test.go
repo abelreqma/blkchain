@@ -155,6 +155,10 @@ func (networkScanModel) GenerateContent(_ context.Context, msgs []llms.MessageCo
 	return finalResp("tier done"), nil
 }
 
+// TestNetworkExecutorRunsLadderRecursesAndCorrelates (acceptance): the network
+// executor runs the recon ladder, parses assets/services with provenance,
+// recurses per-asset onto a discovered in-scope host, and produces the
+// deterministic candidate exploit task from the version enum.
 func TestNetworkExecutorRunsLadderRecursesAndCorrelates(t *testing.T) {
 	d := testDeps(t, networkScanModel{})
 	d.ReconTiers = true
@@ -201,6 +205,11 @@ func TestNetworkExecutorRunsLadderRecursesAndCorrelates(t *testing.T) {
 		t.Errorf("recursed task = %+v, want network/recon", rec)
 	}
 
+	// Deterministic candidate: the OpenSSH service correlated to one unarmed
+	// exploit task with provenance to the recon task. This run has RC=nil (no
+	// retrieval), so under the RAG-grounding bar the catalog match has no
+	// accepted citation and the candidate is surfaced as a NON-ACTIONABLE
+	// coverage-gap (Status=blocked + CoverageGap), never silently dropped.
 	cand, err := d.Store.GetTask("exploit-10.0.0.5-22-openssh")
 	if err != nil {
 		t.Fatalf("expected a deterministic exploit candidate for OpenSSH on 10.0.0.5:22: %v", err)
@@ -323,6 +332,11 @@ func TestNetworkDetectionNoFalseGroundingOnAdjacentCitation(t *testing.T) {
 	}
 }
 
+// networkNoRecordModel runs one bounded nmap for the tier but NEVER calls
+// record_evidence - it exercises the code-side capture backstop: the finding
+// must still be recorded (from captured run_command output) and correlated, not
+// dropped because the model forgot to record. The grader (and selectors) are
+// answered stop/benign.
 type networkNoRecordModel struct{}
 
 func (networkNoRecordModel) GenerateContent(_ context.Context, msgs []llms.MessageContent, _ ...llms.CallOption) (*llms.ContentResponse, error) {
@@ -353,6 +367,10 @@ func (networkNoRecordModel) GenerateContent(_ context.Context, msgs []llms.Messa
 	return finalResp("done"), nil // deliberately never record_evidence
 }
 
+// TestNetworkCodeSideEvidenceWhenModelDoesNotRecord: the network
+// bespoke recon driver records evidence CODE-SIDE from captured run_command
+// output even when the model never calls record_evidence, so the finding is
+// correlated (never silently dropped) and the loop still terminates.
 func TestNetworkCodeSideEvidenceWhenModelDoesNotRecord(t *testing.T) {
 	d := testDeps(t, networkNoRecordModel{})
 	d.ReconTiers = true

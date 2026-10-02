@@ -11,6 +11,8 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
+// surfaceExecutor runs one task on its attack surface. genericExecutor is the
+// default implementation for every surface; concrete surfaces add their own.
 type surfaceExecutor interface {
 	Run(ctx context.Context, task engagement.Task) (string, error)
 }
@@ -36,6 +38,11 @@ func executorFor(d engageDeps, task engagement.Task) surfaceExecutor {
 	return genericExecutor{d: d}
 }
 
+// genericExecutor wraps the original runExecutor body so local/target-analysis
+// (and every other surface) keep working. It holds its deps as
+// a struct field (no package vars), so runBatch fan-out over several executors is
+// race-free: each Run closes over its own task and builds its own tools, store
+// projection, and message slice.
 type genericExecutor struct {
 	d engageDeps
 }
@@ -43,7 +50,11 @@ type genericExecutor struct {
 // Run runs one domain-specialized executor for a task. It gets its own bounded
 // projection and its own message slice; nothing is aliased across agents.
 func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string, error) {
-
+	// Vantage unlocking: when the engagement has an explicit vantage, refuse a task
+	// whose surface that vantage does not reach (a locked surface cannot be entered
+	// before the vantage that unlocks it). An unset vantage ("") is unrestricted. A
+	// store read error fails closed: the task does not run rather than proceed
+	// ungated.
 	v, err := e.d.Store.Vantage(ctx)
 	if err != nil {
 		return fmt.Sprintf("executor: task %s could not read the engagement vantage: %v", task.ID, err), nil
@@ -52,10 +63,18 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 		return fmt.Sprintf("executor: task %s surface %q is not reachable at the current vantage %q; advance the vantage first", task.ID, task.Surface, v), nil
 	}
 
+	// Recon-phase tasks run the code-orchestrated tier ladder when the loop
+	// is enabled and the command path is available. The generic loop below still
+	// serves every other phase and the no-gate path, so non-recon behavior is
+	// unchanged.
 	if e.d.ReconTiers && task.Phase == engagement.PhaseRecon && e.d.Gate != nil && e.d.Runs != nil {
 		return e.runReconPhase(ctx, task)
 	}
 
+	// Exploit/post-ex tasks run the armed, per-action-HITL exploitation lifecycle
+	// when the gated command path is available. This routes through the shared
+	// executor path, so a REPL-initiated engagement (runReplEngage) and `blk engage`
+	// drive the same lifecycle. The generic loop below still serves the no-gate path.
 	if (task.Phase == engagement.PhaseExploit || task.Phase == engagement.PhasePostEx) && e.d.Gate != nil && e.d.Runs != nil {
 		return e.runExploitPhase(ctx, task)
 	}
@@ -86,7 +105,8 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 			Phase:   secgate.Phase(string(task.Phase)),
 			Surface: secgate.Surface(string(task.Surface)),
 			Armed:   task.Armed,
-
+			// Kind/Target carry the read-only invariant to the gate: a
+			// target-analysis command whose resolved binary is its own target is denied.
 			Kind:   task.Kind,
 			Target: task.Target,
 		}

@@ -12,6 +12,12 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
+// networkExecutor is the concrete network-surface executor. It embeds
+// genericExecutor so it reuses the vantage reachability check, gate stamping,
+// and the shared recon/exploit adapters; its value-add is network-shaped recon
+// with vantage-skewed technique emphasis. Every identifier in this file is
+// network-prefixed so it cannot collide with a sibling surface executor at
+// merge time.
 type networkExecutor struct {
 	genericExecutor
 }
@@ -46,6 +52,12 @@ func networkVantageSkew(v engagement.Vantage) string {
 	return "Vantage context: external (" + pos + "). Enumerate from outside: emphasize host discovery, port and service sweeps, and service/version detection (nmap, DNS). Skew kb_search and route_skill queries toward external host, port, and service enumeration."
 }
 
+// Run routes a network task. A recon-phase task, when the code-orchestrated tier
+// ladder is enabled and the gated command path is available, runs the network
+// recon driver below (the generic ladder plus vantage-skewed technique emphasis).
+// Every other phase (exploit/post-ex and the no-gate path) delegates to the
+// embedded genericExecutor, which keeps the shared vantage check, gate stamping,
+// and the exploitation lifecycle.
 func (e networkExecutor) Run(ctx context.Context, task engagement.Task) (string, error) {
 	if e.d.ReconTiers && task.Phase == engagement.PhaseRecon && e.d.Gate != nil && e.d.Runs != nil {
 		// Read the vantage once, for the technique skew. The reachability refusal
@@ -64,6 +76,15 @@ func (e networkExecutor) Run(ctx context.Context, task engagement.Task) (string,
 	return e.genericExecutor.Run(ctx, task)
 }
 
+// networkRunReconPhase drives the network recon tier ladder for one recon-phase
+// task. It reuses the shared live-recon machinery (the same gated tool set,
+// code-owned per-tier evidence capture, and the correlateNewEvidence parsing
+// that recurses in-scope assets and plans deterministic exploit candidates); its
+// only divergence from genericExecutor.runReconPhase is networkTierPrompt, which
+// appends the vantage-skewed technique emphasis so external vs internal recon
+// leans on the right techniques. correlateNewEvidence is the embedded generic
+// method (the shared parsers), reached here by explicit call, not by Go
+// embedding dispatch.
 func (e networkExecutor) networkRunReconPhase(ctx context.Context, task engagement.Task, v engagement.Vantage) (string, error) {
 	runTimeout, runCap := resolveRunCaps()
 	execDir, cleanup, err := newExecutorScratchDir(e.d.WorkDir)
@@ -113,7 +134,12 @@ func (e networkExecutor) networkRunReconPhase(ctx context.Context, task engageme
 		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8}); err != nil {
 			return tierOutcome{}, err
 		}
-
+		// Code-side evidence capture: do not rely on the model's
+		// record_evidence. captureTierEvidence returns the model's rows when it
+		// recorded any, else a code-side backstop records this pass's captured
+		// run_command output as evidence, and surfaces a coverage-gap audit when
+		// nothing was captured - closing no-silent-drop on this bespoke driver the
+		// same way the shared generic runReconPhase does.
 		newRows, err := e.captureTierEvidence(task.ID, string(task.Surface), asset, tier.Name, beforeRows, beforeCmds)
 		if err != nil {
 			return tierOutcome{}, err

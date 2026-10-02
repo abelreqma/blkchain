@@ -9,6 +9,10 @@ import (
 	"blkchain/cli/internal/secgate"
 )
 
+// In the EXTERNAL /auto profile a local read utility carrying an
+// in-scope host operand and an out-of-scratch file operand is DENIED (not
+// allowlisted). A network tool with a file-write escaping scratch is also denied
+// (FileAccessViolation), confirming both classes are covered.
 func TestExternalAutoDeniesLocalReadUtilities(t *testing.T) {
 	s, _ := secgate.ParseScope(strings.NewReader("10.0.0.5\n"))
 	g := &secgate.Gate{Mode: secgate.Auto, Scope: s, Allow: secgate.NewAllowlist(externalEngageAllowlist()...)}
@@ -90,6 +94,8 @@ type fakeConfirmer struct{}
 
 func (fakeConfirmer) Confirm(context.Context, secgate.Command) bool { return true }
 
+// buildEngageGate threads the .blkchain/config.yaml gate policy and the
+// auto-scope override onto the Gate.
 func TestBuildEngageGateSetsConfigPolicy(t *testing.T) {
 	dir := t.TempDir()
 	ws, err := engagement.OpenWorkspace(dir)

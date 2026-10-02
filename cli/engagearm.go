@@ -9,6 +9,16 @@ import (
 	eng "blkchain/cli/internal/engagement"
 )
 
+// engagearm.go is the operator arm gate for a REPL engagement: the mandatory
+// human-in-the-loop prompt the exploit executor raises (ArmRequester.RequestArm)
+// before an unarmed exploit/post-ex task runs, in Safe AND Auto. It mirrors the
+// confirm overlay's channel bridge (engageconfirm.go). The model never arms; only
+// the operator's ArmApprove causes armTask, so model-cannot-arm holds.
+//
+// Wiring: runTUI calls SetReplArmRequester(widgetArmRequester{prog}) once, so
+// runReplEngage reads it onto deps.ArmReq. A nil requester (or a nil prog) fails
+// safe: the exploit task's commands are gate-denied and nothing runs.
+
 // armMsg asks the base Update to open the arm overlay for task and answer on
 // reply. Posted by widgetArmRequester from the orchestrator goroutine.
 type armMsg struct {
@@ -23,6 +33,9 @@ type armResolvedMsg struct {
 	reply chan ArmDecision
 }
 
+// widgetArmRequester is the TUI ArmRequester: it bridges the at-exploit arm gate
+// to the arm overlay over the event loop. A nil prog, or a canceled context, fails
+// safe (ArmSkip): arming never happens by default.
 type widgetArmRequester struct{ prog progSender }
 
 // widgetArmRequester must satisfy ArmRequester so SetReplArmRequester accepts it

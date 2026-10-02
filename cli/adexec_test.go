@@ -169,6 +169,12 @@ func TestADPostExRequiresArm(t *testing.T) {
 	}
 }
 
+// adCorrelateSamba drives the shared correlation path (correlateNewEvidence)
+// exactly as adExecutor inherits it, over an nmap -sV quote that yields a
+// catalogued AD-host service (Samba smbd on an in-scope DC produced by an AD recon
+// task), with the given service selector, and returns the single emitted exploit
+// candidate. The term the gate keys on is citationTerm("Samba smbd") == "samba"
+// (the shared-SERVICE term for the AD base).
 func adCorrelateSamba(t *testing.T, sel exploitSelector) engagement.Task {
 	t.Helper()
 	d := testDeps(t, nil)
@@ -280,6 +286,11 @@ func TestADDetectionRejectsNonSpecificCitation(t *testing.T) {
 	}
 }
 
+// TestADDetectionRejectsVendorSiblingCitation pins the citationTerm behavior (full
+// lowercased phrase + all-tokens word-boundary match): a sibling hit that mentions
+// only PART of the service phrase ("samba" but not "smbd") must NOT ground (the old
+// f[0]-only term would have grounded it), while a hit mentioning the FULL phrase
+// still grounds under the word-boundary matcher.
 func TestADDetectionRejectsVendorSiblingCitation(t *testing.T) {
 	sibling := []retrieval.Result{{
 		Score:   0.99,

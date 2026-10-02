@@ -107,6 +107,13 @@ func (c Capability) valid() bool {
 	return false
 }
 
+// surfaceForKindMap gives the default Surface for a task Kind. A kind not listed
+// here defaults
+// to SurfaceNetwork via surfaceForKind. The per-CSP cloud surfaces
+// (cloud-aws/cloud-gcp/cloud-azure) are not derived from a Kind here: there are
+// no per-CSP personas, so a cloud Kind maps to the generic SurfaceCloud and the
+// provider-specific surface is set explicitly on Task.Surface from the
+// target/scope.
 var surfaceForKindMap = map[string]Surface{
 	"web":             SurfaceWeb,
 	"ad":              SurfaceAD,
@@ -133,6 +140,12 @@ func surfaceForKind(kind string) Surface {
 	return SurfaceNetwork
 }
 
+// phaseForKindMap gives the default Phase for a task Kind whose nature is not
+// recon. Only the exploit-oriented persona is listed; every other Kind (including
+// the enumeration/analysis personas and the empty or unknown Kind) defaults to
+// recon via phaseForKind. Deriving an exploit phase makes the task requiresArm at
+// the gate (denied unless armed), which is the intended fail-safe for a Kind that
+// is not recon-phase work.
 var phaseForKindMap = map[string]Phase{
 	"exploit-dev": PhaseExploit,
 	"exploit":     PhaseExploit,
@@ -178,9 +191,15 @@ type Task struct {
 	Armed      bool
 	DependsOn  []string
 	BasisIDs   []string
-
+	// CoverageGap marks a candidate that a deterministic detector matched but the
+	// corpus could not ground with an accepted citation. It is the
+	// structured discriminator for a non-actionable "corpus-coverage-gap"
+	// candidate: such a candidate is persisted Status=blocked and is surfaced to
+	// the operator but not dispatched (dispatch_batch skips blocked) and not armed
+	// (armTask refuses it) until it is grounded.
 	CoverageGap bool
-
+	// Citation is the candidate's source provenance: the kb
+	// source + origin trust when it was seeded from the corpus, empty otherwise.
 	Citation Citation
 	// Advisory is an operator-facing advisory string: prior-episode recall from
 	// episodic memory, display-only. It is read by no gate, label, classifier,

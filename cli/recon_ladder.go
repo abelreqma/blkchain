@@ -19,6 +19,10 @@ type reconTier struct {
 // reconLadder is a surface's ordered tier ladder (lowest Index first).
 type reconLadder []reconTier
 
+// surfaceLadders maps each attack surface to its recon ladder. The network
+// reference ladder is T0 host discovery -> T1 port/service sweep ->
+// T2 version/safe-script enum -> T3 finding-driven probes. The other surfaces
+// use genericReconLadder.
 var surfaceLadders = map[engagement.Surface]reconLadder{
 	engagement.SurfaceNetwork: {
 		{Index: 0, Name: "host-discovery", Dimensions: []string{"hosts"}},

@@ -23,6 +23,22 @@ const (
 	adTierFindingDriven = "ad-finding-driven"
 )
 
+// adLadder is the SurfaceAD recon ladder. Code owns the tiers, their order, and
+// the coverage dimensions each satisfies; the LLM only proposes commands within a
+// tier. All tiers are read-only enumeration:
+//   - T0 ad-dc-discovery:   identify domain controllers / directory hosts and the
+//     domain on in-scope targets (nmap bounded -p over the AD service set, no NSE;
+//     nbtscan). Dimensions: dcs, domain.
+//   - T1 ad-anon-enum:      unauthenticated / null-session enumeration where a DC
+//     permits it (anonymous LDAP RootDSE/base, null SMB/RPC sessions). Dimensions:
+//     naming-contexts, null-sessions.
+//   - T2 ad-auth-enum:      authenticated directory enumeration with operator-
+//     supplied in-scope credentials (users, groups, computers, password policy).
+//     Dimensions: users, groups, computers.
+//   - T3 ad-finding-driven: targeted READ-ONLY enumeration from T2 findings (SPN
+//     accounts, delegation flags, ACLs, ADCS templates/CAs). Enumeration only;
+//     abuse is exploit/post-ex and is arm-gated.
+//     Dimensions: spns, delegation, acls, adcs.
 var adLadder = reconLadder{
 	{Index: 0, Name: adTierDCDiscovery, Dimensions: []string{"dcs", "domain"}},
 	{Index: 1, Name: adTierAnonEnum, Dimensions: []string{"naming-contexts", "null-sessions"}},

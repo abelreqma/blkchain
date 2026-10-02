@@ -6,6 +6,14 @@ import (
 	"strings"
 )
 
+// targetexec.go holds the target-self-exec structural denial: a target-analysis
+// task must never EXECUTE its own analysis target. A task that exists to INSPECT a
+// binary read-only must not run it. This is an always-on, profile- and mode-agnostic
+// deny enforced in Gate.checkLocked (before the human-governed-path relaxation and
+// the LOCAL/EXTERNAL split), so arming, mode, and the human-confirmed classifier
+// relaxations cannot reach it. It is inert for any non-target-analysis Kind and
+// for an empty Target, so it changes no other command's verdict.
+
 // TargetSelfExecViolation reports whether c is a target-analysis command whose
 // resolved binary IS its own analysis target. It returns the target path and true
 // on a match, else ("", false). Both the binary and the target are canonicalized

@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+// roestore.go persists RoE recall-by-directory in the blk_roe table on the
+// shared histstore handle (storage contract: a NEW table, never a
+// blk_sessions key prefix). It lets `blk engage` remember which ROE.md goes with
+// a working directory and reuse it on the next run from the same directory. All
+// operations degrade gracefully when the store is unavailable (nil db).
+
 // ensureRoETable creates the blk_roe table if it does not exist. A nil db is a
 // no-op (the store is optional).
 func ensureRoETable(db *sql.DB) error {

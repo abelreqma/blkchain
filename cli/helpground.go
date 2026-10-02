@@ -44,6 +44,10 @@ type toolHelpCache interface {
 	Store(binary, version string, iface toolInterface) error
 }
 
+// helpSideEffectBinaries is the per-binary escape hatch: binaries whose --help
+// (or help) run has side effects and therefore must NOT be executed for
+// grounding. It is empty by default (no known offenders); the mechanism
+// exists so a risky binary can be added here. Keyed by base name.
 var helpSideEffectBinaries = map[string]bool{}
 
 // isHelpSideEffect reports whether binary is in the escape-hatch set, matching on

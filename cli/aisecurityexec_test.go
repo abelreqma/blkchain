@@ -314,7 +314,8 @@ func TestAISecCorrelateNewEvidenceGapPersists(t *testing.T) {
 	}
 	e := aiSecExecutor{genericExecutor{d: engageDeps{Store: s, RC: aiSecGapSearcher(), Cfg: aiSecTestCfg()}}}
 	e.aiSecCorrelateNewEvidence(context.Background(), "ai1", rows)
-
+	// A coverage-gap is Status=blocked, which OpenTasks omits, so read
+	// the full snapshot and discriminate on the Task.CoverageGap field.
 	snap, err := s.Snapshot(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -378,7 +379,7 @@ func TestAISecRouteSkillResolution(t *testing.T) {
 }
 
 // TestAISecVantageSkew proves the vantage-skew note is vantage-specific: unset
-// yields nothing (legacy unrestricted), each known vantage yields guidance, and
+// yields nothing (unrestricted), each known vantage yields guidance, and
 // unauth vs auth differ (so probes actually skew by access context).
 func TestAISecVantageSkew(t *testing.T) {
 	if s := aiSecVantageSkew(""); s != "" {
@@ -430,6 +431,10 @@ func aiSecRunCmdJSON(args []string) string {
 	return string(b)
 }
 
+// aiSecCaptureModel drives one recon tier: it runs ONE allowlisted command and then
+// ends the tier WITHOUT calling record_evidence. The code-side capture backstop
+// must then record the captured command output as evidence (no silent drop). It
+// stops the recon loop by answering the grader's sufficiency prompt.
 type aiSecCaptureModel struct{}
 
 func (aiSecCaptureModel) GenerateContent(_ context.Context, msgs []llms.MessageContent, _ ...llms.CallOption) (*llms.ContentResponse, error) {
@@ -456,6 +461,11 @@ func (aiSecCaptureModel) GenerateContent(_ context.Context, msgs []llms.MessageC
 	return finalResp("tier done"), nil
 }
 
+// TestAISecReconCaptureBackstopEndToEnd proves aiSecRunReconPhase wired the
+// code-side capture: when the model runs a command but records no evidence, the
+// backstop records the captured command output verbatim, so the recon tier's
+// outcome is never silently dropped. Without the captureTierEvidence adoption the
+// model's empty record_evidence would leave no evidence and this fails.
 func TestAISecReconCaptureBackstopEndToEnd(t *testing.T) {
 	d := testDeps(t, aiSecCaptureModel{})
 	d.ReconTiers = true

@@ -48,7 +48,9 @@ func defineEngageFlags(fs *flag.FlagSet, o *engageOpts) {
 // the workspace), so a usage mistake is caught without qdrant, embed_server,
 // or the LLM server running.
 func runEngage(args []string) error {
-
+	// `blk engage arm <task-id>` is the operator-only arm subcommand: it sets
+	// Armed on an exploit/post-ex task so it can run under the gate. It is a
+	// subcommand of engage, not a goal.
 	if len(args) > 0 && args[0] == "arm" {
 		return runEngageArm(args[1:])
 	}
@@ -189,6 +191,10 @@ func runEngage(args []string) error {
 	stopReport := rw.Start()
 	defer stopReport()
 
+	// Seed the engagement's initial vantage from scope: an external
+	// engagement starts external-unauth (local/ad-cloud locked until a logged
+	// access-yielding exploit advances the vantage); a local scope starts with an
+	// internal foothold. A seed error is logged, not fatal.
 	if serr := seedInitialVantage(context.Background(), ws.Store, scope); serr != nil {
 		fmt.Fprintf(os.Stderr, "engage: vantage seed failed: %v\n", serr)
 	}

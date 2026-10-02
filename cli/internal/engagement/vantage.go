@@ -1,5 +1,10 @@
 package engagement
 
+// Vantage is the engagement's current access context: the position from which
+// the operator acts. It advances monotonically as access-yielding exploits
+// succeed. An empty
+// Vantage ("") means unset: the executor does not gate surfaces by vantage until
+// one is explicitly set.
 type Vantage string
 
 const (

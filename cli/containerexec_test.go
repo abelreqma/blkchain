@@ -112,6 +112,11 @@ func (m containerCaptureModel) GenerateContent(_ context.Context, msgs []llms.Me
 	return finalResp("tier done"), nil
 }
 
+// TestContainerPersonaSelectedPerKind pins the real container persona: a
+// Kind="container" task must resolve to a dedicated persona, not the
+// generic fallback), while Kind="k8s" still resolves to the existing k8s persona.
+// The persona is selected in-driver and NOT registered in the shared domains map,
+// so route_skill's "container" keyword still resolves to the k8s skill bucket.
 func TestContainerPersonaSelectedPerKind(t *testing.T) {
 	d := containerDomainFor("container")
 	if d.Name != "container" {
@@ -308,6 +313,9 @@ func TestContainerDetectionGroundingAcceptance(t *testing.T) {
 	})
 }
 
+// containerReconNoRecordModel drives a container recon pass that runs one probe
+// but never calls record_evidence, so the code-side capture backstop
+// (captureTierEvidence) must create the evidence row. The grader answers stop.
 type containerReconNoRecordModel struct{}
 
 func (containerReconNoRecordModel) GenerateContent(_ context.Context, msgs []llms.MessageContent, _ ...llms.CallOption) (*llms.ContentResponse, error) {
@@ -335,6 +343,12 @@ func (containerReconNoRecordModel) GenerateContent(_ context.Context, msgs []llm
 	return finalResp("tier done"), nil
 }
 
+// TestContainerReconCodeSideEvidenceAndCandidate pins the captureTierEvidence
+// adoption on the bespoke container recon driver: a container recon pass records
+// evidence CODE-SIDE even when the model never calls record_evidence, and the
+// deterministic detection still yields a candidate-or-coverage-gap (no silent
+// drop). This is the web-class bug, and it matters more for container because its
+// native recon (kubectl/capsh/crictl/escape) is non-nmap.
 func TestContainerReconCodeSideEvidenceAndCandidate(t *testing.T) {
 	d := testDeps(t, containerReconNoRecordModel{})
 	d.ReconTiers = true

@@ -38,7 +38,7 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 		Phase:   secgate.Phase(string(task.Phase)),
 		Surface: secgate.Surface(string(task.Surface)),
 		Armed:   task.Armed,
-
+		// Kind/Target carry the read-only invariant to the gate.
 		Kind:   task.Kind,
 		Target: task.Target,
 	}
@@ -68,6 +68,12 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 		exploitSel = newKBExploitSelector(e.d.Model, e.d.RC, e.d.Cfg)
 	}
 
+	// runTier drives one tier: it asks the model to perform only this tier's step
+	// for this asset through the gated tools, then derives the outcome from code-
+	// owned signals - commands captured and evidence recorded for the task - never
+	// from the model's say-so. The evidence this pass recorded is parsed in code:
+	// newly discovered in-scope assets recurse per-asset, and discovered
+	// services correlate to candidate exploit tasks.
 	runTier := func(ctx context.Context, _ engagement.Surface, asset string, tier reconTier, sel reconSelection) (tierOutcome, error) {
 		beforeCmds := e.d.Runs.Count(task.ID)
 		beforeRows, err := e.d.Store.EvidenceRowsFor(task.ID)
@@ -121,6 +127,11 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 // no grounding citation and is not actionable yet.
 const coverageGapMarker = " [corpus-coverage-gap: no grounding citation; non-actionable until grounded]"
 
+// markCoverageGap turns a deterministic-detector candidate that found no accepted
+// citation into a NON-ACTIONABLE coverage-gap candidate: Status blocked (the arm
+// step refuses a blocked candidate), empty Citation, and the Objective marker. The
+// candidate is still emitted and operator-visible (no silent drop); the caller
+// writes the paired "corpus-coverage-gap" audit row.
 func markCoverageGap(cand *engagement.Task) {
 	cand.Status = engagement.StatusBlocked
 	cand.CoverageGap = true
@@ -174,7 +185,10 @@ func (e genericExecutor) captureTierEvidence(taskID, surface, asset, tierName st
 	}
 	newRows := afterRows[len(beforeRows):]
 	if len(newRows) == 0 {
-
+		// No model evidence and nothing captured: no progress. Surface a recon
+		// coverage-gap so the no-evidence outcome is recorded, never silently
+		// dropped. (Correlation surfaces finding-level gaps; this is the tier
+		// no-evidence gap.)
 		if err := e.d.Store.Audit("recon", "coverage-gap", surface+"/"+asset+"/"+tierName+": tier produced no evidence"); err != nil {
 			return nil, err
 		}
@@ -278,6 +292,9 @@ func (e genericExecutor) correlateNewEvidence(ctx context.Context, taskID string
 	return newAssets
 }
 
+// reconSeeds returns the seed assets for a recon task from its target. An empty
+// target yields no seeds (nothing to recon). Splitting a CIDR or a target list
+// into individual assets is surface-executor work; the target is one seed asset.
 func reconSeeds(target string) []string {
 	target = strings.TrimSpace(target)
 	if target == "" {

@@ -188,6 +188,8 @@ func TestSMBEnumGluedHostFlagDeniedByGate(t *testing.T) {
 	}
 }
 
+// Out-of-scope hosts in every remaining form are denied by the scope check,
+// including the UNC path form.
 func TestSMBEnumOutOfScopeTargetsDeniedByGate(t *testing.T) {
 	g := newSMBGate(t)
 	for _, c := range []Command{

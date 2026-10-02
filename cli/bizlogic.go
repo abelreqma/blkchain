@@ -8,6 +8,18 @@ import (
 	"blkchain/cli/internal/engagement"
 )
 
+// bizlogic.go is the business-logic-gap candidate generator. It is a
+// deterministic, code-owned scanner over verbatim evidence (mirroring
+// parseServices / parseAssets): it reads an exact evidence quote and emits
+// UNARMED exploit candidates for the business-logic flaw classes that
+// service+version/CVE correlation does not catch (IDOR, force-browse / missing
+// function-level access control, price/quantity tampering, workflow abuse,
+// quota/one-per-customer limit bypass). Code owns whether a candidate exists;
+// the RAG-selector advises the technique downstream; the gate enforces arm +
+// per-action confirm at execution time. This generator plans only - it runs
+// nothing and opens no network. A candidate without a verified evidence-quote
+// id (provenance) is never emitted.
+
 type logicGapRule struct {
 	key       string
 	objective string

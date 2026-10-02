@@ -120,6 +120,8 @@ func TestCloudParseFindingsCarryProvenance(t *testing.T) {
 	}
 }
 
+// TestCloudParseFindingsRejectsInvalidProvenance: no match without a verified
+// evidence-quote id (fail closed, mirroring the shared parsers).
 func TestCloudParseFindingsRejectsInvalidProvenance(t *testing.T) {
 	bad := Provenance{TaskID: "", EvidenceID: 0}
 	if got := cloudFindingHits(bad, `{"AccessKeyId":"ASIAABCDEFGHIJKLMNOP"}`, engagement.SurfaceCloud); got != nil {
@@ -183,7 +185,9 @@ func TestCloudReconCorrelatesMetadataCredFinding(t *testing.T) {
 	d.ReconTiers = true
 	d.Gate = autoGate(t)
 	d.Runs = NewRunOutputs()
-
+	// Grounding corpus: kb_search returns a service-specific offensive-cloud hit (the
+	// imds term is present), so the detection is RAG-grounded via the shared
+	// acceptCitation gate and the finding is emitted with its citation.
 	d.RC = &recSearcher{results: []retrieval.Result{
 		chunk("offensive-cloud", "cloud/aws.md", "IMDS", "AWS IMDS role credential theft via 169.254.169.254."),
 	}}
@@ -382,7 +386,7 @@ func TestCloudVantageSkewInjected(t *testing.T) {
 	}
 }
 
-// TestCloudVantageSkewUnsetNoSkew: with no vantage set (legacy), no skew text is
+// TestCloudVantageSkewUnsetNoSkew: with no vantage set, no skew text is
 // appended - the tier prompt is the bare recon prompt.
 func TestCloudVantageSkewUnsetNoSkew(t *testing.T) {
 	if got := cloudVantageSkew(""); got != "" {
@@ -406,6 +410,10 @@ func seedCloudTask(t *testing.T, d engageDeps, id string, s engagement.Surface) 
 	return task
 }
 
+// cloudCandidateSplit partitions the stored CLOUD candidates (id prefix "cloud-")
+// into grounded, actionable findings and coverage-gap records. The
+// DISCRIMINATOR is the Task.CoverageGap BOOL (both kinds share Kind "exploit"),
+// not the Objective string or Kind.
 func cloudCandidateSplit(t *testing.T, d engageDeps) (findings, gaps []engagement.Task) {
 	t.Helper()
 	snap, err := d.Store.Snapshot(context.Background())
@@ -425,6 +433,9 @@ func cloudCandidateSplit(t *testing.T, d engageDeps) (findings, gaps []engagemen
 	return findings, gaps
 }
 
+// awsCredQuote is a verbatim IMDS credential evidence quote that trips exactly the
+// imds-aws-creds rule (and no shared parser), so the correlation tests isolate
+// the cloud finding path.
 const awsCredQuote = `{"AccessKeyId":"ASIAABCDEFGHIJKLMNOP","SecretAccessKey":"s","Token":"t"}`
 
 // cloudCorrelateOne drives cloudCorrelateNewEvidence over a single recorded evidence
@@ -502,6 +513,11 @@ func TestCloudFindingRAGGateMutate(t *testing.T) {
 	})
 }
 
+// TestCloudFindingRejectsFalseGrounding is the INVERSE false-grounding test for
+// the citation-acceptance contract: a keyword-adjacent/generic top hit that does NOT
+// mention the rule's service term must NOT ground (MinCitationScore is 0.0, so the
+// service term is the acceptance gate) - it becomes a coverage-gap, never an
+// actionable finding.
 func TestCloudFindingRejectsFalseGrounding(t *testing.T) {
 	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
 	d.Gate = autoGate(t)

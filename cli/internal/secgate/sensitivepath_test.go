@@ -162,6 +162,9 @@ func TestSensitivePathNotAppliedInExternalProfile(t *testing.T) {
 	}
 }
 
+// On a case-insensitive filesystem a protected artifact spelled
+// with different case still resolves to the same file, and every .env variant is
+// a secret. Both must be denied.
 func TestSensitivePathCaseFoldAndDotenvVariants(t *testing.T) {
 	protected := []string{"/ws/engagement.db", "/ws/audit.jsonl", "/ws/evidence", "/ws/report.md"}
 	scratch := "/scratch"

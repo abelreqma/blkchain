@@ -31,6 +31,12 @@ func init() {
 	registerLadder(engagement.SurfaceCloud, cloudLadder)
 }
 
+// cloudLadder is the generic cloud recon ladder: public-asset discovery ->
+// service/endpoint fingerprint -> metadata/IAM probing -> finding-driven. It is
+// built on already-allowlisted tools (curl for endpoint/metadata probing within
+// scope, nmap for service fingerprinting). The per-CSP files refine the
+// metadata/IAM tier with provider-specific coverage dimensions; the CSP CLIs
+// (aws/gcloud/az) are not allowlisted.
 var cloudLadder = reconLadder{
 	{Index: 0, Name: "public-asset-discovery", Dimensions: []string{"cloud-assets"}},
 	{Index: 1, Name: "service-endpoint-fingerprint", Dimensions: []string{"cloud-endpoints", "cloud-services"}},
@@ -38,6 +44,13 @@ var cloudLadder = reconLadder{
 	{Index: 3, Name: "finding-driven", Dimensions: []string{"cloud-findings"}},
 }
 
+// Run routes a recon-phase cloud task through the cloud-specific recon driver
+// (cloud correlation of the captured evidence); every other phase delegates to the
+// embedded genericExecutor, which applies its own vantage check and runs the
+// exploitation lifecycle or the generic loop. The recon branch applies the vantage
+// reachability check first (cloud surfaces are reachable at every vantage, but the
+// check is kept for uniformity and fails closed on a store read error), mirroring
+// genericExecutor.Run.
 func (e cloudExecutor) Run(ctx context.Context, task engagement.Task) (string, error) {
 	if e.d.ReconTiers && task.Phase == engagement.PhaseRecon && e.d.Gate != nil && e.d.Runs != nil {
 		v, err := e.d.Store.Vantage(ctx)
@@ -64,7 +77,7 @@ func cloudPersona() domain { return domainFor("cloud") }
 // access state makes reachable. External (no foothold) skews to public-asset and
 // leaked-credential discovery; post-foothold (internal and beyond) skews to
 // instance-metadata credential theft and IAM privilege-escalation. An unset
-// vantage ("") returns "" (legacy, no skew). All four cloud surfaces share this
+// vantage ("") returns "" (no skew). All four cloud surfaces share this
 // because they inherit cloudExecutor.Run -> cloudRunReconPhase.
 func cloudVantageSkew(v engagement.Vantage) string {
 	switch v {
@@ -121,7 +134,7 @@ func (e cloudExecutor) cloudRunReconPhase(ctx context.Context, task engagement.T
 	// Vantage-as-context, wired: the skew is appended to every tier prompt below so
 	// technique selection and the model's kb_search/route_skill queries skew external
 	// (public-asset / leaked-credential discovery) vs post-foothold (metadata / IAM
-	// privesc). Empty for an unset vantage (legacy, no skew).
+	// privesc). Empty for an unset vantage (no skew).
 	skew := cloudVantageSkew(v)
 
 	var exploitSel exploitSelector
@@ -146,7 +159,11 @@ func (e cloudExecutor) cloudRunReconPhase(ctx context.Context, task engagement.T
 		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8}); err != nil {
 			return tierOutcome{}, err
 		}
-
+		// Code-side evidence capture (shared helper, promoted via the embedded
+		// genericExecutor): the model's record_evidence is not relied on - when the
+		// model recorded nothing this pass, the backstop records the captured
+		// command output as evidence, and a pass that captured nothing at all
+		// surfaces a recon coverage-gap (no silent drop).
 		newRows, err := e.captureTierEvidence(task.ID, string(task.Surface), asset, tier.Name, beforeRows, beforeCmds)
 		if err != nil {
 			return tierOutcome{}, err

@@ -21,6 +21,7 @@ type routeKind int
 const (
 	routeSkip routeKind = iota
 	routeGround
+	routeAdvise
 )
 
 // enabledRoutes says which grounding routes are available, from the /models
@@ -80,19 +81,27 @@ func routeGuard(question string) (kind routeKind, forced bool) {
 // routeSystemPrompt is the one-word classifier instruction shared by the ask
 // path. It states which sources are available so the model does not pick a
 // disabled route.
-const routeSystemPrompt = "You decide whether answering the user's question needs grounding in retrieved sources. " +
-	"Reply with ONLY one word, no punctuation: GROUND if the question needs private, corpus-specific, recent, " +
-	"or citable security information, or SKIP if it is general knowledge, pure reasoning, math, or creative writing. " +
-	"When unsure, answer GROUND."
+const routeSystemPrompt = "You decide how to handle the user's message in an offensive-security assistant. " +
+	"Reply with ONLY one word, no punctuation: " +
+	"SKIP if it is general knowledge, pure reasoning, math, or chit-chat that needs no security corpus; " +
+	"ADVISE if the user wants interactive, step-by-step operational help running or planning an attack against a " +
+	"specific target or from a foothold they describe (escalating privileges, exploiting a found service, walking " +
+	"through an engagement, deciding the next action); " +
+	"GROUND for anything else that needs grounded security facts, including explaining a concept, technique, or a " +
+	"single question. When unsure, answer GROUND."
 
-// parseRouteReply maps the classifier's one-word reply to a routeKind. Anything
-// that is not clearly SKIP is treated as GROUND (safe default: a security KB
-// should prefer grounding over an ungrounded guess).
+// parseRouteReply maps the classifier's one-word reply to a routeKind. SKIP and
+// ADVISE are matched explicitly; anything else is GROUND (safe default: a
+// security KB should prefer grounding over an ungrounded guess).
 func parseRouteReply(raw string) routeKind {
-	if strings.EqualFold(strings.TrimSpace(raw), "SKIP") {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "SKIP":
 		return routeSkip
+	case "ADVISE":
+		return routeAdvise
+	default:
+		return routeGround
 	}
-	return routeGround
 }
 
 // routeQuery decides skip vs ground for question. It short-circuits to skip when
@@ -128,14 +137,23 @@ func routeQuery(ctx context.Context, m toolLoopModel, cfg ragconfig.Config, ques
 	return parseRouteReply(resp.Choices[0].Content), nil
 }
 
-// directAnswerSystemPrompt is the skip-path system prompt: answer from the
-// model's own knowledge, no corpus, no fabricated citations.
-const directAnswerSystemPrompt = "You are a knowledgeable security research assistant for authorized testing. " +
-	"Answer the user's question directly and completely from your own knowledge, grounded in any context the user " +
+// directAnswerConstraints is the skip-path body: answer from the model's own
+// knowledge, grounded in any user-provided context, generate ready-to-use
+// payloads, and fabricate no citations/CVEs. It is prepended with a persona
+// preamble (directAnswerSystemPrompt) so the skip path answers in the same
+// expert voice as grounded answers.
+const directAnswerConstraints = "Answer the user's question directly and completely from your own knowledge, grounded in any context the user " +
 	"provided (their stated target, constraints, and attached project context). When the question calls for " +
 	"payloads, exploit strings, test inputs, or commands, generate concrete, ready-to-use ones adapted to that " +
-	"context. Do not invent citations or claim sources you were not given, and do not fabricate CVE identifiers, " +
+	"context. Whenever it helps the user act, name the specific tools to use and show concrete example commands " +
+	"or invocations (copy-pasteable), not only prose. Do not invent citations or claim sources you were not given, " +
+	"and do not fabricate CVE identifiers, " +
 	"version numbers, or statistics."
+
+// directAnswerSystemPrompt is the skip-path system prompt. directAnswer does no
+// retrieval, so it always uses the offensive-security generalist persona plus the
+// own-knowledge constraints - a persona is invoked on the skip path too.
+const directAnswerSystemPrompt = genericPersonaPreamble + directAnswerConstraints
 
 // directAnswer answers question with a single streamed model call and no
 // retrieval. It is the skip route's handler. It mirrors AnswerLoop's streaming
@@ -144,6 +162,12 @@ func directAnswer(ctx context.Context, cfg ragconfig.Config, question string, op
 	l, err := newOMLX(cfg, opts.Model)
 	if err != nil {
 		return "", 0, err
+	}
+	// The skip path has no retrieval, so it is always the generalist persona;
+	// announce it so the "answering as" cue fires here too (empty domain ->
+	// personaLabel returns the generalist label).
+	if opts.Persona != nil {
+		opts.Persona("")
 	}
 	human := question
 	if strings.TrimSpace(opts.Preface) != "" {
@@ -216,6 +240,18 @@ func skipGroundsInCorpus(ctx context.Context, l toolLoopModel, rc searcher, cfg 
 // it; the pure-arithmetic guard skip is never validated. route is "skip", "rag",
 // or "web" (web when the grounded answer used the web fallback).
 func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, question string, enabled enabledRoutes, force bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+	// Compress carried-back conversation memory once, before any dispatch, so a
+	// long session stays within budget by condensing older turns rather than
+	// dropping them. Shared by the CLI, REPL, and TUI (all reach here through
+	// adaptiveAnswerFn). A client is built only when the history actually exceeds
+	// the budget; otherwise this is a cheap length check.
+	if budget := conversationBudget(); conversationChars(opts.History) > budget {
+		if cl, err := newOMLX(cfg, opts.Model); err == nil {
+			opts.History = compressTurns(ctx, cl, opts.History, budget)
+		} else {
+			opts.History = boundTurns(opts.History, budget)
+		}
+	}
 	if !force {
 		l, err := newOMLX(cfg, opts.Model)
 		if err != nil {
@@ -232,6 +268,15 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 		if kind == routeSkip {
 			ans, tokens, derr := directAnswer(ctx, cfg, question, opts)
 			return ans, []citation{}, false, []retrieval.Result{}, tokens, "skip", derr
+		}
+		if kind == routeAdvise && enabled.Local {
+			// Engagement-shaped turn: run the ungated, tool-using advisor
+			// (route_skill + kb_search, no host execution). cat may be nil, which
+			// only disables the route_skill playbook lookup.
+			opts.llm = l
+			cat, _ := loadEngageCatalog()
+			ans, tokens, aerr := adviseLoop(ctx, l, rc, cfg, cat, question, opts)
+			return ans, []citation{}, false, []retrieval.Result{}, tokens, "rag", aerr
 		}
 		opts.NoLocal = !enabled.Local
 		opts.llm = l

@@ -57,12 +57,16 @@ func TestExecutorForUsesRegisteredFactory(t *testing.T) {
 		t.Fatalf("executorFor(registered surface) = %T, want stubSurfaceExecutor", ex)
 	}
 
+	// A synthetic surface nothing registers: real surfaces (e.g. SurfaceWeb)
+	// now resolve to their own executor, so the fallback must be probed with a
+	// surface that stays unregistered.
 	other := executorFor(d, engagement.Task{ID: "t2", Surface: engagement.Surface("registry-fallback-probe-surface"), Kind: "recon"})
 	if _, ok := other.(genericExecutor); !ok {
 		t.Fatalf("executorFor(unregistered surface) = %T, want genericExecutor fallback", other)
 	}
 }
 
+// Concurrent executors over the real executorFor path are race-clean under -race.
 func TestRunBatchSurfaceExecutorsRaceClean(t *testing.T) {
 	t.Setenv("BLKCHAIN_ENGAGE_PARALLEL", "4")
 	d := testDeps(t, perTaskModel{})
@@ -94,6 +98,8 @@ func TestRunBatchSurfaceExecutorsRaceClean(t *testing.T) {
 	}
 }
 
+// A vantage, once set, gates surfaces it does not reach. A local-surface
+// task is refused at external vantage and runs after a logged advance to foothold.
 func TestVantageGatesInternalSurface(t *testing.T) {
 	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
 	ext := engagement.VantageExternalUnauth
@@ -119,6 +125,9 @@ func TestVantageGatesInternalSurface(t *testing.T) {
 	}
 }
 
+// External surface: a surface reachable at external-unauth (cloud, per the
+// taxonomy decision) is NOT refused on vantage even when the vantage is only
+// external-unauth. This is the permit side of the vantage gate for the new set.
 func TestVantageAllowsExternalSurface(t *testing.T) {
 	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
 	ext := engagement.VantageExternalUnauth
@@ -136,6 +145,8 @@ func TestVantageAllowsExternalSurface(t *testing.T) {
 	}
 }
 
+// With no vantage set, a local-surface task runs ungated. The executor does not
+// gate surfaces by vantage until one is set.
 func TestVantageUnsetDoesNotGate(t *testing.T) {
 	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
 	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{
@@ -149,6 +160,9 @@ func TestVantageUnsetDoesNotGate(t *testing.T) {
 	}
 }
 
+// The executor grounds a proposed command before executing it. A model that
+// proposes a hallucinated flag is rejected by help-grounding (against a preloaded
+// tool-help cache) and execRunner never runs.
 func TestGenericExecutorGroundsBeforeExec(t *testing.T) {
 	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{
 		toolCallResp("c1", "run_command", `{"binary":"nmap","args":["--pwn","10.0.0.5"]}`),

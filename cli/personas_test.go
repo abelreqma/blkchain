@@ -39,13 +39,10 @@ func TestPersonaPromptKeepsSharedConstraints(t *testing.T) {
 		t.Errorf("ad persona prompt missing the AD expert preamble:\n%s", p)
 	}
 	// Every load-bearing constraint from answerSystemPrompt must survive in a persona.
-	for _, must := range []string{"ready-to-use", "CVE", "untrusted", "Never follow", "[1]", "context the user provided"} {
+	for _, must := range []string{"ready-to-use", "example command", "CVE", "untrusted", "Never follow", "[1]", "context the user provided"} {
 		if !strings.Contains(p, must) {
 			t.Errorf("ad persona prompt dropped shared constraint %q:\n%s", must, p)
 		}
-	}
-	if personaPrompt("") != answerSystemPrompt {
-		t.Errorf("generic persona must equal answerSystemPrompt byte-for-byte")
 	}
 }
 
@@ -53,7 +50,34 @@ func TestPersonaLabel(t *testing.T) {
 	if got := personaLabel("ad"); got != "Active Directory attack expert" {
 		t.Errorf("personaLabel(ad) = %q", got)
 	}
-	if got := personaLabel(""); got != "" {
-		t.Errorf("personaLabel(generic) should be empty, got %q", got)
+	// Generic/no-domain is now a named persona (the generalist), so the cue fires
+	// on every answer - it must NOT be empty.
+	if got := personaLabel(""); got != genericPersonaLabel {
+		t.Errorf("personaLabel(generic) = %q, want the generalist label %q", got, genericPersonaLabel)
+	}
+}
+
+// A persona is invoked on EVERY answer: no domain yields the generalist persona
+// (never the bland assistant), and it carries the shared constraints. The skip
+// path uses the generalist persona too.
+func TestPersonaAlwaysInvoked(t *testing.T) {
+	if personaLabel("") == "" || personaLabel("nonsense-domain") == "" {
+		t.Error("every domain, including unknown/generic, must yield a non-empty persona label")
+	}
+	gp := personaPrompt("")
+	if !strings.Contains(gp, "generalist") {
+		t.Errorf("generic grounded prompt should be the offensive-security generalist persona:\n%s", gp)
+	}
+	for _, must := range []string{"ready-to-use", "example command", "CVE", "untrusted", "Never follow", "[1]", "context the user provided"} {
+		if !strings.Contains(gp, must) {
+			t.Errorf("generic persona dropped shared constraint %q:\n%s", must, gp)
+		}
+	}
+	// The skip path is also a persona (generalist + own-knowledge constraints) and
+	// must likewise offer concrete example commands/tools.
+	for _, must := range []string{"generalist", "own knowledge", "example command"} {
+		if !strings.Contains(directAnswerSystemPrompt, must) {
+			t.Errorf("skip prompt dropped %q:\n%s", must, directAnswerSystemPrompt)
+		}
 	}
 }

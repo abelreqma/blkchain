@@ -121,8 +121,8 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
-// migrate renames the legacy blk_history table to tableName when the old table
-// exists and the new one does not. Best-effort: on any error the caller's
+// migrate renames the old blk_history table to tableName when it exists and the
+// new one does not. Best-effort: on any error the caller's
 // initSchema still creates a fresh tableName, so a failed migration degrades to
 // an empty (not corrupt) history rather than failing the open.
 func (s *Store) migrate() {

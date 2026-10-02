@@ -206,7 +206,12 @@ func (e containerExecutor) containerRunReconPhase(ctx context.Context, task enga
 		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8}); err != nil {
 			return tierOutcome{}, err
 		}
-
+		// Code-side evidence capture (captureTierEvidence): do not rely on the
+		// model's record_evidence. A code-side backstop records this pass's captured
+		// command output as evidence and surfaces a coverage-gap when nothing was
+		// captured, so non-nmap container recon (kubectl/capsh/crictl/escape probes)
+		// cannot silently drop its findings. Container has a bespoke recon driver, so
+		// it adopts the shared helper explicitly rather than inheriting it.
 		newRows, err := e.captureTierEvidence(task.ID, string(task.Surface), asset, tier.Name, beforeRows, beforeCmds)
 		if err != nil {
 			return tierOutcome{}, err

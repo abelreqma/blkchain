@@ -506,6 +506,8 @@ func TestDestructiveNotAppliedInExternalProfile(t *testing.T) {
 	}
 }
 
+// A system-write destination spelled with different case on a
+// case-insensitive filesystem still writes the same file and must be denied.
 func TestSystemPathWriteCaseFold(t *testing.T) {
 	for _, c := range []Command{
 		{Binary: "tee", Args: []string{"/ETC/passwd"}},

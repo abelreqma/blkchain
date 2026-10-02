@@ -61,7 +61,8 @@ func plainREPL() error {
 			return
 		}
 		convo = append(convo, priorTurn{Role: "human", Content: q}, priorTurn{Role: "ai", Content: ans})
-		convo = boundTurns(convo, conversationMaxChars)
+		// The full conversation is carried; the shared answer path compresses it
+		// to the budget when it grows large, so nothing is truncated here.
 	}
 	// eng stays nil until the plain REPL gets an engage mode; the final DAG
 	// snapshot below is dormant until then.

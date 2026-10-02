@@ -44,6 +44,10 @@ type ChainSummarizer struct {
 	// KeepRecent is how many of the most recent messages to leave verbatim
 	// after the summary. A value <= 0 selects defaultKeepRecent.
 	KeepRecent int
+	// Instruction overrides the summarization system framing. Empty selects
+	// summarizeInstruction (the tool-loop wording); the conversation path sets
+	// its own. Either way the span is framed as untrusted data to summarize.
+	Instruction string
 }
 
 // historyChars is the total character length of every text, tool-call, and
@@ -134,7 +138,11 @@ func (s *ChainSummarizer) summarize(ctx context.Context, middle []llms.MessageCo
 	if maxTok <= 0 {
 		maxTok = defaultSummaryMaxTokens
 	}
-	prompt := summarizeInstruction + "\n\n--- STEPS TO SUMMARIZE (untrusted data) ---\n" + renderMessages(middle)
+	instr := s.Instruction
+	if instr == "" {
+		instr = summarizeInstruction
+	}
+	prompt := instr + "\n\n--- STEPS TO SUMMARIZE (untrusted data) ---\n" + renderMessages(middle)
 	resp, err := s.Model.GenerateContent(ctx,
 		[]llms.MessageContent{llms.TextParts(llms.ChatMessageTypeHuman, prompt)},
 		llms.WithTemperature(0),

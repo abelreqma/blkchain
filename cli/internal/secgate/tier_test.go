@@ -12,7 +12,7 @@ func TestPhaseTierPredicates(t *testing.T) {
 		{PhaseReport, false, false},
 		{PhaseExploit, true, true},
 		{PhasePostEx, true, true},
-		{Phase(""), false, false},      // empty == recon (legacy-safe default)
+		{Phase(""), false, false},      // empty == recon (safe default)
 		{Phase("bogus"), false, false}, // unknown is not a confirm/arm tier
 	}
 	for _, c := range cases {

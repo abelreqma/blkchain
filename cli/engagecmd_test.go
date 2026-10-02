@@ -96,6 +96,8 @@ func TestEngageCatalogUnsetIsEmpty(t *testing.T) {
 	}
 }
 
+// --- scope + config resolution ---
+
 func TestResolveEngageScopeExplicitWins(t *testing.T) {
 	sp := filepath.Join(t.TempDir(), "scope.txt")
 	writeFile(t, sp, "10.0.0.5\n")

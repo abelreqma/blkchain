@@ -17,6 +17,13 @@ import (
 	"blkchain/cli/internal/skillcat"
 )
 
+// replengagecmd.go wires the REPL /engage command to the gate-governed engage
+// entry (replengage.go runReplEngage). It builds the engage
+// dependencies from the session, runs the orchestrator in a command goroutine,
+// and bridges progress snapshots to the live engagement view so the existing viz
+// DAG + bar render the run. The confirm overlay (engageconfirm.go) and the
+// Safe-mode asker (engageask.go) are the human-in-the-loop surfaces.
+
 // runReplEngageFn is the engage entry, injected in tests.
 var runReplEngageFn = runReplEngage
 

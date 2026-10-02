@@ -134,13 +134,18 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 	toolHelp, toolHelpClose := openToolHelpCache()
 	defer toolHelpClose()
 	deps.ToolHelp = toolHelp
-
+	// Seed the engagement's initial vantage from scope; a seed error is
+	// logged, not fatal.
 	if serr := seedInitialVantage(ctx, ws.Store, scope); serr != nil {
 		fmt.Fprintf(os.Stderr, "engage: vantage seed failed: %v\n", serr)
 	}
 	return runOrchestrator(ctx, deps, goal)
 }
 
+// applyArmReq sets the optional operator arm requester on deps: the REPL
+// passes its widget ArmRequester here so the at-exploit arm gate fires in a REPL
+// engagement. With no requester, deps.ArmReq stays nil, the arm gate is a no-op,
+// and an unarmed exploit's commands are gate-denied (fail-safe).
 func applyArmReq(deps engageDeps, armReq ...ArmRequester) engageDeps {
 	if len(armReq) > 0 && armReq[0] != nil {
 		deps.ArmReq = armReq[0]

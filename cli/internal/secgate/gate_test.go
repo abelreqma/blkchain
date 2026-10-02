@@ -460,6 +460,9 @@ type confirmFunc func(ctx context.Context, c Command) bool
 
 func (f confirmFunc) Confirm(ctx context.Context, c Command) bool { return f(ctx, c) }
 
+// Authorize and Check deny identically on the recheck layers. A
+// command that clears the deny-layers but fails the file-access recheck must be
+// denied by BOTH entry points with the same reason.
 func TestAuthorizeAndCheckDenyIdenticallyOnRecheck(t *testing.T) {
 	s, _ := ParseScope(strings.NewReader("10.0.0.5\n"))
 	g := &Gate{Mode: Auto, Scope: s, Allow: NewAllowlist("curl"), Approvals: NewSessionApprovals()}
@@ -477,6 +480,9 @@ func TestAuthorizeAndCheckDenyIdenticallyOnRecheck(t *testing.T) {
 	}
 }
 
+// The pipeline re-checks resolution AFTER confirmation and before
+// exec. A hostname in scope by name that resolves out-of-scope only after the
+// human confirms must be denied at the post-confirm recheck.
 func TestPipelineRechecksResolutionAfterConfirm(t *testing.T) {
 	saved := lookupIPFn
 	defer func() { lookupIPFn = saved }()
@@ -534,6 +540,8 @@ func stubEnumFixtureResolver(t *testing.T) {
 	})
 }
 
+// --- RoE rate limiting ---
+
 // TestRateLimitDeniesOverBudget: with a 2/s scope rate, the first two commands
 // in a window are allowed, the third is denied, and after the window advances a
 // command is allowed again. The clock is injected so the test is deterministic.
@@ -562,6 +570,8 @@ func TestRateLimitDeniesOverBudget(t *testing.T) {
 	}
 }
 
+// --- config denylist + unattended-auto allowlist bound ---
+
 // TestConfigDeniedAlwaysDenies: a binary in ConfigDenied is denied even when it
 // is otherwise allowed, in both the external and the local profile.
 func TestConfigDeniedAlwaysDenies(t *testing.T) {
@@ -587,6 +597,9 @@ func TestConfigDeniedAlwaysDenies(t *testing.T) {
 	}
 }
 
+// TestUnattendedAllowBoundAutoHITL: in external Auto with a present-but-empty
+// unattended allowlist and no confirmer, an otherwise-allowed command falls back
+// to HITL, which with no confirmer denies.
 func TestUnattendedAllowBoundAutoHITL(t *testing.T) {
 	g := &Gate{Mode: Auto, Scope: okScope(t), Allow: NewAllowlist("nmap"), UnattendedAllow: NewAllowlist()}
 	if err := g.Start(); err != nil {
@@ -611,8 +624,8 @@ func TestUnattendedAllowPermitsRunsUnattended(t *testing.T) {
 	}
 }
 
-// TestUnattendedAllowNilLegacy: a nil unattended allowlist keeps the legacy
-// behavior (external Auto runs unattended with no confirmer).
+// TestUnattendedAllowNilLegacy: a nil unattended allowlist runs external Auto
+// unattended with no confirmer.
 func TestUnattendedAllowNilLegacy(t *testing.T) {
 	g := &Gate{Mode: Auto, Scope: okScope(t), Allow: NewAllowlist("nmap")}
 	if err := g.Start(); err != nil {
@@ -623,6 +636,8 @@ func TestUnattendedAllowNilLegacy(t *testing.T) {
 		t.Errorf("nil unattended allowlist must keep legacy unattended auto: %q", d.Reason)
 	}
 }
+
+// --- auto-without-scope logged override ---
 
 // TestAutoNoScopeRefusedWithoutOverride: Auto with no scope and no override must
 // refuse to start, and with the override it must start.
@@ -681,6 +696,8 @@ func TestAutoOverrideTargetFailsClosed(t *testing.T) {
 		t.Error("a targeted command must fail closed under the no-scope override")
 	}
 }
+
+// --- override denies glued/bundled short flags ---
 
 // Under the no-scope override, a command that hides its target in a glued short
 // flag (which ExtractTargets drops and the per-tool classifier does not audit for

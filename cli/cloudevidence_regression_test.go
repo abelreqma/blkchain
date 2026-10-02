@@ -11,6 +11,12 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
+// cloudProbeNoRecordModel drives the cloud recon executor to run ONE in-scope curl
+// metadata probe and then finish WITHOUT ever calling record_evidence, and to stop
+// at the sufficiency grader. It proves the code-side capture backstop
+// (captureTierEvidence) records the probe output as evidence even though the model
+// recorded nothing - the no-silent-drop guarantee the shared helper provides, adopted on
+// the bespoke cloud recon path.
 type cloudProbeNoRecordModel struct{}
 
 func (cloudProbeNoRecordModel) GenerateContent(_ context.Context, msgs []llms.MessageContent, _ ...llms.CallOption) (*llms.ContentResponse, error) {
@@ -38,6 +44,13 @@ func (cloudProbeNoRecordModel) GenerateContent(_ context.Context, msgs []llms.Me
 	return finalResp("tier done"), nil
 }
 
+// TestCloudReconCodeSideEvidenceAndCandidate: the cloud recon path adopts the
+// code-side capture helper. The model runs an in-scope metadata probe but never
+// records evidence; captureTierEvidence must still record the captured command
+// output as evidence (no silent drop), and the cloud finding correlation must then
+// emit a candidate from it. With no retrieval configured (RC nil) the IMDS-credential
+// detection cannot be grounded, so it surfaces as a non-actionable coverage-gap
+// (Status blocked + CoverageGap), never vanishing. Hermetic: execRunner stubbed.
 func TestCloudReconCodeSideEvidenceAndCandidate(t *testing.T) {
 	d := testDeps(t, cloudProbeNoRecordModel{})
 	d.ReconTiers = true
