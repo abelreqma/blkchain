@@ -1593,11 +1593,11 @@ func TestWelcomeBannerFitsEveryWidth(t *testing.T) {
 	}
 	// Nerd tier leads the title with the radar glyph; the unicode tier does not.
 	vizForceTier(t, plNerd)
-	if !strings.Contains(welcomeBanner(80), "\U000F2B10") {
-		t.Error("nerd banner should carry the radar glyph U+F2B10")
+	if !strings.Contains(welcomeBanner(80), iconRadar) {
+		t.Error("nerd banner should carry the radar icon")
 	}
 	vizForceTier(t, plUnicode)
-	if b := welcomeBanner(80); strings.ContainsRune(b, 0xF2B10) {
+	if b := welcomeBanner(80); strings.Contains(b, iconRadar) {
 		t.Errorf("unicode banner must not carry a Plane-15 glyph:\n%s", b)
 	}
 	// ASCII tier: no box, plain lines, still naming blk and the tagline.
@@ -2125,7 +2125,7 @@ func TestStatusRibbonColorTier(t *testing.T) {
 	if !strings.Contains(line, "\u2502") {
 		t.Errorf("unicode status lacks a thin separator: %q", line)
 	}
-	if strings.Contains(line, "\U000F2B00") || strings.Contains(line, "\U000F2B03") {
+	if strings.Contains(line, iconDatabase) || strings.Contains(line, iconHealth) {
 		t.Errorf("unicode status carries nerd icons: %q", line)
 	}
 }
@@ -2134,8 +2134,8 @@ func TestStatusRibbonNerdTier(t *testing.T) {
 	for _, env := range []string{"", "1"} {
 		line := colorStatusLine(t, env)
 		for name, want := range map[string]string{
-			"separator": "\ue0b0", "mode database icon": "\U000F2B00", "model icon": "\U000F2B01",
-			"reasoning icon": "\U000F2B02", "services heartbeat icon": "\U000F2B03", "viz icon": "\U000F2B04",
+			"separator": "\ue0b0", "mode database icon": iconDatabase, "model icon": iconCPU,
+			"reasoning icon": iconBolt, "services heartbeat icon": iconHealth, "viz icon": iconChart,
 		} {
 			if !strings.Contains(line, want) {
 				t.Errorf("POWERLINE=%q nerd status lacks %s %q: %q", env, name, want, line)
@@ -2226,8 +2226,7 @@ func TestVizBarTokensPerSecColoredTan(t *testing.T) {
 	}
 }
 
-// Nerd tier leads the bar with the play glyph (F2B06) and spins with the loader
-// glyph (F2B05), reconciling the section-4 loader with the section-7 icon map.
+// The rich bar uses the play and loader icons.
 func TestVizBarNerdTierUsesPlayAndLoaderGlyphs(t *testing.T) {
 	vizForceTier(t, plNerd)
 	m := newTestModel(t)
@@ -2236,7 +2235,7 @@ func TestVizBarNerdTierUsesPlayAndLoaderGlyphs(t *testing.T) {
 	stub.setSnapshot(eng.Engagement{Stage: eng.Stage{Label: "recon: scan", Step: 1, Total: 4, Tool: "run_command"}})
 	m.engagement = stub
 	bar := stripANSI(m.vizBar())
-	for name, glyph := range map[string]string{"play F2B06": "\U000F2B06", "loader F2B05": "\U000F2B05"} {
+	for name, glyph := range map[string]string{"play": iconPlay, "loader": iconLoader} {
 		if !strings.Contains(bar, glyph) {
 			t.Fatalf("nerd viz bar lacks %s: %q", name, bar)
 		}
@@ -2263,7 +2262,7 @@ func TestVizBarNonNerdKeepsBrailleLoader(t *testing.T) {
 			t.Fatalf("tier %v should keep the braille loader and accent: %q", tier, bar)
 		}
 		for _, r := range bar {
-			if r >= 0xF2B00 && r <= 0xF2BFF {
+			if r >= 0xE000 && r <= 0xF8FF {
 				t.Fatalf("tier %v leaked a Plane-15 glyph %U: %q", tier, r, bar)
 			}
 		}

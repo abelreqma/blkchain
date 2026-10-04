@@ -158,6 +158,11 @@ func (p clarifyPicker) resolve(res ClarifyResult) tea.Cmd {
 func (p clarifyPicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 	km, ok := msg.(tea.KeyMsg)
 	if !ok {
+		if p.typing {
+			var cmd tea.Cmd
+			p.input, cmd = p.input.Update(msg)
+			return p, cmd
+		}
 		return p, nil
 	}
 	if p.typing {

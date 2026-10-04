@@ -66,8 +66,7 @@ func (m model) reverseSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		match := m.rsearch.match
 		m.rsearch = reverseSearch{}
 		if match != "" {
-			m.ta.SetValue(match)
-			m.ta.SetHeight(clamp(m.ta.LineCount(), 1, 6))
+			m.setDraft(match)
 			m.ta.CursorEnd()
 			m = m.refreshPalette()
 		}

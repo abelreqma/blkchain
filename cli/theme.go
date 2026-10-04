@@ -185,6 +185,16 @@ func spinnerFramesFor(unicode bool) []string {
 // Glyph returns the glyph for name using the capability detection decided
 // once at startup.
 func Glyph(name GlyphName) string {
+	if plCurrentTier() == plNerd {
+		switch name {
+		case GlyphOK:
+			return "\uf00c"
+		case GlyphErr:
+			return "\uf00d"
+		case GlyphWarn:
+			return "\uf071"
+		}
+	}
 	return glyphFor(name, useUnicode)
 }
 

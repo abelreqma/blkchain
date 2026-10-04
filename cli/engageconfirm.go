@@ -145,6 +145,11 @@ func (p confirmPicker) resolve(res confirmResult) tea.Cmd {
 func (p confirmPicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 	km, ok := msg.(tea.KeyMsg)
 	if !ok {
+		if p.editing {
+			var cmd tea.Cmd
+			p.input, cmd = p.input.Update(msg)
+			return p, cmd
+		}
 		return p, nil
 	}
 	if p.editing {

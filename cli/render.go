@@ -5,6 +5,7 @@ import (
 
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/rivo/uniseg"
 )
 
 // render.go holds glowRender, used everywhere blk shows an answer or other
@@ -31,7 +32,11 @@ func glowRender(md string, width int) string {
 	// mdStyle is resolved once at startup (theme.go); using a fixed style here
 	// instead of glamour.WithAutoStyle avoids a per-render OSC 11 background
 	// query, whose "rgb:..." reply would otherwise leak into the TUI input.
-	r, err := glamour.NewTermRenderer(glamour.WithStandardStyle(mdStyle), glamour.WithWordWrap(w))
+	opts := []glamour.TermRendererOption{glamour.WithStandardStyle(mdStyle), glamour.WithWordWrap(w)}
+	if useUnicode {
+		opts = append(opts, glamour.WithEmoji())
+	}
+	r, err := glamour.NewTermRenderer(opts...)
 	if err != nil {
 		return md
 	}
@@ -88,12 +93,13 @@ func ellipsize(s string, n int) string {
 	}
 	var b strings.Builder
 	used := 0
-	for _, r := range s {
-		rw := lipgloss.Width(string(r))
+	g := uniseg.NewGraphemes(s)
+	for g.Next() {
+		rw := g.Width()
 		if used+rw > n-3 {
 			break
 		}
-		b.WriteRune(r)
+		b.WriteString(g.Str())
 		used += rw
 	}
 	return b.String() + "..."

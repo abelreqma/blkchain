@@ -270,8 +270,7 @@ func (m model) completeSelected() model {
 		return m
 	}
 	it := m.pal.items[m.pal.selected]
-	m.ta.SetValue("/" + it.name + " ")
-	m.ta.SetHeight(clamp(m.ta.LineCount(), 1, 6))
+	m.setDraft("/" + it.name + " ")
 	m.ta.CursorEnd()
 	return m.refreshPalette()
 }

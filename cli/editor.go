@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,34 +59,46 @@ func draftDir() (string, error) {
 	return dir, nil
 }
 
-// editorCmd writes the current draft to a temp .md in the private config dir and
-// returns the tea.Cmd that suspends the TUI, runs the editor on it, and yields an
-// editorDoneMsg. On a temp file error it returns a command that prints the error
-// instead. The draft is removed on every path: here on a write/close error, and
-// in applyEditorResult once the editor returns (whatever its exit).
-func (m model) editorCmd() tea.Cmd {
-	draft := m.ta.Value()
+// prepareDraftEditor writes a private draft and builds the editor command.
+func prepareDraftEditor(draft string) (*exec.Cmd, string, error) {
 	dir, err := draftDir()
 	if err != nil {
-		return tea.Println(styleErr(fmt.Errorf("editor: %w", err)))
+		return nil, "", err
 	}
 	f, err := os.CreateTemp(dir, "blk-draft-*.md")
 	if err != nil {
-		return tea.Println(styleErr(fmt.Errorf("editor: %w", err)))
+		return nil, "", err
 	}
 	path := f.Name()
-	if _, werr := f.WriteString(draft); werr != nil {
+	if _, err := f.WriteString(draft); err != nil {
 		f.Close()
 		_ = os.Remove(path)
-		return tea.Println(styleErr(fmt.Errorf("editor: %w", werr)))
+		return nil, "", err
 	}
-	if cerr := f.Close(); cerr != nil {
+	if err := f.Close(); err != nil {
 		_ = os.Remove(path)
-		return tea.Println(styleErr(fmt.Errorf("editor: %w", cerr)))
+		return nil, "", err
 	}
-
 	argv := editorArgv()
-	c := exec.Command(argv[0], append(argv[1:], path)...) //nolint:gosec // argv from env, no shell
+	return exec.Command(argv[0], append(argv[1:], path)...), path, nil //nolint:gosec // argv from env, no shell
+}
+
+func readEditedDraft(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, inputCharLimit+1))
+	return strings.TrimRight(string(b), "\n"), err
+}
+
+func (m model) editorCmd() tea.Cmd {
+	draft := m.ta.Value()
+	c, path, err := prepareDraftEditor(draft)
+	if err != nil {
+		return tea.Println(styleErr(fmt.Errorf("editor: %w", err)))
+	}
 	return tea.ExecProcess(c, func(err error) tea.Msg {
 		return editorDoneMsg{path: path, before: draft, err: err}
 	})
@@ -98,8 +111,7 @@ func (m model) applyEditorResult(msg editorDoneMsg) (tea.Model, tea.Cmd) {
 	var loaded string
 	var readErr error
 	if msg.err == nil {
-		b, e := os.ReadFile(msg.path)
-		readErr, loaded = e, string(b)
+		loaded, readErr = readEditedDraft(msg.path)
 	}
 	if msg.path != "" {
 		_ = os.Remove(msg.path)
@@ -112,8 +124,7 @@ func (m model) applyEditorResult(msg editorDoneMsg) (tea.Model, tea.Cmd) {
 	if strings.TrimSpace(edited) == "" || edited == strings.TrimRight(msg.before, "\n") {
 		return m, tea.Println("   " + Meta.Render("edit cancelled"))
 	}
-	m.ta.SetValue(edited)
-	m.ta.SetHeight(clamp(m.ta.LineCount(), 1, 6))
+	m.setDraft(edited)
 	m.ta.CursorEnd()
 	m = m.refreshPalette()
 	return m, textarea.Blink

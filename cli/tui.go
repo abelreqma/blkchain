@@ -241,14 +241,16 @@ func exitHint(keys []key.Binding) int {
 	return -1
 }
 
-// inputCharLimit is the draft cap in characters (64 KiB): large enough for a
-// pasted HTTP request or payload.
+// inputCharLimit bounds the draft to 64 KiB of UTF-8 text.
 const inputCharLimit = 65536
 
 // limitNotice is the one-line warning shown while the draft sits at the cap,
 // since the textarea drops further input silently. Empty otherwise.
 func (m model) limitNotice() string {
-	if m.ta.CharLimit > 0 && m.ta.Length() >= m.ta.CharLimit {
+	if m.draftTruncated && m.ta.LineCount() >= maxDraftLines {
+		return " " + Caut.Render(Glyph(GlyphWarn)+" input truncated at 10,000 lines")
+	}
+	if m.draftTruncated || len(m.ta.Value()) >= inputCharLimit {
 		return " " + Caut.Render(Glyph(GlyphWarn)+" input truncated at 64 KiB")
 	}
 	return ""
@@ -407,9 +409,14 @@ type model struct {
 	liveTokens int       // streamed tokens counted this turn (for the live readout)
 	firstTokAt time.Time // first streamed token this turn
 
-	history   []string
-	histIdx   int
-	histDraft string
+	history        []string
+	histIdx        int
+	histDraft      string
+	draftTruncated bool
+	draftTop       int
+	draftGoal      int
+	draftVertical  bool
+	draftLayout    draftLayout
 
 	// Input UX. pal is the slash-command autocomplete palette;
 	// queue is the FIFO of prompts typed while a turn runs; lastCtrlC times the
@@ -543,6 +550,8 @@ func initialModel() model {
 	ta.Placeholder = randomPlaceholder()
 	ta.Prompt = Glyph(GlyphPrompt) + " "
 	ta.CharLimit = inputCharLimit
+	ta.MaxHeight = 0
+	ta.MaxWidth = 0
 	ta.ShowLineNumbers = false
 	ta.SetHeight(1)
 	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(Accent).Bold(true)
@@ -652,6 +661,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ta.SetWidth(max(msg.Width, 1))
+		m.draftVertical = false
+		m.resizeDraft()
 		m.help.Width = max(msg.Width, 1)
 		return m, nil
 
@@ -759,12 +770,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Submit):
 			return m.submit()
 		case key.Matches(msg, m.keys.HistPrev):
-			if m.working || strings.Contains(m.ta.Value(), "\n") {
-				break // multi-line: let the textarea move the cursor
+			if m.working || m.ta.LineCount() > 1 || len(m.draftRows()) > 1 {
+				break // wrapped drafts use cursor navigation
 			}
 			return m.recallPrev(), nil
 		case key.Matches(msg, m.keys.HistNext):
-			if m.working || strings.Contains(m.ta.Value(), "\n") {
+			if m.working || m.ta.LineCount() > 1 || len(m.draftRows()) > 1 {
 				break
 			}
 			return m.recallNext(), nil
@@ -777,13 +788,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Editing stays live even while a turn runs, so a prompt can be typed and
-		// queued (queue-while-busy). The textarea drives cursor movement; the
-		// palette is refreshed from the new draft.
-		var cmd tea.Cmd
-		m.ta, cmd = m.ta.Update(msg)
-		m.ta.SetHeight(clamp(m.ta.LineCount(), 1, 6))
-		m = m.refreshPalette()
-		return m, cmd
+		// queued (queue-while-busy). Editing refreshes the command palette.
+		return m.updateDraft(msg)
+
+	case draftPasteMsg:
+		return m.pasteDraft(msg)
 
 	case spinner.TickMsg:
 		if m.working {
@@ -1264,7 +1273,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.dispatchInput(next)
 	}
 
-	return m, nil
+	if m.overlay != nil {
+		var cmd tea.Cmd
+		m.overlay, cmd = m.overlay.Update(msg)
+		return m, cmd
+	}
+	return m.updateDraft(msg)
 }
 
 // markRetrievalOK records a successful retrieval: qdrant and embed_server
@@ -1334,6 +1348,7 @@ func (m model) handleCancel() (tea.Model, tea.Cmd) {
 	default: // ccClear, ccHint
 		if action == ccClear {
 			m.ta.Reset()
+			m.draftTruncated, m.draftTop, m.draftVertical = false, 0, false
 			m.ta.SetHeight(1)
 			m.pal = palette{}
 		}
@@ -1656,6 +1671,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.ta.Reset()
+	m.draftTruncated, m.draftTop, m.draftVertical = false, 0, false
 	m.ta.SetHeight(1)
 	m.pal = palette{}
 	_ = appendHistory(q)
@@ -1962,7 +1978,7 @@ func (m model) recallPrev() model {
 	if m.histIdx > 0 {
 		m.histIdx--
 	}
-	m.ta.SetValue(m.history[m.histIdx])
+	m.setDraft(m.history[m.histIdx])
 	m.ta.CursorEnd()
 	return m
 }
@@ -1973,9 +1989,9 @@ func (m model) recallNext() model {
 	}
 	m.histIdx++
 	if m.histIdx == len(m.history) {
-		m.ta.SetValue(m.histDraft)
+		m.setDraft(m.histDraft)
 	} else {
-		m.ta.SetValue(m.history[m.histIdx])
+		m.setDraft(m.history[m.histIdx])
 	}
 	m.ta.CursorEnd()
 	return m
@@ -2040,14 +2056,10 @@ func (m model) inputView(w, budget int) string {
 	want := m.ta.Height()
 	rows := clamp(want, 1, max(budget, 1))
 	if rows != want {
-
-		m.ta, _ = m.ta.Update(nil)
-		_ = m.ta.View()
 		m.ta.SetHeight(rows)
 		defer m.ta.SetHeight(want)
-		m.ta, _ = m.ta.Update(nil)
 	}
-	draft := m.ta.View()
+	draft := m.draftView()
 	left := budget - rows
 	if m.pal.open {
 		if pv := m.paletteView(w, left); pv != "" {
@@ -2848,12 +2860,12 @@ func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, mode
 			engSeg.FG, engSeg.BG = wTanFg, wTanBg
 		}
 		left := []plSegment{
-			{Text: mode, FG: wSageFg, BG: wSageBg, Icon: "\U000F2B00"},
+			{Text: mode, FG: wSageFg, BG: wSageBg, Icon: iconDatabase},
 			engSeg,
-			{Text: "model " + model, FG: wHeadFg, BG: wSegBg, Icon: "\U000F2B01"},
+			{Text: "model " + model, FG: wHeadFg, BG: wSegBg, Icon: iconCPU},
 		}
 		if l.reasoning {
-			left = append(left, plSegment{Text: "reasoning " + m.reasoning, FG: wMutedFg, BG: wSegBg2, Icon: "\U000F2B02"})
+			left = append(left, plSegment{Text: "reasoning " + m.reasoning, FG: wMutedFg, BG: wSegBg2, Icon: iconBolt})
 		}
 		var right []plSegment
 		if l.retrieval {
@@ -2869,12 +2881,12 @@ func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, mode
 		if tone == Err {
 			hFG, hBG = wRoseFg, wRoseBg
 		}
-		right = append(right, plSegment{Text: h, FG: hFG, BG: hBG, Icon: "\U000F2B03"})
+		right = append(right, plSegment{Text: h, FG: hFG, BG: hBG, Icon: iconHealth})
 		if l.reasoning && mode == "rag" {
 			if m.prefs.Viz {
-				right = append(right, plSegment{Text: "viz", FG: wTanFg, BG: wTanBg, Icon: "\U000F2B04"})
+				right = append(right, plSegment{Text: "viz", FG: wTanFg, BG: wTanBg, Icon: iconChart})
 			} else {
-				right = append(right, plSegment{Text: "viz off", FG: wMutedFg, BG: wSegBg2, Icon: "\U000F2B04"})
+				right = append(right, plSegment{Text: "viz off", FG: wMutedFg, BG: wSegBg2, Icon: iconChart})
 			}
 		}
 		line := " " + dot + " " + plRenderRibbon(left, right, plCurrentTier(), 0)
@@ -3069,12 +3081,11 @@ func (m model) vizBar() string {
 	on := func(fg lipgloss.Color) lipgloss.Style { return lipgloss.NewStyle().Foreground(fg).Background(wBarBg) }
 	gap := on(wBarBg).Render(" ")
 	label := on(wOffWhite).Render(sanitizeTerminal(e.Stage.Label))
-	// Nerd tier leads with the play glyph (F2B06) and spins with the loader glyph
-	// (F2B05); other tiers keep the braille loader (U+283F) and accent (U+258E).
+	// The rich tier uses the play and loader icons.
 	tier := plCurrentTier()
 	lead, spin := "\u258e", "\u283f"
 	if tier == plNerd {
-		lead, spin = "\U000F2B06", "\U000F2B05"
+		lead, spin = iconPlay, iconLoader
 	}
 	accent := on(wMeterOn).Render(lead)
 	spinner := on(wMeterOn).Render(spin)
@@ -3083,7 +3094,7 @@ func (m model) vizBar() string {
 		tps := modeleval.TokensPerSec(m.liveTokens, time.Since(m.firstTokAt))
 		bolt := ""
 		if tier == plNerd {
-			bolt = on(wMeterOn).Render("\U000F2B02") + gap
+			bolt = on(wMeterOn).Render(iconBolt) + gap
 		}
 		// The rate is approximate: blk counts stream chunks, and one delta can carry
 		// several tokens, so the chunk count under-reports. A muted "~" marks it.
@@ -3252,7 +3263,7 @@ func welcomeBanner(width int) string {
 
 	icon, iconW := "", 0
 	if plCurrentTier() == plNerd {
-		icon, iconW = "\U000F2B10", 2 // ti-radar-2: glyph + trailing space
+		icon, iconW = iconRadar, 2 // icon and trailing space
 	}
 	// Top edge: "╭─ [icon ]blk " then a rule to the "╮". dashN fills to width.
 	dashN := width - 8 - iconW
@@ -3383,8 +3394,15 @@ func (k keyMap) panelGroups() []keyGroup {
 	return []keyGroup{
 		{"MOVE AND EDIT", []keyRow{
 			{label(k.Newline), "new line in the draft"},
-			{label(k.HistPrev, k.HistNext), "recall earlier questions; moves the cursor in a multi-line draft"},
+			{label(k.HistPrev, k.HistNext), "recall earlier questions; moves the cursor in a wrapped or multi-line draft"},
 			{label(k.Editor), "compose in $EDITOR (only while idle)"},
+			{"home/ctrl+a", "line start"},
+			{"end/ctrl+e", "line end"},
+			{"alt+b/f", "word left/right"},
+			{"ctrl+w", "delete previous word"},
+			{"ctrl+k", "delete to line end"},
+			{"ctrl+v", "paste clipboard"},
+			{"backspace/del", "delete character"},
 		}},
 		{"ASK", []keyRow{
 			{label(k.Submit), "ask; while a turn runs, queue it"},

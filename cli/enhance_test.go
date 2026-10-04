@@ -184,6 +184,8 @@ func TestLastLines(t *testing.T) {
 func TestSplitFirst(t *testing.T) {
 	cases := []struct{ in, wantF, wantR string }{
 		{"ask how are you", "ask", "how are you"},
+		{"/ask\nfirst line\nsecond line", "/ask", "first line\nsecond line"},
+		{"search\u2003query", "search", "query"},
 		{"search", "search", ""},
 		{"  open  2  ", "open", "2"},
 		{"", "", ""},

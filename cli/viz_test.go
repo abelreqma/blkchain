@@ -275,7 +275,7 @@ func TestVizMermaidDomainIconNerdTier(t *testing.T) {
 		eng.Task{ID: "d", Kind: "local", Objective: "privesc"},
 		eng.Task{ID: "e", Kind: "target-analysis", Objective: "parse"},
 	))
-	for id, glyph := range map[string]string{"a": "\U000F2B10", "b": "\U000F2B11", "c": "\U000F2B17", "d": "\U000F2B18", "e": "\U000F2B19"} {
+	for id, glyph := range map[string]string{"a": "\uf140", "b": "\uf0ac", "c": "\uf013", "d": "\uf120", "e": "\uf1c9"} {
 		if ln := vizNodeLine(t, m, id); !strings.Contains(ln, "["+glyph+" ") {
 			t.Fatalf("node %s missing glyph %U: %q", id, []rune(glyph)[0], ln)
 		}
@@ -290,7 +290,7 @@ func TestVizMermaidDomainIconAbsentOutsideNerd(t *testing.T) {
 			eng.Task{ID: "b", Kind: "web", Objective: "probe"},
 		))
 		for _, r := range m {
-			if r >= 0xF2B00 && r <= 0xF2BFF {
+			if r >= 0xE000 && r <= 0xF8FF {
 				t.Fatalf("tier %v leaked glyph %U: %q", tier, r, m)
 			}
 		}
@@ -311,7 +311,7 @@ func TestVizMultipleActiveNodesStyledWarn(t *testing.T) {
 	if !strings.Contains(m, "a[") || !strings.Contains(m, "b[") {
 		t.Fatalf("both active nodes must render: %q", m)
 	}
-	fr := &fakeRunner{out: "| \U000F2B10 recon: scan |   | \U000F2B11 web: SQLi |"}
+	fr := &fakeRunner{out: "| \uf140 recon: scan |   | \uf0ac web: SQLi |"}
 	block := newVizRenderer(fr).blockFor(context.Background(), e)
 	for _, label := range []string{"recon: scan", "web: SQLi"} {
 		if !strings.Contains(block, vizStatusStyle(eng.StatusActive).Render(label)) {
@@ -381,7 +381,7 @@ func TestVizColorizeCandidateIsCaution(t *testing.T) {
 	vizForceColor(t)
 	vizForceTier(t, plNerd)
 	e := basisEngagement(eng.Task{ID: "b", Kind: "web", Objective: "SQLi", Phase: eng.PhaseExploit, Status: eng.StatusTodo})
-	fr := &fakeRunner{out: "| \U000F2B11 web: SQLi |"}
+	fr := &fakeRunner{out: "| \uf0ac web: SQLi |"}
 	block := newVizRenderer(fr).blockFor(context.Background(), e)
 	want := lipgloss.NewStyle().Foreground(Warn).Render("web: SQLi")
 	if !strings.Contains(block, want) {

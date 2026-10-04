@@ -1189,8 +1189,7 @@ func TestSafeAutoCommandsInRegistryAndHelp(t *testing.T) {
 	}
 }
 
-// /engage is a TUI-only command that starts a gated engagement; it has a dispatch
-// case, a goal argument, and appears in the palette and TUI /help.
+// /engage starts a gated engagement and appears in the palette and help.
 func TestEngageCommandInRegistryAndHelp(t *testing.T) {
 	noColor(t)
 	c, ok := slashCommand("engage")

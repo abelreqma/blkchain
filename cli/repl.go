@@ -8,7 +8,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 
+	"blkchain/cli/internal/histstore"
 	"blkchain/cli/internal/retrieval"
 )
 
@@ -49,6 +51,13 @@ func replPrompt() string {
 func plainREPL() error {
 	var last []retrieval.Result
 	mode := "rag"
+	pm := model{cfg: loadConfig(), mode: mode, hist: histstore.OpenDefault()}
+	pm.sess, _ = newSession()
+	pm.ambient, _ = loadInitContext()
+	if pm.hist != nil {
+		defer pm.hist.Close()
+	}
+	draft := ""
 	var rc replClient
 	defer rc.close()
 	// convo is the in-process conversation memory for this piped/non-TTY
@@ -61,6 +70,8 @@ func plainREPL() error {
 			return
 		}
 		convo = append(convo, priorTurn{Role: "human", Content: q}, priorTurn{Role: "ai", Content: ans})
+		pm.mode, pm.pendingQ, pm.lastAnswer = mode, q, ans
+		pm.recordTurn(ans)
 		// The full conversation is carried; the shared answer path compresses it
 		// to the budget when it grows large, so nothing is truncated here.
 	}
@@ -72,14 +83,22 @@ func plainREPL() error {
 	fmt.Printf("%s  %s\n", H1.Render("blkChain"), Meta.Render(replBanner()))
 
 	in := bufio.NewScanner(os.Stdin)
-	in.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	in.Buffer(make([]byte, 0, 64*1024), inputCharLimit+2)
 	for {
 		fmt.Print(Prompt.Render(replPrompt()))
 		if !in.Scan() {
 			fmt.Println()
 			return in.Err()
 		}
-		line := strings.TrimSpace(in.Text())
+		line, cut := boundedDraftText(in.Text(), inputCharLimit)
+		if cut {
+			printErr(fmt.Errorf("input exceeds the draft limit; edit and retry"))
+			continue
+		}
+		line = strings.TrimSpace(line)
+		if line == "" && draft != "" {
+			line, draft = draft, ""
+		}
 		if line == "" {
 			continue
 		}
@@ -115,7 +134,33 @@ func plainREPL() error {
 			_ = savePrefs(p)
 			fmt.Println(Meta.Render(vizNote(on)))
 		case "copy":
-			fmt.Println(Meta.Render("/copy is only available in the interactive TUI"))
+			if pm.lastAnswer == "" {
+				printErr(fmt.Errorf("copy: no answer yet"))
+			} else {
+				printErr(copyToClipboard(pm.lastAnswer))
+			}
+		case "engage":
+			printErr(runEngage(strings.Fields(rest)))
+		case "history":
+			var err error
+			convo, err = plainHistory(&pm, rest, convo)
+			printErr(err)
+		case "editor":
+			var err error
+			draft, err = plainEditor(draft)
+			printErr(err)
+		case "init":
+			if ambient, ok := loadInitContext(); ok {
+				pm.ambient = ambient
+				fmt.Println(Meta.Render("loaded .blk/context.md"))
+			} else {
+				fmt.Println(Meta.Render("no .blk/context.md in this directory"))
+			}
+		case "clear":
+			draft, convo, last = "", nil, nil
+			pm.lastAnswer, pm.attachments = "", nil
+			pm.sess, _ = newSession()
+			fmt.Println(Meta.Render("started a fresh session"))
 		case "mode":
 			if mode == "agent" {
 				mode = "rag"
@@ -133,7 +178,7 @@ func plainREPL() error {
 				_ = savePrefs(p)
 				fmt.Println(Meta.Render("rag " + boolOnOff(on)))
 			} else if q != "" {
-				ans, err := replForceAsk(q, &rc, convo)
+				ans, err := plainAsk(mode, q, &rc, convo, pm.buildContextPreface(), true)
 				printErr(err)
 				recordConvo(q, ans)
 			} else {
@@ -143,7 +188,7 @@ func plainREPL() error {
 		case "search", "s":
 			last = replSearch(rest, last, &rc)
 		case "ask", "a":
-			ans, err := replAsk(mode, rest, &rc, convo)
+			ans, err := plainAsk(mode, rest, &rc, convo, pm.buildContextPreface(), false)
 			printErr(err)
 			recordConvo(rest, ans)
 		case "hermes":
@@ -151,9 +196,13 @@ func plainREPL() error {
 		case "open", "o":
 			printErr(replOpen(rest, last))
 		default:
+			if strings.HasPrefix(cmd, "/") {
+				printErr(plainSlashError(cmd))
+				break
+			}
 			// Bare input with no recognized verb is an ask (matches the TUI); in
 			// agent mode it runs the hermes agent instead.
-			ans, err := replAsk(mode, line, &rc, convo)
+			ans, err := plainAsk(mode, line, &rc, convo, pm.buildContextPreface(), false)
 			printErr(err)
 			recordConvo(line, ans)
 		}
@@ -189,17 +238,6 @@ func boolOnOff(on bool) string {
 		return "on"
 	}
 	return "off"
-}
-
-// replForceAsk forces grounding for one query (the /rag <question> form),
-// bypassing the router and the rag toggle. history is the prior conversation;
-// it returns the answer text so the caller can record the turn.
-func replForceAsk(query string, c *replClient, history []priorTurn) (string, error) {
-	rc, err := c.get()
-	if err != nil {
-		return "", err
-	}
-	return askWith(rc, history, []string{"--rag", query})
 }
 
 // plainVizSnapshot writes the current DAG block once, for output that has no
@@ -255,23 +293,6 @@ func (c *replClient) close() {
 	if c.rc != nil {
 		c.rc.Close()
 	}
-}
-
-// replAsk routes a question by mode: rag mode uses the RAG answer path
-// (askWith); agent mode runs the hermes agent (subprocess one-shot). It mirrors
-// the TUI's dual-mode dispatch for the non-TTY fallback. history is the prior
-// conversation (rag mode only); it returns the answer text so the caller can
-// record the turn. Agent mode keeps its memory in the Hermes gateway, so it
-// returns no text.
-func replAsk(mode, query string, c *replClient, history []priorTurn) (string, error) {
-	if mode == "agent" {
-		return "", runHermes([]string{query})
-	}
-	rc, err := c.get()
-	if err != nil {
-		return "", err
-	}
-	return askWith(rc, history, []string{query})
 }
 
 // replSearch runs a search, prints it, and returns the new results (or the
@@ -353,11 +374,17 @@ func replGroups() []rowGroup {
 		}},
 		{hgAgent, []helpRow{
 			{"/hermes <prompt>", replSpecDesc("hermes")},
+			{"/engage [flags] <goal>", replSpecDesc("engage")},
 			{"/mode", replSlashDesc("mode")},
 			{"/agent", replSlashDesc("agent")},
 			{"/rag [on|off|question]", replSlashDesc("rag")},
 		}},
 		{hgSetup, []helpRow{
+			{"/history [n|clear [n]]", replSlashDesc("history")},
+			{"/editor", replSlashDesc("editor")},
+			{"/init", replSlashDesc("init")},
+			{"/copy", replSlashDesc("copy")},
+			{"/clear", replSlashDesc("clear")},
 			{"/viz [on|off]", replSlashDesc("viz")},
 			{"/help", "show this list"},
 			{"/quit", "leave (also Ctrl-D)"},
@@ -385,8 +412,8 @@ func replHelp() {
 // splitFirst splits s into its first whitespace-delimited word and the rest.
 func splitFirst(s string) (first, rest string) {
 	s = strings.TrimSpace(s)
-	if i := strings.IndexAny(s, " \t"); i >= 0 {
-		return s[:i], strings.TrimSpace(s[i+1:])
+	if i := strings.IndexFunc(s, unicode.IsSpace); i >= 0 {
+		return s[:i], strings.TrimSpace(s[i:])
 	}
 	return s, ""
 }

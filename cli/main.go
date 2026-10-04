@@ -439,6 +439,10 @@ func runAsk(args []string) error {
 // askWith runs `blk ask` with args. rc is a long-lived retrieval client to
 // reuse, such as the plain REPL's; nil makes one for this call and closes it.
 func askWith(rc *retrieval.Client, history []priorTurn, args []string) (string, error) {
+	return askWithPreface(rc, history, args, "")
+}
+
+func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, preface string) (string, error) {
 	var o askOpts
 	fs := newFlagSet("ask")
 	defineAskFlags(fs, &o)
@@ -485,6 +489,7 @@ func askWith(rc *retrieval.Client, history []priorTurn, args []string) (string, 
 		p := loadPrefs()
 		_, cits, usedWeb, _, _, _, err := adaptiveAnswerFn(context.Background(), rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{
 			Stream:  newAskStream(os.Stdout, &full),
+			Preface: preface,
 			NoWeb:   !p.Web,
 			History: history,
 			Persona: func(domain string) {
@@ -512,7 +517,7 @@ func askWith(rc *retrieval.Client, history []priorTurn, args []string) (string, 
 	// answer loop was asked to use.
 	model := resolveModel(cfg)
 	p := loadPrefs()
-	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(context.Background(), rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Model: model, NoWeb: !p.Web, History: history})
+	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(context.Background(), rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Model: model, NoWeb: !p.Web, History: history, Preface: preface})
 	if errors.Is(err, ErrNoResults) {
 		return "", reportNoResults(os.Stderr, *jsonOut, model)
 	}

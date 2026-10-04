@@ -43,19 +43,18 @@ func vizSanitizeLabel(s string) string {
 	return ellipsize(s, vizLabelMax)
 }
 
-// vizDomainIcons maps a lowercase domain name to its Plane-15 private-use
-// glyph. The codepoints are shared with the font graft, so keep them exact.
+// vizDomainIcons maps domains to Nerd Font glyphs.
 var vizDomainIcons = map[string]string{
-	"recon":           "\U000F2B10",
-	"web":             "\U000F2B11",
-	"ad":              "\U000F2B12",
-	"cloud":           "\U000F2B13",
-	"k8s":             "\U000F2B14",
-	"wifi":            "\U000F2B15",
-	"exploit-dev":     "\U000F2B16",
-	"generic":         "\U000F2B17",
-	"local":           "\U000F2B18",
-	"target-analysis": "\U000F2B19",
+	"recon":           "\uf140",
+	"web":             "\uf0ac",
+	"ad":              "\uf0e8",
+	"cloud":           "\uf0c2",
+	"k8s":             "\uf1b3",
+	"wifi":            "\uf1eb",
+	"exploit-dev":     "\uf188",
+	"generic":         "\uf013",
+	"local":           "\uf120",
+	"target-analysis": "\uf1c9",
 }
 
 // vizCandidateMark is the bracket-free caution glyph that marks an unarmed

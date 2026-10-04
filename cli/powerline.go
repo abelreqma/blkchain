@@ -11,6 +11,17 @@ import (
 // tiers, held to the theme palette. Segment content and colors are identical
 // across tiers; only separators, icons, and background fills change.
 
+const (
+	iconDatabase = "\uf1c0"
+	iconCPU      = "\uf2db"
+	iconBolt     = "\uf0e7"
+	iconHealth   = "\uf21e"
+	iconChart    = "\uf201"
+	iconLoader   = "\uf110"
+	iconPlay     = "\uf04b"
+	iconRadar    = "\uf140"
+)
+
 type plTier int
 
 const (
