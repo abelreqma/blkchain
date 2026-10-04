@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"blkchain/cli/internal/histstore"
 	"blkchain/cli/internal/retrieval"
@@ -20,6 +21,8 @@ func plainSlashError(cmd string) error {
 }
 
 func plainAsk(mode, query string, c *replClient, history []priorTurn, preface string, force bool) (string, error) {
+	c.metrics = &callMetrics{}
+	c.started = time.Now()
 	first, rest := splitFirst(query)
 	webOnly := first == "--web"
 	if webOnly {
@@ -43,7 +46,7 @@ func plainAsk(mode, query string, c *replClient, history []priorTurn, preface st
 	if webOnly {
 		args = []string{"--web", query}
 	}
-	return askWithPreface(rc, history, args, preface)
+	return askWithPreface(rc, history, args, preface, c.metrics)
 }
 
 func plainEditor(before string) (string, error) {

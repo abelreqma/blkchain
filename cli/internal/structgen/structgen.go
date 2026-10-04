@@ -81,6 +81,15 @@ const systemPrompt = "You produce structured data for an authorized security ass
 // error on every attempt, is returned as-is.
 func Generate(ctx context.Context, g Generator, prompt string, s Schema, o Options) (json.RawMessage, error) {
 	o = o.clamp()
+	if scoped, ok := g.(interface {
+		ForSchema(Schema) (Generator, error)
+	}); ok {
+		var err error
+		g, err = scoped.ForSchema(s)
+		if err != nil {
+			return nil, err
+		}
+	}
 	promptJSON, err := json.Marshal(prompt)
 	if err != nil {
 		return nil, err
@@ -91,6 +100,7 @@ func Generate(ctx context.Context, g Generator, prompt string, s Schema, o Optio
 		llms.TextParts(llms.ChatMessageTypeHuman, user),
 	}
 	callOpts := []llms.CallOption{
+		llms.WithJSONMode(),
 		llms.WithTemperature(o.Temperature),
 		llms.WithMaxTokens(o.MaxTokens),
 	}
@@ -109,7 +119,7 @@ func Generate(ctx context.Context, g Generator, prompt string, s Schema, o Optio
 			continue
 		}
 		allTransport = false
-		if len(cr.Choices) == 0 {
+		if cr == nil || len(cr.Choices) == 0 || cr.Choices[0] == nil {
 			lastReason = "model returned no choices"
 			msgs = appendRepair(msgs, "", lastReason)
 			continue

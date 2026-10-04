@@ -125,7 +125,7 @@ func routeQuery(ctx context.Context, m toolLoopModel, cfg ragconfig.Config, ques
 	if maxTok <= 0 {
 		maxTok = 8
 	}
-	resp, err := m.GenerateContent(ctx, msgs,
+	resp, err := m.GenerateContent(withLLMStage(ctx, "routing"), msgs,
 		llms.WithTemperature(cfg.GradeTemperature),
 		llms.WithMaxTokens(maxTok),
 	)
@@ -196,7 +196,7 @@ func directAnswer(ctx context.Context, cfg ragconfig.Config, question string, op
 		llms.WithTopK(cfg.SynthTopK),
 		llms.WithPresencePenalty(cfg.SynthPresencePenalty),
 	}
-	cr, genErr := l.GenerateContent(withSampling(ctx, cfg), msgs, callOpts...)
+	cr, genErr := l.GenerateContent(withLLMStage(withSampling(ctx, cfg), "synthesis"), msgs, callOpts...)
 	return full.String(), completionTokens(cr), mapLLMError(genErr, omlxBaseURL())
 }
 
@@ -223,7 +223,7 @@ func skipGroundsInCorpus(ctx context.Context, l toolLoopModel, rc searcher, cfg 
 		llms.TextParts(llms.ChatMessageTypeSystem, skipValidateSystemPrompt),
 		llms.TextParts(llms.ChatMessageTypeHuman, "Question: "+question+"\n\nSnippets:\n"+buildContext(results)),
 	}
-	resp, err := l.GenerateContent(ctx, msgs,
+	resp, err := l.GenerateContent(withLLMStage(ctx, "corpus_check"), msgs,
 		llms.WithTemperature(cfg.GradeTemperature),
 		llms.WithMaxTokens(maxTok),
 	)

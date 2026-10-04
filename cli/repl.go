@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"blkchain/cli/internal/histstore"
@@ -66,6 +67,17 @@ func plainREPL() error {
 	// from the history store). Agent-mode memory lives in the Hermes gateway.
 	var convo []priorTurn
 	recordConvo := func(q, ans string) {
+		if rc.metrics != nil {
+			calls, partial := rc.metrics.snapshot()
+			cost := turnCost{elapsed: time.Since(rc.started), calls: calls, partial: partial}
+			for _, call := range calls {
+				if call.Stage == "synthesis" && call.UsageReported {
+					cost.completionTokens = call.CompletionTokens
+				}
+			}
+			pm.lastCost, pm.lastCostSet = cost, true
+			rc.metrics = nil
+		}
 		if strings.TrimSpace(ans) == "" {
 			return
 		}
@@ -107,6 +119,8 @@ func plainREPL() error {
 		switch strings.ToLower(strings.TrimPrefix(cmd, "/")) {
 		case "quit", "exit", "q":
 			return nil
+		case "cost":
+			fmt.Println(pm.costLine())
 		case "help", "?":
 			replHelp()
 		case "health":
@@ -159,6 +173,7 @@ func plainREPL() error {
 		case "clear":
 			draft, convo, last = "", nil, nil
 			pm.lastAnswer, pm.attachments = "", nil
+			pm.lastCostSet = false
 			pm.sess, _ = newSession()
 			fmt.Println(Meta.Render("started a fresh session"))
 		case "mode":
@@ -296,7 +311,11 @@ func plainClarify(in *bufio.Scanner, out io.Writer, c Clarification) ClarifyResu
 
 // replClient is the plain REPL's one retrieval client, made on first use and
 // closed when the loop ends.
-type replClient struct{ rc *retrieval.Client }
+type replClient struct {
+	rc      *retrieval.Client
+	metrics *callMetrics
+	started time.Time
+}
 
 func (c *replClient) get() (*retrieval.Client, error) {
 	if c.rc == nil {
@@ -321,6 +340,8 @@ func replSearch(query string, prev []retrieval.Result, c *replClient, history []
 	if query == "" {
 		return "", prev
 	}
+	c.metrics = &callMetrics{}
+	c.started = time.Now()
 	base, err := c.get()
 	if err != nil {
 		printErr(err)
@@ -329,6 +350,7 @@ func replSearch(query string, prev []retrieval.Result, c *replClient, history []
 	rc := followPrefs(base, loadPrefs())
 	ctx, cancel := context.WithTimeout(context.Background(), loadConfig().RequestTimeout())
 	defer cancel()
+	ctx = context.WithValue(ctx, metricsKey{}, c.metrics)
 	answer, citations, results, err := printGroundedText(ctx, rc, loadConfig(), query, AnswerOpts{NoWeb: !loadPrefs().Web, History: history, Preface: preface}, rc.SkipRerank)
 	if err != nil {
 		printErr(err)
@@ -408,6 +430,7 @@ func replGroups() []rowGroup {
 			{"/rag [on|off|question]", replSlashDesc("rag")},
 		}},
 		{hgSetup, []helpRow{
+			{"/cost", replSlashDesc("cost")},
 			{"/history [n|clear [n]]", replSlashDesc("history")},
 			{"/editor", replSlashDesc("editor")},
 			{"/init", replSlashDesc("init")},

@@ -176,7 +176,7 @@ func analyzeRun(ctx context.Context, cfg ragconfig.Config, o analyzeOpts, schema
 	if err != nil {
 		return err
 	}
-	out, err := structgen.Generate(ctx, gen, prompt, schema, structgen.Options{
+	out, err := structgen.Generate(withLLMStage(ctx, "analysis"), gen, prompt, schema, structgen.Options{
 		MaxTokens:   cfg.AnswerMaxTokens,
 		MaxRetries:  2,
 		Temperature: cfg.GradeTemperature,

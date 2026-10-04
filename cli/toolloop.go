@@ -64,7 +64,7 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 				msgs = compacted
 			}
 		}
-		resp, err := m.GenerateContent(ctx, msgs, opts...)
+		resp, err := m.GenerateContent(withLLMStage(ctx, "tool_loop"), msgs, opts...)
 		if err != nil {
 			return "", rounds, err
 		}

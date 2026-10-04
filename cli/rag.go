@@ -10,7 +10,6 @@ import (
 	"blkchain/cli/internal/retrieval"
 
 	"github.com/tmc/langchaingo/llms"
-	"github.com/tmc/langchaingo/llms/openai"
 )
 
 // noResultsAnswer is the plain-text statement that nothing was found. AnswerLoop
@@ -111,7 +110,7 @@ type AnswerOpts struct {
 	SearchFilter map[string]any
 
 	History []priorTurn
-	llm     *openai.LLM // reuse this client if set; nil builds one
+	llm     toolLoopModel // reuse this client if set; nil builds one
 }
 
 // priorTurn is one earlier message in the conversation. Role is "human" or
@@ -300,7 +299,7 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 // chunks, build the prompt, stream the answer with the synth_* sampling, and
 // extract citations. It does NOT retrieve or grade. AnswerLoop and
 // SynthesizeFromResults share it, so both stream and cite identically.
-func synthesize(ctx context.Context, l *openai.LLM, cfg ragconfig.Config, question string, results []retrieval.Result, opts AnswerOpts) (answer string, cits []citation, tokens int, err error) {
+func synthesize(ctx context.Context, l toolLoopModel, cfg ragconfig.Config, question string, results []retrieval.Result, opts AnswerOpts) (answer string, cits []citation, tokens int, err error) {
 	stage := func(name string) {
 		if opts.Stage != nil {
 			opts.Stage(name)
@@ -366,7 +365,7 @@ func synthesize(ctx context.Context, l *openai.LLM, cfg ragconfig.Config, questi
 
 	// The library drops top_p and top_k; llmTransport adds them for this call
 	// only, so the grade call stays deterministic.
-	cr, genErr := l.GenerateContent(withSampling(ctx, cfg), msgs, callOpts...)
+	cr, genErr := l.GenerateContent(withLLMStage(withSampling(ctx, cfg), "synthesis"), msgs, callOpts...)
 	answer = full.String()
 	cits = citationsFromAnswer(answer, chunks)
 	return answer, cits, completionTokens(cr), mapLLMError(genErr, omlxBaseURL())

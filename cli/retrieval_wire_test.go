@@ -252,6 +252,20 @@ func TestAskJSONGolden(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	var response answerResponse
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.LLMCalls) != 3 || response.LLMCalls[0].Stage != "routing" || response.LLMCalls[1].Stage != "grading" || response.LLMCalls[2].Stage != "synthesis" {
+		t.Fatalf("call stages=%+v", response.LLMCalls)
+	}
+	response.LLMCalls = nil
+	response.LLMCallsPartial = false
+	stable, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = string(stable) + "\n"
 	const want = `{
   "answer": "ok [1]",
   "citations": [

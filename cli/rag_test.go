@@ -677,6 +677,8 @@ func TestAnswerLoopNoLocalSkipsSearch(t *testing.T) {
 }
 
 func TestAnswerLoopNoLocalNoWebIsNoResults(t *testing.T) {
+	isolateUserDirs(t)
+	t.Setenv(webProviderEnv, "off")
 	srv := fakeLLM(t, []string{`{"sufficient":false,"rewrite":"","use_web":true}`}, "")
 	t.Setenv("OMLX_BASE_URL", srv.URL)
 	t.Setenv("OMLX_MODEL", "m")

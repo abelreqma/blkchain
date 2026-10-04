@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,30 @@ import (
 type turnCost struct {
 	completionTokens int
 	elapsed          time.Duration
+	calls            []llmCallStats
+	partial          bool
+}
+
+func costDetails(c turnCost) string {
+	lines := []string{costFooter(c)}
+	for _, call := range c.calls {
+		detail := fmt.Sprintf("%s: %s", sanitizeTerminal(call.Stage), (time.Duration(call.DurationMS) * time.Millisecond).String())
+		if call.Cached {
+			detail += ", cached"
+		} else if call.UsageReported {
+			detail += fmt.Sprintf(", %d input tokens, %d output tokens", call.PromptTokens, call.CompletionTokens)
+		} else {
+			detail += ", usage unavailable"
+		}
+		if call.Status != "ok" {
+			detail += ", " + sanitizeTerminal(call.Status)
+		}
+		lines = append(lines, "   "+Meta.Render(detail))
+	}
+	if c.partial {
+		lines = append(lines, "   "+Meta.Render("additional calls omitted"))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // costFooter renders the muted one-line footer: latency, plus completion tokens

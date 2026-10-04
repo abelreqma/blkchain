@@ -82,7 +82,9 @@ type answerResponse struct {
 	Model   string             `json:"model"`
 	Results []retrieval.Result `json:"results,omitempty"`
 	// Route is the retrieval decision for this answer: "skip", "rag", or "web".
-	Route string `json:"route,omitempty"`
+	Route           string         `json:"route,omitempty"`
+	LLMCalls        []llmCallStats `json:"llm_calls,omitempty"`
+	LLMCallsPartial bool           `json:"llm_calls_partial,omitempty"`
 }
 
 // serviceHealth is one probe of the services an answer needs.
@@ -450,7 +452,12 @@ func askWith(rc *retrieval.Client, history []priorTurn, args []string) (string, 
 	return askWithPreface(rc, history, args, "")
 }
 
-func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, preface string) (string, error) {
+func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, preface string, observed ...*callMetrics) (string, error) {
+	ctx, metrics := withCallMetrics(context.Background())
+	if len(observed) > 0 && observed[0] != nil {
+		metrics = observed[0]
+		ctx = context.WithValue(ctx, metricsKey{}, metrics)
+	}
 	var o askOpts
 	fs := newFlagSet("ask")
 	defineAskFlags(fs, &o)
@@ -499,7 +506,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		// reach the terminal. termStream holds back a sequence split across tokens.
 		var full strings.Builder
 		p := loadPrefs()
-		_, cits, usedWeb, _, _, _, err := adaptiveAnswerFn(context.Background(), rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{
+		_, cits, usedWeb, _, _, _, err := adaptiveAnswerFn(ctx, rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{
 			Stream:  newAskStream(os.Stdout, &full),
 			Preface: preface,
 			NoWeb:   !p.Web,
@@ -530,7 +537,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 	// answer loop was asked to use.
 	model := resolveModel(cfg)
 	p := loadPrefs()
-	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(context.Background(), rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Model: model, NoWeb: !p.Web, WebOnly: o.web, History: history, Preface: preface})
+	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(ctx, rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Model: model, NoWeb: !p.Web, WebOnly: o.web, History: history, Preface: preface})
 	if errors.Is(err, ErrNoResults) {
 		return "", reportNoResults(os.Stderr, *jsonOut, model)
 	}
@@ -545,6 +552,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		Results:   results,
 		Route:     route,
 	}
+	resp.LLMCalls, resp.LLMCallsPartial = metrics.snapshot()
 
 	if *jsonOut {
 		return resp.Answer, printJSON(resp)

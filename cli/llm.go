@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +24,7 @@ import (
 	"blkchain/cli/internal/retrieval"
 
 	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/llms/cache"
 	"github.com/tmc/langchaingo/llms/openai"
 )
 
@@ -255,7 +258,11 @@ func listedModel() string {
 // resolveModel when it is empty), with a custom
 // HTTP client whose transport shapes each request and bounds each response
 // (see llmTransport).
-func newOMLX(cfg ragconfig.Config, model string) (*openai.LLM, error) {
+func newOMLX(cfg ragconfig.Config, model string) (*llmClient, error) {
+	return newOMLXFormat(cfg, model, nil)
+}
+
+func newOMLXFormat(cfg ragconfig.Config, model string, format *openai.ResponseFormat) (*llmClient, error) {
 	base := omlxBaseURL()
 	key := omlxAPIKey()
 	if strings.TrimSpace(model) == "" {
@@ -272,12 +279,26 @@ func newOMLX(cfg ragconfig.Config, model string) (*openai.LLM, error) {
 		// Authorization header it would carry.
 		token = "no-key"
 	}
-	return openai.New(
+	options := []openai.Option{
 		openai.WithBaseURL(base),
 		openai.WithToken(token),
 		openai.WithModel(model),
 		openai.WithHTTPClient(hc),
-	)
+		openai.WithCallback(usageCallback{}),
+	}
+	if format != nil {
+		options = append(options, openai.WithResponseFormat(format))
+	}
+	raw, err := openai.New(options...)
+	if err != nil {
+		return nil, err
+	}
+	config, err := json.Marshal([]any{base, model, key, format})
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(config)
+	return &llmClient{raw: raw, cached: cache.New(raw, sharedDecisions), cfg: cfg, model: model, namespace: hex.EncodeToString(sum[:])}, nil
 }
 
 const (

@@ -76,10 +76,11 @@ func newLLMReconGrader(m toolLoopModel, cfg ragconfig.Config) reconGrader {
 		prompt := fmt.Sprintf(reconGradePrompt, surface, asset, summary)
 		msgs := []llms.MessageContent{llms.TextParts(llms.ChatMessageTypeHuman, prompt)}
 		opts := []llms.CallOption{
+			llms.WithJSONMode(),
 			llms.WithTemperature(cfg.GradeTemperature),
 			llms.WithMaxTokens(cfg.GradeMaxTokens),
 		}
-		cr, err := m.GenerateContent(ctx, msgs, opts...)
+		cr, err := m.GenerateContent(withLLMStage(ctx, "recon_grading"), msgs, opts...)
 		if err != nil || cr == nil || len(cr.Choices) == 0 {
 			return reconVerdict{Parsed: false}
 		}

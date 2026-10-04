@@ -70,6 +70,7 @@ func gradeContext(ctx context.Context, l toolLoopModel, cfg ragconfig.Config, qu
 	prompt := fmt.Sprintf(gradePromptTemplate, query, contextText)
 	msgs := []llms.MessageContent{llms.TextParts(llms.ChatMessageTypeHuman, prompt)}
 	opts := []llms.CallOption{
+		llms.WithJSONMode(),
 		llms.WithTemperature(cfg.GradeTemperature),
 		llms.WithMaxTokens(cfg.GradeMaxTokens),
 	}
@@ -82,7 +83,7 @@ func gradeContext(ctx context.Context, l toolLoopModel, cfg ragconfig.Config, qu
 		if err := ctx.Err(); err != nil {
 			return grade{}, err
 		}
-		cr, err := l.GenerateContent(ctx, msgs, opts...)
+		cr, err := l.GenerateContent(withLLMStage(ctx, "grading"), msgs, opts...)
 		if err != nil {
 			lastErr = err
 			continue

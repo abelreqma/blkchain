@@ -367,14 +367,16 @@ type chunkMsg string
 // marks an agent-mode turn, which renders without a SOURCES block. usedWeb is
 // RAG-only (AnswerLoop's web-search fallback); agent turns leave it false.
 type streamDoneMsg struct {
-	full      string
-	citations []citation
-	usedWeb   bool
-	rerankOff bool // the reranker was turned off for this answer
-	err       error
-	agent     bool
-	results   []retrieval.Result
-	tokens    int // completion tokens when the transport exposed usage, else 0
+	full            string
+	citations       []citation
+	usedWeb         bool
+	rerankOff       bool // the reranker was turned off for this answer
+	err             error
+	agent           bool
+	results         []retrieval.Result
+	tokens          int // completion tokens when the transport exposed usage, else 0
+	llmCalls        []llmCallStats
+	llmCallsPartial bool
 }
 
 // dequeueMsg drives the queue-while-busy auto-submit: after a turn completes with
@@ -896,7 +898,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(full) == "" {
 			full = live
 		}
-		cost := turnCost{completionTokens: msg.tokens, elapsed: elapsed}
+		cost := turnCost{completionTokens: msg.tokens, elapsed: elapsed, calls: msg.llmCalls, partial: msg.llmCallsPartial}
 		if msg.agent {
 			if msg.err != nil && errors.Is(msg.err, context.Canceled) {
 				return m, tea.Println(canceledOutput(full, m.renderWidth()))
@@ -2067,7 +2069,7 @@ func (m model) costLine() string {
 	if !m.lastCostSet {
 		return "   " + Meta.Render("no turn yet")
 	}
-	return costFooter(m.lastCost)
+	return costDetails(m.lastCost)
 }
 
 func (m model) recallPrev() model {
@@ -2361,6 +2363,7 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 	prog := m.prog
 	turnModel := m.ragTurnModel()
 	return func() tea.Msg {
+		ctx, metrics := withCallMetrics(ctx)
 		if turnModel == "" {
 			// The list has not loaded yet: resolve the model here, and keep it
 			// for the session.
@@ -2411,13 +2414,12 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 			}
 			return errMsg{timeoutOrErr(err)}
 		}
-		return streamDoneMsg{full: full, citations: cits, usedWeb: usedWeb, results: results, rerankOff: rc != nil && rc.SkipRerank, err: err, tokens: tokens}
+		calls, partial := metrics.snapshot()
+		return streamDoneMsg{full: full, citations: cits, usedWeb: usedWeb, results: results, rerankOff: rc != nil && rc.SkipRerank, err: err, tokens: tokens, llmCalls: calls, llmCallsPartial: partial}
 	}
 }
 
-
-
-
+// synthFromResultsFn allows tests to substitute result synthesis.
 var synthFromResultsFn = SynthesizeFromResults
 
 // generateCmd synthesizes an answer from the given retrieved results (the last
@@ -2429,6 +2431,7 @@ func (m model) generateCmd(ctx context.Context, question string, results []retri
 	turnModel := m.ragTurnModel()
 	cfg := m.cfg
 	return func() tea.Msg {
+		ctx, metrics := withCallMetrics(ctx)
 		if turnModel == "" {
 			if turnModel = listedModel(); turnModel != "" && prog != nil {
 				prog.Send(modelResolvedMsg(turnModel))
@@ -2470,7 +2473,8 @@ func (m model) generateCmd(ctx context.Context, question string, results []retri
 				break
 			}
 		}
-		return streamDoneMsg{full: full, citations: cits, results: results, usedWeb: usedWeb, tokens: tokens}
+		calls, partial := metrics.snapshot()
+		return streamDoneMsg{full: full, citations: cits, results: results, usedWeb: usedWeb, tokens: tokens, llmCalls: calls, llmCallsPartial: partial}
 	}
 }
 

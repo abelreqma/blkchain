@@ -185,11 +185,26 @@ Common commands (run `blk help` for the full list):
 | `blk repl` | interactive REPL (bare `blk` too) for repeated search/ask |
 | `blk up / down / status` | start, stop, or check the local services (Qdrant and `embed_server`) |
 | `blk health` | check Qdrant, `embed_server`, and the LLM; `--json` prints `{ok, qdrant, embed_server, llm}`; exits 0 when all are up, 1 when any is down |
+
 | `blk doctor` | diagnose the whole stack, including Hermes MCP wiring |
 | `blk models` | readiness and live performance of the chat, embed, and rerank models |
 | `blk mcp` | native Go MCP stdio server exposing `kb_search` / `kb_answer` / `route_skill` |
 | `blk open <path>` | open a source file in `$PAGER` or `$EDITOR`; opens at the cited section when your pager is less (`--section`, or `/open N` in the TUI) |
 | `blk logs [service]` | tail a service log (`embed_server`) |
+JSON answers include `llm_calls` with the stage, requested model, elapsed milliseconds,
+cache status, and reported token usage. Missing usage remains unavailable. The record list
+is bounded; `llm_calls_partial` indicates omitted calls. `/cost` shows these details in both
+terminal interfaces. Prompts, retrieved content, credentials, and error messages are excluded.
+
+Exact deterministic routing and RAG grading responses use a bounded, in-process cache.
+Entries expire after five minutes. Model, endpoint, credential, response-format, thinking,
+sampling, and evidence changes separate cached results. Generation, reconnaissance
+decisions, command execution, and authorization remain uncached.
+
+Structured graders request JSON mode. `blk analyze` uses a dedicated strict JSON-schema
+client while retaining local field validation and bounded retries. The model endpoint must
+support the requested response format. Prose and tool-calling clients retain their formats.
+
 
 `blk help <command>` (or `blk <command> --help`) shows one command's flags and examples, and
 `blk help env` lists every environment variable blk reads. A usage
@@ -352,4 +367,3 @@ BLKCHAIN_COLLECTION=blkchain_alt .venv/bin/python -c "from blkchain import index
   a command.
 - **Saved data.** Session transcripts, session indexes, REPL history, stack logs, and saved install
   paths use private directories and owner-only file permissions on Unix-like systems.
-

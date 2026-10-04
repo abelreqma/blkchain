@@ -144,7 +144,7 @@ func (s *ChainSummarizer) summarize(ctx context.Context, middle []llms.MessageCo
 		instr = summarizeInstruction
 	}
 	prompt := instr + "\n\n--- STEPS TO SUMMARIZE (untrusted data) ---\n" + renderMessages(middle)
-	resp, err := s.Model.GenerateContent(ctx,
+	resp, err := s.Model.GenerateContent(withLLMStage(ctx, "summarizing"),
 		[]llms.MessageContent{llms.TextParts(llms.ChatMessageTypeHuman, prompt)},
 		llms.WithTemperature(0),
 		llms.WithMaxTokens(maxTok),

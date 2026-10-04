@@ -150,6 +150,7 @@ func mcpRouteResult(cat *skillcat.Catalog, domain string) map[string]any {
 // normal result whose answer says so, not a tool error, so an MCP client can
 // tell "no sources" from a failure. noWeb is the /models web switch turned off.
 func kbAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, query string, noWeb bool) (map[string]any, error) {
+	ctx, metrics := withCallMetrics(ctx)
 	answer, cits, usedWeb, results, _, err := AnswerLoop(ctx, rc, cfg, query, AnswerOpts{NoWeb: noWeb})
 	if errors.Is(err, ErrNoResults) {
 		answer, cits, err = noResultsAnswer, []citation{}, nil
@@ -157,10 +158,17 @@ func kbAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, query stri
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	response := map[string]any{
 		"answer":    answer,
 		"citations": cits,
 		"used_web":  usedWeb,
 		"results":   results,
-	}, nil
+	}
+	if calls, partial := metrics.snapshot(); len(calls) > 0 {
+		response["llm_calls"] = calls
+		if partial {
+			response["llm_calls_partial"] = true
+		}
+	}
+	return response, nil
 }
