@@ -17,6 +17,9 @@ type Command struct {
 	Phase   Phase
 	Surface Surface
 	Armed   bool
+	// AutonomousWeb marks a web action authorized by an armed task and its RoE.
+	// It suppresses per-action confirmation in Auto mode only.
+	AutonomousWeb bool
 
 	// PoCIsInterpreter, PoCHash, and PoCBody are interpreter-PoC DISPLAY
 	// metadata, filled by the exploit executor for an authorized, scratch-confined

@@ -398,9 +398,9 @@ func (g *Gate) humanGovernedPath(c Command) bool {
 // confirmation is needed and it audits allow directly.
 func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
 	localProfile := g.Scope != nil && g.Scope.Local()
-	// Exploit and post-ex are the per-action-confirm tier: confirm every command
-	// regardless of mode (Safe, Auto, local or external).
-	force := c.Phase.perActionConfirm()
+	// Exploit and post-ex commands require per-action confirmation, except for
+	// code-authorized web actions in Auto after their task is armed.
+	force := c.Phase.perActionConfirm() && !(g.Mode == Auto && c.Surface == SurfaceWeb && c.AutonomousWeb)
 	needConfirm := g.Mode != Auto || localProfile || force
 	// Unattended-/auto bound: in Auto non-local, a command whose binary is
 	// not permitted by the config allowed_binaries list must be confirmed (HITL).

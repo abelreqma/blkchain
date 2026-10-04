@@ -46,13 +46,17 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 	activeTask := func() string { return task.ID }
 
 	reg := tooldef.NewRegistry()
-	for _, t := range []tooldef.Tool{
+	webTools, closeWeb := webToolsForTask(e.d.Gate, task)
+	defer closeWeb()
+	tools := []tooldef.Tool{
 		newKBSearchTool(e.d.RC, e.d.Cfg),
 		newKBAnswerTool(e.d.RC, e.d.Cfg, !e.d.Prefs.Web),
 		newRouteSkillTool(e.d.Catalog, e.d.Store, activeTask),
 		newRunCommandToolForTask(e.d.Gate, runCap, runTimeout, execDir, activeTask, e.d.Runs.Add, cmdCtx, grounder),
 		newVerifiedRecordEvidenceTool(e.d.Store, e.d.Runs.Contains),
-	} {
+	}
+	tools = append(tools, webTools...)
+	for _, t := range tools {
 		if err := reg.Register(t); err != nil {
 			return "", err
 		}
