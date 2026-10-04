@@ -23,8 +23,11 @@ type toolLoopModel interface {
 
 // LoopCaps bounds one tool loop. A value <= 0 selects the default.
 type LoopCaps struct {
-	MaxRounds int
-	MaxCalls  int
+	MaxRounds        int
+	MaxCalls         int
+	NoProgressRounds int
+	Progress         func(context.Context) (string, error)
+	Finalize         func(context.Context, string) (string, error)
 	// SummarizeAtChars, when > 0 and Summarizer is set, enables chain
 	// summarization: before each model call the running history is compacted
 	// once it grows past this many characters. Zero (the default) disables it,
@@ -48,6 +51,24 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 		caps.MaxCalls = defaultLoopCalls
 	}
 	msgs = slices.Clone(msgs)
+	stop := func(reason string) (string, int, error) {
+		if err := ctx.Err(); err != nil {
+			return "", rounds, err
+		}
+		if caps.Finalize != nil {
+			final, err := caps.Finalize(ctx, reason)
+			return final, rounds, err
+		}
+		return "Stopped: " + reason + ".", rounds, nil
+	}
+	var progress string
+	if caps.Progress != nil && caps.NoProgressRounds > 0 {
+		progress, err = caps.Progress(ctx)
+		if err != nil {
+			return "", rounds, err
+		}
+	}
+	idle := 0
 	opts := append([]llms.CallOption{llms.WithTools(reg.Specs())}, extra...)
 	total := 0
 	for rounds < caps.MaxRounds {
@@ -68,7 +89,7 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 		if err != nil {
 			return "", rounds, err
 		}
-		if resp == nil || len(resp.Choices) == 0 {
+		if resp == nil || len(resp.Choices) == 0 || resp.Choices[0] == nil {
 			return "", rounds, fmt.Errorf("model returned no choices")
 		}
 		choice := resp.Choices[0]
@@ -97,21 +118,40 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 			if tc.FunctionCall != nil {
 				name, args = tc.FunctionCall.Name, tc.FunctionCall.Arguments
 			}
+			result := "tool call skipped: call cap reached"
+			if total < caps.MaxCalls {
+				result = execToolCall(ctx, reg, tc.FunctionCall != nil, name, args)
+				total++
+			}
 			msgs = append(msgs, llms.MessageContent{
 				Role: llms.ChatMessageTypeTool,
 				Parts: []llms.ContentPart{llms.ToolCallResponse{
 					ToolCallID: tc.ID,
 					Name:       name,
-					Content:    execToolCall(ctx, reg, tc.FunctionCall != nil, name, args),
+					Content:    result,
 				}},
 			})
-			total++
 		}
 		if total >= caps.MaxCalls {
-			return fmt.Sprintf("Stopped: tool call cap reached (%d calls).", total), rounds, nil
+			return stop(fmt.Sprintf("tool call cap reached (%d calls)", total))
+		}
+		if caps.Progress != nil && caps.NoProgressRounds > 0 {
+			next, err := caps.Progress(ctx)
+			if err != nil {
+				return "", rounds, err
+			}
+			if next == progress {
+				idle++
+			} else {
+				idle = 0
+			}
+			progress = next
+			if idle >= caps.NoProgressRounds {
+				return stop(fmt.Sprintf("no-progress limit reached (%d rounds)", idle))
+			}
 		}
 	}
-	return fmt.Sprintf("Stopped: round cap reached (%d rounds) without a final answer.", caps.MaxRounds), rounds, nil
+	return stop(fmt.Sprintf("round cap reached (%d rounds) without a final answer", caps.MaxRounds))
 }
 
 // execToolCall runs one tool call and returns the text to feed back to the model.

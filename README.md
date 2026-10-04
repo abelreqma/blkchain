@@ -128,6 +128,19 @@ hardcoded.** See [`.env.example`](.env.example) for every variable; the essentia
 - **Optional corpora** (omit to skip): `BLKCHAIN_SECLISTS_DIR`, `BLKCHAIN_SKILLS_DIR`.
 - **Services:** `QDRANT_URL`, `BLKCHAIN_EMBED_HOST/PORT`, `BLKCHAIN_COLLECTION`.
 - **LLM:** `OMLX_BASE_URL`, `OMLX_MODEL`, `OMLX_API_KEY` (read by `blk` and the eval judge).
+- **Engagement convergence:** `BLKCHAIN_ENGAGE_MAX_ROUNDS` (default 32, clamped to 1..256),
+  `BLKCHAIN_ENGAGE_MAX_CALLS` (128, 1..2048), and `BLKCHAIN_ENGAGE_NO_PROGRESS_ROUNDS` (3, 1..32).
+  Unset or invalid integers use defaults. These settings apply to orchestration in the CLI,
+  REPL/TUI, and MCP. New evidence, task changes or completions, and recon coverage reset the idle
+  counter. Repeated identical updates, duplicate evidence, and dispatch bookkeeping do not.
+  A capped or stalled run makes one final report call with tools disabled; if it fails, the run
+  returns a report from stored evidence. This extra call falls outside the orchestration caps and
+  has a 2048-token output cap. Saved CLI reports mark capped or stalled runs as paused.
+  Executor loop limits remain separate.
+  `BLKCHAIN_ENGAGE_ORCHESTRATOR_MODEL` selects a separate model ID for orchestration and final
+  synthesis. Executors keep the `--model` selection, REPL/TUI model selection, or MCP model
+  argument. An unset override uses that same model for both roles. The model must be available
+  on the configured LLM server.
 - **Answer sampling** (read by `blk`): `BLKCHAIN_SYNTH_TEMPERATURE` (default 0.7),
   `BLKCHAIN_SYNTH_TOP_P` (0.95), `BLKCHAIN_SYNTH_TOP_K` (64), `BLKCHAIN_SYNTH_PRESENCE_PENALTY` (0.5).
   The answer call sends `temperature`, `top_p`, `top_k`, and `presence_penalty`. LangChainGo drops

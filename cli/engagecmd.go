@@ -193,6 +193,8 @@ func runEngage(args []string) error {
 	}
 	stopReport := rw.Start()
 	defer stopReport()
+	reportStatus := "complete"
+	deps.OnStop = func(string) { reportStatus = "paused" }
 
 	// Seed the engagement's initial vantage from scope: an external
 	// engagement starts external-unauth (local/ad-cloud locked until a logged
@@ -210,7 +212,7 @@ func runEngage(args []string) error {
 		}
 		return fmt.Errorf("engage: %w", err)
 	}
-	if ferr := rw.Flush("complete"); ferr != nil {
+	if ferr := rw.Flush(reportStatus); ferr != nil {
 		fmt.Fprintf(os.Stderr, "report: final write failed: %v\n", ferr)
 	}
 	// Fold the finished report into the REPL's persistent memory so it surfaces in

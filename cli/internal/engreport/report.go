@@ -20,7 +20,7 @@ type Model struct {
 	Scope       string                          `json:"scope"`
 	Mode        string                          `json:"mode"`
 	Workspace   string                          `json:"workspace"`
-	Status      string                          `json:"status"` // complete | in-progress | interrupted
+	Status      string                          `json:"status"` // complete | in-progress | interrupted | paused
 	GeneratedAt string                          `json:"generated_at"`
 	Engagement  engagement.Engagement           `json:"engagement"`
 	Evidence    map[string][]string             `json:"evidence"` // task id -> evidence quotes

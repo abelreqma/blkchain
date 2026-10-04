@@ -184,6 +184,28 @@ func TestToolLoopMaxCalls(t *testing.T) {
 	}
 }
 
+func TestToolLoopCallCapWithinRound(t *testing.T) {
+	echo := &fakeTool{name: "echo", fn: func(string) (string, error) { return "ok", nil }}
+	response := callResp("c1", "echo", "{}")
+	response.Choices[0].ToolCalls = append(response.Choices[0].ToolCalls, llms.ToolCall{ID: "c2", FunctionCall: &llms.FunctionCall{Name: "echo", Arguments: "{}"}})
+	m := &fakeModel{queue: []*llms.ContentResponse{response}}
+	_, _, err := runToolLoop(context.Background(), m, newLoopReg(t, echo), userMsgs(), LoopCaps{MaxRounds: 3, MaxCalls: 1})
+	if err != nil || len(echo.ran) != 1 {
+		t.Fatalf("ran=%d err=%v", len(echo.ran), err)
+	}
+}
+
+func TestToolLoopProgressErrorStops(t *testing.T) {
+	want := errors.New("progress unavailable")
+	m := &fakeModel{queue: []*llms.ContentResponse{textResp("done")}}
+	_, _, err := runToolLoop(context.Background(), m, newLoopReg(t), userMsgs(), LoopCaps{
+		NoProgressRounds: 2, Progress: func(context.Context) (string, error) { return "", want },
+	})
+	if !errors.Is(err, want) || m.calls != 0 {
+		t.Fatalf("calls=%d err=%v", m.calls, err)
+	}
+}
+
 func TestToolLoopNoChoices(t *testing.T) {
 	m := &fakeModel{queue: []*llms.ContentResponse{{}}}
 	if _, _, err := runToolLoop(context.Background(), m, newLoopReg(t), userMsgs(), LoopCaps{}); err == nil {

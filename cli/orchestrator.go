@@ -48,6 +48,7 @@ type engageDeps struct {
 	// new revision and a fresh snapshot, for a live view of the engagement. It is
 	// nil-safe (nil disables it) and must not mutate the store.
 	Progress func(rev int64, snap engagement.Engagement)
+	OnStop   func(reason string)
 	// ReconTiers routes recon-phase tasks through the code-orchestrated recon tier
 	// ladder (ReconLoop) instead of the generic single-pass executor loop. The
 	// production composition root (buildEngageDeps) sets it; tests default it off
@@ -384,7 +385,19 @@ func runOrchestrator(ctx context.Context, d engageDeps, goal string) (string, er
 		{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(orchestratorSystemPrompt)}},
 		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(human)}},
 	}
-	final, _, err := runToolLoop(ctx, d.Model, reg, msgs, LoopCaps{MaxRounds: 8, MaxCalls: 16})
+	var options []llms.CallOption
+	if model := strings.TrimSpace(os.Getenv("BLKCHAIN_ENGAGE_ORCHESTRATOR_MODEL")); model != "" {
+		options = append(options, llms.WithModel(model))
+	}
+	caps := engageLoopCaps()
+	caps.Progress = func(ctx context.Context) (string, error) { return engagementProgress(ctx, d.Store) }
+	caps.Finalize = func(ctx context.Context, reason string) (string, error) {
+		if d.OnStop != nil {
+			d.OnStop(reason)
+		}
+		return synthesizeEngagement(ctx, d, goal, reason, options...)
+	}
+	final, _, err := runToolLoop(ctx, d.Model, reg, msgs, caps, options...)
 	return final, err
 }
 
