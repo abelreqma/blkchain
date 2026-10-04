@@ -46,7 +46,7 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 	activeTask := func() string { return task.ID }
 
 	reg := tooldef.NewRegistry()
-	webTools, closeWeb := webToolsForTask(e.d.Gate, task)
+	webTools, closeWeb := webToolsForTask(e.d.Gate, task, webCapture{Store: e.d.Store, Runs: e.d.Runs})
 	defer closeWeb()
 	tools := []tooldef.Tool{
 		newKBSearchTool(e.d.RC, e.d.Cfg),

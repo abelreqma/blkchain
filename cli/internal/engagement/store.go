@@ -15,8 +15,10 @@ import (
 
 // Store is a handle on one engagement database.
 type Store struct {
-	db  *sql.DB
-	wmu sync.Mutex // serializes every writer (Apply/RecordEvidence/RecordReceipt/Audit); reads stay lock-free under WAL
+	path string
+	db   *sql.DB
+	bmu  sync.Mutex
+	wmu  sync.Mutex // serializes every writer (Apply/RecordEvidence/RecordReceipt/Audit); reads stay lock-free under WAL
 	// listeners are called after each Apply that commits, with the new revision
 	// and a fresh snapshot. They are best-effort progress notification; a
 	// snapshot read error skips the calls. They fire after the write lock is
@@ -137,7 +139,11 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate %s: %w", abs, err)
 	}
-	return &Store{db: db}, nil
+	if err := os.Chmod(abs, 0o600); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &Store{db: db, path: abs}, nil
 }
 
 // Close releases the database handle.
@@ -157,6 +163,9 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if err := addMissingTaskColumns(tx); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(webSchema); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(graphSchema); err != nil {

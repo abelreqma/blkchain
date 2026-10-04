@@ -97,6 +97,12 @@ type serviceHealth struct {
 func (h serviceHealth) ok() bool { return h.Qdrant && h.EmbedServer && h.LLM }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "__web-analysis-worker" {
+		if runWebWorker() != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	loadProjectEnv()
 	err := execute(os.Args[1:])
 	reportError(os.Stderr, err)

@@ -52,6 +52,10 @@ func (w *reportWriter) buildModel(status string) (engreport.Model, error) {
 	if err != nil {
 		return engreport.Model{}, err
 	}
+	web, err := w.st.WebSnapshot(context.Background())
+	if err != nil {
+		return engreport.Model{}, err
+	}
 	trans, err := w.st.Transitions()
 	if err != nil {
 		return engreport.Model{}, err
@@ -71,6 +75,7 @@ func (w *reportWriter) buildModel(status string) (engreport.Model, error) {
 		}
 	}
 	return engreport.Model{
+		Web:         &web,
 		Goal:        w.goal,
 		Scope:       w.scope,
 		Mode:        w.mode,

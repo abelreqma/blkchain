@@ -259,6 +259,14 @@ func commandSpecs() []cmdSpec {
 			run: runEngage,
 		},
 		{
+			name: "web", args: "<verb> [targets]", group: hgAgent,
+			desc:     "collect and inspect web JavaScript and API evidence",
+			long:     "Runs bounded collect, analyze, inspect, import, archive, export, and replay jobs in an engagement workspace. Targets accept domains, IP addresses with reverse DNS, lists, and engagement Markdown. Acquisition uses the engagement scope and gate; restricted storage preserves raw artifacts and operation views show exact request values. The same commands are available as blk engage web and /web.",
+			flags:    func(fs *flag.FlagSet) { defineWebFlags(fs, &webOpts{}) },
+			examples: []string{"blk web inspect domain.com --view apis", "blk engage web collect engagement.md --workspace ./engagement --browser", "blk web export --workspace ./engagement"},
+			run:      runWeb,
+		},
+		{
 			name: "kg", group: hgAgent,
 			desc: "query the engagement knowledge graph",
 			long: "Queries the engagement knowledge graph: a read-only, in-process projection of the engagement store that correlates tasks, assets, and evidence as nodes and edges. " +

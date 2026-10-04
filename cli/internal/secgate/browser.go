@@ -28,6 +28,7 @@ type BrowserAction struct {
 // recon; any state-changing method is exploit-tiered.
 type APIRequest struct {
 	Method string
+	Active bool
 	URL    string
 	Armed  bool
 }
@@ -69,7 +70,7 @@ func (g *Gate) AuthorizeBrowser(ctx context.Context, a BrowserAction) Decision {
 
 // AuthorizeAPIRequest authorizes one API request through the single gate.
 func (g *Gate) AuthorizeAPIRequest(ctx context.Context, r APIRequest) Decision {
-	active := apiMethodActive(r.Method)
+	active := r.Active || apiMethodActive(r.Method)
 	label := "web-api:" + strings.ToUpper(strings.TrimSpace(r.Method))
 	return g.authorizeWebAction(ctx, webActionCommand(label, r.URL, active, r.Armed))
 }

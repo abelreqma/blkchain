@@ -48,6 +48,9 @@ func defineEngageFlags(fs *flag.FlagSet, o *engageOpts) {
 // the workspace), so a usage mistake is caught without qdrant, embed_server,
 // or the LLM server running.
 func runEngage(args []string) error {
+	if len(args) > 0 && args[0] == "web" {
+		return runWeb(args[1:])
+	}
 	// `blk engage arm <task-id>` is the operator-only arm subcommand: it sets
 	// Armed on an exploit/post-ex task so it can run under the gate. It is a
 	// subcommand of engage, not a goal.

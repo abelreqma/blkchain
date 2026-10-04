@@ -99,6 +99,7 @@ func TestWebPlaywrightProvisionedEnv(t *testing.T) {
 		t.Fatal("with no PLAYWRIGHT_* set, provisioned must be false")
 	}
 	t.Setenv("PLAYWRIGHT_DRIVER_PATH", "/opt/pinned/playwright")
+	t.Setenv("BLKCHAIN_PLAYWRIGHT_CONTAINER", "fixture")
 	if !webPlaywrightProvisioned() {
 		t.Fatal("with PLAYWRIGHT_DRIVER_PATH set, provisioned must be true")
 	}

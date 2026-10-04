@@ -10,10 +10,12 @@ import (
 	"strings"
 
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/webanalysis"
 )
 
 // Model is the assembled, render-ready view of an engagement.
 type Model struct {
+	Web         *webanalysis.Snapshot           `json:"web,omitempty"`
 	Goal        string                          `json:"goal"`
 	Scope       string                          `json:"scope"`
 	Mode        string                          `json:"mode"`
@@ -28,6 +30,10 @@ type Model struct {
 
 // RenderJSON emits the model as indented JSON.
 func RenderJSON(m Model) ([]byte, error) {
+	if m.Web != nil {
+		w := webanalysis.Display(*m.Web)
+		m.Web = &w
+	}
 	return json.MarshalIndent(m, "", "  ")
 }
 
@@ -149,6 +155,55 @@ func RenderMarkdown(m Model) string {
 		b.WriteString("\n")
 	}
 
+	if m.Web != nil {
+		w := webanalysis.Display(*m.Web)
+		b.WriteString("## Web analysis\n\n")
+		fmt.Fprintf(&b, "Artifacts: %d. Source units: %d. Functions: %d. API operations: %d.\n\n", len(w.Artifacts), len(w.Units), len(w.Functions), len(w.Operations))
+		for _, o := range w.Operations {
+			fmt.Fprintf(&b, "- %s %s%s [%s] discovery=%s features=%s calls=%s\n", sanitizeQuote(o.Method), sanitizeQuote(o.Origin), sanitizeQuote(o.Path), o.Validation, strings.Join(o.Discoveries, ","), strings.Join(o.Features, ","), strings.Join(o.Calls, ","))
+			for _, parameter := range o.Parameters {
+				fmt.Fprintf(&b, "  - %s: %s\n", sanitizeQuote(parameter.Field), sanitizeQuote(parameter.Expression))
+			}
+			for _, example := range o.Examples {
+				fmt.Fprintf(&b, "  - Request: %s %s, status %d\n", sanitizeQuote(example.Method), sanitizeQuote(example.URL), example.Status)
+				keys := []string{}
+				for key := range example.Headers {
+					keys = append(keys, key)
+				}
+				sort.Strings(keys)
+				for _, key := range keys {
+					fmt.Fprintf(&b, "    - %s: %s\n", sanitizeQuote(key), sanitizeQuote(strings.Join(example.Headers[key], ", ")))
+				}
+				if example.Body != "" {
+					fmt.Fprintf(&b, "    - Body: %s\n", sanitizeQuote(example.Body))
+				}
+			}
+		}
+		b.WriteString("\n### Analysis leads\n\n")
+		for _, f := range w.Findings {
+			fmt.Fprintf(&b, "- %s [%s] unit=%s line=%d detector=%s version=%s %s\n", f.Kind, f.Confidence, f.Location.Unit, f.Location.Line, f.Detector, f.Version, sanitizeQuote(f.Preview))
+		}
+		b.WriteString("\n### Collection coverage\n\n")
+		for _, c := range w.Coverage {
+			fmt.Fprintf(&b, "- Role %s: %s, %d routes, %d interactions, %d requests, %d bytes\n", sanitizeQuote(c.Role), c.State, len(c.Routes), len(c.Interactions), c.Requests, c.Bytes)
+			fmt.Fprintf(&b, "  - Stages: %s\n", sanitizeQuote(strings.Join(c.Stages, ", ")))
+			for _, target := range c.Targets {
+				fmt.Fprintf(&b, "  - Target: %s\n", sanitizeQuote(target))
+			}
+			for _, route := range c.Routes {
+				fmt.Fprintf(&b, "  - Visited: %s\n", sanitizeQuote(route))
+			}
+			for _, action := range c.Interactions {
+				fmt.Fprintf(&b, "  - Interaction: %s\n", sanitizeQuote(action))
+			}
+			for _, artifact := range c.Downloaded {
+				fmt.Fprintf(&b, "  - Downloaded artifact: %s\n", sanitizeQuote(artifact))
+			}
+			for _, g := range c.Gaps {
+				fmt.Fprintf(&b, "  - %s %s: %s\n", sanitizeQuote(g.Stage), sanitizeQuote(g.URL), sanitizeQuote(g.Reason))
+			}
+		}
+	}
 	return b.String()
 }
 

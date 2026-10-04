@@ -42,6 +42,7 @@ var wordingDescs = map[string]string{
 	"mcp":        "serve the knowledge base to Hermes over MCP (stdio)",
 	"engage":     "run a gated, multi-step engagement against a goal",
 	"kg":         "query the engagement knowledge graph",
+	"web":        "collect and inspect web JavaScript and API evidence",
 	"analyze":    "generate schema-validated JSON from the LLM",
 	"install":    "put blk on your PATH (run once, from the project)",
 	"completion": "print a bash or zsh completion script",
@@ -52,7 +53,7 @@ var wordingDescs = map[string]string{
 var wordingGroups = [][]string{
 	{"ask", "search", "sources", "open", "add"},
 	{"up", "down", "status", "health", "doctor", "models", "logs"},
-	{"hermes", "gateway", "mcp", "engage", "kg", "analyze"},
+	{"hermes", "gateway", "mcp", "engage", "web", "kg", "analyze"},
 	{"install", "completion", "version", "help"},
 }
 
@@ -436,10 +437,10 @@ func section(s, start, end string) string {
 	return rest
 }
 
-func TestUsageIsAtMost50Lines(t *testing.T) {
+func TestUsageIsAtMost51Lines(t *testing.T) {
 	out := renderUsage(80)
-	if n := strings.Count(out, "\n"); n > 50 {
-		t.Errorf("usage is %d lines at 80 columns, want at most 50:\n%s", n, out)
+	if n := strings.Count(out, "\n"); n > 51 {
+		t.Errorf("usage is %d lines at 80 columns, want at most 51:\n%s", n, out)
 	}
 }
 

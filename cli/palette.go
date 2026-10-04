@@ -71,6 +71,7 @@ func slashCommands() []command {
 		{"engage", "<goal>", "run a gated, multi-step engagement toward a goal", groupModes},
 		{"candidates", "", "list the engagement's exploit candidates and their source", groupModes},
 		{"evidence", "", "show the engagement's captured evidence (verified quotes)", groupModes},
+		{"web", "<verb> [targets]", "collect and inspect web JavaScript and API evidence", groupModes},
 		{"kg", "[node <id>|type]", "query the engagement knowledge graph", groupModes},
 		{"agent", "", "use the Hermes agent for questions", groupHidden},
 		{"rag", "[on|off|question]", "answer from the knowledge base", groupHidden},

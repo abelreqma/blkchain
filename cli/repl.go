@@ -121,6 +121,8 @@ func plainREPL() error {
 				largs = strings.Fields(rest)
 			}
 			printErr(runLogs(largs))
+		case "web":
+			printErr(replWeb(rest))
 		case "models":
 			printErr(replModels(rest))
 		case "viz":

@@ -937,6 +937,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		out := formatAnswer(resp, elapsed, m.renderWidth(), msg.rerankOff) + "\n" + costFooter(cost)
 		return m, m.finish(tea.Println(out))
 
+	case webDoneMsg:
+		m.working = false
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
+		m.live = ""
+		m.workingVerb = ""
+		if msg.Err != nil {
+			return m, m.finish(tea.Println(styleErr(msg.Err)))
+		}
+		return m, m.finish(tea.Println(msg.Output))
+
 	case engageDoneMsg:
 		m.working = false
 		if m.cancel != nil {
@@ -1780,6 +1793,8 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		return m, tea.Sequence(tea.Println(echo), tea.Println(candidatesBlock(m.engagement)))
 	case "evidence":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(evidenceBlock(m.engagement)))
+	case "web":
+		return m.dispatchWeb(arg, echo)
 	case "kg":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(kgBlock(arg)))
 	case "copy":

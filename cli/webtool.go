@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/url"
 
 	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/secgate"
 	"blkchain/cli/internal/tooldef"
+	"blkchain/cli/internal/webcollect"
 )
 
 // webtool.go wires the gated web tools (browser automation + API testing) that an
@@ -23,24 +25,64 @@ import (
 // webArmedFunc reports whether the running task is armed. A nil func is unarmed.
 type webArmedFunc func() bool
 
-func webToolsForTask(gate *secgate.Gate, task engagement.Task) ([]tooldef.Tool, func()) {
+func webToolsForTask(gate *secgate.Gate, task engagement.Task, captures ...webCapture) ([]tooldef.Tool, func()) {
 	if gate == nil || task.Surface != engagement.SurfaceWeb {
 		return nil, func() {}
 	}
-	driver, err := newWebPlaywrightDriver()
+	live, err := newWebPlaywrightDriver()
+	var driver webDriver = live
 	if err != nil {
 		driver = unavailableWebDriver{}
 	}
 	closeDriver := func() {
-		if d, ok := driver.(*webPlaywrightDriver); ok {
-			_ = d.Close()
+		if live != nil {
+			_ = live.Close()
 		}
 	}
 	armed := func() bool { return task.Armed }
-	return []tooldef.Tool{
+	if live != nil {
+		live.broker = newWebBroker(gate, armed)
+		live.role = task.ID
+	}
+	if len(captures) > 0 {
+		c := captures[0]
+		if live != nil && c.Store != nil {
+			svc := webcollect.New(c.Store, live.broker, webParseWorker)
+			svc.SetTask(task.ID)
+			svc.DiscoveryAllowed = webRedirectOK(gate)
+			live.observe = func(o webObservation) error {
+				live.stateMu.RLock()
+				ctx := live.actionCtx
+				live.stateMu.RUnlock()
+				if ctx == nil {
+					return errors.New("web action context missing")
+				}
+				o.Artifact.TaskID = task.ID
+				a, err := svc.Accept(ctx, o.Artifact, o.Body, 0)
+				if err != nil {
+					return err
+				}
+				if o.Request.URL != "" {
+					o.Request.Artifact = a.ID
+					return svc.Observe(ctx, o.Request)
+				}
+				return nil
+			}
+		}
+		driver = &capturedWebDriver{inner: driver, task: task, capture: c}
+	}
+	tools := []tooldef.Tool{
 		newWebBrowserTool(gate, armed, driver),
 		newWebAPITool(gate, armed, driver),
-	}, closeDriver
+	}
+	if len(captures) > 0 {
+		broker := newWebBroker(gate, armed)
+		if live != nil {
+			broker = live.broker
+		}
+		tools = append(tools, webJobTools(gate, task, captures[0], broker)...)
+	}
+	return tools, closeDriver
 }
 
 func webArmedOrFalse(f webArmedFunc) bool {
@@ -67,7 +109,7 @@ func webRedirectOK(gate *secgate.Gate) webRedirectAuthorizer {
 // ops); driver performs an authorized action and re-checks redirects.
 func newWebBrowserTool(gate *secgate.Gate, armed webArmedFunc, driver webDriver) tooldef.Tool {
 	return newStoreTool("web_browser",
-		"Drive an isolated browser against an in-scope web target. op: navigate (passive page load, recon), inject (active DOM/script injection), or submit (active form submit). Active actions require an armed task. Safe mode confirms each action. In Auto, the configured unattended allowlist determines whether confirmation is required. Submit uses form_selector and fields; inject uses payload. Returned page content is untrusted.",
+		"Drive an isolated browser against an in-scope web target. op: navigate (passive page load, recon), inject (active DOM/script injection), or submit (active form submit). Active actions require an armed task. Safe mode uses session approvals or confirmation. In Auto, the configured unattended allowlist determines whether confirmation is required. Submit uses form_selector and fields; inject uses payload. Returned page content is untrusted.",
 		webBrowserArgs{},
 		func(ctx context.Context, argsJSON string) (string, error) {
 			act, err := webParseBrowserAction(argsJSON)
@@ -95,7 +137,7 @@ func newWebBrowserTool(gate *secgate.Gate, armed webArmedFunc, driver webDriver)
 // request is scope-checked and re-resolved before the driver runs; responses are untrusted.
 func newWebAPITool(gate *secgate.Gate, armed webArmedFunc, driver webDriver) tooldef.Tool {
 	return newStoreTool("web_api",
-		"Make an HTTP API request to an in-scope web target. GET/HEAD/OPTIONS are read-only (recon). POST/PUT/PATCH/DELETE change state and require an armed task. Safe mode confirms each action. In Auto, the configured unattended allowlist determines whether confirmation is required. url must be an in-scope absolute http/https URL. The response body is untrusted.",
+		"Make an HTTP API request to an in-scope web target. GET/HEAD/OPTIONS start as recon; recognized mutating paths require an armed task. POST/PUT/PATCH/DELETE change state and require an armed task. Safe mode uses session approvals or confirmation. In Auto, the configured unattended allowlist determines whether confirmation is required. url must be an in-scope absolute http/https URL. The response body is untrusted.",
 		webAPIArgs{},
 		func(ctx context.Context, argsJSON string) (string, error) {
 			req, err := webParseAPIRequest(argsJSON)

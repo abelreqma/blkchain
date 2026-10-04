@@ -1,10 +1,14 @@
 package main
 
 import (
+	"blkchain/cli/internal/webacquire"
+	"blkchain/cli/internal/webanalysis"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,33 +20,8 @@ import (
 	"github.com/mxschmitt/playwright-go"
 )
 
-// webplaywright.go is the live web driver for the gated web tools: a webDriver
-// backed by playwright-go (binding v0.6201.1, the Playwright 1.62.1 client). It
-// drives real browser automation and real API testing (APIRequestContext), and
-// NEVER downloads anything.
-//
-// CONNECTION MODEL: the browser, which
-// renders attacker-controlled web content - runs INSIDE a pinned Docker Hardened
-// Image (dhi/playwright, referenced BY SHA256 DIGEST, carrying Playwright 1.63.0
-// browsers), which the operator provisions and runs out-of-band, exposing a
-// LOOPBACK-only CDP endpoint. blkChain connects to that endpoint with
-// pw.Chromium.ConnectOverCDP: CDP is tied to the Chromium build, not Playwright's
-// own wire protocol, so the 1.62.1 client drives the 1.63.0 browser (validated:
-// ConnectOverCDP + a navigation + Title, and an APIRequestContext GET=200). The
-// local side starts the pinned playwright-core package inside the same container
-// through a hash-checked launcher; Node never runs on the operator host. The API
-// leg uses the isolated driver's APIRequestContext.
-//
-// blkChain never calls playwright.Install / DownloadDriver on any path (a
-// source-guard test enforces this), never pulls the image's floating :1 tag
-// (digest only), and FAILS CLOSED when the local driver or the loopback CDP
-// endpoint is not provisioned. The CDP endpoint MUST be loopback (the DHI
-// container binds CDP loopback-only; a non-loopback endpoint is rejected).
-//
-// Every action is authorized by secgate before the driver runs. The driver
-// re-checks browser requests and API redirect hops against scope. These checks
-// do not pin the browser's eventual socket destination; the provisioning guide
-// records that remaining egress boundary.
+// The browser and Node driver run in a pinned container without network access.
+// HTTP traffic crosses the scoped, DNS-pinned Go request broker.
 
 // webPinnedPlaywrightVersion is the exact LOCAL Playwright driver/CLI version the
 // client is built against (playwright-go binding v0.6201.1). Provisioning must
@@ -68,6 +47,7 @@ const webMaxDriverBytes = 200_000
 const webMaxPageRequests = 100
 
 const webActionTimeout = 15_000
+const webDOMCaptureScript = `() => { const html=document.documentElement.outerHTML; return {html:html.slice(0,200000),incomplete:html.length>200000}; }`
 
 // webPlaywrightDriverDir returns the operator-provisioned driver directory, or ""
 // when no provisioning is configured.
@@ -125,13 +105,23 @@ func webValidateCDPEndpoint(ep string) error {
 // connection and the remote browser connected over CDP to the pinned DHI
 // container.
 type webPlaywrightDriver struct {
-	pw         *playwright.Playwright
-	browser    playwright.Browser
-	mu         sync.Mutex
-	context    playwright.BrowserContext
-	page       playwright.Page
-	redirectOK webRedirectAuthorizer
-	requests   atomic.Int64
+	sessionOrigin  string
+	sessionHeaders http.Header
+	pw             *playwright.Playwright
+	browser        playwright.Browser
+	mu             sync.Mutex
+	context        playwright.BrowserContext
+	page           playwright.Page
+	redirectOK     webRedirectAuthorizer
+	requests       atomic.Int64
+	broker         *webacquire.Broker
+	observe        func(webObservation) error
+	actionCtx      context.Context
+	role           string
+	cdp            webCDPState
+	stateMu        sync.RWMutex
+	proxy          *webProxy
+	workerRoot     playwright.CDPSession
 }
 
 // newWebPlaywrightDriver starts the pinned driver through the isolated container
@@ -153,6 +143,12 @@ func newWebPlaywrightDriver() (*webPlaywrightDriver, error) {
 	}
 	if override := strings.TrimSpace(os.Getenv("PLAYWRIGHT_NODEJS_PATH")); override != "" && override != launcher {
 		return nil, fmt.Errorf("%w: PLAYWRIGHT_NODEJS_PATH must not override the isolated container launcher", errWebDriverUnavailable)
+	}
+	if err := webVerifyPackage(driverDir); err != nil {
+		return nil, fmt.Errorf("%w: %v", errWebDriverUnavailable, err)
+	}
+	if err := webVerifyContainer(driverDir); err != nil {
+		return nil, fmt.Errorf("%w: %v", errWebDriverUnavailable, err)
 	}
 	ep := webPlaywrightCDPEndpoint()
 	if ep == "" {
@@ -199,6 +195,10 @@ func (d *webPlaywrightDriver) Close() error {
 			firstErr = err
 		}
 	}
+	if d.proxy != nil {
+		d.proxy.Close()
+		d.proxy = nil
+	}
 	if d.browser != nil {
 		if err := d.browser.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -216,31 +216,21 @@ func (d *webPlaywrightDriver) ensureContext() error {
 	if d.context != nil {
 		return nil
 	}
-	bctx, err := d.browser.NewContext(&playwright.BrowserNewContextOptions{
-		AcceptDownloads: playwright.Bool(false),
-		ServiceWorkers:  playwright.ServiceWorkerPolicyBlock,
+	endpoint, err := d.startProxy()
+	if err != nil {
+		return err
+	}
+	bctx, err := d.browser.NewContext(playwright.BrowserNewContextOptions{
+		AcceptDownloads:   playwright.Bool(false),
+		ServiceWorkers:    playwright.ServiceWorkerPolicyAllow,
+		Proxy:             &playwright.Proxy{Server: endpoint},
+		IgnoreHttpsErrors: playwright.Bool(true),
 	})
 	if err != nil {
 		return fmt.Errorf("new browser context: %w", err)
 	}
 	bctx.SetDefaultTimeout(webActionTimeout)
 	bctx.SetDefaultNavigationTimeout(webActionTimeout)
-	if err := bctx.Route("**/*", func(route playwright.Route) {
-		if d.requests.Add(1) > webMaxPageRequests {
-			_ = route.Abort("blockedbyclient")
-			return
-		}
-		raw := route.Request().URL()
-		u, parseErr := url.Parse(raw)
-		if parseErr == nil && u.User == nil && d.redirectOK != nil && d.redirectOK(raw) {
-			_ = route.Continue()
-			return
-		}
-		_ = route.Abort("blockedbyclient")
-	}); err != nil {
-		_ = bctx.Close()
-		return fmt.Errorf("install route guard: %w", err)
-	}
 	page, err := bctx.NewPage()
 	if err != nil {
 		_ = bctx.Close()
@@ -248,6 +238,25 @@ func (d *webPlaywrightDriver) ensureContext() error {
 	}
 	d.context = bctx
 	d.page = page
+	page.OnPageError(func(err error) {
+		if d.observe != nil {
+			_ = d.observe(webObservation{Artifact: webanalysis.Artifact{Kind: "collection-gap", URL: page.URL(), Role: d.role, Gap: "browser runtime: " + webanalysis.RedactText(capRunes(err.Error(), 2000))}})
+		}
+	})
+	bctx.OnPage(func(p playwright.Page) {
+		d.cdp.mu.Lock()
+		if len(d.cdp.Pages) < 50 {
+			d.cdp.Pages = append(d.cdp.Pages, p)
+		} else {
+			d.cdp.Gap = true
+		}
+		d.cdp.mu.Unlock()
+	})
+	if err := d.cdpAttach(page); err != nil {
+		bctx.Close()
+		d.context = nil
+		return err
+	}
 	return nil
 }
 
@@ -270,10 +279,18 @@ func (d *webPlaywrightDriver) DoBrowser(ctx context.Context, act webBrowserActio
 	defer d.mu.Unlock()
 	d.redirectOK = redirectOK
 	d.requests.Store(0)
+	d.stateMu.Lock()
+	d.actionCtx = ctx
+	d.stateMu.Unlock()
 	if err := d.ensureContext(); err != nil {
 		return "", err
 	}
 	page := d.page
+	stop := context.AfterFunc(ctx, func() { _ = d.context.Close() })
+	defer stop()
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 	var err error
 	if _, err := page.Goto(act.URL); err != nil {
 		return "", fmt.Errorf("navigate: %w", err)
@@ -316,80 +333,87 @@ func (d *webPlaywrightDriver) DoBrowser(ctx context.Context, act webBrowserActio
 			return "", fmt.Errorf("submit form: %w", err)
 		}
 	}
-	content, err := page.Content()
+	d.proxy.settle(ctx)
+	value, err := page.Evaluate(webDOMCaptureScript)
+	content := ""
+	if v, ok := value.(map[string]interface{}); ok {
+		content, _ = v["html"].(string)
+		if v["incomplete"] == true {
+			content += "\n...[truncated]"
+		}
+	}
 	if err != nil {
 		return "", fmt.Errorf("read content: %w", err)
+	}
+	if d.observe != nil {
+		complete := !strings.Contains(content, "...[truncated]")
+		if e := d.observe(webObservation{Artifact: webanalysis.Artifact{DocumentURL: page.URL(), Kind: "browser-dom", URL: page.URL(), Role: d.role, Complete: complete, Gap: func() string {
+			if !complete {
+				return "runtime DOM exceeds capture limit"
+			}
+			return ""
+		}()}, Body: []byte(content)}); e != nil {
+			return "", e
+		}
+	}
+	if err = d.cdpDrain(ctx); err != nil {
+		return "", err
 	}
 	return webBoundOutput(content), nil
 }
 
-// DoAPIRequest makes an API request via Playwright's APIRequestContext. It
-// disables automatic redirect-following (MaxRedirects 0) and follows redirects
-// manually, re-validating each hop's Location host against the gate (redirectOK),
-// so an API redirect cannot carry the request to an out-of-scope or internal
-// host. The response status, headers, and body are returned (bounded).
+// DoAPIRequest shares isolated session cookies with the Go request broker.
 func (d *webPlaywrightDriver) DoAPIRequest(ctx context.Context, req webAPIRequest, redirectOK webRedirectAuthorizer) (string, error) {
+	d.stateMu.Lock()
+	d.actionCtx = ctx
+	d.stateMu.Unlock()
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.redirectOK = redirectOK
+	if d.broker == nil {
+		return "", errors.New("web request broker missing")
+	}
 	if err := d.ensureContext(); err != nil {
 		return "", err
 	}
-	apiCtx := d.context.Request()
-
-	headers := webParseHeaderLines(req.Headers)
-	target := req.URL
-	const maxHops = 10
-	for hop := 0; ; hop++ {
-		if hop > maxHops {
-			return "", fmt.Errorf("too many redirects (> %d)", maxHops)
+	r := webacquire.Request{Method: req.Method, URL: req.URL, Headers: webHeaders(webParseHeaderLines(req.Headers)), Body: []byte(req.Body)}
+	cookies, err := d.context.Cookies(req.URL)
+	if err != nil {
+		return "", errors.New("cannot read isolated session cookies")
+	}
+	for _, c := range cookies {
+		r.Headers.Add("Cookie", c.Name+"="+c.Value)
+	}
+	out, err := d.broker.Fetch(ctx, r)
+	if d.observe != nil {
+		e := d.observe(webObservation{Artifact: webanalysis.Artifact{Kind: "api-response", URL: req.URL, FinalURL: out.FinalURL, Status: out.Status, Headers: out.Headers, MIME: out.Headers.Get("Content-Type"), Role: d.role, Complete: out.Complete, Gap: out.Gap}, Body: out.Body, Request: webanalysis.RequestExample{URL: req.URL, Method: req.Method, Headers: r.Headers, Body: req.Body, Role: d.role, Status: out.Status}})
+		if e != nil {
+			return "", e
 		}
-		opts := playwright.APIRequestContextFetchOptions{
-			Method:       playwright.String(req.Method),
-			MaxRedirects: playwright.Int(0),
-			MaxRetries:   playwright.Int(0),
-			Timeout:      playwright.Float(webActionTimeout),
+	}
+	if err != nil {
+		return "", err
+	}
+	response := &http.Response{Header: out.Headers}
+	for _, c := range response.Cookies() {
+		u, _ := url.Parse(out.FinalURL)
+		domain := c.Domain
+		if domain == "" {
+			domain = u.Hostname()
 		}
-		if req.Body != "" {
-			opts.Data = req.Body
+		path := c.Path
+		if path == "" {
+			path = "/"
 		}
-		if len(headers) > 0 {
-			opts.Headers = headers
-		}
-		resp, err := apiCtx.Fetch(target, opts)
-		if err != nil {
-			return "", fmt.Errorf("api request: %w", err)
-		}
-		status := resp.Status()
-		if status >= 300 && status < 400 {
-			loc := resp.Headers()["location"]
-			if loc == "" {
-				return webAPIResponseText(resp)
-			}
-			if apiMethodActive(req.Method) {
-				return webAPIResponseText(resp)
-			}
-			next := webResolveRedirect(target, loc)
-			if redirectOK == nil || !redirectOK(next) {
-				return "", fmt.Errorf("redirect to an out-of-scope host denied: %s", next)
-			}
-			if !webSameOrigin(target, next) {
-				webClearHeaders(headers)
-			}
-			target = next
+		if domain != u.Hostname() && domain != "."+u.Hostname() {
 			continue
 		}
-		return webAPIResponseText(resp)
+		exp := float64(c.Expires.Unix())
+		if c.Expires.IsZero() {
+			exp = -1
+		}
+		_ = d.context.AddCookies([]playwright.OptionalCookie{{Name: c.Name, Value: c.Value, Domain: playwright.String(domain), Path: playwright.String(path), Secure: playwright.Bool(c.Secure), HttpOnly: playwright.Bool(c.HttpOnly), Expires: &exp}})
 	}
-}
-
-// webAPIResponseText renders an API response as status + body (bounded).
-func webAPIResponseText(resp playwright.APIResponse) (string, error) {
-	body, err := resp.Text()
-	if err != nil {
-		body = ""
-	}
-	return webBoundOutput(fmt.Sprintf("%d %s\n\n%s", resp.Status(), resp.StatusText(), body)), nil
+	return webBoundOutput(fmt.Sprintf("%d\n\n%s", out.Status, out.Body)), nil
 }
 
 // webParseHeaderLines turns "Name: value" lines into a header map. A line without

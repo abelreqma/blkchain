@@ -290,3 +290,11 @@ type webDriver interface {
 // adapter (webplaywright.go), and it fails closed with this error rather than
 // driving a target with an unverified driver.
 var errWebDriverUnavailable = errors.New("web driver not available: no verified, provisioned Playwright driver is configured")
+
+func apiMethodActive(method string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case "GET", "HEAD", "OPTIONS":
+		return false
+	}
+	return true
+}

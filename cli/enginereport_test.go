@@ -1,6 +1,8 @@
 package main
 
 import (
+	"blkchain/cli/internal/webanalysis"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,5 +81,31 @@ func TestReportWriterStartFlushesOnCommit(t *testing.T) {
 	b, _ := os.ReadFile(filepath.Join(ws, "report.md"))
 	if !strings.Contains(string(b), "t1") {
 		t.Errorf("report after Start+commit missing task t1")
+	}
+}
+
+func TestReportWriterIncludesExactWebOperationRecords(t *testing.T) {
+	st := openStore(t)
+	if _, e := st.Apply(engagement.Delta{Upserts: []engagement.Task{{ID: "t1", Status: engagement.StatusTodo}}, Kind: "init"}); e != nil {
+		t.Fatal(e)
+	}
+	op := webanalysis.Operation{ID: webanalysis.ID("report-op"), Origin: "https://fixture.test", Path: "/api/profile", Method: "GET", Protocol: "http", Validation: "access-response", Parameters: []webanalysis.Parameter{{Name: "token", Field: "header.Authorization", Expression: "operation-credential"}}}
+	if e := st.PutWeb(context.Background(), "operation", op.ID, "t1", op); e != nil {
+		t.Fatal(e)
+	}
+	coverage := webanalysis.Coverage{ID: webanalysis.ID("report-coverage"), Role: "reader", Targets: []string{"https://fixture.test"}, Routes: []string{"https://fixture.test/profile"}, Interactions: []string{"click:#profile"}, Downloaded: []string{"fixture-artifact"}, Stages: []string{"fixture-analysis"}}
+	if e := st.PutWeb(context.Background(), "coverage", coverage.ID, "t1", coverage); e != nil {
+		t.Fatal(e)
+	}
+	dir := t.TempDir()
+	w := newReportWriter(st, dir, "goal", "scope", "auto")
+	if e := w.Flush("complete"); e != nil {
+		t.Fatal(e)
+	}
+	for _, name := range []string{"report.json", "report.md"} {
+		b, e := os.ReadFile(filepath.Join(dir, name))
+		if e != nil || !strings.Contains(string(b), "/api/profile") || !strings.Contains(string(b), "operation-credential") || !strings.Contains(string(b), "https://fixture.test/profile") || !strings.Contains(string(b), "click:#profile") || !strings.Contains(string(b), "fixture-artifact") || !strings.Contains(string(b), "fixture-analysis") {
+			t.Fatal(name, string(b), e)
+		}
 	}
 }
