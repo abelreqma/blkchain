@@ -238,7 +238,7 @@ func setModelSwitch(p modelPrefs, kind rowKind, id string, on bool, active strin
 		}
 		return p, "reranker off: answers keep the hybrid search order", nil
 	case rowWeb:
-		if !webSet {
+		if !webSet && on {
 			return p, "", errors.New("web search is not configured: set TAVILY_SETUP_TOKEN or DuckDuckGo")
 		}
 		p.Web = on

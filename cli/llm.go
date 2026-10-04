@@ -32,9 +32,8 @@ import (
 // defaultOMLXBaseURL matches the local oMLX server.
 const defaultOMLXBaseURL = "http://127.0.0.1:8000/v1"
 
-// citationRefPattern matches inline [n] citation markers in a synthesized
-// answer.
-var citationRefPattern = regexp.MustCompile(`\[(\d+)\]`)
+// citationRefPattern matches single or comma-separated citation markers.
+var citationRefPattern = regexp.MustCompile(`\[(\d+(?:\s*,\s*\d+)*)\]`)
 
 // answerGenericPreamble is the default expert persona; a domain persona
 // (personas.go) swaps it for a specialist one. answerConstraints is the shared,
@@ -174,11 +173,13 @@ func buildMessages(systemPrompt string, question string, chunks []retrieval.Resu
 func citationsFromAnswer(answer string, chunks []retrieval.Result) []citation {
 	indexSet := map[int]bool{}
 	for _, m := range citationRefPattern.FindAllStringSubmatch(answer, -1) {
-		n, err := strconv.Atoi(m[1])
-		if err != nil || n < 1 || n > len(chunks) {
-			continue
+		for _, token := range strings.Split(m[1], ",") {
+			n, err := strconv.Atoi(strings.TrimSpace(token))
+			if err != nil || n < 1 || n > len(chunks) {
+				continue
+			}
+			indexSet[n] = true
 		}
-		indexSet[n] = true
 	}
 	indices := make([]int, 0, len(indexSet))
 	for n := range indexSet {

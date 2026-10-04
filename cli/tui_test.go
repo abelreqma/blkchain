@@ -41,7 +41,7 @@ func TestParseInput(t *testing.T) {
 		{"/ask what is ssrf", "ask", "what is ssrf"},
 		{"/search vector tuning", "search", "vector tuning"},
 		{"s vector tuning", "search", "vector tuning"},
-		{"search vector tuning", "search", "vector tuning"},
+		{"search vector tuning", "ask", "search vector tuning"},
 		{"/open 2", "open", "2"},
 		{"/open docs/a.md", "open", "docs/a.md"},
 		{"/hermes summarize notes", "hermes", "summarize notes"},
@@ -1671,7 +1671,7 @@ func TestHelpBlockLayout(t *testing.T) {
 	for _, want := range []string{
 		"reopen a saved session; clear or clear [n] erases",
 		"answer a question, with cited sources",
-		"find the most relevant source passages for a query",
+		"search the evidence and produce a cited answer",
 		"start the local services",
 		"stop the local services",
 		"show whether each local service is running",

@@ -56,6 +56,7 @@ func panelModel(t *testing.T, w, h int) model {
 	m = nm.(model)
 	m.ragModel = "act-model"
 	m.prefs = defaultPrefs().withHidden("hid-model", true)
+	m.prefs.Web = true
 	m.overlay = newModelsPanel(m.prefs, m.currentModel())
 	nm, _ = m.Update(modelsDataMsg{data: panelData()})
 	return nm.(model)
@@ -234,12 +235,13 @@ func TestModelsPanelSpaceTogglesAndSaves(t *testing.T) {
 
 func TestModelsPanelWebNotConfiguredDoesNotToggle(t *testing.T) {
 	m := panelModel(t, 100, 30)
+	m.prefs.Web = false
 	d := panelData()
 	d.webProvider = webProviderNone
 	nm, _ := m.Update(modelsDataMsg{data: d})
 	m = selectRow(t, nm.(model), "web search")
 	m, _ = step(t, m, keySpace)
-	if !m.prefs.Web {
+	if m.prefs.Web {
 		t.Error("an unconfigured web search must not toggle")
 	}
 	if v := m.View(); !strings.Contains(v, "TAVILY_SETUP_TOKEN") {
@@ -555,10 +557,12 @@ func TestModelsSlashArgsInTheTUI(t *testing.T) {
 	}
 
 	t.Setenv("TAVILY_SETUP_TOKEN", "")
-	if _, out := tuiSlash(t, m, "/models off web"); !strings.Contains(out, "TAVILY_SETUP_TOKEN") {
+	t.Setenv(webProviderEnv, "off")
+	if _, out := tuiSlash(t, m, "/models on web"); !strings.Contains(out, "TAVILY_SETUP_TOKEN") {
 		t.Errorf("web without a token: %q", out)
 	}
 	t.Setenv("TAVILY_SETUP_TOKEN", "k")
+	t.Setenv(webProviderEnv, "auto")
 	if m, out := tuiSlash(t, m, "/models off web"); !strings.Contains(out, "web search off") || m.prefs.Web {
 		t.Errorf("web off: %q, prefs %+v", out, m.prefs)
 	}
@@ -749,7 +753,7 @@ func TestModelsArgsKeepsAToggleMadeWhileInFlight(t *testing.T) {
 	// The panel's next toggle keeps the command's change too.
 	m = selectRow(t, m, "web search")
 	m, _ = step(t, m, keySpace)
-	if p := loadPrefs(); p.Web || !p.isHidden("qwen-a") || p.Rerank {
+	if p := loadPrefs(); !p.Web || !p.isHidden("qwen-a") || p.Rerank {
 		t.Errorf("after the next toggle, on disk = %+v", p)
 	}
 }
@@ -931,6 +935,7 @@ func webPanel(t *testing.T, provider string, web bool) model {
 	m = nm.(model)
 	m.ragModel = "act-model"
 	m.prefs = defaultPrefs().withHidden("hid-model", true)
+	m.prefs.Web = true
 	m.prefs.Web = web
 	m.overlay = newModelsPanel(m.prefs, m.currentModel())
 	d := panelData()

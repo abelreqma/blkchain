@@ -59,6 +59,7 @@ func TestMCPAnswerInputDecodes(t *testing.T) {
 // TestKBAnswerNoResultsIsNormalResult: an empty retrieval is a normal tool
 // result whose answer states nothing was found, not an error.
 func TestKBAnswerNoResultsIsNormalResult(t *testing.T) {
+	isolateUserDirs(t)
 	srv := fakeLLM(t, []string{`{"sufficient":false,"rewrite":"","use_web":false}`}, "unused")
 	t.Setenv("OMLX_BASE_URL", srv.URL)
 	t.Setenv("OMLX_MODEL", "m")

@@ -21,6 +21,7 @@ func TestTavilySearchMapsResults(t *testing.T) {
 
 func TestTavilyKeyAbsentSkips(t *testing.T) {
 	t.Setenv("TAVILY_SETUP_TOKEN", "")
+	t.Setenv("TAVILY_API_KEY", "")
 	if tavilyKey() != "" {
 		t.Errorf("expected empty key")
 	}
@@ -33,6 +34,8 @@ func fnPtr(f webSearchFn) uintptr { return reflect.ValueOf(f).Pointer() }
 func TestWebProviderSelection(t *testing.T) {
 	// A Tavily key selects Tavily and web is available, regardless of the
 	// fallback opt-in.
+	isolateUserDirs(t)
+	t.Setenv(webProviderEnv, "auto")
 	t.Setenv("BLKCHAIN_WEB_FALLBACK", "")
 	if fn, ok := webProvider("tvly-xxx"); !ok || fnPtr(fn) != fnPtr(tavilySearch) {
 		t.Errorf("a Tavily key should select Tavily and be available (ok=%v)", ok)
@@ -40,8 +43,8 @@ func TestWebProviderSelection(t *testing.T) {
 
 	// No key and no opt-in: web search stays unavailable so a keyless install
 	// makes no outbound request by default.
-	if _, ok := webProvider(""); ok {
-		t.Error("no key and no opt-in should leave web search unavailable")
+	if fn, ok := webProvider(""); !ok || fnPtr(fn) != fnPtr(duckDuckGoSearch) {
+		t.Error("keyless installs must have DuckDuckGo capability")
 	}
 
 	// No key with the DuckDuckGo opt-in: the keyless fallback is selected.
@@ -52,6 +55,9 @@ func TestWebProviderSelection(t *testing.T) {
 }
 
 func TestActiveWebProvider(t *testing.T) {
+	isolateUserDirs(t)
+	t.Setenv(webProviderEnv, "auto")
+	t.Setenv("TAVILY_API_KEY", "")
 	cases := []struct {
 		name     string
 		tavily   string
@@ -61,8 +67,8 @@ func TestActiveWebProvider(t *testing.T) {
 		{"tavily key present", "tvly-xxx", "", "tavily"},
 		{"tavily key beats fallback", "tvly-xxx", "duckduckgo", "tavily"},
 		{"no key, ddg opted in", "", "duckduckgo", "duckduckgo"},
-		{"no key, no opt-in", "", "", "off"},
-		{"no key, unknown fallback value", "", "bing", "off"},
+		{"no key, no opt-in", "", "", "duckduckgo"},
+		{"no key, unknown fallback value", "", "bing", "duckduckgo"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -76,15 +82,9 @@ func TestActiveWebProvider(t *testing.T) {
 }
 
 func TestDuckDuckGoSearchMapsUntrustedAndCaps(t *testing.T) {
-	const body = `{
-		"Heading":"XSS",
-		"AbstractText":"Cross-site scripting overview",
-		"AbstractURL":"https://owasp.org/xss",
-		"RelatedTopics":[
-			{"Text":"Reflected XSS","FirstURL":"https://a.example/1"},
-			{"Topics":[{"Text":"Stored XSS","FirstURL":"https://a.example/2"}]}
-		]
-	}`
+	const body = `<div class="result"><a class="result__a" href="https://owasp.org/xss">XSS</a><div class="result__snippet">Cross-site scripting overview</div></div>
+<div class="result"><a class="result__a" href="https://a.example/1">Reflected XSS</a></div>
+<div class="result"><a class="result__a" href="https://a.example/2">Stored XSS</a></div>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(body))
 	}))

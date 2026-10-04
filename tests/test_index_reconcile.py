@@ -110,7 +110,9 @@ class CorpusReconciliationTest(unittest.TestCase):
         reconcile.assert_not_called()
 
     def test_high_stale_ratio_requires_prune_flag(self):
-        ''
+        """P9: if deleting would remove more than 20% of a source's managed
+        points, refuse unless prune_missing_sources is set (a bad ingest should
+        not silently wipe most of the corpus)."""
         source = "hacktricks"
         # 60 reconcilable points (>= the ratio-guard floor), 45 stale (75% > 20%).
         stale = [types.SimpleNamespace(id=f"s{i}", payload={
@@ -141,7 +143,8 @@ class CorpusReconciliationTest(unittest.TestCase):
 
 
 class ManualReconcileTest(unittest.TestCase):
-    ''
+    """P8: re-adding a shrunk source via add_path deletes the manual points that
+    were not seen this pass (orphan chunks), scoped to that source label."""
 
     def test_readding_shrunk_source_deletes_orphans(self):
         ns = types.SimpleNamespace

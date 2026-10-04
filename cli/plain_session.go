@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"blkchain/cli/internal/histstore"
+	"blkchain/cli/internal/retrieval"
 )
 
 func plainSlashError(cmd string) error {
@@ -19,16 +20,28 @@ func plainSlashError(cmd string) error {
 }
 
 func plainAsk(mode, query string, c *replClient, history []priorTurn, preface string, force bool) (string, error) {
-	if mode == "agent" && !force {
+	first, rest := splitFirst(query)
+	webOnly := first == "--web"
+	if webOnly {
+		query = rest
+	}
+	if mode == "agent" && !force && !webOnly {
 		return "", runHermes([]string{query})
 	}
-	rc, err := c.get()
-	if err != nil {
-		return "", err
+	var rc *retrieval.Client
+	var err error
+	if !webOnly {
+		rc, err = c.get()
+		if err != nil {
+			return "", err
+		}
 	}
 	args := []string{query}
 	if force {
 		args = []string{"--rag", query}
+	}
+	if webOnly {
+		args = []string{"--web", query}
 	}
 	return askWithPreface(rc, history, args, preface)
 }

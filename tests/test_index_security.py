@@ -109,7 +109,8 @@ class SSRFRebindingTest(unittest.TestCase):
 
 
 class SSRFAddressRangeTest(unittest.TestCase):
-    ''
+    """P1: the guard must reject shared/CGNAT/6to4 space and IPv4-mapped IPv6,
+    not only the old private/loopback/link-local set."""
 
     def _reject(self, addr: str):
         def resolver(host, port, *a, **k):
@@ -145,7 +146,8 @@ class SSRFAddressRangeTest(unittest.TestCase):
 
 
 class IdnaPinTest(unittest.TestCase):
-    ''
+    """P2: an IDN host must resolve/pin under the IDNA (punycode) form urllib3
+    actually resolves, or the pin is bypassed."""
 
     def test_idn_host_normalized_to_punycode(self):
         def resolver(host, port, *a, **k):
@@ -206,7 +208,8 @@ class IdnaPinTest(unittest.TestCase):
 
 
 class ProxyBypassTest(unittest.TestCase):
-    ''
+    """P3: fetch and embed must use a trust_env-disabled session so a set proxy
+    cannot bypass the SSRF pin, and a set proxy is warned about."""
 
     def test_no_proxy_session_disables_trust_env(self):
         s = index._no_proxy_session()
@@ -235,7 +238,8 @@ class ProxyBypassTest(unittest.TestCase):
 
 
 class HtmlToTextTest(unittest.TestCase):
-    ''
+    """P7: HTML->text must not use a catastrophic-backtracking regex and must
+    strip script/style content."""
 
     def test_strips_script_and_style(self):
         html_doc = "<p>keep this</p><script>evil()</script><style>.x{}</style><p>and this</p>"
@@ -257,7 +261,8 @@ class HtmlToTextTest(unittest.TestCase):
 
 
 class IterFilesSafetyTest(unittest.TestCase):
-    ''
+    """P6/PI8: the ingest iterator must not follow symlinks out of the tree or
+    ingest dotfiles / credential-looking files."""
 
     def test_skips_symlinked_file(self):
         with tempfile.TemporaryDirectory() as d:

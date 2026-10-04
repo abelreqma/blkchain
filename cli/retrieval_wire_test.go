@@ -118,12 +118,16 @@ func TestNewRetrievalClientHonorsCollectionEnv(t *testing.T) {
 func TestTUISearchesReuseOneQdrantConnection(t *testing.T) {
 	isolateUserDirs(t)
 	conns := useFakeRetrieval(t, map[string]*qdrant.Value{"text": qdrant.NewValueString("t"), "source": qdrant.NewValueString("wstg")})
+	srv := fakeLLM(t, []string{`{"sufficient":true,"use_web":false}`}, "Reasoned answer [1].")
+	defer srv.Close()
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
 	m := newKeyModel(t)
 	for i := 0; i < 5; i++ {
 		nm, cmd := m.dispatchInput("/search ssrf")
 		var got bool
 		for _, msg := range drain(cmd) {
-			if sm, ok := msg.(searchMsg); ok && len(sm.results) == 1 {
+			if sm, ok := msg.(streamDoneMsg); ok && len(sm.results) == 1 && sm.full == "Reasoned answer [1]." {
 				got = true
 			}
 			if em, ok := msg.(errMsg); ok {
@@ -382,5 +386,19 @@ func TestAnswerResponseNewFieldsRoundTrip(t *testing.T) {
 	}
 	if strings.Count(string(data), `"untrusted"`) != 1 {
 		t.Errorf("untrusted must appear only on the web citation: %s", data)
+	}
+}
+
+func TestSearchTextSynthesizesInsteadOfListingMatches(t *testing.T) {
+	isolateUserDirs(t)
+	useFakeRetrieval(t, goldenPayload())
+	srv := fakeLLM(t, []string{`{"sufficient":true,"use_web":false}`}, "Reasoned explanation [1].")
+	defer srv.Close()
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	var err error
+	output := captureStdout(t, func() { err = runSearch([]string{"query"}) })
+	if err != nil || !strings.Contains(output, "Reasoned explanation") || strings.Contains(output, "result(s)") {
+		t.Fatalf("output %q err %v", output, err)
 	}
 }

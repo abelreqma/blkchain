@@ -184,7 +184,8 @@ class EmbedServerWireTest(unittest.TestCase):
 
 
 class EmbedFinitenessTest(unittest.TestCase):
-    ''
+    """_validate_embed_arr rejects a degenerate batch (non-finite or wrong dim)
+    so a bad vector is never shipped as a sanitized 0.0 (P5)."""
 
     def test_rejects_non_finite(self):
         import numpy as np

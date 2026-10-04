@@ -1,4 +1,4 @@
-''
+"""Verify collection creation precedes content-hash lookup."""
 import unittest
 from unittest import mock
 

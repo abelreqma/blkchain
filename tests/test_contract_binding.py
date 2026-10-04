@@ -1,4 +1,14 @@
-''
+"""Cross-language contract binding.
+
+Assert the Python side of the three shared contracts matches its committed
+source, reciprocal to the Go tests:
+  - cli/internal/ragconfig/ragconfig_test.go  (TestBuiltinDefaultsMatchContractFile)
+  - cli/internal/retrieval/wirecontract_test.go (payload + embed-wire keys)
+
+Hermetic: no services, models, or network. Does not import embed_server (it
+loads MLX at import); the embed-server wire shapes are tested through the pure
+blkchain.embed_wire module.
+"""
 import json
 import os
 import unittest
@@ -11,7 +21,10 @@ _RAG_JSON = _ROOT / "blkchain" / "contract" / "rag.json"
 
 
 class RagJsonMatchesConfigTest(unittest.TestCase):
-    ''
+    """The values config.py keeps its own copies of must equal rag.json, the
+    Python mirror of Go's TestBuiltinDefaultsMatchContractFile.
+    The shared values include the dense/sparse vector names, the sparse model, and
+    the embed server URL."""
 
     def setUp(self):
         self.rag = json.loads(_RAG_JSON.read_text())

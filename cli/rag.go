@@ -41,8 +41,7 @@ type searcher interface {
 }
 
 // webSearch is the web fallback, a variable so tests do not touch the network.
-// It routes to Tavily when a key is configured and to the opted-in keyless
-// DuckDuckGo fallback otherwise (see webProvider).
+// It selects the configured provider and applies the automatic fallback.
 var webSearch = dispatchWebSearch
 
 // rag.go is the bounded RAG answer loop (AnswerLoop): retrieve, grade
@@ -73,8 +72,11 @@ func looksLikeCVEorPoC(query string) bool {
 // grader asks for it, the query looks like a CVE or PoC question, or retrieval
 // found nothing, and gets it only when web search is enabled (the web provider
 // is Tavily, or the opted-in keyless DuckDuckGo fallback, see webProvider);
-// grade.Sufficient always wins first.
+// An enabled web request takes precedence over sufficiency.
 func nextAction(g grade, hasWeb, looksCVE bool, results int) string {
+	if hasWeb && g.UseWeb {
+		return "web"
+	}
 	if g.Sufficient {
 		return "sufficient"
 	}
@@ -101,9 +103,12 @@ type AnswerOpts struct {
 	// Persona, when set, is called once with the chosen domain KEY (e.g. "ad")
 	// before the answer streams, so the UI can show the cue via personaLabel and
 	// a short status token. It is not called for the generic persona.
-	Persona func(domain string)
-	NoWeb   bool
-	NoLocal bool
+	Persona      func(domain string)
+	WebOnly      bool
+	NoWeb        bool
+	NoLocal      bool
+	SearchTopK   int
+	SearchFilter map[string]any
 
 	History []priorTurn
 	llm     *openai.LLM // reuse this client if set; nil builds one
@@ -181,12 +186,36 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 		}
 	}
 
+	if opts.WebOnly {
+		if opts.NoWeb || !loadPrefs().Web {
+			return "", nil, false, nil, 0, errors.New("web: disabled; enable web before searching the internet")
+		}
+		stage(stageWeb)
+		webLimit := cfg.TavilyMaxResults
+		if opts.SearchTopK > 0 {
+			webLimit = opts.SearchTopK
+		}
+		results, err = webSearch(ctx, tavilyKey(), question, webLimit, nil)
+		if err != nil {
+			return "", nil, false, nil, 0, err
+		}
+		if len(results) == 0 {
+			return "", nil, false, results, 0, ErrNoResults
+		}
+		answer, cits, tokens, err = SynthesizeFromResults(ctx, cfg, question, results, opts)
+		return answer, cits, true, results, tokens, err
+	}
+
+	topK := cfg.TopK
+	if opts.SearchTopK > 0 {
+		topK = opts.SearchTopK
+	}
 	if !opts.NoLocal {
 		stage(stageRetrieving)
 		// History-aware first retrieval: a follow-up carries the prior user
 		// question so it retrieves the right chunks. Grading/synthesis still use
 		// the raw question below.
-		results, err = rc.Search(ctx, retrievalQuery(opts.History, question), cfg.TopK, nil)
+		results, err = rc.Search(ctx, retrievalQuery(opts.History, question), topK, opts.SearchFilter)
 		if err != nil {
 			return "", nil, false, nil, 0, err
 		}
@@ -201,14 +230,11 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 	}
 
 	searchQuery := question
-	// Web search is reachable only when a provider is available and the caller
-	// did not disable it. The provider is Tavily when a key is set, else the
-	// keyless DuckDuckGo fallback when it is opted in (see webProvider); with no
-	// key and no opt-in, web stays off so a keyless install makes no outbound
-	// request.
+	// Automatic searches require saved permission and an available provider.
 	_, webAvail := webProvider(tavilyKey())
-	hasWeb := webAvail && !opts.NoWeb
+	hasWeb := webAvail && !opts.NoWeb && loadPrefs().Web
 	looksCVE := looksLikeCVEorPoC(question)
+	var externalResults []retrieval.Result
 
 	// Clamp MaxLoops to at least one pass: a value <= 0 (a bad rag.json or env)
 	// would skip grading, the web fallback, and the guardrails entirely and go
@@ -225,7 +251,7 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 			break
 		}
 
-		action := nextAction(g, hasWeb, looksCVE, len(results))
+		action := nextAction(g, hasWeb && !usedWeb, looksCVE, len(results))
 		if action == "sufficient" {
 			break
 		}
@@ -243,7 +269,8 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 			stage(stageWeb)
 			webResults, werr := webSearch(ctx, tavilyKey(), webQuery, cfg.TavilyMaxResults, domains)
 			if werr == nil && len(webResults) > 0 {
-				results = append(results, webResults...)
+				externalResults = webResults
+				results = append(results, externalResults...)
 				usedWeb = true
 				continue
 			}
@@ -258,9 +285,9 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 			} else {
 				stage(stageRetrieving)
 			}
-			retried, rerr := rc.Search(ctx, searchQuery, cfg.TopK, nil)
+			retried, rerr := rc.Search(ctx, searchQuery, topK, opts.SearchFilter)
 			if rerr == nil && len(retried) > 0 {
-				results = retried
+				results = append(retried, externalResults...)
 			}
 		}
 	}

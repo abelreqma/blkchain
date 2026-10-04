@@ -328,6 +328,13 @@ type searchMsg struct {
 	query   string
 	results []retrieval.Result
 	elapsed time.Duration
+	web     bool
+	json    bool
+}
+type webAnswerMsg struct {
+	query   string
+	results []retrieval.Result
+	ctx     context.Context
 }
 type healthReportMsg struct{ h *serviceHealth }
 type healthMsg struct { // status-dot check: qdrant, embed_server, llm
@@ -366,6 +373,7 @@ type streamDoneMsg struct {
 	rerankOff bool // the reranker was turned off for this answer
 	err       error
 	agent     bool
+	results   []retrieval.Result
 	tokens    int // completion tokens when the transport exposed usage, else 0
 }
 
@@ -930,6 +938,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastAnswer = full
 		m.openTargets = citationTargets(msg.citations)
+		if msg.results != nil {
+			m.lastQuery, m.lastResults = m.pendingQ, msg.results
+		}
 		m.servicesOK, m.servicesChecked = true, true
 		m.recordTurn(full)
 		m.lastCost, m.lastCostSet = cost, true
@@ -967,6 +978,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.finish(tea.Println(formatEngageDone(msg.final, elapsed, m.renderWidth())))
 
+	case webAnswerMsg:
+		m.lastQuery, m.lastResults, m.pendingQ = msg.query, msg.results, msg.query
+		m.workingVerb = stageAnswering
+		return m, m.generateCmd(msg.ctx, msg.query, msg.results, m.turnStart)
 	case searchMsg:
 		m.working = false
 		if m.cancel != nil {
@@ -976,8 +991,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.openTargets = resultTargets(msg.results)
 		// Retain this search so /generate can synthesize from exactly these chunks.
 		m.lastQuery, m.lastResults = msg.query, msg.results
-		m.markRetrievalOK()
-		return m, m.finish(tea.Println(strings.TrimRight(formatResults(msg.query, msg.results, msg.elapsed, m.renderWidth()), "\n")))
+		if !msg.web {
+			m.markRetrievalOK()
+		}
+		output := formatResults(msg.query, msg.results, msg.elapsed, m.renderWidth())
+		if msg.json {
+			encoded, err := formatWebJSON(searchResponse{Results: msg.results})
+			if err != nil {
+				return m, m.finish(tea.Println(styleErr(err)))
+			}
+			output = encoded
+		}
+		return m, m.finish(tea.Println(strings.TrimRight(output, "\n")))
 
 	case healthReportMsg:
 		m.working = false
@@ -1698,7 +1723,13 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	// Queue-while-busy: while a turn runs, a plain question (or a
 	// turn-starting slash command) is queued FIFO instead of erroring; other slash
 	// commands run immediately (mode switch, pickers, /help, /clear, ...).
-	if verb, _ := parseInput(q); m.working && isTurnVerb(verb) {
+	verb, arg := parseInput(q)
+	turn := isTurnVerb(verb)
+	if verb == "web" {
+		c, err := parseWebCommand(strings.Fields(arg))
+		turn = err == nil && c.action == "search"
+	}
+	if m.working && turn {
 		m.queue = append(m.queue, q)
 		note := "   " + Meta.Render(fmt.Sprintf("%s queued (%d in queue)", Glyph(GlyphBullet), len(m.queue)))
 		return m, tea.Println(note)
@@ -1740,7 +1771,16 @@ func vizNote(on bool) string {
 func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 	verb, arg := parseInput(q)
 	echo := promptEcho(q)
-
+	groundSearch := verb == "search"
+	if groundSearch {
+		verb = "ask"
+	}
+	webOnly := false
+	if verb == "ask" {
+		if first, rest := splitFirst(arg); first == "--web" {
+			webOnly, arg = true, rest
+		}
+	}
 	switch verb {
 	case "quit":
 		return m, tea.Quit
@@ -1793,8 +1833,6 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		return m, tea.Sequence(tea.Println(echo), tea.Println(candidatesBlock(m.engagement)))
 	case "evidence":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(evidenceBlock(m.engagement)))
-	case "web":
-		return m.dispatchWeb(arg, echo)
 	case "kg":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(kgBlock(arg)))
 	case "copy":
@@ -1879,6 +1917,55 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		return m, tea.Sequence(tea.Println(echo), execFuncCmd(func() error { return runLogs(largs) }))
 	case "up", "down", "status":
 		return m, tea.Sequence(tea.Println(echo), execFuncCmd(func() error { return runStack(verb) }))
+	case "web":
+		args, err := webArguments(arg)
+		if err != nil {
+			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
+		}
+		if !webIsSearchCommand(args) {
+			return m.dispatchWeb(arg, echo)
+		}
+		c, err := parseWebCommand(args)
+		if err != nil {
+			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
+		}
+		if c.action != "search" {
+			p, note, err := applyWebCommand(loadPrefs(), c)
+			if err != nil {
+				return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
+			}
+			m.prefs = p
+			if panel, ok := m.overlay.(modelsPanel); ok {
+				panel.prefs = p
+				m.overlay = panel
+			}
+			if c.json {
+				output, err := formatWebJSON(webReport(p))
+				if err != nil {
+					return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
+				}
+				return m, tea.Sequence(tea.Println(echo), tea.Println(output))
+			}
+			return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render(note)))
+		}
+		m.working, m.workingVerb = true, stageWeb
+		m.tickGen++
+		m.turnStart = time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RequestTimeout())
+		m.cancel = cancel
+		return m, tea.Batch(tea.Println(echo), m.workTick(), func() tea.Msg {
+			results, err := webSearchResults(ctx, c)
+			if err != nil {
+				if ctx.Err() == context.Canceled {
+					return canceledMsg{}
+				}
+				return errMsg{err}
+			}
+			if c.json {
+				return searchMsg{query: c.value, results: results, elapsed: time.Since(m.turnStart), web: true, json: true}
+			}
+			return webAnswerMsg{query: c.value, results: results, ctx: ctx}
+		})
 	case "search", "ask", "health":
 		if (verb == "search" || verb == "ask") && strings.TrimSpace(arg) == "" {
 			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("%s: give me something to %s", verb, verb))))
@@ -1892,7 +1979,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.firstTokAt = time.Time{}
 		var ctx context.Context
 		var cancel context.CancelFunc
-		if verb == "ask" && m.mode == "agent" && !m.forceRag {
+		if verb == "ask" && m.mode == "agent" && !m.forceRag && !groundSearch && !webOnly {
 			// Agent turns can run for a long time (multi-step tool use) and
 			// StreamAgent assumes a long-lived ctx; only Ctrl-C should end one,
 			// not the RAG client's HTTP timeout.
@@ -1910,7 +1997,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			m.pendingQ = arg    // the operator's question, recorded to the session
 			// AGENT mode: a full agentic turn via the gateway (or subprocess
 			// fallback), streaming into the same live buffer.
-			if m.mode == "agent" && !m.forceRag {
+			if m.mode == "agent" && !m.forceRag && !groundSearch && !webOnly {
 				message := arg
 				if preface != "" {
 					message = preface + "\n\n" + arg
@@ -1918,10 +2005,10 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.agentStreamCmd(ctx, message))
 			}
 			// RAG mode: route through the adaptive router (skip/ground/web).
-			force := m.forceRag
+			force := m.forceRag || groundSearch
 			m.forceRag = false
 			m.persona = "" // cleared for the new turn; set when its persona cue arrives
-			return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.streamCmd(ctx, arg, preface, m.turnStart, force))
+			return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.streamCmd(ctx, arg, preface, m.turnStart, force, webOnly))
 		}
 		return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.dispatchCmd(ctx, verb, arg, m.turnStart))
 	case "generate":
@@ -2269,7 +2356,8 @@ func (m model) dispatchCmd(ctx context.Context, verb, arg string, start time.Tim
 // ground, or web; force grounds unconditionally. The grounded path is the full
 // bounded AnswerLoop (grade, optional web fallback or rewrite, then synthesis);
 // a cancel returns a canceledMsg.
-func (m model) streamCmd(ctx context.Context, question, preface string, start time.Time, force bool) tea.Cmd {
+func (m model) streamCmd(ctx context.Context, question, preface string, start time.Time, force bool, explicitWeb ...bool) tea.Cmd {
+	webOnly := len(explicitWeb) > 0 && explicitWeb[0]
 	prog := m.prog
 	turnModel := m.ragTurnModel()
 	return func() tea.Msg {
@@ -2280,17 +2368,22 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 				prog.Send(modelResolvedMsg(turnModel))
 			}
 		}
-		rc, err := m.retrievalClient()
-		if err != nil {
-			return errMsg{err}
+		var rc *retrieval.Client
+		var err error
+		if !webOnly {
+			rc, err = m.retrievalClient()
+			if err != nil {
+				return errMsg{err}
+			}
 		}
 		cfg := m.cfg
 		streamed := false
 		p := loadPrefs()
-		full, cits, usedWeb, _, tokens, _, err := adaptiveAnswerFn(ctx, rc, cfg, question, askRoutes(p), force, AnswerOpts{
+		full, cits, usedWeb, results, tokens, _, err := adaptiveAnswerFn(ctx, rc, cfg, question, askRoutes(p), force, AnswerOpts{
 			Model:   turnModel,
 			Preface: preface,
 			NoWeb:   !p.Web,
+			WebOnly: webOnly,
 			History: m.conversationHistory(),
 			Persona: func(domain string) {
 				if prog != nil {
@@ -2318,7 +2411,7 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 			}
 			return errMsg{timeoutOrErr(err)}
 		}
-		return streamDoneMsg{full: full, citations: cits, usedWeb: usedWeb, rerankOff: rc.SkipRerank, err: err, tokens: tokens}
+		return streamDoneMsg{full: full, citations: cits, usedWeb: usedWeb, results: results, rerankOff: rc != nil && rc.SkipRerank, err: err, tokens: tokens}
 	}
 }
 
@@ -2370,7 +2463,14 @@ func (m model) generateCmd(ctx context.Context, question string, results []retri
 			}
 			return errMsg{timeoutOrErr(err)}
 		}
-		return streamDoneMsg{full: full, citations: cits, tokens: tokens}
+		usedWeb := false
+		for _, result := range results {
+			if result.Payload.Source == webSource {
+				usedWeb = true
+				break
+			}
+		}
+		return streamDoneMsg{full: full, citations: cits, results: results, usedWeb: usedWeb, tokens: tokens}
 	}
 }
 
@@ -2739,7 +2839,7 @@ func (m model) doCopy() string {
 // --- input parsing ---
 
 // parseInput classifies a submitted line. A leading "/" selects an explicit
-// command; bare "s"/"search" is a search shorthand; anything else is an ask
+// command; bare "s" is a search shorthand; other natural input is an ask
 // (the headline verb for a Q&A KB).
 func parseInput(line string) (verb, arg string) {
 	line = strings.TrimSpace(line)
@@ -2752,8 +2852,12 @@ func parseInput(line string) (verb, arg string) {
 	}
 	first, rest := splitFirst(line)
 	switch strings.ToLower(first) {
-	case "s", "search":
+	case "s":
 		return "search", rest
+	case "search":
+		return "ask", line
+	case "web":
+		return "web", rest
 	}
 	return "ask", line
 }

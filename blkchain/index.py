@@ -263,7 +263,7 @@ def _reconcile_corpus(
         if offset is None:
             break
 
-    
+    # P9 safety: on a non-trivial corpus, refuse a mass deletion (more than 20% of
     # the reconcilable corpus) unless explicitly forced. A silent read failure or a
     # bad ingest could otherwise wipe most of the corpus. The absolute floor keeps
     # the guard from firing on a tiny corpus where deleting most points is normal.
@@ -283,7 +283,9 @@ def _reconcile_corpus(
 def _reconcile_manual_source(
     client: QdrantClient, collection: str, source: str, index_generation: str
 ) -> int:
-    ''
+    """Delete manual-scope points of `source` whose index_generation is not the
+    current one: orphan chunks left after re-adding a shrunk file/dir/URL (P8).
+    Scoped to the one source label, so other manual adds are untouched."""
     stale: list[str] = []
     offset = None
     while True:
@@ -366,7 +368,7 @@ _EXTRA_DENIED_NETS = (
 )
 
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
-
+# The stale-ratio reconcile guard (P9) only applies once the corpus is at least
 # this many reconcilable points; below it, deleting a large fraction is normal.
 _RECONCILE_RATIO_GUARD_MIN = 50
 _MAX_URL_BYTES = 5 * 1024 * 1024  # bound a fetched body to 5 MiB (DoS guard)
@@ -522,7 +524,7 @@ def _chunk_text(text: str, source: str, path_str: str, markdown: bool):
                 identifiers=ingest._extract_identifiers(piece),
                 cwe_class=cwe,
                 # Fetched web content is untrusted: tag its origin so the Go
-                
+                # answer prompt treats these citations as untrusted (P12), the
                 # same way it already handles Tavily web results.
                 extra={"origin": "url"},
             )
@@ -786,7 +788,7 @@ def add_path(
     # A fresh per-add generation stamps every point seen this pass (new, changed,
     # and re-stamped unchanged); orphan points of this source from a previous add
     # keep the old generation and are then deleted, so re-adding a shrunk file/dir
-    
+    # /URL does not leave stale chunks behind (P8). Only runs on a clean pass.
     generation = uuid.uuid4().hex
     stats = _index_chunks(client, sparse_model, collection, chunks, existing, resume,
                           snapshot_version, "manual", generation)

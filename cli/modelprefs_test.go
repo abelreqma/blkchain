@@ -20,7 +20,7 @@ func prefsFile(t *testing.T) string {
 
 func TestPrefsDefaultsWhenMissingOrCorrupt(t *testing.T) {
 	isolateUserDirs(t)
-	want := modelPrefs{Rerank: true, Web: true, Rag: true, Viz: true}
+	want := modelPrefs{Rerank: true, Web: false, Rag: true, Viz: true}
 	if got := loadPrefs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("missing file: got %+v, want %+v", got, want)
 	}
@@ -105,7 +105,7 @@ func TestPrefsLoadRejectsOversizeAndSymlink(t *testing.T) {
 	if err := os.WriteFile(path, []byte(big), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadPrefs(); !got.Web || len(got.Hidden) != 0 {
+	if got := loadPrefs(); got.Web || len(got.Hidden) != 0 {
 		t.Errorf("oversize file should load as defaults, got web=%v hidden=%d", got.Web, len(got.Hidden))
 	}
 
@@ -117,7 +117,7 @@ func TestPrefsLoadRejectsOversizeAndSymlink(t *testing.T) {
 	if err := os.Symlink(target, path); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadPrefs(); !got.Web {
+	if got := loadPrefs(); got.Web {
 		t.Error("a symlinked prefs file should be ignored")
 	}
 }

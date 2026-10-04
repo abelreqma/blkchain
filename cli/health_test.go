@@ -99,7 +99,7 @@ func TestReplSearchUnreachableKeepsPrev(t *testing.T) {
 	useDeadServices(t)
 	t.Setenv("QDRANT_GRPC_URL", "127.0.0.1:1")
 	prev := []retrieval.Result{{ID: "keep"}}
-	got := replSearch("ssrf", prev, &replClient{})
+	_, got := replSearch("ssrf", prev, &replClient{}, nil, "")
 	if len(got) != 1 || got[0].ID != "keep" {
 		t.Fatalf("want previous results kept, got %+v", got)
 	}

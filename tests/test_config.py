@@ -1,4 +1,7 @@
-''
+"""Hermetic tests for blkchain.config parsing (P10 + int-env / api-key minors).
+
+Imports only blkchain.config (stdlib-light), so no MLX/transformers load.
+"""
 import os
 import tempfile
 import unittest
@@ -11,7 +14,7 @@ _K = "BLKCHAIN_TEST_DOTENV_KEY"
 
 
 class LoadDotenvTest(unittest.TestCase):
-    ''
+    """P10: inline comments on unquoted values, optional 'export ', quotes."""
 
     def _parse(self, line: str) -> str | None:
         with tempfile.TemporaryDirectory() as d:

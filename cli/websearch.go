@@ -4,37 +4,41 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"blkchain/cli/internal/retrieval"
+	"golang.org/x/net/html"
 )
 
-// tavilyAPIKeyEnv is the environment variable holding the Tavily API key.
-const tavilyAPIKeyEnv = "TAVILY_SETUP_TOKEN"
+const (
+	tavilyAPIKeyEnv       = "TAVILY_SETUP_TOKEN"
+	webSource             = "web"
+	webFallbackEnv        = "BLKCHAIN_WEB_FALLBACK"
+	webFallbackDuckDuckGo = "duckduckgo"
+	webProviderTavily     = "tavily"
+	webProviderDuckDuckGo = "duckduckgo"
+	webProviderNone       = "off"
+	webProviderAuto       = "auto"
+	webProviderEnv        = "BLKCHAIN_WEB_PROVIDER"
+	ddgBaseURL            = "https://html.duckduckgo.com/html/"
+	webMaxResponseBytes   = 2 << 20
+	webMaxResults         = 20
+	webQueryMaxBytes      = 4096
+	webRequestTimeout     = 20 * time.Second
+)
 
-// webSource is the Source of every web result. buildContext marks it untrusted
-// external evidence, and citations from it carry the web tag.
-const webSource = "web"
+var webHTTPClient = &http.Client{
+	Timeout:       webRequestTimeout,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
 
-// tavilyMaxResponseBytes bounds how much of a Tavily response body is read,
-// to avoid unbounded memory use on a misbehaving or malicious endpoint.
-const tavilyMaxResponseBytes = 10 << 20 // 10 MiB
-
-// tavilyRequestTimeout bounds how long a single Tavily request may take, so a
-// hung endpoint cannot hang `blk ask` indefinitely.
-const tavilyRequestTimeout = 20 * time.Second
-
-// tavilyHTTPClient is the HTTP client used for Tavily requests, with a
-// request timeout (see tavilyRequestTimeout) instead of http.DefaultClient's
-// unbounded wait.
-var tavilyHTTPClient = &http.Client{Timeout: tavilyRequestTimeout}
-
-// tavilySearchRequest is the Tavily /search request body.
 type tavilySearchRequest struct {
 	APIKey         string   `json:"api_key"`
 	Query          string   `json:"query"`
@@ -42,8 +46,6 @@ type tavilySearchRequest struct {
 	IncludeDomains []string `json:"include_domains,omitempty"`
 }
 
-// tavilySearchResponse is the subset of the Tavily /search response this
-// client consumes.
 type tavilySearchResponse struct {
 	Results []struct {
 		Title   string  `json:"title"`
@@ -53,282 +55,290 @@ type tavilySearchResponse struct {
 	} `json:"results"`
 }
 
-// tavilyKey reads the Tavily API key. It returns "" when unset so callers can
-// skip web search entirely.
+type webSearchFn func(context.Context, string, string, int, []string) ([]retrieval.Result, error)
+
 func tavilyKey() string {
-	return os.Getenv(tavilyAPIKeyEnv)
+	if key := strings.TrimSpace(os.Getenv("TAVILY_API_KEY")); key != "" {
+		return key
+	}
+	return strings.TrimSpace(os.Getenv(tavilyAPIKeyEnv))
 }
 
-// tavilySearch queries the live Tavily API.
-func tavilySearch(ctx context.Context, apiKey, query string, maxResults int, includeDomains []string) ([]retrieval.Result, error) {
-	return tavilySearchAt(ctx, "https://api.tavily.com", apiKey, query, maxResults, includeDomains)
-}
-
-// tavilySearchAt POSTs a search request to baseURL+"/search" and maps the
-// Tavily hits to retrieval.Result, so the answer loop's web fallback can
-// treat them like any other retrieval result (tagged Source webSource).
-func tavilySearchAt(ctx context.Context, baseURL, apiKey, query string, maxResults int, includeDomains []string) ([]retrieval.Result, error) {
-	reqBody := tavilySearchRequest{
-		APIKey:     apiKey,
-		Query:      query,
-		MaxResults: maxResults,
+func webProviderSetting(p modelPrefs) string {
+	if value := os.Getenv(webProviderEnv); strings.TrimSpace(value) != "" {
+		return strings.ToLower(strings.TrimSpace(value))
 	}
-	if len(includeDomains) > 0 {
-		reqBody.IncludeDomains = includeDomains
+	if p.WebProvider != "" {
+		return p.WebProvider
 	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("tavily: encode request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/search", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("tavily: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := tavilyHTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("tavily: request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	limited := io.LimitReader(resp.Body, tavilyMaxResponseBytes)
-
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, limited)
-		return nil, fmt.Errorf("tavily: unexpected status %d", resp.StatusCode)
-	}
-
-	var parsed tavilySearchResponse
-	if err := json.NewDecoder(limited).Decode(&parsed); err != nil {
-		return nil, fmt.Errorf("tavily: decode response: %w", err)
-	}
-
-	results := make([]retrieval.Result, 0, len(parsed.Results))
-	for _, hit := range parsed.Results {
-		results = append(results, retrieval.Result{
-			ID:    hit.URL,
-			Score: hit.Score,
-			Payload: retrieval.Payload{
-				Source:  webSource,
-				Path:    hit.URL,
-				Section: hit.Title,
-				Type:    "doc",
-				Text:    hit.Content,
-			},
-		})
-	}
-	return results, nil
-}
-
-// webSearchFn is the shape of a web-search provider: given a query, a result
-// cap, and optional include-domains, it returns web results tagged webSource.
-// Both tavilySearch and duckDuckGoSearch satisfy it so the answer loop can pick
-// one behind the webSearch seam.
-type webSearchFn func(ctx context.Context, apiKey, query string, maxResults int, includeDomains []string) ([]retrieval.Result, error)
-
-// webFallbackEnv is the opt-in for the keyless DuckDuckGo fallback. blkChain is
-// offline by default, so when no Tavily key is set the web path stays off and
-// makes no outbound request unless this is set to webFallbackDuckDuckGo.
-const webFallbackEnv = "BLKCHAIN_WEB_FALLBACK"
-
-// webFallbackDuckDuckGo is the webFallbackEnv value that opts into the keyless
-// DuckDuckGo Instant Answer fallback.
-const webFallbackDuckDuckGo = "duckduckgo"
-
-// Web-search provider labels. These are the values webProviderName and
-// activeWebProvider return and the names the UI renders.
-const (
-	webProviderTavily     = "tavily"
-	webProviderDuckDuckGo = "duckduckgo"
-	webProviderNone       = "off"
-)
-
-// webProviderName is the single source of truth for which web-search provider a
-// given Tavily key selects: Tavily when the key is set, else the keyless
-// DuckDuckGo fallback when opted in via BLKCHAIN_WEB_FALLBACK, else none. Both
-// webProvider (func + availability) and activeWebProvider (label) derive from
-// it, so the selection logic lives in exactly one place.
-func webProviderName(apiKey string) string {
-	if apiKey != "" {
-		return webProviderTavily
-	}
-	if os.Getenv(webFallbackEnv) == webFallbackDuckDuckGo {
+	if os.Getenv(webFallbackEnv) == webFallbackDuckDuckGo && tavilyKey() == "" {
 		return webProviderDuckDuckGo
+	}
+	return webProviderAuto
+}
+
+func webProviderName(apiKey string) string {
+	switch webProviderSetting(loadPrefs()) {
+	case webProviderAuto:
+		if apiKey != "" {
+			return webProviderTavily
+		}
+		return webProviderDuckDuckGo
+	case webProviderDuckDuckGo:
+		return webProviderDuckDuckGo
+	case webProviderTavily:
+		if apiKey != "" {
+			return webProviderTavily
+		}
 	}
 	return webProviderNone
 }
 
-// webProvider picks the web-search provider for the given Tavily key and reports
-// whether web search is available at all. Tavily is primary whenever its key is
-// configured. With no key, the keyless DuckDuckGo fallback is used only when
-// explicitly opted in via BLKCHAIN_WEB_FALLBACK, so a keyless install stays
-// offline (ok=false) by default. The key flows through the apiKey argument the
-// call site already passes (tavilyKey()), so selection needs no extra env read.
 func webProvider(apiKey string) (webSearchFn, bool) {
 	switch webProviderName(apiKey) {
 	case webProviderTavily:
 		return tavilySearch, true
 	case webProviderDuckDuckGo:
 		return duckDuckGoSearch, true
-	default:
-		return nil, false
 	}
+	return nil, false
 }
 
-// activeWebProvider reports which web-search provider `blk ask` would use, by
-// Tavily key and opt-in alone: "tavily", "duckduckgo", or "off". It is
-// capability-only and does NOT fold in the /models web switch (opts.NoWeb /
-// p.Web); the UI composes the final on/off from its own switch over this label.
-// It reads the live Tavily key, so the reported provider tracks the environment.
-func activeWebProvider() string {
-	return webProviderName(tavilyKey())
-}
+func activeWebProvider() string { return webProviderName(tavilyKey()) }
 
-// dispatchWebSearch is the default of the webSearch seam in rag.go. It routes
-// each request to the provider webProvider picks for the given key, so the loop
-// transparently uses Tavily when configured and the opted-in DuckDuckGo
-// fallback otherwise. With no provider available it returns no results, and the
-// loop falls through to its rewrite-and-re-retrieve path.
 func dispatchWebSearch(ctx context.Context, apiKey, query string, maxResults int, includeDomains []string) ([]retrieval.Result, error) {
+	if !loadPrefs().Web {
+		return nil, errors.New("web: disabled; enable web before searching the internet")
+	}
 	provider, ok := webProvider(apiKey)
 	if !ok {
-		return nil, nil
+		return nil, errors.New("web: provider unavailable; select duckduckgo or configure TAVILY_API_KEY")
 	}
-	return provider(ctx, apiKey, query, maxResults, includeDomains)
-}
-
-// --- DuckDuckGo keyless fallback ---
-
-// ddgBaseURL is the DuckDuckGo Instant Answer API host. It is a fixed,
-// hardcoded endpoint with no user-controlled component, so the fallback adds no
-// SSRF surface: only the query string varies, and it is URL-encoded.
-const ddgBaseURL = "https://api.duckduckgo.com"
-
-// ddgMaxResponseBytes bounds how much of a DuckDuckGo response body is read, to
-// avoid unbounded memory use on a misbehaving or malicious endpoint.
-const ddgMaxResponseBytes = 10 << 20 // 10 MiB
-
-// ddgRequestTimeout bounds a single DuckDuckGo request so a hung endpoint
-// cannot hang `blk ask` indefinitely.
-const ddgRequestTimeout = 20 * time.Second
-
-// ddgDefaultMaxResults caps results when the caller passes a non-positive
-// maxResults, so the fallback never returns an unbounded list.
-const ddgDefaultMaxResults = 5
-
-// ddgHTTPClient is the HTTP client for DuckDuckGo requests, with a bounded
-// request timeout instead of http.DefaultClient's unbounded wait.
-var ddgHTTPClient = &http.Client{Timeout: ddgRequestTimeout}
-
-// ddgTopic is one Instant Answer related topic. The API nests topics: a leaf
-// carries Text and FirstURL, while a category group carries nested Topics.
-type ddgTopic struct {
-	Text     string     `json:"Text"`
-	FirstURL string     `json:"FirstURL"`
-	Topics   []ddgTopic `json:"Topics"`
-}
-
-// ddgResponse is the subset of the DuckDuckGo Instant Answer response consumed.
-type ddgResponse struct {
-	Heading       string     `json:"Heading"`
-	AbstractText  string     `json:"AbstractText"`
-	AbstractURL   string     `json:"AbstractURL"`
-	RelatedTopics []ddgTopic `json:"RelatedTopics"`
-}
-
-// duckDuckGoSearch queries the keyless DuckDuckGo Instant Answer API. The
-// apiKey and includeDomains arguments satisfy the webSearchFn shape but are
-// unused: DuckDuckGo needs no key, and the Instant Answer API has no domain
-// filter.
-func duckDuckGoSearch(ctx context.Context, _ string, query string, maxResults int, _ []string) ([]retrieval.Result, error) {
-	return duckDuckGoSearchAt(ctx, ddgBaseURL, query, maxResults)
-}
-
-// duckDuckGoSearchAt GETs an Instant Answer request from baseURL and maps the
-// hits to retrieval.Result tagged Source webSource, so the answer loop treats
-// them exactly like Tavily results (untrusted external evidence). It reads at
-// most ddgMaxResponseBytes and returns at most maxResults hits.
-func duckDuckGoSearchAt(ctx context.Context, baseURL, query string, maxResults int) ([]retrieval.Result, error) {
-	limit := maxResults
-	if limit <= 0 {
-		limit = ddgDefaultMaxResults
+	results, err := provider(ctx, apiKey, query, maxResults, includeDomains)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
+	if webProviderSetting(loadPrefs()) == webProviderAuto && apiKey != "" && (err != nil || len(results) == 0) {
+		fallback, fallbackErr := duckDuckGoSearch(ctx, "", query, maxResults, includeDomains)
+		if fallbackErr != nil {
+			return nil, errors.Join(err, fallbackErr)
+		}
+		return fallback, nil
+	}
+	return results, err
+}
 
-	q := url.Values{}
-	q.Set("q", query)
-	q.Set("format", "json")
-	q.Set("no_html", "1")
-	q.Set("no_redirect", "1")
+func searchLimit(query string, requested int) (int, error) {
+	if strings.TrimSpace(query) == "" || len(query) > webQueryMaxBytes {
+		return 0, fmt.Errorf("web: query must contain 1 to %d bytes", webQueryMaxBytes)
+	}
+	if requested <= 0 {
+		requested = 5
+	}
+	return min(requested, webMaxResults), nil
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/?"+q.Encode(), nil)
+func searchBody(ctx context.Context, method, endpoint string, body io.Reader) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
-		return nil, fmt.Errorf("duckduckgo: build request: %w", err)
+		return nil, errors.New("web: invalid search request")
 	}
-
-	resp, err := ddgHTTPClient.Do(req)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("User-Agent", "blkChain/1.0")
+	resp, err := webHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("duckduckgo: request failed: %w", err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errors.New("web: search request failed")
 	}
 	defer resp.Body.Close()
-
-	limited := io.LimitReader(resp.Body, ddgMaxResponseBytes)
-
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, limited)
-		return nil, fmt.Errorf("duckduckgo: unexpected status %d", resp.StatusCode)
+		return nil, fmt.Errorf("web: provider returned HTTP %d", resp.StatusCode)
 	}
-
-	var parsed ddgResponse
-	if err := json.NewDecoder(limited).Decode(&parsed); err != nil {
-		return nil, fmt.Errorf("duckduckgo: decode response: %w", err)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, webMaxResponseBytes+1))
+	if err != nil {
+		return nil, errors.New("web: cannot read search response")
 	}
+	if len(data) > webMaxResponseBytes {
+		return nil, errors.New("web: search response exceeds size limit")
+	}
+	return data, nil
+}
 
+func tavilySearch(ctx context.Context, apiKey, query string, maxResults int, domains []string) ([]retrieval.Result, error) {
+	return tavilySearchAt(ctx, "https://api.tavily.com", apiKey, query, maxResults, domains)
+}
+
+func tavilySearchAt(ctx context.Context, baseURL, apiKey, query string, maxResults int, domains []string) ([]retrieval.Result, error) {
+	limit, err := searchLimit(query, maxResults)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey == "" {
+		return nil, errors.New("tavily: set TAVILY_API_KEY or TAVILY_SETUP_TOKEN")
+	}
+	body, err := json.Marshal(tavilySearchRequest{apiKey, query, limit, domains})
+	if err != nil {
+		return nil, errors.New("tavily: invalid search request")
+	}
+	data, err := searchBody(ctx, http.MethodPost, baseURL+"/search", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("tavily: %w", err)
+	}
+	var parsed tavilySearchResponse
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, errors.New("tavily: invalid search response")
+	}
 	results := make([]retrieval.Result, 0, limit)
-	add := func(title, link, text string) bool {
-		if link == "" || len(results) >= limit {
-			return len(results) < limit
+	for _, hit := range parsed.Results {
+		if allowedSearchURL(hit.URL, domains) {
+			results = append(results, searchResult(hit.Title, hit.URL, hit.Content, hit.Score))
+			if len(results) == limit {
+				break
+			}
 		}
-		results = append(results, retrieval.Result{
-			ID: link,
-			Payload: retrieval.Payload{
-				Source:  webSource,
-				Path:    link,
-				Section: title,
-				Type:    "doc",
-				Text:    text,
-			},
-		})
-		return len(results) < limit
-	}
-
-	// The abstract is the API's best single answer; map it first, then the
-	// related topics (flattening the one level of nesting the API uses).
-	if !add(parsed.Heading, parsed.AbstractURL, parsed.AbstractText) {
-		return results, nil
-	}
-	if !ddgAppendTopics(parsed.RelatedTopics, add) {
-		return results, nil
 	}
 	return results, nil
 }
 
-// ddgAppendTopics walks related topics (one level of nesting) and feeds each
-// leaf to add. It returns false as soon as add reports the result cap is full,
-// so the walk stops early.
-func ddgAppendTopics(topics []ddgTopic, add func(title, link, text string) bool) bool {
-	for _, t := range topics {
-		if len(t.Topics) > 0 {
-			if !ddgAppendTopics(t.Topics, add) {
-				return false
-			}
-			continue
-		}
-		if !add(t.Text, t.FirstURL, t.Text) {
-			return false
+func allowedSearchURL(raw string, domains []string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+		return false
+	}
+	if len(domains) == 0 {
+		return true
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, domain := range domains {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain != "" && (host == domain || strings.HasSuffix(host, "."+domain)) {
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+func searchResult(title, link, text string, score float64) retrieval.Result {
+	return retrieval.Result{ID: link, Score: score, Payload: retrieval.Payload{Source: webSource, Path: link, Section: capRunes(title, 500), Type: "doc", Text: capRunes(text, 8000)}}
+}
+
+func duckDuckGoSearch(ctx context.Context, _ string, query string, maxResults int, domains []string) ([]retrieval.Result, error) {
+	if len(domains) > 0 {
+		sites := make([]string, 0, len(domains))
+		for _, domain := range domains {
+			sites = append(sites, "site:"+domain)
+		}
+		query += " (" + strings.Join(sites, " OR ") + ")"
+	}
+	results, err := duckDuckGoSearchAt(ctx, ddgBaseURL, query, maxResults)
+	if err != nil {
+		return nil, err
+	}
+	filtered := results[:0]
+	for _, r := range results {
+		if allowedSearchURL(r.Payload.Path, domains) {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered, nil
+}
+
+func duckDuckGoSearchAt(ctx context.Context, baseURL, query string, maxResults int) ([]retrieval.Result, error) {
+	limit, err := searchLimit(query, maxResults)
+	if err != nil {
+		return nil, err
+	}
+	data, err := searchBody(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/?"+url.Values{"q": {query}}.Encode(), nil)
+	if err != nil {
+		if strings.Contains(err.Error(), "HTTP 202") {
+			return nil, errors.New("duckduckgo: search requires a CAPTCHA; use Tavily or retry later")
+		}
+		return nil, fmt.Errorf("duckduckgo: %w", err)
+	}
+	if bytes.Contains(data, []byte("anomaly-modal")) || bytes.Contains(data, []byte("challenge-form")) {
+		return nil, errors.New("duckduckgo: search requires a CAPTCHA; use Tavily or retry later")
+	}
+	doc, err := html.Parse(bytes.NewReader(data))
+	if err != nil {
+		return nil, errors.New("duckduckgo: invalid search response")
+	}
+	results := make([]retrieval.Result, 0, limit)
+	seen := map[string]bool{}
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if len(results) >= limit {
+			return
+		}
+		if htmlClass(n, "result") || htmlClass(n, "web-result") {
+			anchor, snippet := htmlFindClass(n, "result__a"), htmlFindClass(n, "result__snippet")
+			if anchor != nil {
+				link := htmlAttr(anchor, "href")
+				if u, err := url.Parse(link); err == nil && (u.Hostname() == "duckduckgo.com" || u.Hostname() == "html.duckduckgo.com" || u.Hostname() == "" && u.Path == "/l/") {
+					link = u.Query().Get("uddg")
+				}
+				if allowedSearchURL(link, nil) && !seen[link] {
+					seen[link] = true
+					results = append(results, searchResult(htmlText(anchor), link, htmlText(snippet), 0))
+				}
+			}
+			return
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(doc)
+	if len(results) == 0 && !bytes.Contains(data, []byte("no-results")) {
+		return nil, errors.New("duckduckgo: no recognizable search results")
+	}
+	return results, nil
+}
+
+func htmlAttr(n *html.Node, key string) string {
+	for _, attr := range n.Attr {
+		if attr.Key == key {
+			return attr.Val
+		}
+	}
+	return ""
+}
+func htmlClass(n *html.Node, class string) bool {
+	for _, value := range strings.Fields(htmlAttr(n, "class")) {
+		if value == class {
+			return true
+		}
+	}
+	return false
+}
+func htmlFindClass(n *html.Node, class string) *html.Node {
+	if htmlClass(n, class) {
+		return n
+	}
+	for child := n.FirstChild; child != nil; child = child.NextSibling {
+		if found := htmlFindClass(child, class); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+func htmlText(n *html.Node) string {
+	if n == nil {
+		return ""
+	}
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.TextNode {
+			b.WriteString(node.Data)
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(n)
+	return strings.Join(strings.Fields(b.String()), " ")
 }

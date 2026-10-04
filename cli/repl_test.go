@@ -194,3 +194,40 @@ func TestTUIRagQuestionInRagModeStartsForcedTurn(t *testing.T) {
 		t.Errorf("router model = %q; want ragmodel", c.model)
 	}
 }
+
+func TestInteractiveSearchSynthesizesAnAnswer(t *testing.T) {
+	useDeadServices(t)
+	original := adaptiveAnswerFn
+	defer func() { adaptiveAnswerFn = original }()
+	var seen string
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, query string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		seen = query
+		opts.Stream([]byte("Synthesis from retrieved evidence."))
+		return "Synthesis from retrieved evidence.", nil, false, nil, 8, "rag", nil
+	}
+	for _, line := range []string{"/search current LLM testing techniques", "search for current LLM testing techniques", "s current LLM testing techniques"} {
+		m := frameModel(t)
+		updated, cmd := m.dispatchInput(line)
+		m = updated.(model)
+		found := false
+		for _, msg := range drain(cmd) {
+			if done, ok := msg.(streamDoneMsg); ok && done.full == "Synthesis from retrieved evidence." {
+				found = true
+			}
+			if _, raw := msg.(searchMsg); raw {
+				t.Fatalf("%q returned raw matches", line)
+			}
+		}
+		if !found || seen == "" {
+			t.Fatalf("%q did not reach synthesis", line)
+		}
+	}
+}
+
+func TestEmptySearchDoesNotForceTheNextTurn(t *testing.T) {
+	m := frameModel(t)
+	updated, _ := m.dispatchInput("/search")
+	if updated.(model).forceRag {
+		t.Fatal("empty search leaked forced retrieval into the next turn")
+	}
+}

@@ -19,17 +19,12 @@ dependencies = [
   "requests==2.34.2",
   "numpy==2.5.3",
   "transformers==5.17.0",  # tokenizer-only (reranker); no torch
+  # evaluation
   "deepeval==4.2.6",
 ]
 
-# Notes:
-# - Secrets are read from the environment only; never listed or stored here.
-# - LangChain: only langchain-text-splitters is used (ingest.py). langchain,
-#   langgraph, langchain-community, and langchain-graph-retriever were removed
-#   graph) is built, which is its natural home.
-# - ragas is intentionally excluded (its latest release is incompatible with
-#   langchain 1.x; DeepEval covers evaluation).
-# - uv.lock pins the full transitive dependency graph and artifact hashes.
+# Secrets are read from the environment.
+# uv.lock pins transitive dependencies and artifact hashes.
 
 [tool.uv]
 package = false

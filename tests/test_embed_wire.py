@@ -1,4 +1,9 @@
-''
+"""Unit tests for blkchain.embed_wire: the pure embed-server wire contract.
+
+This module must import WITHOUT loading MLX/numpy (embed_server.py loads models
+at import; the wire keys/response builders live here so the contract is
+importable and testable independently). Stdlib unittest only.
+"""
 import unittest
 
 from blkchain import embed_wire

@@ -304,17 +304,17 @@ func runSearch(args []string) error {
 		return err
 	}
 	defer rc.Close()
-	start := time.Now()
+	if !*jsonOut {
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout())
+		defer cancel()
+		_, _, _, err := printGroundedText(ctx, rc, cfg, query, AnswerOpts{NoWeb: !loadPrefs().Web, SearchTopK: *topK, SearchFilter: filterMap}, rc.SkipRerank)
+		return err
+	}
 	results, err := rc.Search(context.Background(), query, *topK, filterMap)
-	elapsed := time.Since(start)
 	if err != nil {
 		return err
 	}
-	if *jsonOut {
-		return printJSON(searchResponse{results})
-	}
-	printResults(query, results, elapsed)
-	return nil
+	return printJSON(searchResponse{results})
 }
 
 // buildFilters folds --source/--type/--filter into the {field: value} payload
@@ -422,6 +422,7 @@ type askOpts struct {
 	sources bool
 	agent   bool
 	rag     bool
+	web     bool
 }
 
 // askRoutes builds the router's enabled-route set from the saved model prefs.
@@ -433,6 +434,7 @@ func defineAskFlags(fs *flag.FlagSet, o *askOpts) {
 	fs.BoolVar(&o.json, "json", false, "print the answer as JSON instead of formatted text")
 	fs.BoolVar(&o.sources, "sources", false, "also print the retrieved passages")
 	fs.BoolVar(&o.agent, "agent", false, "answer with the Hermes agent instead of the knowledge base alone")
+	fs.BoolVar(&o.web, "web", false, "search the internet for this answer only")
 	fs.BoolVar(&o.rag, "rag", false, "force a grounded answer from the knowledge base, skipping adaptive routing")
 }
 
@@ -462,6 +464,10 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		return "", missingArg("ask", "missing question", `ask "what is SSRF?"`)
 	}
 
+	if o.web && (o.agent || o.rag) {
+		return "", usageErr("ask: --web cannot be combined with --agent or --rag")
+	}
+
 	// --agent hands the question to the Hermes agent (which has the blkChain KB
 	// tools plus web/tool access), rather than the Go answer loop.
 	if *agent {
@@ -474,14 +480,14 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 	// no truncation happens here. Empty history is the stateless single-turn case.
 
 	cfg := loadConfig()
-	if rc == nil {
+	if rc == nil && !o.web {
 		c, err := newRetrievalClient(cfg)
 		if err != nil {
 			return "", err
 		}
 		defer c.Close()
 		rc = c
-	} else {
+	} else if rc != nil {
 		rc = followPrefs(rc, loadPrefs())
 	}
 
@@ -497,6 +503,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 			Stream:  newAskStream(os.Stdout, &full),
 			Preface: preface,
 			NoWeb:   !p.Web,
+			WebOnly: o.web,
 			History: history,
 			Persona: func(domain string) {
 				fmt.Println(Meta.Render("answering as " + personaLabel(domain)))
@@ -512,7 +519,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		if !strings.HasSuffix(full.String(), "\n") {
 			fmt.Println()
 		}
-		printSources(cits, usedWeb, rc.SkipRerank)
+		printSources(cits, usedWeb, rc != nil && rc.SkipRerank)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s stream ended early: %s\n", errMark(), sanitizeTerminal(err.Error()))
 		}
@@ -523,7 +530,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 	// answer loop was asked to use.
 	model := resolveModel(cfg)
 	p := loadPrefs()
-	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(context.Background(), rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Model: model, NoWeb: !p.Web, History: history, Preface: preface})
+	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(context.Background(), rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Model: model, NoWeb: !p.Web, WebOnly: o.web, History: history, Preface: preface})
 	if errors.Is(err, ErrNoResults) {
 		return "", reportNoResults(os.Stderr, *jsonOut, model)
 	}
@@ -552,7 +559,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		fmt.Println()
 		printResults(query, resp.Results, 0)
 	}
-	printSources(resp.Citations, resp.UsedWeb, rc.SkipRerank)
+	printSources(resp.Citations, resp.UsedWeb, rc != nil && rc.SkipRerank)
 	return resp.Answer, nil
 }
 
@@ -874,4 +881,21 @@ func (m *multiFlag) String() string { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error {
 	*m = append(*m, v)
 	return nil
+}
+
+func printGroundedText(ctx context.Context, rc searcher, cfg ragconfig.Config, question string, opts AnswerOpts, rerankOff bool) (string, []citation, []retrieval.Result, error) {
+	var full strings.Builder
+	opts.Stream = newAskStream(os.Stdout, &full)
+	answer, citations, usedWeb, results, _, err := AnswerLoop(ctx, rc, cfg, question, opts)
+	if errors.Is(err, ErrNoResults) {
+		return "", nil, results, reportNoResults(os.Stderr, false, "")
+	}
+	if err != nil {
+		return answer, citations, results, timeoutOrErr(err)
+	}
+	if !strings.HasSuffix(full.String(), "\n") {
+		fmt.Println()
+	}
+	printSources(citations, usedWeb, rerankOff)
+	return answer, citations, results, nil
 }

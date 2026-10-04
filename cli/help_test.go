@@ -26,7 +26,8 @@ import (
 // usage, per-command help, and shell completion must use these lines verbatim.
 var wordingDescs = map[string]string{
 	"ask":        "answer a question, with cited sources",
-	"search":     "find the most relevant source passages for a query",
+	"search":     "search the evidence and produce a cited answer",
+	"web":        "search the web and analyze JavaScript/API evidence",
 	"sources":    "list indexed sources, with chunk counts",
 	"open":       "open a cited source in your pager or editor",
 	"add":        "add your own files, folders, or a web page",
@@ -42,7 +43,6 @@ var wordingDescs = map[string]string{
 	"mcp":        "serve the knowledge base to Hermes over MCP (stdio)",
 	"engage":     "run a gated, multi-step engagement against a goal",
 	"kg":         "query the engagement knowledge graph",
-	"web":        "collect and inspect web JavaScript and API evidence",
 	"analyze":    "generate schema-validated JSON from the LLM",
 	"install":    "put blk on your PATH (run once, from the project)",
 	"completion": "print a bash or zsh completion script",
@@ -51,9 +51,9 @@ var wordingDescs = map[string]string{
 }
 
 var wordingGroups = [][]string{
-	{"ask", "search", "sources", "open", "add"},
+	{"ask", "search", "web", "sources", "open", "add"},
 	{"up", "down", "status", "health", "doctor", "models", "logs"},
-	{"hermes", "gateway", "mcp", "engage", "web", "kg", "analyze"},
+	{"hermes", "gateway", "mcp", "engage", "kg", "analyze"},
 	{"install", "completion", "version", "help"},
 }
 

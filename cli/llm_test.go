@@ -418,3 +418,23 @@ func TestGroundedAnswerPromptPermitsPayloadGeneration(t *testing.T) {
 		}
 	}
 }
+
+func TestCitationsFromAnswerGroupedNumbers(t *testing.T) {
+	chunks := []retrieval.Result{
+		chunk("local", "local.md", "Local", "local evidence"),
+		chunk(webSource, "https://example.com/current", "Current", "web evidence"),
+		chunk("other", "other.md", "Other", "other evidence"),
+	}
+	for _, test := range []struct {
+		answer string
+		count  int
+	}{
+		{"Reasoning [1, 2]. Follow-up [3].", 3},
+		{"Reasoning [2, 1, 2, 999].", 2},
+	} {
+		citations := citationsFromAnswer(test.answer, chunks)
+		if len(citations) != test.count || citations[0].Path != "local.md" || !citations[1].Untrusted {
+			t.Fatalf("%q citations %+v", test.answer, citations)
+		}
+	}
+}

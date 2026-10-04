@@ -60,7 +60,7 @@ func defineWebFlags(fs *flag.FlagSet, o *webOpts) {
 	fs.IntVar(&o.states, "states", 30, "maximum page states (1 to 100)")
 	fs.Var(&o.interactions, "interaction", "scroll or click:<selector> (repeatable)")
 }
-func runWeb(args []string) error {
+func runWebAnalysis(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	var confirm secgate.Confirmer

@@ -121,8 +121,6 @@ func plainREPL() error {
 				largs = strings.Fields(rest)
 			}
 			printErr(runLogs(largs))
-		case "web":
-			printErr(replWeb(rest))
 		case "models":
 			printErr(replModels(rest))
 		case "viz":
@@ -187,8 +185,28 @@ func plainREPL() error {
 				mode = "rag"
 				fmt.Println(Meta.Render("mode: rag"))
 			}
+		case "web":
+			args, err := webArguments(rest)
+			if err != nil {
+				printErr(err)
+				break
+			}
+			if webIsSearchCommand(args) {
+				last = replWebSearch(rest, last)
+			} else {
+				printErr(replWeb(rest))
+			}
 		case "search", "s":
-			last = replSearch(rest, last, &rc)
+			query := rest
+			if !strings.HasPrefix(cmd, "/") && strings.EqualFold(cmd, "search") {
+				ans, err := plainAsk(mode, line, &rc, convo, pm.buildContextPreface(), false)
+				printErr(err)
+				recordConvo(line, ans)
+				break
+			}
+			ans, results := replSearch(query, last, &rc, convo, pm.buildContextPreface())
+			last = results
+			recordConvo(query, ans)
 		case "ask", "a":
 			ans, err := plainAsk(mode, rest, &rc, convo, pm.buildContextPreface(), false)
 			printErr(err)
@@ -297,28 +315,35 @@ func (c *replClient) close() {
 	}
 }
 
-// replSearch runs a search, prints it, and returns the new results (or the
-// previous ones on error/empty query, so `open N` keeps working).
-func replSearch(query string, prev []retrieval.Result, c *replClient) []retrieval.Result {
+// replSearch synthesizes an answer and retains its cited sources for open.
+func replSearch(query string, prev []retrieval.Result, c *replClient, history []priorTurn, preface string) (string, []retrieval.Result) {
 	query = strings.TrimSpace(query)
 	if query == "" {
-		return prev
+		return "", prev
 	}
 	base, err := c.get()
 	if err != nil {
 		printErr(err)
-		return prev
+		return "", prev
 	}
 	rc := followPrefs(base, loadPrefs())
 	ctx, cancel := context.WithTimeout(context.Background(), loadConfig().RequestTimeout())
 	defer cancel()
-	results, err := rc.Search(ctx, query, 0, nil)
+	answer, citations, results, err := printGroundedText(ctx, rc, loadConfig(), query, AnswerOpts{NoWeb: !loadPrefs().Web, History: history, Preface: preface}, rc.SkipRerank)
 	if err != nil {
 		printErr(err)
-		return prev
+		return "", prev
 	}
-	printResults(query, results, 0)
-	return results
+	cited := make([]retrieval.Result, 0, len(citations))
+	for _, citation := range citations {
+		for _, result := range results {
+			if result.Payload.Source == citation.Source && result.Payload.Path == citation.Path && result.Payload.Section == citation.Section {
+				cited = append(cited, result)
+				break
+			}
+		}
+	}
+	return answer, cited
 }
 
 // replOpen opens the N-th result from the last search, or a literal path.
@@ -363,6 +388,7 @@ func replGroups() []rowGroup {
 			{"<question>", "type a question with no command to ask it"},
 			{"/ask <q>", replSpecDesc("ask")},
 			{"/search <q>", replSpecDesc("search")},
+			{"/web [action]", replSpecDesc("web")},
 			{"/open <N|path>", replSpecDesc("open")},
 		}},
 		{hgServices, []helpRow{

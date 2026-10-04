@@ -1,4 +1,51 @@
-''
+"""Self-contained benchmark harness for `blk engage` recon and detection.
+
+This module is complete and stdlib-only. It provides: the lab-config
+loader/validator (`load_lab_config`), the strict lab-host guard (`is_lab_host`),
+the network-only scope builder (`build_scope_text`), the bounded `blk engage`
+subprocess client (`find_blk`, `run_engage`), the defensive report extractor
+(`parse_target`, `extract_detections`, `extract_recon`), the grounded detection scorer
+(`class_match`, `score_target`, `score_batch`, `aggregate_runs`), and the CLI
+(`build_report`, `main`).
+
+Scope and safety:
+  - RECON + DETECTION SCORING ONLY. This harness never arms a task, never
+    confirms a command, and never runs an exploit. It measures discovery and
+    detection, not weaponization.
+  - The scope passed to `blk engage` is NETWORK-only: bare host/IP/CIDR lines
+    and `!` exclusions. The `local` scope keyword is never emitted (it forces
+    local HITL and strays to post-access).
+  - The harness REFUSES to run without an explicit operator-supplied lab
+    config, and NEVER targets a non-lab host. `is_lab_host` is the SOLE control
+    for the lab-only guarantee: `blk engage` allows in-scope public hosts, as
+    real engagements do, so nothing downstream backstops a public host in the
+    scope file. If this guard lets a public host through, it reaches the target.
+
+A lab host is accepted iff it is a non-flipping identifier:
+  (a) a private/reserved/loopback/link-local/CGNAT/documentation IP or CIDR
+      literal (ipaddress marks it not `is_global`), with IPv4-mapped IPv6 judged
+      by its embedded v4 and 6to4/Teredo literals refused outright; OR
+  (b) a hostname that passes the `[A-Za-z0-9.-]` char-set check AND whose final
+      label is a reserved suffix (RFC6761 test/example/invalid/localhost,
+      RFC6762 local, ICANN private-use internal) or is bare `localhost`.
+
+EVERY other hostname is REFUSED, including a privately-resolvable non-reserved
+name (e.g. box.corp, internal-box.corp). `.lab` is refused too: it is a
+delegated public gTLD, not a reserved suffix.
+
+No DNS resolution happens here. The guard accepts only identifiers that cannot
+flip between validation time and engage run time, which eliminates the
+resolve-time vs run-time DNS TOCTOU window that a resolve-and-check guard would
+have. This is a deliberate strengthening (it refuses more).
+
+Capability boundary: a lab that uses non-reserved private hostnames (e.g.
+box.corp on an internal DNS server) must express its targets as IP/CIDR literals
+or reserved-suffix names. Broadening the guard to admit such hostnames is a
+future posture decision, not a default.
+
+Stdlib only: this module stays cheap and hermetic to import. It does not import
+`blkchain.eval.run` or any model/service code.
+"""
 from __future__ import annotations
 
 import argparse

@@ -184,7 +184,7 @@ def _iter_files(root: Path, exts: set[str] | None, exclude: tuple[str, ...]) -> 
     # os.walk with followlinks=False so a symlinked directory is never descended
     # into (it could point outside the corpus/add root); symlinked files are
     # skipped explicitly below. This closes the "ingest follows symlinks out of
-    
+    # tree" hole (P6/PI8) that Path.rglob left open.
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames.sort()
         # Drop symlinked subdirectories so the walk stays inside the real tree.

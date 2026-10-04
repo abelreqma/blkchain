@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -163,6 +164,7 @@ func TestAnswerLoopStageOrderWebAndRewrite(t *testing.T) {
 	t.Setenv("OMLX_BASE_URL", srv.URL)
 	t.Setenv("OMLX_MODEL", "m")
 	t.Setenv("OMLX_API_KEY", "test-key")
+	authorizeWebTest(t)
 	t.Setenv("TAVILY_SETUP_TOKEN", "k")
 	old := webSearch
 	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
@@ -194,6 +196,7 @@ func TestAnswerLoopWebOffMakesNoWebCall(t *testing.T) {
 	t.Setenv("OMLX_BASE_URL", srv.URL)
 	t.Setenv("OMLX_MODEL", "m")
 	t.Setenv("OMLX_API_KEY", "test-key")
+	authorizeWebTest(t)
 	t.Setenv("TAVILY_SETUP_TOKEN", "k")
 	calls := 0
 	old := webSearch
@@ -233,6 +236,7 @@ func TestAnswerLoopNilStageIsNoop(t *testing.T) {
 }
 
 func TestAnswerLoopNoResultsIsSentinelNotAnswer(t *testing.T) {
+	isolateUserDirs(t)
 	srv := fakeLLM(t, []string{`{"sufficient":false,"rewrite":"","use_web":false}`}, "unused")
 	t.Setenv("OMLX_BASE_URL", srv.URL)
 	t.Setenv("OMLX_MODEL", "m")
@@ -650,6 +654,7 @@ func TestAnswerLoopNoLocalSkipsSearch(t *testing.T) {
 	t.Setenv("OMLX_BASE_URL", srv.URL)
 	t.Setenv("OMLX_MODEL", "m")
 	t.Setenv("OMLX_API_KEY", "test-key")
+	authorizeWebTest(t)
 	t.Setenv("TAVILY_SETUP_TOKEN", "tvly-test")
 
 	oldWeb := webSearch
@@ -693,6 +698,7 @@ func TestAnswerLoopCVEUsesPocDomains(t *testing.T) {
 	t.Setenv("OMLX_BASE_URL", srv.URL)
 	t.Setenv("OMLX_MODEL", "m")
 	t.Setenv("OMLX_API_KEY", "test-key")
+	authorizeWebTest(t)
 	t.Setenv("TAVILY_SETUP_TOKEN", "tvly-test")
 
 	var gotDomains []string
@@ -724,6 +730,7 @@ func TestAnswerLoopNonCVEUsesReputableDomains(t *testing.T) {
 	t.Setenv("OMLX_BASE_URL", srv.URL)
 	t.Setenv("OMLX_MODEL", "m")
 	t.Setenv("OMLX_API_KEY", "test-key")
+	authorizeWebTest(t)
 	t.Setenv("TAVILY_SETUP_TOKEN", "tvly-test")
 
 	var gotDomains []string
@@ -843,5 +850,115 @@ func TestAnswerLoopFiresPersonaForDomain(t *testing.T) {
 	}
 	if got != "ad" {
 		t.Errorf("persona cue domain = %q, want \"ad\"", got)
+	}
+}
+
+func authorizeWebTest(t *testing.T) {
+	t.Helper()
+	isolateUserDirs(t)
+	t.Setenv(webProviderEnv, "auto")
+	p := defaultPrefs()
+	p.Web = true
+	if err := savePrefs(p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAnswerLoopHonorsWebRequestBeforeSufficiency(t *testing.T) {
+	authorizeWebTest(t)
+	t.Setenv("TAVILY_API_KEY", "test-key")
+	srv := fakeLLM(t, []string{`{"sufficient":true,"use_web":true}`, `{"sufficient":true,"use_web":false}`}, "Reasoned answer using local and current evidence [1] [2].")
+	defer srv.Close()
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	original := webSearch
+	calls := 0
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		calls++
+		return []retrieval.Result{chunk(webSource, "https://example.com/current", "Current", "current evidence")}, nil
+	}
+	defer func() { webSearch = original }()
+	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "local evidence")}}
+	answer, citations, used, results, _, err := AnswerLoop(context.Background(), local, answerCfg(2), "current techniques", AnswerOpts{})
+	if err != nil || calls != 1 || !used || len(results) != 2 || len(citations) != 2 || !strings.Contains(answer, "Reasoned answer") {
+		t.Fatalf("answer %q citations %+v results %+v calls %d used %v err %v", answer, citations, results, calls, used, err)
+	}
+}
+
+func TestAnswerLoopKeepsWebEvidenceAfterLocalRewrite(t *testing.T) {
+	authorizeWebTest(t)
+	t.Setenv("TAVILY_API_KEY", "test-key")
+	srv := fakeLLM(t, []string{`{"sufficient":false,"use_web":true}`, `{"sufficient":false,"rewrite":"refined","use_web":false}`}, "Reasoned answer [1] [2].")
+	defer srv.Close()
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	original := webSearch
+	calls := 0
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		calls++
+		return []retrieval.Result{chunk(webSource, "https://example.com/current", "Current", "current evidence")}, nil
+	}
+	defer func() { webSearch = original }()
+	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "local evidence")}}
+	_, _, used, results, _, err := AnswerLoop(context.Background(), local, answerCfg(2), "techniques", AnswerOpts{})
+	if err != nil || !used || calls != 1 || len(results) != 2 || results[1].Payload.Source != webSource {
+		t.Fatalf("results %+v used %v calls %d err %v", results, used, calls, err)
+	}
+}
+
+func TestSynthesisReceivesLocalAndWebEvidence(t *testing.T) {
+	authorizeWebTest(t)
+	t.Setenv("TAVILY_API_KEY", "test-key")
+	var mu sync.Mutex
+	synthesis := ""
+	grades := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			http.NotFound(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		var request struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Error(err)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if request.Stream {
+			synthesis = string(body)
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Reasoned synthesis [1] [2].\"}}]}\n\ndata: [DONE]\n\n")
+			return
+		}
+		grade := `{"sufficient":true,"use_web":true}`
+		if grades > 0 {
+			grade = `{"sufficient":true,"use_web":false}`
+		}
+		grades++
+		text, _ := json.Marshal(grade)
+		fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%s}}]}`, text)
+	}))
+	defer srv.Close()
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	original := webSearch
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		return []retrieval.Result{chunk(webSource, "https://example.com/current", "Current", "CURRENT_WEB_EVIDENCE")}, nil
+	}
+	defer func() { webSearch = original }()
+	answer, _, usedWeb, _, _, err := AnswerLoop(context.Background(), fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "LOCAL_CORPUS_EVIDENCE")}}, answerCfg(2), "current testing approaches", AnswerOpts{})
+	mu.Lock()
+	defer mu.Unlock()
+	if err != nil || !usedWeb || answer != "Reasoned synthesis [1] [2]." {
+		t.Fatalf("answer %q web %v err %v", answer, usedWeb, err)
+	}
+	for _, evidence := range []string{"LOCAL_CORPUS_EVIDENCE", "CURRENT_WEB_EVIDENCE", "Synthesize the sources into a clear"} {
+		if !strings.Contains(synthesis, evidence) {
+			t.Errorf("synthesis request omitted %q", evidence)
+		}
 	}
 }

@@ -87,7 +87,8 @@ class ReadJsonBodyTest(unittest.TestCase):
 
 
 class NonDictBodyTest(unittest.TestCase):
-    ''
+    """P4: a JSON body that is not an object must be a 400, not crash the caller
+    that immediately does req.get(...)."""
 
     def test_list_body_400(self):
         body = b"[1, 2, 3]"

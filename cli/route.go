@@ -253,7 +253,7 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 			opts.History = boundTurns(opts.History, budget)
 		}
 	}
-	if !force {
+	if !force && !opts.WebOnly {
 		l, err := newOMLX(cfg, opts.Model)
 		if err != nil {
 			return "", nil, false, nil, 0, "", err

@@ -203,7 +203,8 @@ class AddPathTest(unittest.TestCase):
 
 
 class OriginTaggingTest(unittest.TestCase):
-    ''
+    """P12: URL-sourced chunks carry origin=url so the Go answer prompt can treat
+    their citations as untrusted; file-sourced chunks do not."""
 
     def test_url_chunk_tagged_and_roundtrips(self):
         chunks = list(index._chunk_text("prose about ssrf metadata", "example.com",
@@ -229,7 +230,8 @@ class OriginTaggingTest(unittest.TestCase):
 
 
 class EmbedDenseValidationTest(unittest.TestCase):
-    ''
+    """_embed_dense must reject a degenerate vector (non-finite or wrong dim)
+    from the embed server rather than upserting a zeroed/garbage point (P5)."""
 
     def _fake_session(self, payload):
         resp = mock.Mock()

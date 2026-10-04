@@ -3,9 +3,7 @@
 Selected via config.RERANKER_KIND == "qwen3". Qwen3-Reranker is a causal LM used
 as a cross-encoder: for each (query, document) pair the relevance score is
 softmax([logit("no"), logit("yes")])[1] at the last position of a fixed judge
-prompt. It is instruction-aware and multilingual, and ranks higher on retrieval
-benchmarks than the modernbert cross-encoder, at the cost of one 0.6B forward
-pass per document.
+prompt. It is instruction-aware and multilingual, with one forward pass per document.
 
 Same contract as the other backends: rerank_documents(query, documents) ->
 list[float], one score per document in input order, higher = more relevant.

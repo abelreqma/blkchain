@@ -99,7 +99,11 @@ SKILLS_DIR = _path_env("BLKCHAIN_SKILLS_DIR", None)
 
 
 def corpus_roots() -> tuple[Path, ...]:
-    ''
+    """Base directories under which corpus files live, most specific first.
+
+    Used to render stored document paths relative to a data root (readable and
+    portable) instead of relative to any fixed parent directory.
+    """
     roots = [r for r in (SECLISTS_DIR, SKILLS_DIR, SOURCES_DIR, WSTG_PDF.parent) if r]
     return tuple(dict.fromkeys(roots))  # de-dupe, preserve order
 
@@ -129,14 +133,8 @@ def _embedder_path() -> Path:
 EMBEDDER_PATH = _embedder_path()
 EMBED_DIM = 1024  # Qwen3-Embedding-0.6B native dim (MRL-truncatable later)
 
-# Reranker is pluggable. "modernbert" (default) = gte-reranker-modernbert-base
-
-
-# causal-LM reranker (Apache-2.0): instruction-aware, ~one 0.6B forward per
-
-# queries. "jina" = jina-reranker-v3 listwise (CC-BY-NC-4.0, non-commercial).
-# Each model must be downloaded to use it. All expose rerank_documents(query,
-# documents) via blkchain.reranker.
+# Select the reranker backend. ModernBERT and Qwen3 use Apache-2.0 models.
+# Jina uses a CC-BY-NC-4.0 model. Each backend exposes rerank_documents.
 RERANKER_KIND = os.environ.get("BLKCHAIN_RERANKER_KIND", "modernbert").strip().lower()
 
 

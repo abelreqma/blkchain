@@ -52,9 +52,8 @@ func commandSpecs() []cmdSpec {
 			name: "ask", args: "<question...>", group: hgAsk,
 			desc: "answer a question, with cited sources",
 			long: "Searches the knowledge base, checks that what it found is enough, and writes an answer that cites its sources. " +
-				"Use it when you want an answer rather than a list of passages. " +
-				"If the passages fall short and a web search key is set, it can also search the web and marks those sources as untrusted. " +
-				"It needs the local services and the LLM server running.",
+				"With web permission enabled, it can search the internet and marks those sources as untrusted. Use --web for a web-only answer when web is enabled. " +
+				"Web answers need only the LLM; local answers also need the retrieval services.",
 			flags: func(fs *flag.FlagSet) { defineAskFlags(fs, &askOpts{}) },
 			examples: []string{
 				`blk ask "how do I chain SSRF to RCE?"`,
@@ -65,11 +64,10 @@ func commandSpecs() []cmdSpec {
 		},
 		{
 			name: "search", args: "<query...>", group: hgAsk,
-			desc: "find the most relevant source passages for a query",
-			long: "Finds the passages in the knowledge base that best match your query and prints them with their sources and scores. " +
-				"It does not use the LLM server, so it is quick. " +
-				"Use it to see the raw sources, or to find a file to open with blk open. " +
-				"It needs the local services running (blk up).",
+			desc: "search the evidence and produce a cited answer",
+			long: "Retrieves relevant passages, checks whether they answer your query, and synthesizes a cited explanation. " +
+				"With web enabled, the model can request additional internet evidence before answering. " +
+				"Text output needs the local retrieval services and LLM; --json returns raw retrieval results for scripts and evaluations without using the LLM.",
 			flags: func(fs *flag.FlagSet) { defineSearchFlags(fs, &searchOpts{}, loadConfig().TopK) },
 			examples: []string{
 				`blk search "SSRF to cloud metadata"`,
@@ -77,6 +75,21 @@ func commandSpecs() []cmdSpec {
 				`blk search --type payload "xss polyglot"`,
 			},
 			run: runSearch,
+		},
+		{
+			name: "web", args: "[action...]", group: hgAsk,
+			desc: "search the web and analyze JavaScript/API evidence",
+			long: "Controls internet search permission with on, off, status, and provider; search produces a cited answer when enabled. " +
+				"Providers are auto, duckduckgo, and tavily, with Tavily credentials read from TAVILY_API_KEY or TAVILY_SETUP_TOKEN. " +
+				"Also runs bounded collect, analyze, inspect, import, archive, export, and replay jobs in an engagement workspace. " +
+				"Acquisition retains the engagement scope and gate; those analysis commands also run through blk engage web and /web.",
+			flags: func(fs *flag.FlagSet) {
+				defineWebFlags(fs, &webOpts{})
+				fs.Int("top-k", 5, "maximum search results (1 to 20)")
+				fs.Lookup("json").Usage = "print structured JSON instead of formatted text"
+			},
+			examples: []string{"blk web on", `blk web search "current security guidance"`, "blk web inspect domain.com --view apis"},
+			run:      runWeb,
 		},
 		{
 			name: "sources", group: hgAsk,
@@ -257,14 +270,6 @@ func commandSpecs() []cmdSpec {
 				`blk engage --workspace ~/engagements/acme "assess the acme staging host"`,
 			},
 			run: runEngage,
-		},
-		{
-			name: "web", args: "<verb> [targets]", group: hgAgent,
-			desc:     "collect and inspect web JavaScript and API evidence",
-			long:     "Runs bounded collect, analyze, inspect, import, archive, export, and replay jobs in an engagement workspace. Targets accept domains, IP addresses with reverse DNS, lists, and engagement Markdown. Acquisition uses the engagement scope and gate; restricted storage preserves raw artifacts and operation views show exact request values. The same commands are available as blk engage web and /web.",
-			flags:    func(fs *flag.FlagSet) { defineWebFlags(fs, &webOpts{}) },
-			examples: []string{"blk web inspect domain.com --view apis", "blk engage web collect engagement.md --workspace ./engagement --browser", "blk web export --workspace ./engagement"},
-			run:      runWeb,
 		},
 		{
 			name: "kg", group: hgAgent,
@@ -908,7 +913,9 @@ func usageEnv() []rowGroup {
 			{"QDRANT_GRPC_URL", "qdrant gRPC address (default 127.0.0.1:6334)"},
 		}},
 		{"WEB SEARCH", []helpRow{
-			{"TAVILY_SETUP_TOKEN", "Tavily key; lets ask search the web (default: off)"},
+			{"TAVILY_API_KEY", "Tavily key; internet search requires web on"},
+			{"TAVILY_SETUP_TOKEN", "alternate Tavily key variable"},
+			{"BLKCHAIN_WEB_PROVIDER", "auto, duckduckgo, or tavily; overrides the saved provider"},
 		}},
 		{"DISPLAY", []helpRow{
 			{"NO_COLOR", "any value turns colors off"},
