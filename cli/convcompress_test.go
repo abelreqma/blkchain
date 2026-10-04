@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"blkchain/cli/internal/promptguard"
 	"github.com/tmc/langchaingo/llms"
 )
 
@@ -86,7 +87,7 @@ func TestCompressTurnsOverBudgetSummarizes(t *testing.T) {
 	for _, m := range fake.seen[0] {
 		prompt.WriteString(msgText(m))
 	}
-	if !strings.Contains(prompt.String(), "UNTRUSTED DATA") {
+	if !strings.Contains(prompt.String(), promptguard.UntrustedInputClause) {
 		t.Fatalf("summarizer prompt lacks the untrusted-data instruction")
 	}
 }

@@ -11,6 +11,7 @@ import (
 
 	"blkchain/cli/internal/askuser"
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/promptguard"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/secgate"
 	"blkchain/cli/internal/skillcat"
@@ -86,7 +87,7 @@ var orchestratorSystemPrompt = "You are the orchestrator of a scoped offensive p
 	"something in the 'already discovered (do not repeat)' list. Each dispatch result ends with the refreshed state - use it, " +
 	"advance to the next distinct step, and when coverage is sufficient for the goal, stop and return a final summary rather " +
 	"than re-scanning. " +
-	"Domains available for tasks: " + strings.Join(domainNames(), ", ") + "."
+	"Domains available for tasks: " + strings.Join(domainNames(), ", ") + ". " + promptguard.UntrustedInputClause
 
 type dispatchArgs struct {
 	TaskID string `json:"task_id" desc:"id of the open task to hand to a specialized executor"`

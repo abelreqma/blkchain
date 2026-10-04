@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"blkchain/cli/internal/promptguard"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 	"github.com/tmc/langchaingo/llms"
@@ -201,7 +202,7 @@ func directAnswer(ctx context.Context, cfg ragconfig.Config, question string, op
 
 const skipValidateSystemPrompt = "You are checking whether retrieved snippets are relevant to the user's question. " +
 	"Reply with ONLY one word, no punctuation: RELEVANT if the snippets directly address the question's topic, " +
-	"or IRRELEVANT if they are off-topic. When unsure, answer IRRELEVANT."
+	"or IRRELEVANT if they are off-topic. When unsure, answer IRRELEVANT. " + promptguard.UntrustedInputClause
 
 // skipGroundsInCorpus validates a provisional skip against the corpus using the
 // local LLM: it retrieves for question and asks whether the retrieved snippets

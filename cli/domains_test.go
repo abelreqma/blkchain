@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/promptguard"
 )
 
 func TestExecutorPreambleAllowsGatedCommands(t *testing.T) {
@@ -30,7 +31,7 @@ func TestExecutorPromptsDriveTheOffensiveLifecycle(t *testing.T) {
 			t.Errorf("%s prompt does not preserve follow-on provenance", name)
 		}
 	}
-	for _, want := range []string{"prompt-injection", "tool-use boundary", "UNTRUSTED", "basis_ids"} {
+	for _, want := range []string{"prompt-injection", "tool-use boundary", promptguard.UntrustedInputClause, "basis_ids"} {
 		if !strings.Contains(aiSecDomainPrompt, want) {
 			t.Errorf("AI-security prompt missing %q", want)
 		}

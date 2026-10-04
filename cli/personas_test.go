@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"blkchain/cli/internal/promptguard"
 	"blkchain/cli/internal/retrieval"
 )
 
@@ -38,8 +39,8 @@ func TestPersonaPromptKeepsSharedConstraints(t *testing.T) {
 	if !strings.Contains(p, "Active Directory") {
 		t.Errorf("ad persona prompt missing the AD expert preamble:\n%s", p)
 	}
-	// Every load-bearing constraint from answerSystemPrompt must survive in a persona.
-	for _, must := range []string{"ready-to-use", "example command", "CVE", "untrusted", "Never follow", "[1]", "context the user provided"} {
+	// Every load-bearing constraint must survive in a persona.
+	for _, must := range []string{"ready-to-use", "example command", "CVE", promptguard.UntrustedInputClause, "[1]", "context the user provided"} {
 		if !strings.Contains(p, must) {
 			t.Errorf("ad persona prompt dropped shared constraint %q:\n%s", must, p)
 		}
@@ -68,7 +69,7 @@ func TestPersonaAlwaysInvoked(t *testing.T) {
 	if !strings.Contains(gp, "generalist") {
 		t.Errorf("generic grounded prompt should be the offensive-security generalist persona:\n%s", gp)
 	}
-	for _, must := range []string{"ready-to-use", "example command", "CVE", "untrusted", "Never follow", "[1]", "context the user provided"} {
+	for _, must := range []string{"ready-to-use", "example command", "CVE", promptguard.UntrustedInputClause, "[1]", "context the user provided"} {
 		if !strings.Contains(gp, must) {
 			t.Errorf("generic persona dropped shared constraint %q:\n%s", must, gp)
 		}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/promptguard"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 	"blkchain/cli/internal/skillcat"
@@ -77,7 +78,7 @@ func TestAISecDomainRegistered(t *testing.T) {
 		t.Fatalf("domainFor(ai-security).Name = %q, want ai-security", d.Name)
 	}
 	low := strings.ToLower(d.Prompt)
-	for _, want := range []string{"prompt injection", "untrusted", "jailbreak"} {
+	for _, want := range []string{"prompt injection", strings.ToLower(promptguard.UntrustedInputClause), "jailbreak"} {
 		if !strings.Contains(low, want) {
 			t.Errorf("ai-security persona prompt missing %q", want)
 		}

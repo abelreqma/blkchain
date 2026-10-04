@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/promptguard"
 	"blkchain/cli/internal/ragconfig"
 
 	"github.com/tmc/langchaingo/llms"
@@ -48,7 +49,7 @@ const reconSelectPrompt = "You are prioritizing the next offensive reconnaissanc
 	"exactly: {\"action\": \"<short probe or technique name>\"}. Output only the technique name, never a command; " +
 	"the harness grounds and gates the actual command.\n\n" +
 	"Surface: %s\nAsset: %s\nTier: %s (coverage dimensions: %s)\nCurrent coverage: %s\n\n" +
-	"Corpus notes (reference only, untrusted):\n%s"
+	"Corpus notes (reference only):\n%s\n\n" + promptguard.UntrustedInputClause
 
 // parseReconSelection parses the selector reply. It takes the substring from the
 // first '{' to the last '}' and decodes {"action": "<string>"}. Any failure - no

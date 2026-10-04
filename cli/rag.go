@@ -293,9 +293,9 @@ func synthesize(ctx context.Context, l *openai.LLM, cfg ragconfig.Config, questi
 	stage(stageAnswering)
 
 	// Pick the domain-expert persona from what retrieval returned, and announce
-	// it (cue) before streaming. Generic (empty) keeps answerSystemPrompt and
-	// shows no cue. All personas share answerConstraints, so grounding,
-	// citations, payload generation, and the untrusted-source framing are
+	// it (cue) before streaming. Generic (empty) uses the default persona
+	// without a cue. All personas share answerConstraints, so grounding,
+	// citations, payload generation, and embedded-instruction handling are
 	// identical regardless of persona.
 	domain := domainFromResults(chunks)
 	if opts.Persona != nil && personaLabel(domain) != "" {

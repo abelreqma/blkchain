@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"blkchain/cli/internal/promptguard"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 
@@ -20,7 +21,7 @@ const gradePromptTemplate = "You are grading whether the retrieved context below
 	"query, or empty string>\", \"use_web\": true or false}. Set \"use_web\" to true only if " +
 	"the question needs a CVE lookup, a public proof-of-concept, or other current external " +
 	"information a local knowledge base would not contain.\n\n" +
-	"Question: %s\n\nRetrieved context:\n%s"
+	"Question: %s\n\nRetrieved context:\n%s\n\n" + promptguard.UntrustedInputClause
 
 // grade is the parsed sufficiency verdict from the grading call.
 type grade struct {
