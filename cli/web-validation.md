@@ -11,16 +11,21 @@ Branch: `fix/web-engagement-limitations`, rebased onto local main at `d88eb0f`.
 | HTTP replay | Explicit stored-example adapters preserve text, JSON, form, multipart and binary body bytes | Local HTTP fixture verifies byte equality through the shared command handler. Missing HAR wire bytes remain gaps. |
 | WebSocket exchanges | Match an operator-supplied send/expect transcript with negotiated subprotocol, opcode and exact bytes | Controlled GraphQL subscription exchange passes. Mismatch, denied sends, cancellation and limits fail closed. No remote application subscription was tested. |
 | Roles and state | Require supplied roles and credentials; persist unavailable roles and browser-only state as gaps | Missing-role persistence and target-filtered gap tests pass. Unknown roles and application states remain unavailable. |
-| Assisted browser | Consume one assistance window per role job, cap 120 seconds, capture DOM after assistance | Limit rejection is tested. Live headed interaction, challenge completion and post-assistance DOM capture remain unverified. |
+| Assisted browser | Consume one assistance window per role job, cap 120 seconds, capture DOM after assistance | Provisioned headed viewer input unlocks the controlled fixture; exact post-assistance DOM and response persist; second navigation does not repeat assistance; cancellation closes the isolated page. The 120-second limit rejection passes. Arbitrary remote challenges remain untested. |
 | Evidence grades | Supply grades with explanations in JSON; distinguish HTTP responses, cached responses, WebSocket handshakes, messages and validated exchanges | Record and TUI-dispatch tests pass. No probability calibration was performed. Text rendering awaits approval of the terminal preview. |
 
 The full Go suite and vet pass. Race-enabled tests cover the CLI and the web
 analysis, collection and broker packages. The Python suite passes 277 tests.
 The archive-specific live LLM acceptance passes with the local retrieval stack.
-These checks do not establish browser isolation or headed assistance.
+Provisioned browser and headed-assistance checks now exercise the verified
+container boundary against controlled fixtures. They do not establish complete
+coverage of arbitrary sites or remote challenges.
 
-Browser provisioning variables were unset in this session. No shared service was
-restarted or reconfigured. Provisioned browser and headed-assistance checks remain outstanding.
+Browser provisioning is now configured in the operator environment. The browser
+service was reconfigured as headed, restarted, and restored its verified display
+runtime before returning internal CDP HTTP 200. The driver remains read-only,
+the browser uses the pinned image and network none, and CDP stays inside the
+container. Other local stack services were not restarted.
 
 The public-service attempt used:
 
@@ -87,3 +92,70 @@ interpretation. It does not establish browser collection, challenge completion,
 remote WebSocket application behavior or current behavior of archived targets.
 MCP engagement snapshot/persistence and formatted evidence-grade display remain
 separate outstanding items from the earlier web engagement audit.
+
+## Provisioned browser and headed acceptance
+
+On 2026-10-05, the operator environment sets `PLAYWRIGHT_DRIVER_PATH`,
+`BLKCHAIN_PLAYWRIGHT_CONTAINER`, `BLKCHAIN_PLAYWRIGHT_CDP`, and
+`BLKCHAIN_PLAYWRIGHT_HEADED=1`. Persistent configuration lives in
+`~/.config/blkchain/browser.sh`, sourced by zsh, with a local browser service
+managed by `~/Library/LaunchAgents/com.blkchain.browser.plist`.
+
+The local viewer at `http://127.0.0.1:6080/` relays display input through
+`docker exec`. Its WebSocket listener binds 127.0.0.1:6081, allows only the
+local viewer origin, and bounds frames and concurrent clients. No container
+ports are published. The browser still runs as 1000:1000 with network none,
+a read-only root, one read-only driver bind, bounded temporary filesystems,
+1 GiB memory, two CPUs, 256 PIDs, dropped capabilities and no new privileges.
+
+The pinned image lacks a display server. Signed Debian metadata and SHA256
+package hashes verify the local display dependencies. A temporary executable
+filesystem holds them inside the container. Xvfb's fixed keyboard-compiler path
+is relocated to that runtime with original and transformed hashes recorded
+locally. The service verifies the runtime files before restoring them after a
+browser restart. noVNC 1.7.0 and the WebSocket relay dependency are integrity
+pinned locally. The operator's home and Docker socket are not mounted.
+
+`TestWebPlaywrightE2E` passed dynamic/inline/lazy/frame script capture, denied
+subresources and unarmed writes, exact blobs, active authorization and cookies.
+Its local LLM check called `web_inspect` once in two rounds.
+
+`TestWebWorkerWebSocketE2E` passed HTTPS workers, WSS text and binary messages,
+duplicate retention, exact blobs, and CLI/REPL/TUI/export inspection. Its local
+LLM check reported an observed worker API and message-observed WebSocket data.
+
+`TestWebHeadedAssistanceE2E` uses the real viewer protocol to click a button on
+a controlled fixture, verifies the resulting HTTP response and exact captured
+DOM, and verifies that assistance is consumed once across two navigations.
+A separate cancellation case closes the isolated page within two seconds.
+The test observes a headed Chromium process, not only an environment flag.
+Its local LLM check called `web_inspect` once in two rounds. The fixture is not
+a third-party CAPTCHA and does not validate arbitrary challenge completion.
+
+Run these checks serially with the provisioned environment:
+
+```sh
+. "$HOME/.config/blkchain/browser.sh"
+BLKCHAIN_PW_E2E=1 BLKCHAIN_WEB_LLM_E2E=1 BLKCHAIN_COLLECTION=blkchain_dwq OMLX_MODEL=supergemma4-26b-uncensored-mlx-4bit-v2 BLK_ENABLE_THINKING=0 go test -race -p 1 ./... -count=1 -timeout 5m
+```
+
+The first full provisioned race run exposed an intermittent assistance-cancellation
+cleanup defect: returning from the wait could stop the registered close callback
+before it began. The assistance path now closes its context once and waits for
+closure before returning on cancellation. The native cancellation acceptance
+case checks the page actually closes, rather than only checking the returned
+error. The display tmpfs also uses explicit UID/GID 1000 and mode 0700 so its
+runtime can be restored after restart.
+
+One full-stack run captured a model interpretation failure: the model selected
+the page-owned `/api/write` POST instead of a worker-owned route. The stream
+acceptance prompt now explicitly distinguishes those source categories and
+excludes that page-owned control. The assertion still requires a genuinely
+stored, response-observed worker route. This records an interpretation limit;
+a passing fixture check does not establish general model accuracy.
+
+Final validation passed with `go test -race -p 1 ./... -v -count=1 -timeout 5m`,
+`BLKCHAIN_PW_E2E=1`, `BLKCHAIN_WEB_LLM_E2E=1`, and the local model/collection
+specified above. The full provisioned run passes all three native browser
+acceptance tests. `go vet ./...` and all 277 Python tests pass. The final browser
+restart check confirms internal CDP HTTP 200 and a working viewer handshake.

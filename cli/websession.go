@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -260,8 +261,15 @@ func (b *webJobBrowser) Visit(ctx context.Context, raw, role string) error {
 		d.stateMu.Unlock()
 		window := b.Assist
 		b.Assist = 0
-		stop := context.AfterFunc(ctx, func() { _ = d.context.Close() })
-		defer stop()
+		var closeOnce sync.Once
+		closeContext := func() { closeOnce.Do(func() { _ = d.context.Close() }) }
+		stop := context.AfterFunc(ctx, closeContext)
+		defer func() {
+			if ctx.Err() != nil {
+				closeContext()
+			}
+			stop()
+		}()
 		timer := time.NewTimer(window)
 		select {
 		case <-ctx.Done():

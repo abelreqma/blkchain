@@ -177,3 +177,21 @@ BLKCHAIN_PLAYWRIGHT_CONTAINER=<running container name or ID> \
 BLKCHAIN_PLAYWRIGHT_CDP=http://127.0.0.1:<port> \
 go test -run TestWebPlaywrightE2E -count=1 -timeout 120s .
 ```
+
+## Headed display validation
+
+A headed deployment needs a real display server and an operator viewer in
+addition to `BLKCHAIN_PLAYWRIGHT_HEADED=1`. Setting the variable does not turn
+a headless Chromium process into a headed process. Keep the same container
+checks and broker boundary. A local viewer may relay display input through
+`docker exec` without publishing container ports or granting target egress.
+
+`TestWebHeadedAssistanceE2E` additionally requires the local viewer relay at
+127.0.0.1:5901. It exercises actual framebuffer mouse input against a controlled
+fixture, verifies post-assistance DOM and response evidence, checks one window
+across multiple navigations, and checks cancellation closes the isolated page.
+The fixture does not require solving a third-party CAPTCHA. Run it serially:
+
+```sh
+BLKCHAIN_PW_E2E=1 BLKCHAIN_PLAYWRIGHT_HEADED=1 go test -run '^TestWebHeadedAssistanceE2E$' -v -count=1 -timeout 150s .
+```
