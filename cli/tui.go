@@ -3166,16 +3166,16 @@ func engageModeSeg(mode secgate.Mode, override, hitl bool) string {
 }
 
 // autoModeNote is the one-line confirmation printed after /auto: it warns when
-// bounded autonomy has no scope and no override (engagements still confirm each
-// command), and notes when the scope override is on. LOCAL always confirms.
+// bounded autonomy has no scope and no override, and notes when the scope
+// override is on. LOCAL unattended actions need both RoE and binary allowlists.
 func autoModeNote(override, scopeDetected bool) string {
 	switch {
 	case override:
-		return "auto: bounded autonomy, scope override on (logged); LOCAL still confirms every command"
+		return "auto: no-scope override logged; LOCAL needs an RoE rule and binary allowlist"
 	case !scopeDetected:
-		return "auto: no scope detected - add an ROE.md or use /auto override; until then commands still prompt"
+		return "auto: no scope detected - add ROE.md or use /auto override before engaging"
 	default:
-		return "auto: bounded autonomy within scope; LOCAL still confirms every command"
+		return "auto: scoped; LOCAL needs an RoE rule and binary allowlist or confirmation"
 	}
 }
 

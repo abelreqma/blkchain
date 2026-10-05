@@ -2648,17 +2648,17 @@ func TestSafeAutoCommandsSetEngageMode(t *testing.T) {
 }
 
 // autoModeNote states the autonomy posture: override takes precedence, a missing
-// scope warns that commands still prompt, and an in-scope run notes LOCAL still
-// confirms.
+// scope warns that engagement needs a scope, and an in-scope run names the
+// LOCAL unattended conditions.
 func TestAutoModeNote(t *testing.T) {
 	cases := []struct {
 		override, scope bool
 		want            string
 	}{
-		{true, false, "override on"},
-		{true, true, "override on"}, // override takes precedence over scope detection
+		{true, false, "override logged"},
+		{true, true, "override logged"}, // override takes precedence over scope detection
 		{false, false, "no scope detected"},
-		{false, true, "within scope"},
+		{false, true, "LOCAL needs an RoE rule and binary allowlist"},
 	}
 	for _, tc := range cases {
 		got := autoModeNote(tc.override, tc.scope)

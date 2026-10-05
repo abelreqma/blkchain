@@ -199,6 +199,14 @@ func TestEngagementStoreReportBoundsTaskText(t *testing.T) {
 	}
 }
 
+func TestEngagementStoreReportHasNoBlankReportEnvelope(t *testing.T) {
+	d := testDeps(t, nil)
+	report, err := engagementStoreReport(context.Background(), d.Store, "inspect")
+	if err != nil || !strings.HasPrefix(report, "## Coverage\n") || strings.Contains(report, "- Scope: ") || strings.Contains(report, "# Engagement Report") {
+		t.Fatalf("fallback report=%q err=%v", report, err)
+	}
+}
+
 func TestEngageConvergenceCancellationSkipsSynthesis(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

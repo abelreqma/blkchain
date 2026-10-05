@@ -104,6 +104,9 @@ func engagementStoreReport(ctx context.Context, store *engagement.Store, goal st
 		return "", err
 	}
 	report := engreport.RenderMarkdown(engreport.Model{Goal: capRunes(goal, 8000), Status: "paused", Engagement: snap, Evidence: evidence})
+	if i := strings.Index(report, "## Coverage\n"); i >= 0 {
+		report = report[i:]
+	}
 	report += "\n[Task text is limited to 1024 characters. Dependency, basis, and citation fields over 4096 characters are omitted from this bounded summary; inspect the store for complete task data.]\n"
 	if tasksTruncated || evidenceTruncated {
 		report += "\n[Stored tasks or evidence omitted from this bounded summary; inspect the workspace report and store.]\n"

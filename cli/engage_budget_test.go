@@ -135,7 +135,7 @@ func TestEngageWithOpenTaskReportsPaused(t *testing.T) {
 func TestEngageEmptyFinalReturnsStoredReport(t *testing.T) {
 	d := testDeps(t, &fakeModel{queue: []*llms.ContentResponse{textResp("")}})
 	final, err := runOrchestrator(context.Background(), d, "inspect target")
-	if err != nil || !strings.Contains(final, "Engagement paused: empty final response") || !strings.Contains(final, "# Engagement Report") {
+	if err != nil || !strings.Contains(final, "Engagement paused: empty final response") || !strings.Contains(final, "## Coverage") || strings.Contains(final, "# Engagement Report") {
 		t.Fatalf("final=%q err=%v", final, err)
 	}
 }

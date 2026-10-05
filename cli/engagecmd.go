@@ -37,7 +37,7 @@ type engageOpts struct {
 // defineEngageFlags declares `blk engage`'s flags.
 func defineEngageFlags(fs *flag.FlagSet, o *engageOpts) {
 	fs.StringVar(&o.scope, "scope", "", "scope file: in-scope targets, `local`, and `allow <bin>` lines")
-	fs.BoolVar(&o.auto, "auto", false, "run without confirmation prompts (bounded by scope and allowed_binaries)")
+	fs.BoolVar(&o.auto, "auto", false, "run RoE-authorized, allowlisted actions unattended; confirm other actions")
 	fs.BoolVar(&o.autoOverride, "auto-override", false, "allow --auto with no scope (logged to audit.jsonl); only no-target recon runs autonomously")
 	fs.StringVar(&o.workspace, "workspace", "", "engagement workspace directory (default: a new one under the config dir)")
 	fs.StringVar(&o.model, "model", "", "chat model id (default: the resolved model)")

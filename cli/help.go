@@ -260,7 +260,7 @@ func commandSpecs() []cmdSpec {
 			name: "engage", args: "<goal...>", group: hgAgent,
 			desc: "run a gated, multi-step engagement against a goal",
 			long: "Runs a bounded, gated engagement: the orchestrator plans tasks and hands each to a domain-specialized executor, which can run allowlisted commands against in-scope targets. " +
-				"In /safe, the default, every command needs your confirmation; --auto skips confirmation but requires --scope, so an autonomous run stays bounded. " +
+				"In /safe, every command needs your confirmation; --auto uses ROE.md or --scope and runs authorized, allowlisted actions without prompting. " +
 				`A scope file lists in-scope targets (hostnames, IPs, or CIDRs), the line "local" to permit commands with no network target, and "allow <binary>" lines to extend the allowlist; a hostname target also needs its resolved IP or CIDR listed, since the gate re-checks the resolved address at run time. ` +
 				"ROE.md Autonomous Actions entries such as 'exploit/network 192.0.2.1' permit that action class on an exact in-scope host; LOCAL unattended commands also require local_unattended_binaries in .blkchain/config.yaml; every command still passes the gate, and decisions, plan, and evidence are recorded in the workspace.",
 			flags: func(fs *flag.FlagSet) { defineEngageFlags(fs, &engageOpts{}) },
