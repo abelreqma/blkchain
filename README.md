@@ -238,6 +238,9 @@ The plain REPL supports `/history` to list saved sessions and `/history <number>
 `/editor` to prepare a multiline draft, `/init` to reload project context, `/copy`, and `/clear`.
 `/engage [flags] <goal>` uses the same gated entry as `blk engage`. Unknown slash commands show
 an error; commands that require a picker identify the interactive TUI requirement.
+CLI and interactive engagements save `report.md` and `report.json` in their workspace. The final
+assessment is included in both files, and the Markdown report shows evidence from unfinished
+tasks. A capped or stalled TUI run displays a paused marker and the report paths.
 
 **Models panel.** In the interactive session, `/models` lists every model: the chat models the LLM
 server serves, the embedder, the reranker, and web search. Keys: up/down move, space turns the

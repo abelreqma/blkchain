@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,6 +115,84 @@ func TestRunReplEngageSmoke(t *testing.T) {
 	}
 	if !strings.Contains(final, "engagement complete") {
 		t.Errorf("final = %q, want the model's answer", final)
+	}
+}
+
+func TestRunReplEngagePersistsFinalAssessment(t *testing.T) {
+	wsDir := t.TempDir()
+	model := &scriptModel{resps: []*llms.ContentResponse{finalResp("observed HTTP response")}}
+	final, err := runReplEngage(context.Background(), wsDir, t.TempDir(), secgate.Safe, false,
+		model, nil, ragconfig.Config{TopK: 5}, modelPrefs{}, nil,
+		&countingConfirmer{ok: true}, askuser.AutoAsker{}, nil, "inspect the lab", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(final, "observed HTTP response") || !strings.Contains(final, filepath.Join(wsDir, "report.md")) {
+		t.Fatalf("final output=%q", final)
+	}
+	data, err := os.ReadFile(filepath.Join(wsDir, "report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		Final string `json:"final"`
+	}
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Final != "observed HTTP response" {
+		t.Fatalf("saved final=%q", report.Final)
+	}
+}
+
+func TestRunReplEngageRetainsPriorAssessmentOnRetryFailure(t *testing.T) {
+	wsDir, cwd := t.TempDir(), t.TempDir()
+	args := func(model toolLoopModel) (string, error) {
+		return runReplEngage(context.Background(), wsDir, cwd, secgate.Safe, false,
+			model, nil, ragconfig.Config{TopK: 5}, modelPrefs{}, nil,
+			&countingConfirmer{ok: true}, askuser.AutoAsker{}, nil, "inspect the lab", nil)
+	}
+	if _, err := args(&scriptModel{resps: []*llms.ContentResponse{finalResp("prior assessment")}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := args(errModel{}); err == nil {
+		t.Fatal("expected model failure on retry")
+	}
+	data, err := os.ReadFile(filepath.Join(wsDir, "report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		Final string `json:"final"`
+	}
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Final != "prior assessment" {
+		t.Fatalf("prior assessment lost: %q", report.Final)
+	}
+}
+
+type reportWriteFailureModel struct{ workspace string }
+
+func (m reportWriteFailureModel) GenerateContent(_ context.Context, _ []llms.MessageContent, _ ...llms.CallOption) (*llms.ContentResponse, error) {
+	path := filepath.Join(m.workspace, "report.md")
+	if err := os.Remove(path); err != nil {
+		return nil, err
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		return nil, err
+	}
+	return finalResp("validated finding"), nil
+}
+
+func TestRunReplEngagePreservesFinalOnReportWriteFailure(t *testing.T) {
+	wsDir := t.TempDir()
+	final, err := runReplEngage(context.Background(), wsDir, t.TempDir(), secgate.Safe, false,
+		reportWriteFailureModel{workspace: wsDir}, nil, ragconfig.Config{TopK: 5}, modelPrefs{}, nil,
+		&countingConfirmer{ok: true}, askuser.AutoAsker{}, nil, "inspect the lab", nil)
+	if err == nil || !strings.Contains(err.Error(), "final report write failed") || final != "validated finding" || strings.Contains(final, "Report:") {
+		t.Fatalf("final=%q err=%v", final, err)
 	}
 }
 

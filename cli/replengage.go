@@ -78,7 +78,7 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 	confirm secgate.Confirmer, asker askuser.Asker, roeDB *sql.DB, goal string,
 	progress func(rev int64, snap engagement.Engagement)) (string, error) {
 
-	scope, _, _, err := resolveEngageScope(engageOpts{}, cwd, roeDB)
+	scope, scopeDesc, _, err := resolveEngageScope(engageOpts{}, cwd, roeDB)
 	if err != nil {
 		return "", fmt.Errorf("engage: %w", err)
 	}
@@ -134,12 +134,45 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 	toolHelp, toolHelpClose := openToolHelpCache()
 	defer toolHelpClose()
 	deps.ToolHelp = toolHelp
+	modeStr := "safe"
+	if mode == secgate.Auto {
+		modeStr = "auto"
+	}
+	rw := newReportWriter(ws.Store, wsDir, goal, scopeDesc, modeStr)
+	if err := rw.RestoreFinal(); err != nil {
+		return "", fmt.Errorf("engage: prior report: %w", err)
+	}
+	if err := rw.Flush("in-progress"); err != nil {
+		return "", fmt.Errorf("engage: initial report: %w", err)
+	}
+	stopReport := rw.Start()
+	defer stopReport()
+	reportStatus := "complete"
+	deps.OnStop = func(string) {
+		reportStatus = "paused"
+		if state, ok := ctx.Value(engageStatusKey{}).(*engageRunStatus); ok {
+			state.paused = true
+		}
+	}
 	// Seed the engagement's initial vantage from scope; a seed error is
 	// logged, not fatal.
 	if serr := seedInitialVantage(ctx, ws.Store, scope); serr != nil {
 		fmt.Fprintf(os.Stderr, "engage: vantage seed failed: %v\n", serr)
 	}
-	return runOrchestrator(ctx, deps, goal)
+	final, err := runOrchestrator(ctx, deps, goal)
+	stopReport()
+	if err != nil {
+		if ferr := rw.Flush("interrupted"); ferr != nil {
+			fmt.Fprintf(os.Stderr, "report: final write failed: %v\n", ferr)
+		}
+		return "", err
+	}
+	rw.SetFinal(final)
+	if err := rw.Flush(reportStatus); err != nil {
+		return final, fmt.Errorf("engage: final report write failed: %w", err)
+	}
+	mdPath, jsonPath := reportPaths(wsDir)
+	return final + "\n\nReport: " + mdPath + "\n        " + jsonPath, nil
 }
 
 // applyArmReq sets the optional operator arm requester on deps: the REPL

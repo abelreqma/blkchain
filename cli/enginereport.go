@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"blkchain/cli/internal/engagement"
@@ -25,8 +29,64 @@ type reportWriter struct {
 	goal   string
 	scope  string
 	mode   string
+	final  string
 	dirty  chan struct{}
 	remove func()
+}
+
+func (w *reportWriter) SetFinal(final string) {
+	const maxFinalRunes = 65536
+	if len([]rune(final)) > maxFinalRunes {
+		w.final = capRunes(final, maxFinalRunes) + "\n[final assessment truncated]"
+		return
+	}
+	w.final = final
+}
+
+func (w *reportWriter) RestoreFinal() error {
+	const maxHeaderBytes = 1 << 20
+	_, jsonPath := reportPaths(w.wsDir)
+	fd, err := syscall.Open(jsonPath, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if errors.Is(err, syscall.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	f := os.NewFile(uintptr(fd), jsonPath)
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("report: saved JSON is not a regular file")
+	}
+	decoder := json.NewDecoder(io.LimitReader(f, maxHeaderBytes))
+	first, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if first != json.Delim('{') {
+		return fmt.Errorf("report: saved JSON has no object")
+	}
+	key, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	name, ok := key.(string)
+	if !ok || (name != "final" && name != "web" && name != "goal") {
+		return fmt.Errorf("report: saved JSON has an unexpected header")
+	}
+	if name != "final" {
+		return nil
+	}
+	var final string
+	if err := decoder.Decode(&final); err != nil {
+		return err
+	}
+	w.SetFinal(final)
+	return nil
 }
 
 // newReportWriter builds a writer for one engagement workspace.
@@ -81,6 +141,7 @@ func (w *reportWriter) buildModel(status string) (engreport.Model, error) {
 		Mode:        w.mode,
 		Workspace:   w.wsDir,
 		Status:      status,
+		Final:       w.final,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Engagement:  snap,
 		Evidence:    ev,
@@ -112,12 +173,18 @@ func (w *reportWriter) Flush(status string) error {
 // returned stop function unregisters the hook, waits for the loop to drain any
 // in-flight render, and is safe to call more than once.
 func (w *reportWriter) Start() (stop func()) {
-	w.remove = w.st.AddOnApply(func(rev int64, e engagement.Engagement) {
+	signalDirty := func() {
 		select {
 		case w.dirty <- struct{}{}:
 		default:
 		}
-	})
+	}
+	removeApply := w.st.AddOnApply(func(int64, engagement.Engagement) { signalDirty() })
+	removeEvidence := w.st.AddOnEvidence(signalDirty)
+	w.remove = func() {
+		removeApply()
+		removeEvidence()
+	}
 	quit := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -150,9 +217,21 @@ func (w *reportWriter) Start() (stop func()) {
 // atomicWrite writes data to a temp file then renames it into place, so a reader
 // never sees a partially written report.
 func atomicWrite(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer os.Remove(f.Name())
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }

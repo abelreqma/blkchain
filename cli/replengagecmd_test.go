@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"blkchain/cli/internal/askuser"
 	eng "blkchain/cli/internal/engagement"
@@ -27,6 +29,20 @@ func engageReadyModel(t *testing.T) model {
 	}
 	m.rc = rc
 	return m
+}
+
+func TestFormatEngagePaused(t *testing.T) {
+	out := formatEngagePaused("Engagement paused: work budget reached.\n\nReport: /tmp/ws/report.md", 2*time.Second, 80)
+	if !strings.Contains(out, Glyph(GlyphWarn)) || !strings.Contains(out, "Engagement paused after 2s") || !strings.Contains(out, "work budget reached") || !strings.Contains(out, "/tmp/ws/report.md") || strings.Contains(out, "Engagement complete") {
+		t.Fatalf("paused rendering=%q", out)
+	}
+}
+
+func TestFormatEngageErrorKeepsFinalAssessment(t *testing.T) {
+	out := formatEngageError("validated finding", errors.New("report write failed"), 80)
+	if !strings.Contains(out, "validated finding") || !strings.Contains(out, "report write failed") || strings.Contains(out, "Report:") {
+		t.Fatalf("error rendering=%q", out)
+	}
 }
 
 // stubRunReplEngage swaps the injectable engage entry for a test and restores it.

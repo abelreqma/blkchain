@@ -139,7 +139,11 @@ func TestEngageConvergenceLocalLLM(t *testing.T) {
 				}
 			}
 		}
-		if requests.Load() == 0 || !captured || !strings.Contains(out, "convergence-fixture-ok") || !strings.Contains(out, "Engagement paused: round cap") {
+		reportMD, readErr := os.ReadFile(filepath.Join(wsDir, "report.md"))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if requests.Load() == 0 || !captured || !strings.Contains(string(reportMD), "convergence-fixture-ok") || !strings.Contains(out, "Engagement paused: round cap") || strings.Contains(out, "Final synthesis unavailable") {
 			t.Fatalf("requests=%d captured=%v report=%q", requests.Load(), captured, out)
 		}
 		t.Logf("REPL local fixture: %d HTTP requests; report:\n%s", requests.Load(), out)
@@ -175,12 +179,17 @@ func TestEngageConvergenceLocalLLM(t *testing.T) {
 		}
 		var persisted struct {
 			Status string `json:"status"`
+			Final  string `json:"final"`
 		}
 		if err := json.Unmarshal(reportData, &persisted); err != nil {
 			t.Fatal(err)
 		}
-		if persisted.Status != "paused" {
-			t.Fatalf("persisted report status=%q", persisted.Status)
+		if persisted.Status != "paused" || strings.TrimSpace(persisted.Final) == "" {
+			t.Fatalf("persisted report status=%q final=%q", persisted.Status, persisted.Final)
+		}
+		markdown, err := os.ReadFile(filepath.Join(wsDir, "report.md"))
+		if err != nil || !strings.Contains(string(markdown), "## Final assessment") {
+			t.Fatalf("final assessment missing from Markdown: %v", err)
 		}
 		t.Logf("CLI round-cap report:\n%s", output)
 	})

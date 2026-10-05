@@ -188,6 +188,9 @@ func runEngage(args []string) error {
 		modeStr = "auto"
 	}
 	rw := newReportWriter(ws.Store, wsDir, goal, scopeDesc, modeStr)
+	if err := rw.RestoreFinal(); err != nil {
+		return fmt.Errorf("engage: prior report: %w", err)
+	}
 	if err := rw.Flush("in-progress"); err != nil {
 		fmt.Fprintf(os.Stderr, "report: initial write failed: %v\n", err)
 	}
@@ -212,8 +215,10 @@ func runEngage(args []string) error {
 		}
 		return fmt.Errorf("engage: %w", err)
 	}
+	rw.SetFinal(final)
 	if ferr := rw.Flush(reportStatus); ferr != nil {
-		fmt.Fprintf(os.Stderr, "report: final write failed: %v\n", ferr)
+		fmt.Fprintln(os.Stdout, final)
+		return fmt.Errorf("engage: final report write failed: %w", ferr)
 	}
 	// Fold the finished report into the REPL's persistent memory so it surfaces in
 	// /history. Best-effort: a memory error never fails a completed engagement.

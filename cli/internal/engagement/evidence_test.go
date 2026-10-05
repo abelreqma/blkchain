@@ -29,6 +29,32 @@ func TestRecordEvidenceShortVerbatim(t *testing.T) {
 	}
 }
 
+func TestEvidenceListenerRunsAfterWriteAndCanUseStore(t *testing.T) {
+	s := openTemp(t)
+	seedAB(t, s)
+	calls := 0
+	remove := s.AddOnEvidence(func() {
+		quotes, err := s.EvidenceFor("A")
+		if err != nil || len(quotes) != 1 || quotes[0] != "observed" {
+			t.Errorf("listener saw quotes=%q err=%v", quotes, err)
+		}
+		calls++
+	})
+	if _, err := s.RecordEvidence("A", "observed"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("listener calls=%d", calls)
+	}
+	remove()
+	if _, err := s.RecordEvidence("B", "other"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("removed listener calls=%d", calls)
+	}
+}
+
 func TestRecordEvidenceOrderedByID(t *testing.T) {
 	s := openTemp(t)
 	seedAB(t, s)

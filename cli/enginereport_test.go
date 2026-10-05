@@ -3,18 +3,44 @@ package main
 import (
 	"blkchain/cli/internal/webanalysis"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/engreport"
 )
 
 func TestReportPaths(t *testing.T) {
 	md, js := reportPaths("/ws")
 	if md != filepath.Join("/ws", "report.md") || js != filepath.Join("/ws", "report.json") {
 		t.Errorf("paths = %q %q", md, js)
+	}
+}
+
+func TestAtomicReportWriteDoesNotFollowTempSymlink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "report.md")
+	victim := filepath.Join(t.TempDir(), "operator-file")
+	if err := os.WriteFile(victim, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, path+".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWrite(path, []byte("new report")); err != nil {
+		t.Fatal(err)
+	}
+	gotVictim, err := os.ReadFile(victim)
+	if err != nil || string(gotVictim) != "original" {
+		t.Fatalf("operator file changed: %q err=%v", gotVictim, err)
+	}
+	gotReport, err := os.ReadFile(path)
+	if err != nil || string(gotReport) != "new report" {
+		t.Fatalf("report=%q err=%v", gotReport, err)
 	}
 }
 
@@ -43,6 +69,134 @@ func TestReportWriterWritesBothFiles(t *testing.T) {
 	if !strings.Contains(string(jb), "goal-x") {
 		t.Errorf("report.json missing goal")
 	}
+}
+
+func TestReportWriterPersistsFinalAssessment(t *testing.T) {
+	ws := t.TempDir()
+	st := openStore(t)
+	w := newReportWriter(st, ws, "inspect example", "in: example", "auto")
+	final := "Confirmed response\n<script>alert(1)</script>\x1b[31m"
+	w.SetFinal(final)
+	if err := w.Flush("paused"); err != nil {
+		t.Fatal(err)
+	}
+	jsonData, err := os.ReadFile(filepath.Join(ws, "report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		Final  string `json:"final"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(jsonData, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Final != final || record.Status != "paused" {
+		t.Fatalf("persisted final=%q status=%q", record.Final, record.Status)
+	}
+	markdown, err := os.ReadFile(filepath.Join(ws, "report.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(markdown), "Final assessment\n\nConfirmed response\n") || !strings.Contains(string(markdown), "&lt;script&gt;") || strings.Contains(string(markdown), "\x1b") {
+		t.Fatalf("unsafe or missing final assessment: %q", markdown)
+	}
+}
+
+func TestReportWriterBoundsFinalAssessment(t *testing.T) {
+	w := newReportWriter(openStore(t), t.TempDir(), "goal", "scope", "auto")
+	w.SetFinal(strings.Repeat("x", 65537))
+	if len([]rune(w.final)) > 65600 || !strings.HasSuffix(w.final, "[final assessment truncated]") {
+		t.Fatalf("final assessment length=%d suffix=%q", len([]rune(w.final)), w.final[len(w.final)-40:])
+	}
+}
+
+func TestReportWriterRejectsUnsafeSavedReport(t *testing.T) {
+	for _, fixture := range []string{"symlink", "oversized", "malformed"} {
+		t.Run(fixture, func(t *testing.T) {
+			wsDir := t.TempDir()
+			path := filepath.Join(wsDir, "report.json")
+			switch fixture {
+			case "symlink":
+				target := filepath.Join(t.TempDir(), "target.json")
+				if err := os.WriteFile(target, []byte(`{"final":"untrusted"}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			case "oversized":
+				f, err := os.Create(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := f.Truncate((16 << 20) + 1); err != nil {
+					t.Fatal(err)
+				}
+				f.Close()
+			case "malformed":
+				if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w := newReportWriter(openStore(t), wsDir, "goal", "scope", "auto")
+			if err := w.RestoreFinal(); err == nil {
+				t.Fatal("unsafe report was accepted")
+			}
+		})
+	}
+}
+
+func TestReportWriterRestoresFinalFromLargeGeneratedReport(t *testing.T) {
+	dir := t.TempDir()
+	w := newReportWriter(openStore(t), dir, "goal", "scope", "auto")
+	w.SetFinal("prior assessment")
+	quote := strings.Repeat("x", 4000)
+	evidence := make([]string, 4300)
+	for i := range evidence {
+		evidence[i] = quote
+	}
+	large := engreport.Model{Final: w.final, Evidence: map[string][]string{"t1": evidence}}
+	data, err := engreport.RenderJSON(large)
+	if err != nil || len(data) <= 16<<20 {
+		t.Fatalf("generated report size=%d err=%v", len(data), err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "report.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	reopened := newReportWriter(openStore(t), dir, "goal", "scope", "auto")
+	if err := reopened.RestoreFinal(); err != nil || reopened.final != "prior assessment" {
+		t.Fatalf("restored final=%q err=%v", reopened.final, err)
+	}
+}
+
+func TestReportWriterRefreshesOnEvidenceWithoutTaskUpdate(t *testing.T) {
+	ws := t.TempDir()
+	st := openStore(t)
+	if _, err := st.Apply(engagement.Delta{Upserts: []engagement.Task{{ID: "t1", Status: engagement.StatusActive}}, Kind: "init"}); err != nil {
+		t.Fatal(err)
+	}
+	w := newReportWriter(st, ws, "goal", "scope", "auto")
+	if err := w.Flush("in-progress"); err != nil {
+		t.Fatal(err)
+	}
+	stop := w.Start()
+	defer stop()
+	if _, err := st.RecordEvidence("t1", "fresh-evidence-marker"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(filepath.Join(ws, "report.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "fresh-evidence-marker") {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("evidence-only write did not refresh the live report")
 }
 
 func TestReportWriterResumeRegenerates(t *testing.T) {
@@ -104,7 +258,11 @@ func TestReportWriterIncludesExactWebOperationRecords(t *testing.T) {
 	}
 	for _, name := range []string{"report.json", "report.md"} {
 		b, e := os.ReadFile(filepath.Join(dir, name))
-		if e != nil || !strings.Contains(string(b), "/api/profile") || !strings.Contains(string(b), "operation-credential") || !strings.Contains(string(b), "https://fixture.test/profile") || !strings.Contains(string(b), "click:#profile") || !strings.Contains(string(b), "fixture-artifact") || !strings.Contains(string(b), "fixture-analysis") {
+		click := "click:#profile"
+		if name == "report.md" {
+			click = "click:\\#profile"
+		}
+		if e != nil || !strings.Contains(string(b), "/api/profile") || !strings.Contains(string(b), "operation-credential") || !strings.Contains(string(b), "https://fixture.test/profile") || !strings.Contains(string(b), click) || !strings.Contains(string(b), "fixture-artifact") || !strings.Contains(string(b), "fixture-analysis") {
 			t.Fatal(name, string(b), e)
 		}
 	}

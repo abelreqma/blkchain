@@ -48,6 +48,58 @@ func TestRenderMarkdownHasSections(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownShowsUnfinishedTaskEvidence(t *testing.T) {
+	m := sampleModel()
+	m.Engagement.Tasks[1].Status = engagement.StatusActive
+	m.Evidence["t2"] = []string{"convergence-fixture-ok"}
+	md := RenderMarkdown(m)
+	if !strings.Contains(md, "Evidence from unfinished tasks") || !strings.Contains(md, "t2") || !strings.Contains(md, "convergence-fixture-ok") {
+		t.Fatalf("unfinished evidence missing: %s", md)
+	}
+}
+
+func TestRenderMarkdownEncodesUntrustedMarkup(t *testing.T) {
+	m := sampleModel()
+	m.Goal = "<script>alert(1)</script>"
+	m.Final = "![remote](https://example.invalid/pixel)\n## forged section"
+	m.Evidence["t2"] = []string{"<img src=https://example.invalid/pixel>"}
+	md := RenderMarkdown(m)
+	for _, forbidden := range []string{"<script>", "<img", "![remote]", "\n## forged section"} {
+		if strings.Contains(md, forbidden) {
+			t.Fatalf("active markup %q in report: %s", forbidden, md)
+		}
+	}
+	for _, expected := range []string{"&lt;script&gt;", "&lt;img", "Final assessment", "Evidence from unfinished tasks"} {
+		if !strings.Contains(md, expected) {
+			t.Fatalf("encoded text %q missing: %s", expected, md)
+		}
+	}
+}
+
+func TestRenderMarkdownFinalCannotCreateSetextHeading(t *testing.T) {
+	m := sampleModel()
+	m.Final = "Verified coverage\n=================\n=== \n---\n--- \n> quoted line\n- forged item\n1. forged item"
+	md := RenderMarkdown(m)
+	for _, marker := range []string{"\n=================", "\n=== \n", "\n---\n", "\n--- \n", "\n> quoted line", "\n- forged item", "\n1. forged item"} {
+		if strings.Contains(md, marker) {
+			t.Fatalf("active Markdown marker %q: %s", marker, md)
+		}
+	}
+	if !strings.Contains(md, "Verified coverage") || !strings.Contains(md, "Final assessment") {
+		t.Fatalf("final text missing: %s", md)
+	}
+}
+
+func TestRenderMarkdownKeepsQuotedBackticks(t *testing.T) {
+	m := sampleModel()
+	m.Engagement.Tasks[1].Status = engagement.StatusActive
+	m.Evidence["t2"] = []string{"value `quoted`"}
+	md := RenderMarkdown(m)
+	if !strings.Contains(md, "value \\`quoted\\`") || strings.Contains(md, "value 'quoted'") {
+		t.Fatalf("backtick evidence changed: %s", md)
+	}
+}
+
 func TestRenderMarkdownEmptyEngagement(t *testing.T) {
 	m := Model{Goal: "g", Status: "in-progress", GeneratedAt: "t"}
 	md := RenderMarkdown(m) // must not panic

@@ -29,9 +29,14 @@ var runReplEngageFn = runReplEngage
 
 // engageDoneMsg ends an /engage turn with the orchestrator's final answer or error.
 type engageDoneMsg struct {
-	final string
-	err   error
+	final  string
+	err    error
+	paused bool
 }
+
+type engageStatusKey struct{}
+
+type engageRunStatus struct{ paused bool }
 
 // replEngageRun is the fully-built input to one gated REPL engagement. The deps
 // (model, rc, cat, roeDB, confirm, cfg, prefs, mode, override, cwd, goal) are
@@ -96,23 +101,45 @@ func (m model) buildReplEngageRun(goal string) (replEngageRun, error) {
 // so the viz DAG + bar render it. The final result returns as an engageDoneMsg.
 func engageCmd(r replEngageRun) tea.Cmd {
 	return func() tea.Msg {
+		status := &engageRunStatus{}
+		ctx := context.WithValue(r.ctx, engageStatusKey{}, status)
 		progress := func(rev int64, snap eng.Engagement) {
 			if r.stub != nil {
 				r.stub.setSnapshot(snap)
 			}
 		}
-		final, err := runReplEngageFn(r.ctx, "", r.cwd, r.mode, r.override, r.model, r.rc,
+		final, err := runReplEngageFn(ctx, "", r.cwd, r.mode, r.override, r.model, r.rc,
 			r.cfg, r.prefs, r.cat, r.confirm, r.asker, r.roeDB, r.goal, progress)
-		return engageDoneMsg{final: final, err: err}
+		return engageDoneMsg{final: final, err: err, paused: status.paused}
 	}
 }
 
 // formatEngageDone renders the finished engagement: a done marker with the
 // elapsed time, then the orchestrator's summary.
 func formatEngageDone(final string, elapsed time.Duration, width int) string {
+	return formatEngageResult(final, elapsed, width, false)
+}
+
+func formatEngagePaused(final string, elapsed time.Duration, width int) string {
+	return formatEngageResult(final, elapsed, width, true)
+}
+
+func formatEngageError(final string, err error, width int) string {
+	out := styleErr(err)
+	if strings.TrimSpace(final) != "" {
+		out += "\n" + strings.TrimRight(glowRender(final, width), "\n")
+	}
+	return out
+}
+
+func formatEngageResult(final string, elapsed time.Duration, width int, paused bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, " %s %s\n", OK.Render(Glyph(GlyphOK)),
-		Meta.Render("Engagement complete in "+elapsed.Round(100*time.Millisecond).String()))
+	marker, label := OK.Render(Glyph(GlyphOK)), "Engagement complete in "
+	if paused {
+		marker, label = Caut.Render(Glyph(GlyphWarn)), "Engagement paused after "
+	}
+	fmt.Fprintf(&b, " %s %s\n", marker,
+		Meta.Render(label+elapsed.Round(100*time.Millisecond).String()))
 	body := strings.TrimSpace(final)
 	if body == "" {
 		body = Meta.Render("(no summary)")
