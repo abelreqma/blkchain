@@ -178,6 +178,9 @@ func TestKBToolAnswerLoopError(t *testing.T) {
 }
 
 func TestKBToolSchemas(t *testing.T) {
+	if desc := newKBAnswerTool(&recSearcher{}, kbTestCfg(), false).Description(); !strings.Contains(desc, "NVD") || !strings.Contains(desc, "PoC") {
+		t.Errorf("kb_answer description omits CVE research: %q", desc)
+	}
 	cases := []struct {
 		tool     tooldef.Tool
 		name     string

@@ -36,6 +36,14 @@ var genericPersona = persona{label: genericPersonaLabel, preamble: genericPerson
 // personas maps a domain key to its specialist. An unknown/"" domain is NOT in
 // this map; personaFor returns genericPersona for it.
 var personas = map[string]persona{
+	"cve": {"CVE researcher",
+		"You are a vulnerability researcher advising an authorized operator. Use the current NVD record for the identifier, status, affected product and version ranges, weakness, severity, and references; use web results as leads to public PoCs from Exploit-DB, Sploitus, GitHub, and other cited sources. " +
+			"Separate a CVE record, a linked advisory, an actual public PoC, and a verified exploit. Check the exact product build, reachable input, required configuration, access, and mitigations before judging applicability. " +
+			"Name a public PoC only when a cited source identifies a specific repository or exploit page. A topic page or search snippet is a directory lead, not proof that its named repositories exist or work. Do not claim that a search hit was reviewed or that code executed. " +
+			"When no public PoC is evidenced, say that the search found no matching leads, then give a concrete, scoped validation playbook or an adaptable minimal payload based on the documented mechanism. " +
+			"For a playbook, give the exact input when supported, a positive signal, and an inert negative control sent through the same input path. A callback proves only that a lookup occurred; no callback does not prove the target is patched. Explain the next decision for each result. " +
+			"Do not invent a vendor version, endpoint, exploit ID, payload success, or public PoC. Cite each CVE fact and PoC lead. ",
+		[]string{"nvd", "cve-"}},
 	"web": {"web application security expert",
 		"You are a web and API penetration tester. Map routes, roles, object ownership, sessions, and the browser-to-server trust boundary before testing. " +
 			"Compare authorized and unauthorized requests for BOLA/IDOR, function-level access, OAuth/OIDC, and business-logic flaws. " +
@@ -114,12 +122,16 @@ var personas = map[string]persona{
 // domainOrder fixes iteration and tie-breaking (Go maps are unordered). The
 // first domain to reach the top count wins, so more specific domains that share
 // tokens with a broader one are listed before it (k8s before cloud).
-var domainOrder = []string{"ad", "ai", "supply", "api", "web", "k8s", "cloud", "linux", "windows", "wireless", "binexp", "network", "mobile", "recon"}
+var domainOrder = []string{"cve", "ad", "ai", "supply", "api", "web", "k8s", "cloud", "linux", "windows", "wireless", "binexp", "network", "mobile", "recon"}
 
-// domainFromResults tallies, per retrieved chunk, which domains its metadata
-// matches (each chunk counts at most once per domain), and returns the domain
-// with the most matching chunks. It returns "" (generic) when nothing matches.
+// domainFromResults selects CVE research for an NVD record. Otherwise it tallies
+// domain signals per chunk and returns the most common domain, or "" when none match.
 func domainFromResults(results []retrieval.Result) string {
+	for _, result := range results {
+		if result.Payload.Source == nvdSource {
+			return "cve"
+		}
+	}
 	counts := map[string]int{}
 	for _, r := range results {
 		hay := strings.ToLower(r.Payload.Source + " " + r.Payload.Path + " " + r.Payload.Section + " " + r.Payload.CWEClass)
@@ -153,7 +165,17 @@ func personaFor(domain string) persona {
 // personaPrompt is the grounded-answer system prompt for a domain: the expert
 // preamble plus the shared answerConstraints. Never the bland assistant.
 func personaPrompt(domain string) string {
-	return personaFor(domain).preamble + answerConstraints
+	prompt := personaFor(domain).preamble + answerConstraints
+	if domain == "cve" {
+		prompt += " If an NVD summary is present, it is displayed before your answer. Focus on applicability, PoC evidence, and the validation playbook instead of restating NVD metadata. " +
+			"CVE answer checks: copy version strings and exclusions exactly from the NVD source if you must restate them; do not paraphrase numbers or silently drop parenthetical exclusions. " +
+			"If you cannot state the full affected range exactly, refer the reader to the NVD record instead of giving a shortened range. " +
+			"Name a public PoC only when a source URL or title identifies that specific PoC; list directories and search hits as unverified leads. " +
+			"For a validation playbook, use exactly one inert input as the negative control through the same input path: a plain alphanumeric marker with no vulnerability trigger syntax; never list an exploit trigger as a negative control, even as an alternative. " +
+			"State the positive signal and its narrow meaning. A missing callback or other negative result is not proof of a patch, because the input may not reach the vulnerable code or outbound traffic may be blocked. " +
+			"Do not infer code execution from an outbound lookup. Separate a version lead, a confirmed trigger, and demonstrated impact."
+	}
+	return prompt
 }
 
 // personaLabel is the cue label for a domain; always non-empty (generic maps to

@@ -43,6 +43,7 @@ func TestNextAction(t *testing.T) {
 func TestLooksLikeCVEorPoC(t *testing.T) {
 	yes := []string{
 		"CVE-2024-1234",
+		"CVE-2024-12345678",
 		"cve-2021-44228 details",
 		"is there a poc for this bug",
 		"proof-of-concept exploit",
@@ -702,13 +703,18 @@ func TestAnswerLoopCVEUsesPocDomains(t *testing.T) {
 	t.Setenv("OMLX_API_KEY", "test-key")
 	authorizeWebTest(t)
 	t.Setenv("TAVILY_SETUP_TOKEN", "tvly-test")
+	oldNVD := nvdLookup
+	nvdLookup = func(_ context.Context, id string) ([]retrieval.Result, error) {
+		return []retrieval.Result{chunk(nvdSource, "https://nvd.nist.gov/vuln/detail/"+id, id+" summary", "NVD facts")}, nil
+	}
+	defer func() { nvdLookup = oldNVD }()
 
 	var gotDomains []string
 	var gotQuery string
 	oldWeb := webSearch
 	webSearch = func(_ context.Context, _, query string, _ int, domains []string) ([]retrieval.Result, error) {
 		gotDomains, gotQuery = domains, query
-		return []retrieval.Result{chunk(webSource, "https://github.com/nomi-sec/PoC-in-GitHub", "T", "poc")}, nil
+		return []retrieval.Result{chunk(webSource, "https://github.com/nomi-sec/PoC-in-GitHub", "CVE-2024-1234", "poc")}, nil
 	}
 	defer func() { webSearch = oldWeb }()
 
@@ -724,6 +730,156 @@ func TestAnswerLoopCVEUsesPocDomains(t *testing.T) {
 	}
 	if !strings.Contains(gotQuery, "nomi-sec/PoC-in-GitHub") {
 		t.Errorf("web query = %q, want PoC-repo hint", gotQuery)
+	}
+}
+
+func TestAnswerLoopCVEAddsNVDAndPoCSearchEvenWhenLocalIsSufficient(t *testing.T) {
+	srv := fakeLLM(t, []string{`{"sufficient":true,"rewrite":"","use_web":false}`}, "CVE answer [1] [2]")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	authorizeWebTest(t)
+	t.Setenv("TAVILY_SETUP_TOKEN", "tvly-test")
+
+	oldNVD, oldWeb := nvdLookup, webSearch
+	defer func() { nvdLookup, webSearch = oldNVD, oldWeb }()
+	nvdCalls, webCalls := 0, 0
+	nvdLookup = func(_ context.Context, id string) ([]retrieval.Result, error) {
+		nvdCalls++
+		if id != "CVE-2021-44228" {
+			t.Errorf("NVD id = %q", id)
+		}
+		return []retrieval.Result{chunk(nvdSource, "https://nvd.nist.gov/vuln/detail/"+id, id+" summary", "NVD facts")}, nil
+	}
+	webSearch = func(_ context.Context, _, query string, _ int, domains []string) ([]retrieval.Result, error) {
+		webCalls++
+		if !strings.Contains(query, "CVE-2021-44228") || len(domains) == 0 {
+			t.Errorf("PoC query = %q domains = %v", query, domains)
+		}
+		return []retrieval.Result{chunk(webSource, "https://exploit-db.com/exploits/1", "CVE-2021-44228 PoC", "unverified lead")}, nil
+	}
+	cfg := answerCfg(2)
+	rs := &recSearcher{results: []retrieval.Result{chunk("kb", "local.md", "local", "local facts")}}
+	var persona string
+	answer, cits, usedWeb, results, _, err := AnswerLoop(context.Background(), rs, cfg, "Explain cve-2021-44228 and give a test playbook", AnswerOpts{Persona: func(d string) { persona = d }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nvdCalls != 1 || webCalls != 1 || !usedWeb {
+		t.Errorf("NVD calls = %d, web calls = %d, usedWeb = %v", nvdCalls, webCalls, usedWeb)
+	}
+	if len(results) < 3 || results[0].Payload.Source != nvdSource {
+		t.Errorf("results do not prioritize NVD: %+v", results)
+	}
+	if persona != "cve" {
+		t.Errorf("persona = %q, want cve", persona)
+	}
+	if !strings.HasPrefix(answer, "NVD record [1]\nNVD facts\n\n") {
+		t.Errorf("answer omitted code-owned NVD facts: %q", answer)
+	}
+	if len(cits) < 2 || !cits[0].Untrusted || !cits[1].Untrusted {
+		t.Errorf("external citations should be untrusted: %+v", cits)
+	}
+}
+
+func TestAnswerLoopCVEHonorsWebOff(t *testing.T) {
+	srv := fakeLLM(t, []string{`{"sufficient":true,"rewrite":"","use_web":false}`}, "local answer [1]")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	authorizeWebTest(t)
+	oldNVD := nvdLookup
+	defer func() { nvdLookup = oldNVD }()
+	nvdLookup = func(context.Context, string) ([]retrieval.Result, error) {
+		t.Fatal("NVD called when web is off")
+		return nil, nil
+	}
+	_, _, usedWeb, _, _, err := AnswerLoop(context.Background(), &recSearcher{results: []retrieval.Result{chunk("kb", "a", "s", "text")}}, answerCfg(1), "CVE-2021-44228", AnswerOpts{NoWeb: true})
+	if err != nil || usedWeb {
+		t.Fatalf("web-off answer: usedWeb=%v err=%v", usedWeb, err)
+	}
+}
+
+func TestCVEResearchKeepsOnlyMatchingPoCLeads(t *testing.T) {
+	oldNVD, oldWeb := nvdLookup, webSearch
+	defer func() { nvdLookup, webSearch = oldNVD, oldWeb }()
+	nvdLookup = func(_ context.Context, id string) ([]retrieval.Result, error) {
+		return []retrieval.Result{chunk(nvdSource, "https://nvd.nist.gov/vuln/detail/"+id, id+" summary", "NVD facts")}, nil
+	}
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		return []retrieval.Result{
+			chunk(webSource, "https://github.com/author/CVE-2021-44228", "PoC", "matching lead"),
+			chunk(webSource, "https://exploit-db.com/exploits/1", "Unrelated exploit", "CVE-2020-1234"),
+			chunk(webSource, "https://github.com/topics/cve-2021-44228", "CVE-2021-44228", "repository directory"),
+			chunk(webSource, "https://sploitus.com/exploit?id=1", "exploit-availability-check", "mentions CVE-2021-44228 among many others"),
+		}, nil
+	}
+	results, err := cveResearch(context.Background(), answerCfg(1), "CVE-2021-44228", func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 || results[1].Payload.Path != "https://github.com/author/CVE-2021-44228" {
+		t.Fatalf("CVE research results = %+v", results)
+	}
+}
+
+func TestAnswerLoopWebOnlyCVEUsesNVDAndOnePoCSearch(t *testing.T) {
+	srv := fakeLLM(t, []string{`{"sufficient":true,"rewrite":"","use_web":false}`}, "playbook [1]")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	authorizeWebTest(t)
+	t.Setenv("TAVILY_SETUP_TOKEN", "tvly-test")
+	oldNVD, oldWeb := nvdLookup, webSearch
+	defer func() { nvdLookup, webSearch = oldNVD, oldWeb }()
+	nvdLookup = func(_ context.Context, id string) ([]retrieval.Result, error) {
+		return []retrieval.Result{chunk(nvdSource, "https://nvd.nist.gov/vuln/detail/"+id, id+" summary", "NVD\x1b[31m facts")}, nil
+	}
+	webCalls := 0
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		webCalls++
+		return nil, nil
+	}
+	answer, _, usedWeb, results, _, err := AnswerLoop(context.Background(), nil, answerCfg(1), "CVE-2021-44228", AnswerOpts{WebOnly: true, NoLocal: true})
+	if err != nil || !usedWeb || webCalls != 1 || len(results) != 1 {
+		t.Fatalf("web-only CVE: err=%v usedWeb=%v webCalls=%d results=%d", err, usedWeb, webCalls, len(results))
+	}
+	if !strings.Contains(answer, "NVD facts") || strings.Contains(answer, "\x1b") {
+		t.Errorf("NVD prelude was not sanitized: %q", answer)
+	}
+}
+
+func TestAnswerLoopCVEKeepsNVDFirstAfterLocalRewrite(t *testing.T) {
+	srv := fakeLLM(t, []string{`{"sufficient":false,"rewrite":"log4j version","use_web":false}`}, "answer [1]")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	authorizeWebTest(t)
+	t.Setenv("TAVILY_SETUP_TOKEN", "tvly-test")
+	oldNVD, oldWeb := nvdLookup, webSearch
+	defer func() { nvdLookup, webSearch = oldNVD, oldWeb }()
+	nvdLookup = func(_ context.Context, id string) ([]retrieval.Result, error) {
+		return []retrieval.Result{
+			chunk(nvdSource, "https://nvd.nist.gov/vuln/detail/"+id, id+" summary", "NVD summary"),
+			chunk(nvdSource, "https://nvd.nist.gov/vuln/detail/"+id, id+" details", "NVD details"),
+		}, nil
+	}
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) { return nil, nil }
+	local := []retrieval.Result{
+		chunk("skills", "pentesting-web/1", "local", "one"), chunk("skills", "pentesting-web/2", "local", "two"),
+		chunk("skills", "pentesting-web/3", "local", "three"), chunk("skills", "pentesting-web/4", "local", "four"), chunk("skills", "pentesting-web/5", "local", "five"),
+	}
+	cfg := answerCfg(2)
+	cfg.AnswerMaxChunks = 6
+	answer, _, _, results, _, err := AnswerLoop(context.Background(), &recSearcher{results: local}, cfg, "CVE-2021-44228", AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) < 2 || results[0].Payload.Source != nvdSource || results[1].Payload.Source != nvdSource {
+		t.Fatalf("NVD evidence lost priority after rewrite: %+v", results)
+	}
+	if !strings.HasPrefix(answer, "NVD record [1]\nNVD summary") {
+		t.Errorf("NVD prelude missing after rewrite: %q", answer)
 	}
 }
 

@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"blkchain/cli/internal/ragconfig"
@@ -28,6 +30,7 @@ var ErrNoResults = errors.New("no results")
 const (
 	stageRetrieving = "retrieving"
 	stageGrading    = "grading"
+	stageNVD        = "searching NVD"
 	stageWeb        = "searching web"
 	stageRewriting  = "rewriting query"
 	stageAnswering  = "answering"
@@ -54,7 +57,7 @@ var webSearch = dispatchWebSearch
 // cveQueryPattern and pocQueryPattern spot a CVE id and a proof-of-concept or
 // exploit request.
 var (
-	cveQueryPattern = regexp.MustCompile(`(?i)\bCVE-\d{4}-\d{4,7}\b`)
+	cveQueryPattern = regexp.MustCompile(`(?i)\bCVE-\d{4}-\d{4,55}\b`)
 	pocQueryPattern = regexp.MustCompile(`(?i)\bpoc\b|proof[- ]of[- ]concept|\bexploit\b`)
 )
 
@@ -64,6 +67,59 @@ var (
 // CVE or PoC information.
 func looksLikeCVEorPoC(query string) bool {
 	return cveQueryPattern.MatchString(query) || pocQueryPattern.MatchString(query)
+}
+
+func specificPoCLead(result retrieval.Result, id string, domains []string) bool {
+	if !allowedSearchURL(result.Payload.Path, domains) {
+		return false
+	}
+	text := result.Payload.Path + " " + result.Payload.Section
+	if !strings.Contains(strings.ToUpper(text), id) {
+		return false
+	}
+	u, _ := url.Parse(result.Payload.Path)
+	if strings.EqualFold(u.Hostname(), "github.com") {
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		if len(parts) < 2 || parts[0] == "topics" || parts[0] == "search" || parts[0] == "collections" {
+			return false
+		}
+	}
+	return true
+}
+
+func cveResearch(ctx context.Context, cfg ragconfig.Config, question string, stage func(string)) ([]retrieval.Result, error) {
+	id := strings.ToUpper(cveQueryPattern.FindString(question))
+	if id == "" {
+		return nil, nil
+	}
+	stage(stageNVD)
+	nvdResults, err := nvdLookup(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if len(nvdResults) == 0 {
+		return nil, errors.New("nvd: empty CVE result")
+	}
+	stage(stageWeb)
+	query := id + " proof of concept exploit Exploit-DB Sploitus GitHub nomi-sec/PoC-in-GitHub"
+	webResults, webErr := webSearch(ctx, tavilyKey(), query, min(cfg.TavilyMaxResults, 3), cfg.PocDomains)
+	matching := webResults[:0]
+	for _, result := range webResults {
+		if specificPoCLead(result, id, cfg.PocDomains) {
+			matching = append(matching, result)
+		}
+	}
+	webResults = matching
+	if webErr != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		nvdResults[len(nvdResults)-1].Payload.Text = "Public PoC search was unavailable; no PoC availability conclusion can be drawn.\n" + nvdResults[len(nvdResults)-1].Payload.Text
+	} else if len(webResults) == 0 {
+		nvdResults[len(nvdResults)-1].Payload.Text = "Public PoC search returned no matching leads; this does not prove none exist.\n" + nvdResults[len(nvdResults)-1].Payload.Text
+	}
+	nvdResults[len(nvdResults)-1].Payload.Text = nvdCapText(nvdResults[len(nvdResults)-1].Payload.Text)
+	return append(nvdResults, webResults...), nil
 }
 
 // nextAction is the pure loop-control decision, extracted so it can be unit
@@ -189,14 +245,21 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 		if opts.NoWeb || !loadPrefs().Web {
 			return "", nil, false, nil, 0, errors.New("web: disabled; enable web before searching the internet")
 		}
-		stage(stageWeb)
-		webLimit := cfg.TavilyMaxResults
-		if opts.SearchTopK > 0 {
-			webLimit = opts.SearchTopK
-		}
-		results, err = webSearch(ctx, tavilyKey(), question, webLimit, nil)
-		if err != nil {
-			return "", nil, false, nil, 0, err
+		if cveQueryPattern.MatchString(question) {
+			results, err = cveResearch(ctx, cfg, question, stage)
+			if err != nil {
+				return "", nil, false, nil, 0, err
+			}
+		} else {
+			stage(stageWeb)
+			webLimit := cfg.TavilyMaxResults
+			if opts.SearchTopK > 0 {
+				webLimit = opts.SearchTopK
+			}
+			results, err = webSearch(ctx, tavilyKey(), question, webLimit, nil)
+			if err != nil {
+				return "", nil, false, nil, 0, err
+			}
 		}
 		if len(results) == 0 {
 			return "", nil, false, results, 0, ErrNoResults
@@ -234,6 +297,14 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 	hasWeb := webAvail && !opts.NoWeb && loadPrefs().Web
 	looksCVE := looksLikeCVEorPoC(question)
 	var externalResults []retrieval.Result
+	if cveQueryPattern.MatchString(question) && hasWeb {
+		externalResults, err = cveResearch(ctx, cfg, question, stage)
+		if err != nil {
+			return "", nil, false, results, 0, err
+		}
+		results = append(externalResults, results...)
+		usedWeb = true
+	}
 
 	// Clamp MaxLoops to at least one pass: a value <= 0 (a bad rag.json or env)
 	// would skip grading, the web fallback, and the guardrails entirely and go
@@ -268,7 +339,7 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 			stage(stageWeb)
 			webResults, werr := webSearch(ctx, tavilyKey(), webQuery, cfg.TavilyMaxResults, domains)
 			if werr == nil && len(webResults) > 0 {
-				externalResults = webResults
+				externalResults = append(externalResults, webResults...)
 				results = append(results, externalResults...)
 				usedWeb = true
 				continue
@@ -286,7 +357,11 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 			}
 			retried, rerr := rc.Search(ctx, searchQuery, topK, opts.SearchFilter)
 			if rerr == nil && len(retried) > 0 {
-				results = append(retried, externalResults...)
+				if len(externalResults) > 0 && externalResults[0].Payload.Source == nvdSource {
+					results = append(append([]retrieval.Result{}, externalResults...), retried...)
+				} else {
+					results = append(retried, externalResults...)
+				}
 			}
 		}
 	}
@@ -337,6 +412,18 @@ func synthesize(ctx context.Context, l toolLoopModel, cfg ragconfig.Config, ques
 	}
 
 	var full strings.Builder
+	if domain == "cve" {
+		for i, result := range chunks {
+			if result.Payload.Source == nvdSource && strings.HasSuffix(result.Payload.Section, " summary") {
+				prefix := "NVD record [" + strconv.Itoa(i+1) + "]\n" + sanitizeTerminal(result.Payload.Text) + "\n\n"
+				full.WriteString(prefix)
+				if opts.Stream != nil {
+					opts.Stream([]byte(prefix))
+				}
+				break
+			}
+		}
+	}
 	stream := func(_ context.Context, chunk []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err

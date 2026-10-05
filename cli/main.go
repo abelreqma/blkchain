@@ -65,8 +65,7 @@ type citation struct {
 	Source  string `json:"source"`
 	Path    string `json:"path"`
 	Section string `json:"section"`
-	// Untrusted is true for a web citation, whose text came from the open web
-	// and not the local corpus. Local citations omit it.
+	// Untrusted is true for web and NVD citations. Local citations omit it.
 	Untrusted bool `json:"untrusted,omitempty"`
 }
 

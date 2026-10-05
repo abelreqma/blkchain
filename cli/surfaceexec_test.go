@@ -13,7 +13,7 @@ import (
 )
 
 func TestGenericExecutorPromptIsImperative(t *testing.T) {
-	for _, want := range []string{"EXECUTING", "run_command", "plan_add"} {
+	for _, want := range []string{"EXECUTING", "run_command", "plan_add", "kb_answer", "NVD"} {
 		if !strings.Contains(executorPreamble, want) {
 			t.Errorf("executorPreamble missing %q:\n%s", want, executorPreamble)
 		}

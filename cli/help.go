@@ -915,6 +915,7 @@ func usageEnv() []rowGroup {
 		{"WEB SEARCH", []helpRow{
 			{"TAVILY_API_KEY", "Tavily key; internet search requires web on"},
 			{"TAVILY_SETUP_TOKEN", "alternate Tavily key variable"},
+			{"NVD_API_KEY", "optional key for direct CVE lookups"},
 			{"BLKCHAIN_WEB_PROVIDER", "auto, duckduckgo, or tavily; overrides the saved provider"},
 		}},
 		{"DISPLAY", []helpRow{

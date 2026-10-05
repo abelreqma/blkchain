@@ -546,6 +546,7 @@ func printed(t *testing.T, cmd tea.Cmd) string {
 func TestTUIPersonaCueUsesEmojis(t *testing.T) {
 	expectedSymbols := map[string]string{
 		"":         "\U0001f9ed",
+		"cve":      "\U0001f52c",
 		"web":      "\U0001f310",
 		"api":      "\U0001f50c",
 		"ad":       "\U0001faaa",

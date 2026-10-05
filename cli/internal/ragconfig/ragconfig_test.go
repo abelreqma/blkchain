@@ -197,7 +197,7 @@ func TestRouterDefaults(t *testing.T) {
 	if cfg.RouteMaxTokens != 8 {
 		t.Errorf("RouteMaxTokens = %d, want 8", cfg.RouteMaxTokens)
 	}
-	want := []string{"github.com", "nvd.nist.gov", "exploit-db.com"}
+	want := []string{"github.com", "exploit-db.com", "sploitus.com"}
 	if !reflect.DeepEqual(cfg.PocDomains, want) {
 		t.Errorf("PocDomains = %v, want %v", cfg.PocDomains, want)
 	}

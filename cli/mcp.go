@@ -80,7 +80,7 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "kb_answer",
-		Description: "Bounded, code-orchestrated agentic answer over the local blkChain knowledge base: retrieves, grades sufficiency, optionally rewrites the query or falls back to web search, then synthesizes a grounded, source-cited answer.",
+		Description: "Bounded, source-cited answer over the local knowledge base. Exact CVEs add direct NVD details and public PoC search when web research is enabled.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpAnswerIn) (*mcp.CallToolResult, any, error) {
 		p := loadPrefs()
 		out, err := kbAnswer(ctx, followPrefs(rc, p), cfg, in.Query, !p.Web)

@@ -104,7 +104,7 @@ func boundChunks(cfg ragconfig.Config, results []retrieval.Result) []retrieval.R
 
 // buildContext encodes each retrieved record as JSON so source text cannot
 // forge record delimiters or metadata fields in the prompt. Local chunks are
-// tagged as trusted corpus evidence; web results are tagged as unverified.
+// tagged as trusted corpus evidence; external results are tagged as unverified.
 func buildContext(chunks []retrieval.Result) string {
 	type evidence struct {
 		Number  int    `json:"number"`
@@ -117,7 +117,7 @@ func buildContext(chunks []retrieval.Result) string {
 	blocks := make([]evidence, 0, len(chunks))
 	for i, r := range chunks {
 		trust := "trusted_corpus"
-		if r.Payload.Source == webSource {
+		if r.Payload.Source == webSource || r.Payload.Source == nvdSource {
 			trust = "unverified_external"
 		}
 		blocks = append(blocks, evidence{i + 1, trust, r.Payload.Source,
@@ -221,7 +221,7 @@ func dedupCitations(chunks []retrieval.Result) []citation {
 			Source:    r.Payload.Source,
 			Path:      r.Payload.Path,
 			Section:   r.Payload.Section,
-			Untrusted: r.Payload.Source == webSource,
+			Untrusted: r.Payload.Source == webSource || r.Payload.Source == nvdSource,
 		})
 	}
 	return cits

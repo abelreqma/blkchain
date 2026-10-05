@@ -155,7 +155,8 @@ hardcoded.** See [`.env.example`](.env.example) for every variable; the essentia
   sends only `temperature` 0, so grading stays deterministic. An unparsable value is ignored, and an
   out-of-range one falls back to the default, with a one-line note on stderr.
 - **Web provider:** `BLKCHAIN_WEB_PROVIDER=auto|duckduckgo|tavily` overrides the saved selection.
-- **Secrets:** `TAVILY_API_KEY` or `TAVILY_SETUP_TOKEN` configures Tavily. Credentials alone do not
+- **Secrets:** `TAVILY_API_KEY` or `TAVILY_SETUP_TOKEN` configures Tavily. `NVD_API_KEY` increases
+  the NVD request allowance for direct CVE lookups. Credentials alone do not
   authorize web access.
 
 The corpus is defined by `config.CORPUS_SOURCES` (source dirs + handling kind), all derived from the
@@ -321,6 +322,14 @@ DuckDuckGo uses HTML search and can require a CAPTCHA; blk reports that failure.
 20 seconds per provider, read at most 2 MiB, and return at most 20 results. Web content remains
 untrusted evidence, and answer citations identify web sources as untrusted. These commands provide
 search and cited answers; target browser automation belongs to the engagement browser tooling.
+
+With web access enabled, a question containing an exact CVE ID fetches its NVD record directly and
+searches for matching public PoC leads on GitHub, Exploit-DB, and Sploitus. The CVE researcher
+uses the NVD description, score, affected-product hints, and references to explain prerequisites and
+give a scoped payload or validation playbook. Search results are leads, not verified exploits. The
+NVD lookup reads `NVD_API_KEY` from the environment when present and works without a key at the
+public rate limit. NVD and web citations are marked untrusted. `blk ask`, bare interactive questions,
+the plain REPL, the TUI, and `kb_answer` use the same answer loop.
 
 **Status line.** The interactive session's status line shows the mode (`rag` or `agent`), the model
 a turn uses (the `/model` pick, else `OMLX_MODEL`, else the first model the LLM server lists), the

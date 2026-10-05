@@ -53,6 +53,21 @@ func TestPersonaPromptKeepsSharedConstraints(t *testing.T) {
 	}
 }
 
+func TestCVEPersonaCoversPoCAndPayloadFallback(t *testing.T) {
+	p := personaPrompt("cve")
+	for _, want := range []string{"NVD", "Exploit-DB", "Sploitus", "public PoC", "payload", "playbook", "negative control", "same input path", "does not prove", "copy version", "inert input", "not proof of a patch", "plain alphanumeric marker", "never list an exploit trigger as a negative control", "parenthetical exclusions", "If an NVD summary is present", promptguard.UntrustedInputClause} {
+		if !strings.Contains(p, want) {
+			t.Errorf("CVE persona prompt missing %q", want)
+		}
+	}
+	if strings.Contains(p, "already displayed") {
+		t.Error("CVE persona claims an NVD summary is always displayed")
+	}
+	if got := domainFromResults([]retrieval.Result{pchunk(nvdSource, "https://nvd.nist.gov/vuln/detail/CVE-2021-44228")}); got != "cve" {
+		t.Errorf("NVD domain = %q, want cve", got)
+	}
+}
+
 func TestPersonaLabel(t *testing.T) {
 	if got := personaLabel("ad"); got != "Active Directory attack expert" {
 		t.Errorf("personaLabel(ad) = %q", got)

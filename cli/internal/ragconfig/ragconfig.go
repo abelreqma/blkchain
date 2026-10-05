@@ -82,7 +82,7 @@ func builtinDefaults() Config {
 			"owasp.org", "exploit-db.com", "portswigger.net",
 		},
 		RouteMaxTokens: 8,
-		PocDomains:     []string{"github.com", "nvd.nist.gov", "exploit-db.com"},
+		PocDomains:     []string{"github.com", "exploit-db.com", "sploitus.com"},
 	}
 }
 

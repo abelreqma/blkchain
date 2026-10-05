@@ -99,7 +99,7 @@ func newKBAnswerTool(rc searcher, cfg ragconfig.Config, noWeb bool) tooldef.Tool
 	}
 	return kbTool{
 		name:   "kb_answer",
-		desc:   "Answer a question from the local security knowledge base with source citations.",
+		desc:   "Answer from the local knowledge base with citations. Exact CVEs use NVD and public PoC search when web is enabled.",
 		schema: schema,
 		call: func(ctx context.Context, argsJSON string) (string, error) {
 			var a kbAnswerArgs
