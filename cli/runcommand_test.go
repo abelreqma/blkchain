@@ -5,6 +5,8 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -27,6 +29,70 @@ func withStubPipeline(t *testing.T, fn func(ctx context.Context, stages []pipeli
 	prev := execPipeline
 	execPipeline = fn
 	t.Cleanup(func() { execPipeline = prev })
+}
+
+func privateScratchDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestExecutorEnvironmentIsolated(t *testing.T) {
+	t.Setenv("BLKCHAIN_EXEC_PROBE_SECRET", "operator-secret-sentinel")
+	t.Setenv("HTTP_PROXY", "http://operator-proxy.invalid")
+	t.Setenv("HOME", t.TempDir())
+	want := "PATH=/usr/bin:/bin:/usr/sbin:/sbin\n"
+	ctx := context.Background()
+	for name, run := range map[string]func() runResult{
+		"single": func() runResult {
+			return realExec(ctx, "/usr/bin/env", nil, privateScratchDir(t), 4096, 5*time.Second)
+		},
+		"pipeline": func() runResult {
+			return realExecPipeline(ctx, []pipelineStage{{Binary: "/usr/bin/env"}, {Binary: "/bin/cat"}}, privateScratchDir(t), 4096, 5*time.Second)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := run()
+			if got.Err != nil || got.TimedOut || got.Output != want {
+				t.Fatalf("output=%q timed_out=%t err=%v", got.Output, got.TimedOut, got.Err)
+			}
+		})
+	}
+}
+
+func TestExecutorSandboxRestrictsHostFiles(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS sandbox profile")
+	}
+	ctx := context.Background()
+	scratch := privateScratchDir(t)
+	outside := filepath.Join(t.TempDir(), "operator-file")
+	if err := os.WriteFile(outside, []byte("operator-file-marker"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(scratch, "allowed-file")
+	if err := os.WriteFile(inside, []byte("scratch-marker"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	allowed := realExec(ctx, "/bin/cat", []string{inside}, scratch, 4096, 5*time.Second)
+	if allowed.Err != nil || allowed.Output != "scratch-marker" {
+		t.Fatalf("scratch read: output=%q err=%v", allowed.Output, allowed.Err)
+	}
+	denied := realExec(ctx, "/bin/cat", []string{outside}, scratch, 4096, 5*time.Second)
+	if denied.Err == nil || strings.Contains(denied.Output, "operator-file-marker") {
+		t.Fatalf("host read allowed: output=%q err=%v", denied.Output, denied.Err)
+	}
+	writeOutside := realExec(ctx, "/usr/bin/touch", []string{filepath.Join(t.TempDir(), "forbidden")}, scratch, 4096, 5*time.Second)
+	if writeOutside.Err == nil {
+		t.Fatal("host write allowed")
+	}
+	writeInside := realExec(ctx, "/usr/bin/touch", []string{filepath.Join(scratch, "created")}, scratch, 4096, 5*time.Second)
+	if writeInside.Err != nil {
+		t.Fatalf("scratch write: %v", writeInside.Err)
+	}
 }
 
 func autoGate(t *testing.T) *secgate.Gate {
@@ -303,7 +369,7 @@ func TestRealExecEchoSmoke(t *testing.T) {
 	if os.Getenv("BLKCHAIN_EXEC_SMOKE") != "1" {
 		t.Skip("set BLKCHAIN_EXEC_SMOKE=1 to run the real-exec smoke test")
 	}
-	res := realExec(context.Background(), "echo", []string{"hello"}, "", 100, time.Second)
+	res := realExec(context.Background(), "echo", []string{"hello"}, privateScratchDir(t), 100, time.Second)
 	if res.TimedOut || !strings.Contains(res.Output, "hello") {
 		t.Errorf("echo smoke failed: %+v", res)
 	}
@@ -537,7 +603,7 @@ func TestRealExecPipelineFilters(t *testing.T) {
 		{Binary: "printf", Args: []string{"alpha\nsshd\nbravo\n"}},
 		{Binary: "grep", Args: []string{"sshd"}},
 	}
-	res := realExecPipeline(context.Background(), stages, "", 1<<20, 5*time.Second)
+	res := realExecPipeline(context.Background(), stages, privateScratchDir(t), 1<<20, 5*time.Second)
 	if res.TimedOut {
 		t.Fatalf("unexpected timeout: %+v", res)
 	}
@@ -561,7 +627,7 @@ func TestRealExecPipelineHeadEarlyClose(t *testing.T) {
 		{Binary: "seq", Args: []string{"1", "100000"}},
 		{Binary: "head", Args: []string{"-n", "1"}},
 	}
-	res := realExecPipeline(context.Background(), stages, "", 1<<20, 5*time.Second)
+	res := realExecPipeline(context.Background(), stages, privateScratchDir(t), 1<<20, 5*time.Second)
 	if res.TimedOut {
 		t.Fatalf("unexpected timeout: %+v", res)
 	}

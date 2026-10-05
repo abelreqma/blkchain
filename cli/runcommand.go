@@ -271,11 +271,11 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 func realExec(ctx context.Context, bin string, args []string, dir string, capBytes int, timeout time.Duration) runResult {
 	ctx2, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx2, bin, args...)
-	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
-	if dir != "" {
-		cmd.Dir = dir
+	cmd, err := newSandboxedCommand(ctx2, bin, args, dir)
+	if err != nil {
+		return runResult{Err: err}
 	}
+	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -291,7 +291,7 @@ func realExec(ctx context.Context, bin string, args []string, dir string, capByt
 	w := &cappedWriter{cap: capBytes, buf: &buf}
 	cmd.Stdout = w
 	cmd.Stderr = w
-	err := cmd.Run()
+	err = cmd.Run()
 	if cmd.Process != nil {
 		// Reap any daemonized grandchild left in the group after a normal exit.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -317,11 +317,11 @@ func realExecPipeline(ctx context.Context, stages []pipelineStage, dir string, c
 	n := len(stages)
 	cmds := make([]*exec.Cmd, n)
 	for i := range stages {
-		c := exec.CommandContext(ctx2, stages[i].Binary, stages[i].Args...)
-		c.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
-		if dir != "" {
-			c.Dir = dir
+		c, err := newSandboxedCommand(ctx2, stages[i].Binary, stages[i].Args, dir)
+		if err != nil {
+			return runResult{Err: err}
 		}
+		c.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
 		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		c.WaitDelay = 2 * time.Second
 		pc := c
