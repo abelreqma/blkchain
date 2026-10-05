@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,6 +88,32 @@ func TestExecutorSandboxRestrictsHostFiles(t *testing.T) {
 	if denied.Err == nil || strings.Contains(denied.Output, "operator-file-marker") {
 		t.Fatalf("host read allowed: output=%q err=%v", denied.Output, denied.Err)
 	}
+	resolvedOutside, err := filepath.EvalSymlinks(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataAlias := "/System/Volumes/Data" + resolvedOutside
+	if _, err := os.Stat(dataAlias); err == nil {
+		if result := realExec(ctx, "/bin/cat", []string{dataAlias}, scratch, 4096, 5*time.Second); result.Err == nil || strings.Contains(result.Output, "operator-file-marker") {
+			t.Fatal("Data-volume alias bypassed the host-file sandbox")
+		}
+	}
+	for _, path := range []string{
+		"/private/etc/passwd",
+		"/private/var/db/timezone/zoneinfo/UTC",
+		"/Library/Preferences/.GlobalPreferences.plist",
+		"/opt/homebrew/etc/openssl@3/openssl.cnf",
+		"/usr/local/share/gcm-core/git-credential-manager.deps.json",
+	} {
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		f.Close()
+		if result := realExec(ctx, "/bin/cat", []string{path}, scratch, 32, 5*time.Second); result.Err == nil {
+			t.Fatalf("host configuration read allowed: %s", path)
+		}
+	}
 	writeOutside := realExec(ctx, "/usr/bin/touch", []string{filepath.Join(t.TempDir(), "forbidden")}, scratch, 4096, 5*time.Second)
 	if writeOutside.Err == nil {
 		t.Fatal("host write allowed")
@@ -92,6 +121,32 @@ func TestExecutorSandboxRestrictsHostFiles(t *testing.T) {
 	writeInside := realExec(ctx, "/usr/bin/touch", []string{filepath.Join(scratch, "created")}, scratch, 4096, 5*time.Second)
 	if writeInside.Err != nil {
 		t.Fatalf("scratch write: %v", writeInside.Err)
+	}
+}
+
+func TestExecutorSandboxBlocksHiddenNetworkTarget(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS sandbox profile")
+	}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		fmt.Fprint(w, "fixture-response")
+	}))
+	defer server.Close()
+	scratch := privateScratchDir(t)
+	config := filepath.Join(scratch, "curl-config")
+	if err := os.WriteFile(config, []byte(fmt.Sprintf("url = %q\n", server.URL)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--disable", "-fsS", "--max-time", "2", "-K", config}
+	baseline, err := exec.Command("/usr/bin/curl", args...).CombinedOutput()
+	if err != nil || !strings.Contains(string(baseline), "fixture-response") {
+		t.Fatalf("fixture baseline: output=%q err=%v", baseline, err)
+	}
+	result := realExec(context.Background(), "/usr/bin/curl", args, scratch, 4096, 5*time.Second)
+	if result.Err == nil || strings.Contains(result.Output, "fixture-response") || requests.Load() != 1 {
+		t.Fatalf("hidden target reached: output=%q err=%v requests=%d", result.Output, result.Err, requests.Load())
 	}
 }
 

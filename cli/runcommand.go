@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -68,9 +69,10 @@ type runCommandArgs struct {
 
 // runResult is the captured output of one execution.
 type runResult struct {
-	Output   string
-	TimedOut bool
-	Err      error
+	Output         string
+	TimedOut       bool
+	Err            error
+	EphemeralFiles bool
 }
 
 // execRunner runs a shell-free command with a timeout and byte cap. Stubbed in tests.
@@ -185,6 +187,9 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 				if res.Err != nil {
 					fmt.Fprintf(&b, "(command exited with an error: %s)\n", res.Err.Error())
 				}
+				if res.EphemeralFiles {
+					b.WriteString("(isolated command files are temporary; capture stdout or stderr as evidence)\n")
+				}
 				b.WriteString(secgate.WrapUntrusted("command", res.Output))
 				return b.String(), nil
 			}
@@ -261,6 +266,9 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 			if res.Err != nil {
 				fmt.Fprintf(&b, "(command exited with an error: %s)\n", res.Err.Error())
 			}
+			if res.EphemeralFiles {
+				b.WriteString("(isolated command files are temporary; capture stdout or stderr as evidence)\n")
+			}
 			b.WriteString(secgate.WrapUntrusted("command", res.Output))
 			return b.String(), nil
 		})
@@ -268,13 +276,20 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 
 // realExec runs bin with args, no shell, minimal env, a timeout, and an output
 // cap. On timeout it kills the child's process group.
-func realExec(ctx context.Context, bin string, args []string, dir string, capBytes int, timeout time.Duration) runResult {
+func realExec(ctx context.Context, bin string, args []string, dir string, capBytes int, timeout time.Duration) (result runResult) {
 	ctx2, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd, err := newSandboxedCommand(ctx2, bin, args, dir)
+	cmd, cleanup, ephemeral, err := newSandboxedCommand(ctx2, bin, args, dir)
 	if err != nil {
 		return runResult{Err: err}
 	}
+	result.EphemeralFiles = ephemeral
+	defer func() {
+		if err := cleanup(); err != nil {
+			stopExecutorRun(ctx2, err)
+			result.Err = errors.Join(result.Err, err)
+		}
+	}()
 	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
@@ -297,7 +312,7 @@ func realExec(ctx context.Context, bin string, args []string, dir string, capByt
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	timedOut := ctx2.Err() == context.DeadlineExceeded
-	return runResult{Output: buf.String(), TimedOut: timedOut, Err: nonTimeoutErr(err, timedOut)}
+	return runResult{Output: buf.String(), TimedOut: timedOut, Err: nonTimeoutErr(err, timedOut), EphemeralFiles: ephemeral}
 }
 
 // realExecPipeline runs a shell-free pipeline: each stage's stdout is wired to
@@ -307,7 +322,7 @@ func realExec(ctx context.Context, bin string, args []string, dir string, capByt
 // One timeout bounds the whole pipeline; on cancel every stage's process group
 // is killed. A broken pipe on an upstream stage (a downstream stage like head
 // exiting early) is normal and is not reported as an error.
-func realExecPipeline(ctx context.Context, stages []pipelineStage, dir string, capBytes int, timeout time.Duration) runResult {
+func realExecPipeline(ctx context.Context, stages []pipelineStage, dir string, capBytes int, timeout time.Duration) (result runResult) {
 	ctx2, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -316,11 +331,23 @@ func realExecPipeline(ctx context.Context, stages []pipelineStage, dir string, c
 
 	n := len(stages)
 	cmds := make([]*exec.Cmd, n)
+	ephemeral := false
+	cleanups := make([]func() error, 0, n)
+	defer func() {
+		for _, cleanup := range cleanups {
+			if err := cleanup(); err != nil {
+				stopExecutorRun(ctx2, err)
+				result.Err = errors.Join(result.Err, err)
+			}
+		}
+	}()
 	for i := range stages {
-		c, err := newSandboxedCommand(ctx2, stages[i].Binary, stages[i].Args, dir)
+		c, cleanup, stageEphemeral, err := newSandboxedCommand(ctx2, stages[i].Binary, stages[i].Args, dir)
 		if err != nil {
 			return runResult{Err: err}
 		}
+		ephemeral = ephemeral || stageEphemeral
+		cleanups = append(cleanups, cleanup)
 		c.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
 		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		c.WaitDelay = 2 * time.Second
@@ -398,7 +425,7 @@ func realExecPipeline(ctx context.Context, stages []pipelineStage, dir string, c
 		}
 	}
 	timedOut := ctx2.Err() == context.DeadlineExceeded
-	return runResult{Output: buf.String(), TimedOut: timedOut, Err: nonTimeoutErr(lastErr, timedOut)}
+	return runResult{Output: buf.String(), TimedOut: timedOut, Err: nonTimeoutErr(lastErr, timedOut), EphemeralFiles: ephemeral}
 }
 
 func nonTimeoutErr(err error, timedOut bool) error {

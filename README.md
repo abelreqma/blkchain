@@ -256,6 +256,15 @@ or SIGTERM cancels an active CLI run and writes an interrupted report.
 The workspace `audit.jsonl` records typed model decisions, tool calls, gate verdicts, and
 command execution attempts. Eight gate denials within one minute halt the engagement and leave a paused
 report with the reason and report paths. An audit write failure stops the run.
+Target-facing IPv4 commands with a verifiable, in-scope remote address run in a pinned Docker
+runner. Its network namespace admits only the command's resolved destination IPs, and its tool
+process drops all capabilities after the firewall is installed. The runner receives a read-only
+copy of task scratch inputs and a 64 MiB temporary work filesystem; files it creates are not
+persisted after the command. Capture stdout or stderr for evidence. Loopback, link-local,
+operator-host interfaces, Docker host gateways, broadcast, and IPv6 destinations fail closed.
+Commands with no extracted network target run under the macOS file and network sandbox; local
+host execution on other operating systems fails closed. The pinned runner image must already
+exist locally and includes a limited tool set; an unavailable tool reports a command error.
 
 **Models panel.** In the interactive session, `/models` lists every model: the chat models the LLM
 server serves, the embedder, the reranker, and web search. Keys: up/down move, space turns the

@@ -284,6 +284,32 @@ func (s *Scope) InScope(target string) bool {
 	return false
 }
 
+func (s *Scope) IsDirectedBroadcast(ip net.IP) bool {
+	v4 := ip.To4()
+	if v4 == nil {
+		return false
+	}
+	for _, matcher := range s.in {
+		if matcher.cidr == nil {
+			continue
+		}
+		ones, bits := matcher.cidr.Mask.Size()
+		if bits != 32 || ones >= 31 {
+			continue
+		}
+		network := matcher.cidr.IP.To4()
+		if network == nil {
+			continue
+		}
+		broadcast := net.IPv4(network[0]|^matcher.cidr.Mask[0], network[1]|^matcher.cidr.Mask[1],
+			network[2]|^matcher.cidr.Mask[2], network[3]|^matcher.cidr.Mask[3])
+		if broadcast.Equal(v4) {
+			return true
+		}
+	}
+	return false
+}
+
 // Empty reports whether the scope has no in-scope entries.
 func (s *Scope) Empty() bool { return len(s.in) == 0 }
 

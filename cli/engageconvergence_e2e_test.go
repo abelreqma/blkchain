@@ -3,14 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -100,15 +96,10 @@ func TestEngageConvergenceLocalLLM(t *testing.T) {
 		t.Setenv("BLKCHAIN_ENGAGE_MAX_ROUNDS", "2")
 		t.Setenv("BLKCHAIN_ENGAGE_MAX_CALLS", "64")
 		t.Setenv("BLKCHAIN_ENGAGE_NO_PROGRESS_ROUNDS", "3")
-		var requests atomic.Int32
-		fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			requests.Add(1)
-			w.Header().Set("Server", "blk-convergence-fixture")
-			fmt.Fprint(w, "convergence-fixture-ok")
-		}))
-		defer fixture.Close()
+		fixtureIP, fixtureName := startDockerHTTPFixture(t, "convergence", "convergence-fixture-ok")
+		fixtureURL := "http://" + fixtureIP + ":8080/"
 		cwd, wsDir := t.TempDir(), t.TempDir()
-		if err := os.WriteFile(filepath.Join(cwd, "ROE.md"), []byte("## In Scope\n127.0.0.1\n"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(cwd, "ROE.md"), []byte("## In Scope\n"+fixtureIP+"\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Mkdir(filepath.Join(cwd, ".blkchain"), 0700); err != nil {
@@ -117,7 +108,7 @@ func TestEngageConvergenceLocalLLM(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(cwd, ".blkchain", "config.yaml"), []byte("allowed_binaries:\n  - curl\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		goal := "Create one web task for " + fixture.URL + ". Dispatch that task. Use only curl with --max-time 5 to fetch the HTTP response. Record exact response evidence, complete the task, and return a report. Do not scan ports or add follow-on tasks."
+		goal := "Create one web task for " + fixtureURL + ". Dispatch that task. Use only curl with --max-time 5 to fetch the HTTP response. Record exact response evidence, complete the task, and return a report. Do not scan ports or add follow-on tasks."
 		out, err := runReplEngage(ctx, wsDir, cwd, secgate.Auto, false, base, rc, cfg, modelPrefs{}, nil, nil, askuser.AutoAsker{}, nil, goal, nil)
 		if err != nil {
 			t.Fatalf("REPL: %v; report=%q", err, out)
@@ -143,10 +134,11 @@ func TestEngageConvergenceLocalLLM(t *testing.T) {
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
-		if requests.Load() == 0 || !captured || !strings.Contains(string(reportMD), "convergence-fixture-ok") || !strings.Contains(out, "Engagement paused: round cap") || strings.Contains(out, "Final synthesis unavailable") {
-			t.Fatalf("requests=%d captured=%v report=%q", requests.Load(), captured, out)
+		logs, logErr := exec.Command("docker", "logs", fixtureName).CombinedOutput()
+		if logErr != nil || !strings.Contains(string(logs), "GET /") || !captured || !strings.Contains(string(reportMD), "convergence-fixture-ok") || !strings.Contains(out, "Engagement paused: round cap") || strings.Contains(out, "Final synthesis unavailable") {
+			t.Fatalf("fixture logs=%q err=%v captured=%v report=%q", logs, logErr, captured, out)
 		}
-		t.Logf("REPL local fixture: %d HTTP requests; report:\n%s", requests.Load(), out)
+		t.Logf("REPL Docker fixture: %d HTTP requests; report:\n%s", strings.Count(string(logs), "GET /"), out)
 	})
 	t.Run("cli-round-cap", func(t *testing.T) {
 		t.Setenv("BLKCHAIN_ENGAGE_MAX_ROUNDS", "1")

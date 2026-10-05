@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -344,11 +345,31 @@ func runExecutor(ctx context.Context, d engageDeps, taskID string) (string, erro
 
 // runOrchestrator runs the top-level engagement loop for a goal.
 func runOrchestrator(ctx context.Context, d engageDeps, goal string) (final string, runErr error) {
+	runCtx, cancelRun := context.WithCancelCause(ctx)
+	defer cancelRun(nil)
+	ctx = withExecutorStop(runCtx, cancelRun)
+	if d.Gate != nil {
+		ctx = withExecutorScope(ctx, d.Gate.Scope)
+	}
 	ctx, stopBudget, err := engageBudgetContext(ctx, d.Store, d.MaxActions, d.WallSeconds)
 	if err != nil {
 		return "", err
 	}
 	defer stopBudget()
+	defer func() {
+		cause := context.Cause(runCtx)
+		if cause == nil || errors.Is(cause, context.Canceled) {
+			cause = context.Cause(ctx)
+		}
+		if cause != nil && !errors.Is(cause, context.Canceled) && !errors.Is(cause, context.DeadlineExceeded) &&
+			!errors.Is(cause, errEngageWorkBudget) && !errors.Is(cause, errEngageWallBudget) && !errors.Is(runErr, cause) {
+			if errors.Is(runErr, context.Canceled) {
+				runErr = cause
+			} else {
+				runErr = errors.Join(runErr, cause)
+			}
+		}
+	}()
 	defer func() {
 		if report, stopped, stopErr := engageBudgetStop(ctx, d.Store, goal); stopped {
 			if d.OnStop != nil {

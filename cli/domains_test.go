@@ -16,6 +16,18 @@ func TestExecutorPreambleAllowsGatedCommands(t *testing.T) {
 	}
 }
 
+func TestNetworkExecutorPromptsUseCapturedOutput(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"recon":       domainFor("recon").Prompt,
+		"web":         domainFor("web").Prompt,
+		"ai-security": aiSecDomainPrompt,
+	} {
+		if !strings.Contains(prompt, "stdout or stderr") || strings.Contains(prompt, "Save outputs in the working directory") || strings.Contains(prompt, "Write outputs with relative paths") {
+			t.Fatalf("%s prompt expects persistent network output files", name)
+		}
+	}
+}
+
 func TestExecutorPromptsDriveTheOffensiveLifecycle(t *testing.T) {
 	for _, want := range []string{"offensive operator", "initial access", "privilege escalation", "lateral movement", "post-exploitation", "rules of engagement", "execution gate"} {
 		if !strings.Contains(executorPreamble, want) {

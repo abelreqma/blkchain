@@ -257,6 +257,9 @@ func localNewTargetAnalysisRunCommand(g *secgate.Gate, task engagement.Task, sto
 			if res.Err != nil {
 				fmt.Fprintf(&b, "(command exited with an error: %s)\n", res.Err.Error())
 			}
+			if res.EphemeralFiles {
+				b.WriteString("(isolated command files are temporary; capture stdout or stderr as evidence)\n")
+			}
 			b.WriteString(secgate.WrapUntrusted("command", res.Output))
 			return b.String(), nil
 		})
