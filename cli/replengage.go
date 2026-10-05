@@ -20,7 +20,7 @@ import (
 // replengage.go is the gate-governed engage path reachable from the REPL. The
 // session autonomy mode (secgate.Safe/Auto, held on the tui model as engageMode)
 // and the auto-scope override (engageOverride) feed buildEngageGate, so a REPL
-// engagement is gated exactly like `blk engage`: LOCAL always confirms, the
+// engagement is gated exactly like `blk engage`: unattended LOCAL requires RoE and config allowlists, the
 // unattended /auto bound falls back to HITL, and the RoE/override rules hold. The
 // three helpers below back the UI/UX session's /safe//auto commands and ribbon.
 
@@ -70,7 +70,7 @@ func unattendedBoundEmpty(cwd string) bool {
 // orchestrator for goal. scope and config policy autodetect from cwd (ROE.md +
 // .blkchain/config.yaml); the engagement runs in wsDir (empty picks a fresh
 // timestamped workspace under the config dir). confirm is the TUI confirmer: in
-// a LOCAL engagement every command is confirmed and a nil confirmer fails closed.
+// a LOCAL engagement commands outside the RoE and config allowlists require confirmation.
 // progress is nil-safe and, when set, feeds a live view of the engagement store.
 // Every command the engagement issues passes the single secgate.Gate.
 func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, override bool,
@@ -121,11 +121,6 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 	if err != nil {
 		return "", fmt.Errorf("engage: %w", err)
 	}
-	// Fail closed: a LOCAL engagement confirms every command, so with no confirmer
-	// it cannot run.
-	if scope != nil && scope.Local() && confirm == nil {
-		return "", errors.New("engage: a local/post-access engagement needs interactive confirmation")
-	}
 
 	ws, err := engagement.OpenWorkspace(wsDir)
 	if err != nil {
@@ -141,12 +136,24 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 		if err := saveEngageCheckpoint(ws.Dir, entry, source); err != nil {
 			return "", fmt.Errorf("engage: checkpoint: %w", err)
 		}
-		if kind == "roe" {
-			scope, scopeDesc, _, err = resolveEngageScope(engageOpts{}, ws.Dir, nil)
+		if kind != "none" {
+			saved, loadErr := loadEngageCheckpoint(ws.Dir)
+			if loadErr != nil {
+				return "", fmt.Errorf("engage: checkpoint: %w", loadErr)
+			}
+			scope, scopeDesc, roeUsed, err = checkpointScope(ws.Dir, saved)
 			if err != nil {
 				return "", fmt.Errorf("engage: snapshotted scope: %w", err)
 			}
 		}
+	}
+	policy.AutoActions, err = checkpointAutoActions(ws.Dir)
+	if err != nil {
+		return "", fmt.Errorf("engage: autonomous actions: %w", err)
+	}
+	if scope != nil && scope.Local() && confirm == nil &&
+		(mode != secgate.Auto || !policy.AutoActions.hasLocalRule() || !policy.LocalUnattendedReady) {
+		return "", errors.New("engage: a local/post-access engagement needs interactive confirmation or RoE autonomous actions with local_unattended_binaries")
 	}
 
 	SetEngageEvidenceSource(ws.Store.EvidenceRowsFor)
@@ -175,6 +182,7 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 	}
 	deps := buildEngageDeps(model, rc, cfg, prefs, ws.Store, gate, scratch, cat, asker, confirm, progress)
 	deps.ExploitTools = policy.ExploitTools
+	deps.AutoActions = policy.AutoActions
 	deps.MaxActions, deps.WallSeconds = policy.MaxActions, policy.WallSeconds
 	deps = applyArmReq(deps, replArmReq())
 	toolHelp, toolHelpClose := openToolHelpCache()

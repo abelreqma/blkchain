@@ -11,6 +11,7 @@ import (
 )
 
 func finalizeCandidate(base engagement.Task, cit engagement.Citation, audit func(action, detail string), gapDetail string) engagement.Task {
+	base.CodeCandidate = true
 	if cit.Source != "" {
 		base.Citation = cit
 		if base.Status == "" {
@@ -107,15 +108,16 @@ func candidateTask(svc Service, technique string) engagement.Task {
 	}
 	id := "exploit-" + sanitizeSegment(svc.Host) + "-" + strconv.Itoa(svc.Port) + "-" + sanitizeSegment(key)
 	return engagement.Task{
-		ID:        id,
-		Kind:      "exploit",
-		Target:    target,
-		Objective: objective,
-		Status:    engagement.StatusTodo,
-		Phase:     engagement.PhaseExploit,
-		Surface:   engagement.SurfaceNetwork,
-		Armed:     false,
-		BasisIDs:  []string{svc.Prov.TaskID},
+		ID:            id,
+		Kind:          "exploit",
+		Target:        target,
+		Objective:     objective,
+		Status:        engagement.StatusTodo,
+		Phase:         engagement.PhaseExploit,
+		Surface:       engagement.SurfaceNetwork,
+		Armed:         false,
+		CodeCandidate: true,
+		BasisIDs:      []string{svc.Prov.TaskID},
 	}
 }
 

@@ -163,3 +163,24 @@ func TestLoadEngageConfigExploitTools(t *testing.T) {
 		t.Fatalf("ExploitTools = %v, want [customexploit sqlmap]", cfg.ExploitTools)
 	}
 }
+
+func TestLocalUnattendedBinariesAreOnlyAConfigBound(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".blkchain", "config.yaml")
+	writeFile(t, path, "local_unattended_binaries: [id, uname]\n")
+	policy, err := resolveEngageConfigPolicy(engageOpts{}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.LocalUnattendedReady || !policy.LocalUnattendedAllow.Permits("id") || policy.AutoActions != nil {
+		t.Fatalf("config policy=%+v", policy)
+	}
+	writeFile(t, path, "local_unattended_binaries: true\n")
+	if _, err := loadEngageConfig(path); err == nil {
+		t.Fatal("unbounded LOCAL binary switch accepted")
+	}
+	writeFile(t, path, "local_unattended_binaries: [/tmp/id]\n")
+	if _, err := loadEngageConfig(path); err == nil {
+		t.Fatal("path-qualified LOCAL binary accepted")
+	}
+}

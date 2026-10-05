@@ -2,6 +2,12 @@ package engagement
 
 import "time"
 
+func (s *Store) HasEvidence(taskID string) (bool, error) {
+	var found int
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM evidence WHERE task_id = ? LIMIT 1)`, taskID).Scan(&found)
+	return found != 0, err
+}
+
 // EvidenceCap is the maximum number of characters (runes) of a quote kept as
 // evidence.
 const EvidenceCap = 4000

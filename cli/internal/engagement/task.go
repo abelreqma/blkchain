@@ -197,7 +197,8 @@ type Task struct {
 	// candidate: such a candidate is persisted Status=blocked and is surfaced to
 	// the operator but not dispatched (dispatch_batch skips blocked) and not armed
 	// (armTask refuses it) until it is grounded.
-	CoverageGap bool
+	CoverageGap   bool
+	CodeCandidate bool
 	// Citation is the candidate's source provenance: the kb
 	// source + origin trust when it was seeded from the corpus, empty otherwise.
 	Citation Citation
@@ -267,19 +268,19 @@ func unmarshalCitation(s string) (Citation, error) {
 // GetTask returns the task with the given id, or ErrNotFound.
 func (s *Store) GetTask(id string) (Task, error) {
 	var (
-		t                      Task
-		status                 string
-		deps, bas              sql.NullString
-		phase, surface, capVal sql.NullString
-		cit                    sql.NullString
-		advisory               sql.NullString
-		armed                  sql.NullInt64
-		coverageGap            sql.NullInt64
+		t                          Task
+		status                     string
+		deps, bas                  sql.NullString
+		phase, surface, capVal     sql.NullString
+		cit                        sql.NullString
+		advisory                   sql.NullString
+		armed                      sql.NullInt64
+		coverageGap, codeCandidate sql.NullInt64
 	)
 	err := s.db.QueryRow(
-		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, citation, advisory
+		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, code_candidate, citation, advisory
 		 FROM task WHERE id = ?`, id).
-		Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed, &coverageGap, &cit, &advisory)
+		Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed, &coverageGap, &codeCandidate, &cit, &advisory)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNotFound
 	}
@@ -292,6 +293,7 @@ func (s *Store) GetTask(id string) (Task, error) {
 	t.Capability = Capability(capVal.String)
 	t.Armed = armed.Int64 != 0
 	t.CoverageGap = coverageGap.Int64 != 0
+	t.CodeCandidate = codeCandidate.Int64 != 0
 	t.Advisory = advisory.String
 	if t.DependsOn, err = unmarshalStrings(deps.String); err != nil {
 		return Task{}, err

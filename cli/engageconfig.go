@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,11 +19,12 @@ import (
 
 // engageConfig is the parsed .blkchain/config.yaml.
 type engageConfig struct {
-	DeniedBinaries      []string        `yaml:"denied_binaries"`
-	AllowedBinaries     allowedBinaries `yaml:"allowed_binaries"`
-	AllowInterpreterPoC bool            `yaml:"allow_interpreter_poc"`
-	MaxActions          int             `yaml:"engage_max_actions"`
-	WallSeconds         int             `yaml:"engage_wall_seconds"`
+	DeniedBinaries          []string        `yaml:"denied_binaries"`
+	AllowedBinaries         allowedBinaries `yaml:"allowed_binaries"`
+	LocalUnattendedBinaries []string        `yaml:"local_unattended_binaries"`
+	AllowInterpreterPoC     bool            `yaml:"allow_interpreter_poc"`
+	MaxActions              int             `yaml:"engage_max_actions"`
+	WallSeconds             int             `yaml:"engage_wall_seconds"`
 	// ExploitTools extends the per-finding exploit-tier allowlist with the
 	// operator's own vetted structured-argv exploit tools, in addition to the
 	// code-owned default catalog. It is additive and always bounded by
@@ -77,6 +79,11 @@ func loadEngageConfig(path string) (*engageConfig, error) {
 	}
 	if cfg.MaxActions < 0 || cfg.MaxActions > 10000 || cfg.WallSeconds < 0 || cfg.WallSeconds > 86400 {
 		return nil, fmt.Errorf("engage config %s: engagement budgets out of range", path)
+	}
+	for _, binary := range cfg.LocalUnattendedBinaries {
+		if strings.TrimSpace(binary) == "" || strings.ContainsAny(binary, `/\`) {
+			return nil, fmt.Errorf("engage config %s: local_unattended_binaries needs bare binary names", path)
+		}
 	}
 	return &cfg, nil
 }

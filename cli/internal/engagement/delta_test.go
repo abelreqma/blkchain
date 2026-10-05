@@ -393,3 +393,27 @@ func TestApplyDefaultsAndRoundTripsPhaseSurface(t *testing.T) {
 		t.Errorf("round-trip mismatch: %+v", g2)
 	}
 }
+
+func TestCodeCandidateModelDeltaCannotChangeIdentity(t *testing.T) {
+	s := mustOpen(t)
+	base := Task{ID: "c1", Kind: "exploit", Target: "192.0.2.1", Phase: PhaseExploit, Surface: SurfaceNetwork, Status: StatusTodo, CodeCandidate: true}
+	if _, err := s.Apply(Delta{Kind: "correlate", Upserts: []Task{base}}); err != nil {
+		t.Fatal(err)
+	}
+	changed := base
+	changed.Target = "198.51.100.2"
+	if _, err := s.Apply(Delta{Kind: "plan_update", Upserts: []Task{changed}}); err == nil {
+		t.Fatal("model plan retargeted code candidate")
+	}
+	if _, err := s.Apply(Delta{Kind: "plan_add", Upserts: []Task{base}}); err == nil {
+		t.Fatal("model plan replaced code candidate")
+	}
+	gap := Task{ID: "gap", Kind: "exploit", Target: "192.0.2.1", Phase: PhaseExploit, Surface: SurfaceNetwork, Status: StatusBlocked, CoverageGap: true, CodeCandidate: true}
+	if _, err := s.Apply(Delta{Kind: "correlate", Upserts: []Task{gap}}); err != nil {
+		t.Fatal(err)
+	}
+	gap.Status = StatusTodo
+	if _, err := s.Apply(Delta{Kind: "plan_update", Upserts: []Task{gap}}); err == nil {
+		t.Fatal("model plan unblocked coverage gap")
+	}
+}

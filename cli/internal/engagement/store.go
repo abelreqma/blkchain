@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS task (
 	capability TEXT,
 	armed INTEGER,
 	coverage_gap INTEGER,
+	code_candidate INTEGER,
 	citation TEXT,
 	advisory TEXT
 );
@@ -241,6 +242,7 @@ func addMissingTaskColumns(tx *sql.Tx) error {
 		{"capability", "TEXT"},
 		{"armed", "INTEGER"},
 		{"coverage_gap", "INTEGER"},
+		{"code_candidate", "INTEGER"},
 		{"citation", "TEXT"},
 		{"advisory", "TEXT"}, // D' follow-up: display-only prior-episode recall hint, additive.
 	}

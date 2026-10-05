@@ -150,13 +150,15 @@ func runEngageWithOptions(o engageOpts, goal string, checkpoint *engageCheckpoin
 		if err := saveEngageCheckpoint(ws.Dir, entry, source); err != nil {
 			return fmt.Errorf("engage: checkpoint: %w", err)
 		}
-		if kind == "roe" {
-			scope, scopeDesc, roeUsed, err = resolveEngageScope(engageOpts{}, ws.Dir, nil)
-		} else if kind == "scope" {
-			scope, scopeDesc, _, err = resolveEngageScope(engageOpts{scope: filepath.Join(ws.Dir, "scope.txt")}, cwd, nil)
-		}
-		if err != nil {
-			return fmt.Errorf("engage: snapshotted scope: %w", err)
+		if kind != "none" {
+			saved, loadErr := loadEngageCheckpoint(ws.Dir)
+			if loadErr != nil {
+				return fmt.Errorf("engage: checkpoint: %w", loadErr)
+			}
+			scope, scopeDesc, roeUsed, err = checkpointScope(ws.Dir, saved)
+			if err != nil {
+				return fmt.Errorf("engage: snapshotted scope: %w", err)
+			}
 		}
 	}
 
@@ -166,6 +168,10 @@ func runEngageWithOptions(o engageOpts, goal string, checkpoint *engageCheckpoin
 		if _, werr := writeRoETemplate(ws.Dir); werr != nil {
 			fmt.Fprintf(os.Stderr, "engage: could not write ROE.md template: %v\n", werr)
 		}
+	}
+	policy.AutoActions, err = checkpointAutoActions(ws.Dir)
+	if err != nil {
+		return fmt.Errorf("engage: autonomous actions: %w", err)
 	}
 
 	tty := isTerminalFile(os.Stdin)
@@ -177,10 +183,9 @@ func runEngageWithOptions(o engageOpts, goal string, checkpoint *engageCheckpoin
 	if tty {
 		confirm = newTerminalConfirmer(os.Stdin, os.Stdout)
 	}
-	// Fail closed: a local engagement with no way to confirm cannot run, because
-	// every local command needs human approval and none is available off a TTY.
-	if scope != nil && scope.Local() && confirm == nil {
-		return fmt.Errorf("engage: local/post-access engagements require interactive confirmation; run on a TTY (or over MCP with confirm=elicit)")
+	if scope != nil && scope.Local() && confirm == nil &&
+		(mode != secgate.Auto || !policy.AutoActions.hasLocalRule() || !policy.LocalUnattendedReady) {
+		return fmt.Errorf("engage: local/post-access engagements require interactive confirmation or RoE autonomous actions with local_unattended_binaries")
 	}
 
 	// The scratch dir lives outside the workspace: run_command's cwd, so a
@@ -222,6 +227,7 @@ func runEngageWithOptions(o engageOpts, goal string, checkpoint *engageCheckpoin
 	r := newVizRenderer(newMmdfluxRunner())
 	deps := buildEngageDeps(model, rc, cfg, prefs, ws.Store, gate, scratch, cat, asker, confirm, makeEngageProgress(os.Stdout, r, prefs.Viz))
 	deps.ExploitTools = policy.ExploitTools
+	deps.AutoActions = policy.AutoActions
 	deps.MaxActions, deps.WallSeconds = policy.MaxActions, policy.WallSeconds
 	toolHelp, toolHelpClose := openToolHelpCache()
 	defer toolHelpClose()
@@ -341,6 +347,7 @@ func resolveEngageConfigPolicy(o engageOpts, cwd string) (gatePolicy, error) {
 	}
 	var denied []string
 	var exploitTools []string
+	var localUnattended []string
 	var maxActions, wallSeconds int
 	poc := false
 	// Default (no config): an empty, non-nil unattended bound, so unattended /auto
@@ -351,6 +358,7 @@ func resolveEngageConfigPolicy(o engageOpts, cwd string) (gatePolicy, error) {
 		maxActions, wallSeconds = cfg.MaxActions, cfg.WallSeconds
 		poc = cfg.AllowInterpreterPoC
 		exploitTools = cfg.ExploitTools
+		localUnattended = cfg.LocalUnattendedBinaries
 		if cfg.AllowedBinaries.All {
 			// allowed_binaries: true -> everything allowed unattended (no bound).
 			unattended = nil
@@ -359,13 +367,15 @@ func resolveEngageConfigPolicy(o engageOpts, cwd string) (gatePolicy, error) {
 		}
 	}
 	return gatePolicy{
-		DeniedBinaries:      denied,
-		UnattendedAllow:     unattended,
-		AllowInterpreterPoC: poc,
-		AutoScopeOverride:   o.autoOverride,
-		MaxActions:          maxActions,
-		WallSeconds:         wallSeconds,
-		ExploitTools:        exploitTools,
+		DeniedBinaries:       denied,
+		UnattendedAllow:      unattended,
+		LocalUnattendedAllow: secgate.NewAllowlist(localUnattended...),
+		LocalUnattendedReady: len(localUnattended) > 0,
+		AllowInterpreterPoC:  poc,
+		AutoScopeOverride:    o.autoOverride,
+		MaxActions:           maxActions,
+		WallSeconds:          wallSeconds,
+		ExploitTools:         exploitTools,
 	}, nil
 }
 

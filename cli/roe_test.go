@@ -150,3 +150,33 @@ func TestParseRoEMultiLineCommentSkipped(t *testing.T) {
 		t.Error("the real in-scope entry after the comment should parse")
 	}
 }
+
+func TestRoEAutonomousActionsRequireExactInScopeHost(t *testing.T) {
+	roe, err := ParseRoE(strings.NewReader("## In Scope\n192.0.2.1\n## Autonomous Actions\n- exploit/network 192.0.2.1\n"))
+	if err != nil || roe.AutoActions == nil {
+		t.Fatalf("auto actions=%+v err=%v", roe, err)
+	}
+	for _, entry := range []string{
+		"## In Scope\n192.0.2.1\n## Autonomous Actions\n- exploit/network 198.51.100.2\n",
+		"## In Scope\n192.0.2.1\n## Autonomous Actions\n- exploit/network 192.0.2.1:80\n",
+		"## In Scope\n192.0.2.1\n## Autonomous Actions\n- exploit/network 192.0.2.0/24\n",
+		"## In Scope\n192.0.2.1\n## Autonomous Actions\n- recon/network 192.0.2.1\n",
+	} {
+		if _, err := ParseRoE(strings.NewReader(entry)); err == nil {
+			t.Fatalf("invalid autonomous action accepted: %q", entry)
+		}
+	}
+}
+
+func TestRoELocalAutoActionNeedsLocalScope(t *testing.T) {
+	if _, err := ParseRoE(strings.NewReader("## In Scope\n192.0.2.1\n## Autonomous Actions\nrecon/local local\n")); err == nil {
+		t.Fatal("local auto action without a local directive accepted")
+	}
+	roe, err := ParseRoE(strings.NewReader("## In Scope\nlocal\n## Autonomous Actions\nrecon/local local\n"))
+	if err != nil || roe.AutoActions == nil {
+		t.Fatalf("local auto policy=%+v err=%v", roe, err)
+	}
+	if _, err := ParseRoE(strings.NewReader("## In Scope\nlocal\n## Out of Scope\nlocal\n## Autonomous Actions\nrecon/local local\n")); err == nil {
+		t.Fatal("out-of-scope local directive was ignored")
+	}
+}

@@ -56,12 +56,15 @@ func externalEngageAllowlist() []string {
 // posture (nil UnattendedAllow runs unattended /auto, no config
 // denylist, no interpreter PoC, no override).
 type gatePolicy struct {
-	DeniedBinaries      []string
-	UnattendedAllow     *secgate.Allowlist
-	AllowInterpreterPoC bool
-	AutoScopeOverride   bool
-	MaxActions          int
-	WallSeconds         int
+	DeniedBinaries       []string
+	UnattendedAllow      *secgate.Allowlist
+	LocalUnattendedAllow *secgate.Allowlist
+	LocalUnattendedReady bool
+	AutoActions          *autoActionPolicy
+	AllowInterpreterPoC  bool
+	AutoScopeOverride    bool
+	MaxActions           int
+	WallSeconds          int
 	// ExploitTools is the operator's config exploit_tools list. It is not a
 	// gate field (the gate does not read it); buildEngageGate ignores it and the
 	// engage entrypoints copy it onto engageDeps for the exploit executor.
@@ -71,8 +74,8 @@ type gatePolicy struct {
 // buildEngageGate is the single composition root for the engage gate. It
 // selects the allowlist by profile: the external allowlist plus the scope's
 // `allow <bin>` lines when the scope is not local, and no allowlist at all for
-// local (ClassifyLocal governs there; every local command is human-confirmed
-// regardless). It also builds the one and only copy of the Protected-paths
+// local (ClassifyLocal governs there; unattended LOCAL needs RoE and config
+// allowlists). It also builds the one and only copy of the Protected-paths
 // recipe (the engagement's own artifacts, guarded from an executor's file
 // arguments in the LOCAL profile) and sets Scratch. The config policy and
 // auto-scope override are threaded onto the Gate here. The caller starts the
@@ -92,7 +95,7 @@ func buildEngageGate(ws *engagement.Workspace, scope *secgate.Scope, mode secgat
 	// resolve to the same absolute paths the sensitive-path check compares
 	// against. reportPaths and EvidenceDir are the code's own path builders.
 	protMD, protJSON := reportPaths(ws.Dir)
-	return &secgate.Gate{
+	g := &secgate.Gate{
 		Mode:      mode,
 		Scope:     scope,
 		Allow:     allow,
@@ -109,12 +112,17 @@ func buildEngageGate(ws *engagement.Workspace, scope *secgate.Scope, mode secgat
 			filepath.Join(ws.Dir, "ROE.md"),
 			filepath.Join(ws.Dir, "scope.txt"),
 		},
-		Scratch:             scratch,
-		ConfigDenied:        policy.DeniedBinaries,
-		UnattendedAllow:     policy.UnattendedAllow,
-		AllowInterpreterPoC: policy.AllowInterpreterPoC,
-		AutoScopeOverride:   policy.AutoScopeOverride,
+		Scratch:              scratch,
+		ConfigDenied:         policy.DeniedBinaries,
+		UnattendedAllow:      policy.UnattendedAllow,
+		LocalUnattendedAllow: policy.LocalUnattendedAllow,
+		AllowInterpreterPoC:  policy.AllowInterpreterPoC,
+		AutoScopeOverride:    policy.AutoScopeOverride,
 	}
+	if policy.AutoActions != nil {
+		g.AutoAction = policy.AutoActions.permitsCommand
+	}
+	return g
 }
 
 // buildEngageDeps assembles the engageDeps fields shared by blk engage and the

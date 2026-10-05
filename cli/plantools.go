@@ -66,6 +66,11 @@ func newPlanAddTool(st *engagement.Store) tooldef.Tool {
 			if strings.EqualFold(strings.TrimSpace(a.Status), string(engagement.StatusDone)) {
 				return "plan_add: cannot set status done directly; record_evidence then plan_complete", nil
 			}
+			if existing, err := st.GetTask(a.ID); err == nil && existing.CodeCandidate {
+				return "plan_add: code-derived candidate cannot be replaced by a model task", nil
+			} else if err != nil && !errors.Is(err, engagement.ErrNotFound) {
+				return "plan_add: " + err.Error(), nil
+			}
 			// Storm guard: under repeated command failure an executor loop otherwise
 			// re-adds near-identical recon tasks. Reject a plan_add that duplicates an
 			// OPEN task on (kind, target, objective, surface). Re-adding the same id
@@ -129,6 +134,15 @@ func newPlanUpdateTool(st *engagement.Store) tooldef.Tool {
 			}
 			if err != nil {
 				return "plan_update: " + err.Error(), nil
+			}
+			if cur.CodeCandidate {
+				if (a.Kind != "" && a.Kind != cur.Kind) || (a.Target != "" && a.Target != cur.Target) ||
+					(a.Phase != "" && a.Phase != string(cur.Phase)) || (a.Surface != "" && a.Surface != string(cur.Surface)) {
+					return "plan_update: code-derived candidate identity cannot be changed", nil
+				}
+				if cur.Status == engagement.StatusBlocked && a.Status != "" && a.Status != string(engagement.StatusBlocked) {
+					return "plan_update: blocked code-derived candidate needs code-owned grounding", nil
+				}
 			}
 			if a.Kind != "" {
 				cur.Kind = a.Kind

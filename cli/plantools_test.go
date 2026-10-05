@@ -364,3 +364,45 @@ func TestPlanAddExplicitDifferentSurfaceAllowed(t *testing.T) {
 		t.Fatalf("different-surface task t2 should be added: %v", err)
 	}
 }
+
+func TestModelPlanCannotRetargetCodeCandidate(t *testing.T) {
+	st := openStore(t)
+	base := engagement.Task{ID: "c1", Kind: "exploit", Target: "192.0.2.1", Phase: engagement.PhaseExploit, Surface: engagement.SurfaceNetwork, Status: engagement.StatusTodo, CodeCandidate: true}
+	if _, err := st.Apply(engagement.Delta{Kind: "correlate", Upserts: []engagement.Task{base}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range []string{
+		`{"id":"c1","target":"198.51.100.2"}`,
+		`{"id":"c1","phase":"post-ex"}`,
+		`{"id":"c1","surface":"web"}`,
+	} {
+		out, err := newPlanUpdateTool(st).Call(context.Background(), args)
+		if err != nil || !strings.Contains(out, "identity cannot be changed") {
+			t.Fatalf("update %s: out=%q err=%v", args, out, err)
+		}
+	}
+	out, err := newPlanAddTool(st).Call(context.Background(), `{"id":"c1","kind":"exploit","target":"198.51.100.2"}`)
+	if err != nil || !strings.Contains(out, "cannot be replaced") {
+		t.Fatalf("replacement out=%q err=%v", out, err)
+	}
+	got, err := st.GetTask("c1")
+	if err != nil || !got.CodeCandidate || got.Target != "192.0.2.1" || got.Surface != engagement.SurfaceNetwork {
+		t.Fatalf("candidate changed: %+v err=%v", got, err)
+	}
+}
+
+func TestCoverageGapCannotBeUnblockedByModel(t *testing.T) {
+	st := openStore(t)
+	gap := engagement.Task{ID: "gap", Kind: "exploit", Target: "192.0.2.1", Phase: engagement.PhaseExploit, Surface: engagement.SurfaceNetwork, Status: engagement.StatusBlocked, CoverageGap: true, CodeCandidate: true}
+	if _, err := st.Apply(engagement.Delta{Kind: "correlate", Upserts: []engagement.Task{gap}}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := newPlanUpdateTool(st).Call(context.Background(), `{"id":"gap","status":"todo"}`)
+	if err != nil || !strings.Contains(out, "needs code-owned grounding") {
+		t.Fatalf("unblock out=%q err=%v", out, err)
+	}
+	got, err := st.GetTask("gap")
+	if err != nil || got.Status != engagement.StatusBlocked || !got.CoverageGap {
+		t.Fatalf("coverage gap changed: %+v err=%v", got, err)
+	}
+}

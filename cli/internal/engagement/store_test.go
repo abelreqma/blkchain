@@ -91,3 +91,24 @@ func TestOpenCorruptFile(t *testing.T) {
 		t.Fatal("Open on a corrupt file returned nil error")
 	}
 }
+
+func TestCodeCandidatePersistsAcrossOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "engagement.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Apply(Delta{Kind: "correlate", Upserts: []Task{{ID: "c1", Kind: "exploit", Status: StatusTodo, CodeCandidate: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	task, err := s.GetTask("c1")
+	if err != nil || !task.CodeCandidate {
+		t.Fatalf("reopened candidate=%+v err=%v", task, err)
+	}
+}

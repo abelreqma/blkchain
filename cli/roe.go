@@ -31,6 +31,9 @@ Describe the authorized engagement here.
 
 ## Rate
 10/s
+
+## Autonomous Actions
+<!-- phase/surface target, e.g. exploit/network 192.0.2.1 or recon/local local -->
 `
 
 // writeRoETemplate writes roeTemplate to <dir>/ROE.md when that file does not
@@ -63,9 +66,10 @@ func writeRoETemplate(dir string) (bool, error) {
 // RoE is a parsed ROE.md. Summary and Targets are informational (for the
 // report); Scope carries the enforced In/Out matchers and the optional Rate.
 type RoE struct {
-	Summary string
-	Targets []string
-	Scope   *secgate.Scope
+	Summary     string
+	Targets     []string
+	Scope       *secgate.Scope
+	AutoActions *autoActionPolicy
 }
 
 // ParseRoE reads an ROE.md. Recognized level-2+ sections are Summary, Targets,
@@ -78,6 +82,7 @@ type RoE struct {
 func ParseRoE(r io.Reader) (*RoE, error) {
 	var summary []string
 	var spec secgate.ScopeSpec
+	var autoEntries []string
 	section := ""
 	inComment := false
 
@@ -106,7 +111,7 @@ func ParseRoE(r io.Reader) (*RoE, error) {
 			}
 			key := normalizeSection(h)
 			if !isKnownSection(key) {
-				return nil, fmt.Errorf("ROE.md: unrecognized section heading %q (expected: Summary, Targets, In Scope, Out of Scope, Rate)", h)
+				return nil, fmt.Errorf("ROE.md: unrecognized section heading %q (expected: Summary, Targets, In Scope, Out of Scope, Rate, Autonomous Actions)", h)
 			}
 			section = key
 			continue
@@ -121,13 +126,19 @@ func ParseRoE(r io.Reader) (*RoE, error) {
 		case "targets":
 			spec.Targets = append(spec.Targets, entry)
 		case "in scope":
-			spec.In = append(spec.In, entry)
+			if strings.EqualFold(entry, "local") {
+				spec.Local = true
+			} else {
+				spec.In = append(spec.In, entry)
+			}
 		case "out of scope":
 			spec.Out = append(spec.Out, entry)
 		case "rate":
 			if spec.Rate == "" { // first entry wins
 				spec.Rate = entry
 			}
+		case "autonomous actions":
+			autoEntries = append(autoEntries, entry)
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -137,10 +148,15 @@ func ParseRoE(r io.Reader) (*RoE, error) {
 	if err != nil {
 		return nil, err
 	}
+	autoActions, err := buildAutoActionPolicy(autoEntries, scope)
+	if err != nil {
+		return nil, err
+	}
 	return &RoE{
-		Summary: strings.Join(summary, "\n"),
-		Targets: spec.Targets,
-		Scope:   scope,
+		Summary:     strings.Join(summary, "\n"),
+		Targets:     spec.Targets,
+		Scope:       scope,
+		AutoActions: autoActions,
 	}, nil
 }
 
@@ -162,7 +178,7 @@ func headingText(line string) (text string, level int, ok bool) {
 // ROE.md sections.
 func isKnownSection(key string) bool {
 	switch key {
-	case "summary", "targets", "in scope", "out of scope", "rate":
+	case "summary", "targets", "in scope", "out of scope", "rate", "autonomous actions":
 		return true
 	}
 	return false

@@ -42,9 +42,11 @@ type Gate struct {
 	//
 	// AllowInterpreterPoC is plumbed from config for the interpreter-PoC HITL
 	// exception; this policy layer does not act on it.
-	ConfigDenied        []string
-	UnattendedAllow     *Allowlist
-	AllowInterpreterPoC bool
+	ConfigDenied         []string
+	UnattendedAllow      *Allowlist
+	LocalUnattendedAllow *Allowlist
+	AutoAction           func(Command) bool
+	AllowInterpreterPoC  bool
 
 	// AutoScopeOverride is the explicit, logged operator override that relaxes
 	// "/auto requires a scope" to "/auto requires scope OR an override". It
@@ -89,11 +91,9 @@ func (g *Gate) audit(action, detail string) {
 // (every extracted target in scope), confirmation (Safe, unless already
 // session-approved). A scope with a local directive selects the LOCAL profile
 // instead: the classifier is ClassifyLocal (enforceability denials only) and
-// there is no binary allowlist. Because the LOCAL profile drops the allowlist,
-// it requires per-command human confirmation in EVERY mode, including Auto: the
-// human is the positive control that bounds arbitrary code execution, and with
-// no confirmer available a local command fails closed (deny). EXTERNAL /auto is
-// unchanged and does not prompt. It never executes anything.
+// there is no external binary allowlist. Unattended LOCAL requires a matching
+// RoE action and the local binary allowlist; other LOCAL commands need confirmation.
+// It never executes anything.
 //
 // The human confirmation (g.Confirm.Confirm) runs OUTSIDE g.mu: the mutex is
 // released for the duration of the prompt and re-acquired afterward, so a slow
@@ -241,7 +241,7 @@ func (g *Gate) checkLocked(c Command) Decision {
 	if tgt, bad := TargetSelfExecViolation(c, g.Scratch); bad {
 		return g.deny("target-self-exec", c, "a target-analysis task must not execute its own analysis target: "+tgt, "inspect the target read-only (file, stat, nm, readelf, objdump, strings, ldd, getcap) instead of executing it")
 	}
-	// Human-governed paths (LOCAL always-confirm, Safe, the Auto HITL-fallback)
+	// Human-governed paths (LOCAL HITL, Safe, the Auto HITL-fallback)
 	// relax the structural shell/interpreter/exec-wrapper/metacharacter/exec-flag
 	// denials: the operator approves the exact argv. Unattended paths (Auto with the
 	// binary permitted by allowed_binaries, no HITL) keep the structural denials -
@@ -376,7 +376,7 @@ func (g *Gate) rateAllowLocked(c Command) Decision {
 }
 
 // humanGovernedPath reports whether command c will be put to a human confirmer:
-// LOCAL (always-confirm), Safe mode, or the Auto HITL-fallback (a binary not
+// LOCAL without unattended authorization, Safe mode, or the Auto HITL-fallback (a binary not
 // permitted by the unattended allowed_binaries bound, or an exploit/post-ex
 // per-action-confirm command). Only on such a path are the structural code-exec
 // denials relaxed; an UNATTENDED Auto command (binary permitted unattended, or a
@@ -390,16 +390,28 @@ func (g *Gate) humanGovernedPath(c Command) bool {
 	if g.Confirm == nil {
 		return false
 	}
-	if g.Mode != Auto || (g.Scope != nil && g.Scope.Local()) {
+	if g.Mode != Auto {
 		return true
 	}
-	if c.Phase.perActionConfirm() {
+	if g.Scope != nil && g.Scope.Local() {
+		return !g.unattendedLocal(c)
+	}
+	if c.Phase.perActionConfirm() && !g.autonomousAction(c) {
 		return true
 	}
 	if g.UnattendedAllow != nil && !g.UnattendedAllow.Permits(c.Binary) {
 		return true
 	}
 	return false
+}
+
+func (g *Gate) autonomousAction(c Command) bool {
+	return g.Mode == Auto && g.AutoAction != nil && g.AutoAction(c)
+}
+
+func (g *Gate) unattendedLocal(c Command) bool {
+	return g.Scope != nil && g.Scope.Local() && g.autonomousAction(c) &&
+		g.LocalUnattendedAllow != nil && g.LocalUnattendedAllow.Permits(c.Binary)
 }
 
 // confirmTailLocked runs the confirmation step and audits the final decision. It
@@ -410,15 +422,15 @@ func (g *Gate) humanGovernedPath(c Command) bool {
 // confirmation is needed and it audits allow directly.
 func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
 	localProfile := g.Scope != nil && g.Scope.Local()
-	// Exploit and post-ex commands require per-action confirmation, except for
-	// code-authorized web actions in Auto after their task is armed.
-	force := c.Phase.perActionConfirm() && !(g.Mode == Auto && c.Surface == SurfaceWeb && c.AutonomousWeb)
-	needConfirm := g.Mode != Auto || localProfile || force
+	// Exploit and post-ex commands require per-action confirmation unless an
+	// armed action matches the RoE automation policy or the web authorization.
+	force := c.Phase.perActionConfirm() && !(g.Mode == Auto && c.Surface == SurfaceWeb && c.AutonomousWeb) && !g.autonomousAction(c)
+	needConfirm := g.Mode != Auto || (localProfile && !g.unattendedLocal(c)) || force
 	// Unattended-/auto bound: in Auto non-local, a command whose binary is
 	// not permitted by the config allowed_binaries list must be confirmed (HITL).
 	// A nil UnattendedAllow adds no extra confirmation. A present-but-empty
 	// bound forces confirmation for every Auto command (the no-allowlist floor).
-	if !needConfirm && g.UnattendedAllow != nil && !g.UnattendedAllow.Permits(c.Binary) {
+	if !localProfile && !needConfirm && g.UnattendedAllow != nil && !g.UnattendedAllow.Permits(c.Binary) {
 		needConfirm = true
 	}
 	// Session-approval memoization is skipped for the per-action-confirm tier:

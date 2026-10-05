@@ -113,6 +113,30 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 		}
 		upserts[i] = t
 	}
+	if d.Kind == "plan_add" || d.Kind == "plan_update" {
+		for _, task := range upserts {
+			var kind, target, phase, surface, status string
+			var basis sql.NullString
+			var gap, codeCandidate sql.NullInt64
+			err := conn.QueryRowContext(ctx,
+				`SELECT kind, target, phase, surface, basis_ids, status, coverage_gap, code_candidate FROM task WHERE id = ?`, task.ID).
+				Scan(&kind, &target, &phase, &surface, &basis, &status, &gap, &codeCandidate)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return 0, err
+			}
+			if codeCandidate.Int64 == 0 {
+				continue
+			}
+			if d.Kind == "plan_add" || !task.CodeCandidate || task.Kind != kind || task.Target != target ||
+				string(task.Phase) != phase || string(task.Surface) != surface || marshalStrings(task.BasisIDs) != basis.String ||
+				(gap.Int64 != 0 && !task.CoverageGap) || (status == string(StatusBlocked) && task.Status != StatusBlocked) {
+				return 0, fmt.Errorf("engagement: code-derived candidate %q cannot be retargeted or unblocked by a model plan", task.ID)
+			}
+		}
+	}
 
 	// Ids that exist after this delta: every id already stored plus the upserts.
 	known := map[string]bool{}
@@ -208,8 +232,8 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 
 	for _, t := range upserts {
 		if _, err := conn.ExecContext(ctx,
-			`INSERT INTO task (id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, citation, advisory)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO task (id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, code_candidate, citation, advisory)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			   kind = excluded.kind,
 			   target = excluded.target,
@@ -224,11 +248,12 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 			   capability = excluded.capability,
 			   armed = excluded.armed,
 			   coverage_gap = excluded.coverage_gap,
+			   code_candidate = excluded.code_candidate,
 			   citation = excluded.citation,
 			   advisory = excluded.advisory`,
 			t.ID, t.Kind, t.Target, t.Objective, t.DoneWhen, string(t.Status),
 			marshalStrings(t.DependsOn), marshalStrings(t.BasisIDs), newRev, newRev,
-			string(t.Phase), string(t.Surface), string(t.Capability), boolToInt(t.Armed), boolToInt(t.CoverageGap), marshalCitation(t.Citation), t.Advisory); err != nil {
+			string(t.Phase), string(t.Surface), string(t.Capability), boolToInt(t.Armed), boolToInt(t.CoverageGap), boolToInt(t.CodeCandidate), marshalCitation(t.Citation), t.Advisory); err != nil {
 			return 0, err
 		}
 	}

@@ -70,13 +70,13 @@ func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
 }
 
 func scanTasks(ctx context.Context, q rowsQueryer, limit int) ([]Task, error) {
-	query := `SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, citation, advisory
+	query := `SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, code_candidate, citation, advisory
 		 FROM task ORDER BY created_rev ASC, id ASC`
 	if limit > 0 {
 		query = `SELECT substr(id, 1, 256), substr(kind, 1, 256), substr(target, 1, 1024), substr(objective, 1, 1024), substr(done_when, 1, 1024), status,
 		 CASE WHEN length(depends_on) <= 4096 THEN depends_on ELSE NULL END,
 		 CASE WHEN length(basis_ids) <= 4096 THEN basis_ids ELSE NULL END,
-		 created_rev, updated_rev, phase, surface, capability, armed, coverage_gap,
+		 created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, code_candidate,
 		 CASE WHEN length(citation) <= 4096 THEN citation ELSE NULL END, substr(advisory, 1, 1024)
 		 FROM task ORDER BY CASE WHEN status IN ('todo', 'active') THEN 0 ELSE 1 END, created_rev ASC, id ASC LIMIT ?`
 	}
@@ -93,16 +93,16 @@ func scanTasks(ctx context.Context, q rowsQueryer, limit int) ([]Task, error) {
 	out := []Task{}
 	for rows.Next() {
 		var (
-			t                      Task
-			status                 string
-			deps, bas              sql.NullString
-			phase, surface, capVal sql.NullString
-			cit                    sql.NullString
-			advisory               sql.NullString
-			armed                  sql.NullInt64
-			coverageGap            sql.NullInt64
+			t                          Task
+			status                     string
+			deps, bas                  sql.NullString
+			phase, surface, capVal     sql.NullString
+			cit                        sql.NullString
+			advisory                   sql.NullString
+			armed                      sql.NullInt64
+			coverageGap, codeCandidate sql.NullInt64
 		)
-		if err := rows.Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed, &coverageGap, &cit, &advisory); err != nil {
+		if err := rows.Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed, &coverageGap, &codeCandidate, &cit, &advisory); err != nil {
 			return nil, err
 		}
 		t.Status = Status(status)
@@ -111,6 +111,7 @@ func scanTasks(ctx context.Context, q rowsQueryer, limit int) ([]Task, error) {
 		t.Capability = Capability(capVal.String)
 		t.Armed = armed.Int64 != 0
 		t.CoverageGap = coverageGap.Int64 != 0
+		t.CodeCandidate = codeCandidate.Int64 != 0
 		t.Advisory = advisory.String
 		if t.DependsOn, err = unmarshalStrings(deps.String); err != nil {
 			return nil, err

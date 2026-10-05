@@ -62,14 +62,9 @@ type engageDeps struct {
 	// allowlist for every exploit task. Empty is the code-owned default catalog only.
 	// The engage entrypoints copy it from gatePolicy after buildEngageDeps.
 	ExploitTools []string
-	// ArmReq is the operator arm gate for armed exploitation: the exploit
-	// executor calls it for an UNARMED exploit/post-ex task before running anything,
-	// in any mode (not AutoAsker-suppressed), so /auto cannot reach armed
-	// exploitation without a human. Only the operator's approval arms (via armTask);
-	// the model never arms. nil disables the push (the gate then denies every
-	// exploit command until the operator arms out of band). The REPL/TUI session
-	// wires a widget ArmRequester here; the CLI arms proactively via `blk engage arm`.
-	ArmReq ArmRequester
+	// ArmReq asks the operator when RoE auto-arm does not authorize the task.
+	ArmReq      ArmRequester
+	AutoActions *autoActionPolicy
 }
 
 var orchestratorSystemPrompt = "You are the orchestrator of a scoped offensive penetration test. " +

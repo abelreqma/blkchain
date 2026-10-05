@@ -135,6 +135,7 @@ type ScopeSpec struct {
 	Out     []string
 	Targets []string
 	Rate    string // "" means no rate limit
+	Local   bool
 }
 
 // BuildScope parses a ScopeSpec into a Scope. Every In and Out entry is parsed
@@ -143,7 +144,7 @@ type ScopeSpec struct {
 // verbatim. An empty Rate string means no rate limit; a non-empty malformed Rate
 // is an error.
 func BuildScope(spec ScopeSpec) (*Scope, error) {
-	s := &Scope{}
+	s := &Scope{local: spec.Local}
 	for _, e := range spec.In {
 		if strings.TrimSpace(e) == "" {
 			continue
@@ -156,6 +157,10 @@ func BuildScope(spec ScopeSpec) (*Scope, error) {
 	}
 	for _, e := range spec.Out {
 		if strings.TrimSpace(e) == "" {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(e), "local") {
+			s.local = false
 			continue
 		}
 		m, err := parseMatcher(e)

@@ -266,6 +266,17 @@ Commands with no extracted network target run under the macOS file and network s
 host execution on other operating systems fails closed. The pinned runner image must already
 exist locally and includes a limited tool set; an unavailable tool reports a command error.
 
+An engagement `ROE.md` can authorize specific unattended action classes with `## Autonomous Actions`.
+Each entry is `phase/surface host`, for example `exploit/network 192.0.2.1` or
+`recon/local local`. The host must be an exact in-scope host; `local` requires an `In Scope`
+entry of `local`. A rule covers that action class on the host, not other hosts. Exploit and
+post-ex tasks auto-arm only when a stored basis task has evidence. Every proposed command
+still passes the gate, scope, denylists, and rate limit. The project's
+`.blkchain/config.yaml` sets reusable binary bounds: `allowed_binaries` for external Auto
+and `local_unattended_binaries` for LOCAL. LOCAL runs without a confirmer only when both a
+matching RoE rule and a listed local binary permit the command. Commands outside that pair
+still need a confirmer.
+
 **Models panel.** In the interactive session, `/models` lists every model: the chat models the LLM
 server serves, the embedder, the reranker, and web search. Keys: up/down move, space turns the
 selected row on or off, `l` loads and `u` unloads a chat model (the active model needs a second
