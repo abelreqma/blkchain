@@ -715,3 +715,33 @@ func TestAutoOverrideDeniesGluedShortFlag(t *testing.T) {
 		t.Errorf("no-target recon should proceed under the override: %q", d.Reason)
 	}
 }
+
+func TestCanceledContextDeniesEveryGateEntry(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var actions []string
+	g := recordingGate(&Gate{Mode: Auto, Scope: okScope(t), Allow: NewAllowlist("nmap")}, &actions)
+	cmd := Command{Binary: "nmap", Args: []string{"10.0.0.5"}}
+	for _, decision := range []Decision{g.Authorize(ctx, cmd), g.Check(ctx, cmd), g.ConfirmCommand(ctx, cmd)} {
+		if decision.Allowed {
+			t.Fatal("canceled context authorized a command")
+		}
+	}
+	if len(actions) != 3 || actions[0] != "deny:context" || actions[1] != "deny:context" || actions[2] != "deny:context" {
+		t.Fatalf("audit actions=%v", actions)
+	}
+}
+
+func TestInternalProbeDenialIsAuditedSeparately(t *testing.T) {
+	var actions []string
+	g := recordingGate(&Gate{Mode: Auto, Scope: okScope(t), Allow: NewAllowlist("curl")}, &actions)
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if d := g.Authorize(context.Background(), Command{Binary: "curl", Args: []string{"--help"}, InternalProbe: true}); d.Allowed {
+		t.Fatal("out-of-scope help probe was allowed")
+	}
+	if len(actions) != 1 || actions[0] != "probe-deny:scope" {
+		t.Fatalf("audit actions=%v", actions)
+	}
+}

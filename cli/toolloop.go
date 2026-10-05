@@ -28,6 +28,7 @@ type LoopCaps struct {
 	NoProgressRounds int
 	Progress         func(context.Context) (string, error)
 	Finalize         func(context.Context, string) (string, error)
+	Observe          func(action, detail string) error
 	// SummarizeAtChars, when > 0 and Summarizer is set, enables chain
 	// summarization: before each model call the running history is compacted
 	// once it grows past this many characters. Zero (the default) disables it,
@@ -44,6 +45,9 @@ type LoopCaps struct {
 // and tool errors are fed back as results, never fatal) and the loop continues.
 // It stops at caps.MaxRounds rounds or once caps.MaxCalls calls have run.
 func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, msgs []llms.MessageContent, caps LoopCaps, extra ...llms.CallOption) (final string, rounds int, err error) {
+	if caps.Observe == nil {
+		caps.Observe = engageTelemetryFromContext(ctx)
+	}
 	if caps.MaxRounds <= 0 {
 		caps.MaxRounds = defaultLoopRounds
 	}
@@ -97,7 +101,17 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 		}
 		choice := resp.Choices[0]
 		if len(choice.ToolCalls) == 0 {
+			if caps.Observe != nil {
+				if err := caps.Observe("model-final", fmt.Sprintf("round=%d", rounds)); err != nil {
+					return "", rounds, err
+				}
+			}
 			return choice.Content, rounds, nil
+		}
+		if caps.Observe != nil {
+			if err := caps.Observe("model-tools", fmt.Sprintf("round=%d calls=%d", rounds, len(choice.ToolCalls))); err != nil {
+				return "", rounds, err
+			}
 		}
 		// One assistant turn carries the text and every tool call of the round.
 		parts := make([]llms.ContentPart, 0, len(choice.ToolCalls)+1)
@@ -124,10 +138,20 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 			if err := consumeEngageWork(ctx); err != nil {
 				return "", rounds, err
 			}
+			if caps.Observe != nil {
+				if err := caps.Observe("tool-call", name); err != nil {
+					return "", rounds, err
+				}
+			}
 			result := "tool call skipped: call cap reached"
 			if total < caps.MaxCalls {
 				result = execToolCall(ctx, reg, tc.FunctionCall != nil, name, args)
 				total++
+			}
+			if caps.Observe != nil {
+				if err := caps.Observe("tool-result", name); err != nil {
+					return "", rounds, err
+				}
 			}
 			msgs = append(msgs, llms.MessageContent{
 				Role: llms.ChatMessageTypeTool,

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -52,19 +53,26 @@ func (w *Workspace) Close() error {
 
 // auditRecord is one JSONL audit line.
 type auditRecord struct {
-	At     string `json:"at"`
-	Actor  string `json:"actor"`
-	Action string `json:"action"`
-	Detail string `json:"detail"`
+	At         string `json:"at"`
+	Actor      string `json:"actor"`
+	Action     string `json:"action"`
+	Detail     string `json:"detail"`
+	Kind       string `json:"kind"`
+	Outcome    string `json:"outcome"`
+	ReasonCode string `json:"reason_code,omitempty"`
 }
 
 // AuditLine appends one sanitized JSON object to audit.jsonl.
 func (w *Workspace) AuditLine(actor, action, detail string) error {
+	kind, outcome, reasonCode := auditFields(action)
 	rec := auditRecord{
-		At:     time.Now().UTC().Format(time.RFC3339),
-		Actor:  sanitizeAuditDetail(actor),
-		Action: sanitizeAuditDetail(action),
-		Detail: sanitizeAuditDetail(detail),
+		At:         time.Now().UTC().Format(time.RFC3339),
+		Actor:      sanitizeAuditDetail(actor),
+		Action:     sanitizeAuditDetail(action),
+		Detail:     sanitizeAuditDetail(detail),
+		Kind:       kind,
+		Outcome:    outcome,
+		ReasonCode: sanitizeAuditDetail(reasonCode),
 	}
 	b, err := json.Marshal(rec)
 	if err != nil {
@@ -79,6 +87,31 @@ func (w *Workspace) AuditLine(actor, action, detail string) error {
 		return err
 	}
 	return nil
+}
+
+func auditFields(action string) (kind, outcome, reasonCode string) {
+	switch {
+	case strings.HasPrefix(action, "deny:"):
+		return "decision", "denied", strings.TrimPrefix(action, "deny:")
+	case strings.HasPrefix(action, "probe-deny:"):
+		return "probe", "denied", strings.TrimPrefix(action, "probe-deny:")
+	case action == "allow":
+		return "decision", "allowed", ""
+	case action == "model-tools":
+		return "decision", "tools", ""
+	case action == "model-final":
+		return "decision", "final", ""
+	case action == "exec":
+		return "action", "attempted", ""
+	case action == "tool-call":
+		return "action", "requested", ""
+	case action == "tool-result":
+		return "action", "completed", ""
+	case action == "anomaly-denial-burst":
+		return "anomaly", "halted", "denial-burst"
+	default:
+		return "event", "recorded", ""
+	}
 }
 
 // sanitizeAuditDetail maps control bytes (< 0x20 or 0x7f, including NUL and

@@ -192,10 +192,14 @@ func runEngageWithOptions(o engageOpts, goal string, checkpoint *engageCheckpoin
 		return fmt.Errorf("engage: cannot create scratch dir: %w", err)
 	}
 	defer os.RemoveAll(scratch)
+	signalCtx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignal()
+	runCtx, cancelRun := context.WithCancelCause(signalCtx)
+	defer cancelRun(nil)
+	telemetry := newEngageTelemetry(ws, cancelRun)
+	runCtx = withEngageTelemetry(runCtx, telemetry)
 
-	gate := buildEngageGate(ws, scope, mode, confirm, secgate.NewSessionApprovals(), scratch, policy, func(action, detail string) {
-		_ = ws.AuditLine("secgate", action, detail)
-	})
+	gate := buildEngageGate(ws, scope, mode, confirm, secgate.NewSessionApprovals(), scratch, policy, telemetry.gate)
 	if err := gate.Start(); err != nil {
 		return fmt.Errorf("engage: %w", err)
 	}
@@ -249,12 +253,18 @@ func runEngageWithOptions(o engageOpts, goal string, checkpoint *engageCheckpoin
 		fmt.Fprintf(os.Stderr, "engage: vantage seed failed: %v\n", serr)
 	}
 
-	runCtx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignal()
 	final, err := runOrchestrator(runCtx, deps, goal)
 	stopReport() // stop the live render loop before the terminal flush (idempotent)
 	if err != nil {
-		if ferr := rw.Flush("interrupted"); ferr != nil {
+		if cause := context.Cause(runCtx); cause != nil && cause != context.Canceled {
+			err = cause
+		}
+		status := "interrupted"
+		if err == errEngageDenialBurst {
+			status = "paused"
+			rw.SetFinal(err.Error())
+		}
+		if ferr := rw.Flush(status); ferr != nil {
 			fmt.Fprintf(os.Stderr, "report: final write failed: %v\n", ferr)
 		}
 		mdPath, jsonPath := reportPaths(wsDir)

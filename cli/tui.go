@@ -976,6 +976,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.Is(msg.err, context.Canceled) {
 				return m, m.finish(tea.Println("   " + Meta.Render("engagement stopped") + "\n" + msg.final))
 			}
+			if msg.paused {
+				return m, m.finish(tea.Println(formatEngagePaused(msg.err.Error()+"\n\n"+msg.final, elapsed, m.renderWidth())))
+			}
 			return m, m.finish(tea.Println(formatEngageError(msg.final, fmt.Errorf("engage: %w", timeoutOrErr(msg.err)), m.renderWidth())))
 		}
 		if msg.paused {

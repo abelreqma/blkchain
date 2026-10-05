@@ -21,11 +21,11 @@ func (g *Gate) recheck(c Command) Decision {
 	skipScopeRecheck := g.Scope != nil && g.Scope.Local() && g.Scope.Empty()
 	if !skipScopeRecheck {
 		if ip, ok := ScopeViolation(g.Scope, c); ok {
-			g.audit("deny:scope-recheck", Signature(c))
+			g.audit(denialAction(c, "scope-recheck"), Signature(c))
 			return Decision{Allowed: false, Reason: "a target resolves to an out-of-scope address: " + ip}
 		}
 		if host, ip, bad := ResolveScopeViolation(g.Scope, c); bad {
-			g.audit("deny:resolve", Signature(c))
+			g.audit(denialAction(c, "resolve"), Signature(c))
 			if ip != "" {
 				return Decision{Allowed: false, Reason: host + " resolves to an out-of-scope address: " + ip}
 			}
@@ -33,7 +33,7 @@ func (g *Gate) recheck(c Command) Decision {
 		}
 	}
 	if arg, bad := FileAccessViolation(c); bad {
-		g.audit("deny:fileaccess", Signature(c))
+		g.audit(denialAction(c, "fileaccess"), Signature(c))
 		return Decision{Allowed: false, Reason: "file path outside the working directory, or a config-file option, is not allowed: " + arg}
 	}
 	return Decision{Allowed: true}

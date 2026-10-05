@@ -161,10 +161,12 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 		return "", fmt.Errorf("engage: cannot create scratch dir: %w", err)
 	}
 	defer os.RemoveAll(scratch)
+	runCtx, cancelRun := context.WithCancelCause(ctx)
+	defer cancelRun(nil)
+	telemetry := newEngageTelemetry(ws, cancelRun)
+	runCtx = withEngageTelemetry(runCtx, telemetry)
 
-	gate := buildEngageGate(ws, scope, mode, confirm, secgate.NewSessionApprovals(), scratch, policy, func(action, detail string) {
-		_ = ws.AuditLine("secgate", action, detail)
-	})
+	gate := buildEngageGate(ws, scope, mode, confirm, secgate.NewSessionApprovals(), scratch, policy, telemetry.gate)
 	if err := gate.Start(); err != nil {
 		return "", fmt.Errorf("engage: %w", err)
 	}
@@ -203,10 +205,19 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 	if serr := seedInitialVantage(ctx, ws.Store, scope); serr != nil {
 		fmt.Fprintf(os.Stderr, "engage: vantage seed failed: %v\n", serr)
 	}
-	final, err := runOrchestrator(ctx, deps, goal)
+	final, err := runOrchestrator(runCtx, deps, goal)
 	stopReport()
 	if err != nil {
-		if ferr := rw.Flush("interrupted"); ferr != nil {
+		if cause := context.Cause(runCtx); cause != nil && cause != context.Canceled {
+			err = cause
+		}
+		status := "interrupted"
+		if err == errEngageDenialBurst {
+			status = "paused"
+			rw.SetFinal(err.Error())
+			deps.OnStop("denial burst")
+		}
+		if ferr := rw.Flush(status); ferr != nil {
 			fmt.Fprintf(os.Stderr, "report: final write failed: %v\n", ferr)
 		}
 		mdPath, jsonPath := reportPaths(wsDir)

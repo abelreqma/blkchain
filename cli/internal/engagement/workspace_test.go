@@ -1,6 +1,7 @@
 package engagement
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,16 @@ func TestAuditLineSanitizesAndAppends(t *testing.T) {
 	if strings.Contains(lines[0], "\x00") {
 		t.Error("NUL not sanitized in audit line")
 	}
+	var denied, allowed auditRecord
+	if err := json.Unmarshal([]byte(lines[0]), &denied); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &allowed); err != nil {
+		t.Fatal(err)
+	}
+	if denied.Kind != "decision" || denied.Outcome != "denied" || denied.ReasonCode != "scope" || allowed.Outcome != "allowed" {
+		t.Fatalf("structured audit denied=%+v allowed=%+v", denied, allowed)
+	}
 }
 
 func TestSanitizeAuditDetailTruncates(t *testing.T) {
@@ -58,5 +69,12 @@ func TestSanitizeAuditDetailTruncates(t *testing.T) {
 	got := sanitizeAuditDetail(long)
 	if len([]rune(got)) != auditDetailCap {
 		t.Errorf("len = %d, want %d", len([]rune(got)), auditDetailCap)
+	}
+}
+
+func TestExecAuditIsAttempt(t *testing.T) {
+	kind, outcome, reason := auditFields("exec")
+	if kind != "action" || outcome != "attempted" || reason != "" {
+		t.Fatalf("exec fields=%q %q %q", kind, outcome, reason)
 	}
 }

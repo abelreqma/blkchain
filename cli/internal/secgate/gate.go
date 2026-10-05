@@ -101,6 +101,10 @@ func (g *Gate) audit(action, detail string) {
 // behind the prompt and a bounded-parallel executor pool cannot deadlock. Every
 // Episode, Approvals, and audit access stays under g.mu.
 func (g *Gate) Authorize(ctx context.Context, c Command) Decision {
+	if err := ctx.Err(); err != nil {
+		g.audit("deny:context", Signature(c)+" :: "+err.Error())
+		return Decision{Reason: err.Error()}
+	}
 	g.mu.Lock()
 	if g.Episode == nil {
 		g.Episode = NewEpisode(Caps{}, nil)
@@ -167,6 +171,10 @@ func sameCommand(a, b Command) bool {
 // authoritative rechecks run after confirmation, immediately before exec. The
 // deny-layers run under g.mu; g.mu is released before the rechecks, which do DNS.
 func (g *Gate) Check(ctx context.Context, c Command) Decision {
+	if err := ctx.Err(); err != nil {
+		g.audit("deny:context", Signature(c)+" :: "+err.Error())
+		return Decision{Reason: err.Error()}
+	}
 	g.mu.Lock()
 	if g.Episode == nil {
 		g.Episode = NewEpisode(Caps{}, nil)
@@ -195,6 +203,10 @@ func (g *Gate) Check(ctx context.Context, c Command) Decision {
 // calls it once with a synthetic command that stands for the whole pipeline,
 // before Check clears every stage, so a /safe pipeline prompts once.
 func (g *Gate) ConfirmCommand(ctx context.Context, c Command) Decision {
+	if err := ctx.Err(); err != nil {
+		g.audit("deny:context", Signature(c)+" :: "+err.Error())
+		return Decision{Reason: err.Error()}
+	}
 	g.mu.Lock()
 	return g.confirmTailLocked(ctx, c)
 }
@@ -474,6 +486,13 @@ func deniedByConfig(binary string, denied []string) bool {
 }
 
 func (g *Gate) deny(layer string, c Command, reason, suggestion string) Decision {
-	g.audit("deny:"+layer, Signature(c)+" :: "+reason)
+	g.audit(denialAction(c, layer), Signature(c)+" :: "+reason)
 	return Decision{Allowed: false, Reason: reason, Suggestion: suggestion}
+}
+
+func denialAction(c Command, layer string) string {
+	if c.InternalProbe {
+		return "probe-deny:" + layer
+	}
+	return "deny:" + layer
 }

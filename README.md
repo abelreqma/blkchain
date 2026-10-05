@@ -253,6 +253,9 @@ Each new engagement also saves `checkpoint.json` and a private copy of its `ROE.
 evidence, and vantage under that saved scope. Omit the directory to select the latest engagement.
 The project's `.blkchain/config.yaml` remains the source for general options on resume. Ctrl+C
 or SIGTERM cancels an active CLI run and writes an interrupted report.
+The workspace `audit.jsonl` records typed model decisions, tool calls, gate verdicts, and
+command execution attempts. Eight gate denials within one minute halt the engagement and leave a paused
+report with the reason and report paths. An audit write failure stops the run.
 
 **Models panel.** In the interactive session, `/models` lists every model: the chat models the LLM
 server serves, the embedder, the reranker, and web search. Keys: up/down move, space turns the

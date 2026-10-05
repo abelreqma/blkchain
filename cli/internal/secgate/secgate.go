@@ -10,6 +10,8 @@ package secgate
 type Command struct {
 	Binary string
 	Args   []string
+	// InternalProbe separates code-owned help checks in the audit; it does not change authorization.
+	InternalProbe bool
 
 	// Phase, Surface, and Armed are the engagement context the gate derives
 	// the per-action tier from. The zero value (Phase "" == recon, unarmed) is

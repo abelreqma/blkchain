@@ -323,3 +323,20 @@ func TestToolLoopDoesNotMutateCallerSlice(t *testing.T) {
 		t.Fatalf("caller backing array was written: %+v", extra)
 	}
 }
+
+func TestToolLoopAuditFailureSkipsTool(t *testing.T) {
+	echo := &fakeTool{name: "echo", fn: func(string) (string, error) { return "ok", nil }}
+	m := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "echo", "{}")}}
+	auditErr := errors.New("audit unavailable")
+	_, _, err := runToolLoop(context.Background(), m, newLoopReg(t, echo), userMsgs(), LoopCaps{
+		Observe: func(action, detail string) error {
+			if action == "tool-call" {
+				return auditErr
+			}
+			return nil
+		},
+	})
+	if !errors.Is(err, auditErr) || len(echo.ran) != 0 {
+		t.Fatalf("err=%v tool calls=%v", err, echo.ran)
+	}
+}

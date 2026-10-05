@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,20 @@ func TestFormatEngagePaused(t *testing.T) {
 	out := formatEngagePaused("Engagement paused: work budget reached.\n\nReport: /tmp/ws/report.md", 2*time.Second, 80)
 	if !strings.Contains(out, Glyph(GlyphWarn)) || !strings.Contains(out, "Engagement paused after 2s") || !strings.Contains(out, "work budget reached") || !strings.Contains(out, "/tmp/ws/report.md") || strings.Contains(out, "Engagement complete") {
 		t.Fatalf("paused rendering=%q", out)
+	}
+}
+
+func TestTUIAnomalyDisplaysPausedReport(t *testing.T) {
+	noColor(t)
+	m := newTestModel(t)
+	m.working = true
+	_, cmd := m.Update(engageDoneMsg{final: "Report: /tmp/workspace/report.md", err: errEngageDenialBurst, paused: true})
+	if cmd == nil {
+		t.Fatal("missing TUI result")
+	}
+	out := fmt.Sprint(cmd())
+	if !strings.Contains(out, "Engagement paused") || !strings.Contains(out, "eight gate denials") || !strings.Contains(out, "/tmp/workspace/report.md") {
+		t.Fatalf("TUI anomaly output=%q", out)
 	}
 }
 

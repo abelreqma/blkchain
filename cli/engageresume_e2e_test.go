@@ -51,6 +51,10 @@ func TestEngageResumeLocalLLM(t *testing.T) {
 	if !strings.Contains(first, "Engagement paused:") {
 		t.Fatalf("first report=%q", first)
 	}
+	audit, err := os.ReadFile(filepath.Join(wsDir, "audit.jsonl"))
+	if err != nil || !strings.Contains(string(audit), `"action":"model-tools"`) || !strings.Contains(string(audit), `"action":"tool-call"`) || !strings.Contains(string(audit), `"kind":"decision"`) {
+		t.Fatalf("missing structured model telemetry: %v %q", err, audit)
+	}
 	ws, err := engagement.OpenWorkspace(wsDir)
 	if err != nil {
 		t.Fatal(err)
