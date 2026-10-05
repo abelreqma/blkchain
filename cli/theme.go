@@ -112,20 +112,20 @@ const (
 
 // glyphPairs maps each glyph to its {unicode, ascii} rendering.
 var glyphPairs = map[GlyphName][2]string{
-	GlyphOK:     {"✓", "[ok]"},
-	GlyphErr:    {"✗", "[x]"},
-	GlyphWarn:   {"▲", "[!]"},
+	GlyphOK:     {"\u2705", "[ok]"},
+	GlyphErr:    {"\u274c", "[x]"},
+	GlyphWarn:   {"\u26a0\ufe0f", "[!]"},
 	GlyphInfo:   {"•", "-"},
 	GlyphPrompt: {"❯", ">"},
 	GlyphBullet: {"·", "-"},
 	GlyphNest:   {"▸", ">"},
-	GlyphArrow:  {"→", "->"},
+	GlyphArrow:  {"\u27a1\ufe0f", "->"},
 	GlyphDot:    {"●", "*"},
 	GlyphBar:    {"│", "|"},
 	GlyphSep:    {"·", "|"},
 	GlyphDash:   {"—", "-"},
-	GlyphUp:     {"↑", "up"},
-	GlyphDown:   {"↓", "down"},
+	GlyphUp:     {"\u2b06\ufe0f", "up"},
+	GlyphDown:   {"\u2b07\ufe0f", "down"},
 }
 
 var spinnerUnicodeFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -185,16 +185,6 @@ func spinnerFramesFor(unicode bool) []string {
 // Glyph returns the glyph for name using the capability detection decided
 // once at startup.
 func Glyph(name GlyphName) string {
-	if plCurrentTier() == plNerd {
-		switch name {
-		case GlyphOK:
-			return "\uf00c"
-		case GlyphErr:
-			return "\uf00d"
-		case GlyphWarn:
-			return "\uf071"
-		}
-	}
 	return glyphFor(name, useUnicode)
 }
 

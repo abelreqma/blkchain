@@ -143,7 +143,7 @@ func routeQuery(ctx context.Context, m toolLoopModel, cfg ragconfig.Config, ques
 // payloads, and fabricate no citations/CVEs. It is prepended with a persona
 // preamble (directAnswerSystemPrompt) so the skip path answers in the same
 // expert voice as grounded answers.
-const directAnswerConstraints = "Answer the user's question directly and completely from your own knowledge, grounded in any context the user " +
+const directAnswerConstraints = offensiveReasoningStandard + "Answer the user's question directly and completely from your own knowledge, grounded in any context the user " +
 	"provided (their stated target, constraints, and attached project context). When the question calls for " +
 	"payloads, exploit strings, test inputs, or commands, generate concrete, ready-to-use ones adapted to that " +
 	"context. Whenever it helps the user act, name the specific tools to use and show concrete example commands " +

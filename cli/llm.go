@@ -45,7 +45,13 @@ var citationRefPattern = regexp.MustCompile(`\[(\d+(?:\s*,\s*\d+)*)\]`)
 // specializing the persona can never drop or contradict a constraint.
 const answerGenericPreamble = "You are a security research assistant for authorized testing. "
 
-const answerConstraints = "Write a complete, well-organized " +
+const offensiveReasoningStandard = "Reason from the operator's stated scope, vantage, access, target behavior, and available tools. " +
+	"Separate observed facts, plausible hypotheses, and untested paths. For a proposed test, state its prerequisite, exact input or command when enough detail is known, expected positive and negative signals, and the next decision each result supports. " +
+	"Prefer a small reproducible proof over a broad scan or an assumed exploit chain. Account for current identity, application state, protocol, mitigations, and likely side effects. " +
+	"If a crucial target detail is missing, ask for that detail or give a clearly labeled adaptable example; never present guessed hostnames, paths, versions, privileges, or output as observed. " +
+	"Distinguish an established weakness from a version-based lead, and describe impact only to the level the evidence proves. "
+
+const answerConstraints = offensiveReasoningStandard + "Write a complete, well-organized " +
 	"answer to the question, grounded in the numbered sources below and in any context the user provided (their " +
 	"stated target, constraints, and attached project context). Cite the source number inline in brackets " +
 	"(e.g. [1]) after each claim you draw from a source. Synthesize the sources into a clear, useful answer and do " +

@@ -20,10 +20,16 @@ func TestDomainFromResultsPicksMajorityDomain(t *testing.T) {
 	}{
 		{"ad", []retrieval.Result{pchunk("skills", "attacking-active-directory/SKILL.md"), pchunk("hacktricks", "hacktricks/windows-hardening/active-directory-methodology/kerberoast.md")}, "ad"},
 		{"web", []retrieval.Result{pchunk("payloads", "payloadsallthethings/XSS Injection/README.md"), pchunk("skills", "offensive-sqli/SKILL.md")}, "web"},
+		{"web-idor", []retrieval.Result{pchunk("hacktricks", "hacktricks/pentesting-web/idor.md")}, "web"},
+		{"web-oauth", []retrieval.Result{pchunk("skills", "offensive-oauth/SKILL.md")}, "web"},
+		{"api", []retrieval.Result{pchunk("violin-skills", "violin-skills/pentest/references/api-testing.md"), pchunk("skills", "offensive-wstg-methodology/references/12-api-testing.md")}, "api"},
 		{"cloud", []retrieval.Result{pchunk("hacktricks-cloud", "hacktricks/hacktricks-cloud/pentesting-cloud/aws-security/README.md")}, "cloud"},
+		{"supply", []retrieval.Result{pchunk("skills", "offensive-supply-chain/SKILL.md"), pchunk("skills", "offensive-cicd-pipeline/SKILL.md")}, "supply"},
 		{"k8s", []retrieval.Result{pchunk("skills", "offensive-k8s-attacks/SKILL.md"), pchunk("hacktricks-cloud", "hacktricks/hacktricks-cloud/pentesting-cloud/kubernetes-security/x.md")}, "k8s"},
 		{"linux", []retrieval.Result{pchunk("skills", "offensive-linux-privesc/SKILL.md")}, "linux"},
 		{"wireless", []retrieval.Result{pchunk("skills", "offensive-wpa2-psk/SKILL.md"), pchunk("hacktricks", "hacktricks/generic-methodologies-and-resources/pentesting-wifi/x.md")}, "wireless"},
+		{"ai", []retrieval.Result{pchunk("skills", "ai-security/prompt-injection.md")}, "ai"},
+		{"llmnr-stays-network", []retrieval.Result{pchunk("skills", "network-attacks/llmnr.md")}, "network"},
 		{"generic-none", []retrieval.Result{pchunk("vault", "notes/random/thoughts.md")}, ""},
 		{"empty", nil, ""},
 	}
@@ -80,5 +86,42 @@ func TestPersonaAlwaysInvoked(t *testing.T) {
 		if !strings.Contains(directAnswerSystemPrompt, must) {
 			t.Errorf("skip prompt dropped %q:\n%s", must, directAnswerSystemPrompt)
 		}
+	}
+}
+
+func TestAnswerPromptsShareOperationalStandard(t *testing.T) {
+	if len(personas) != len(domainOrder) {
+		t.Fatalf("persona count %d differs from domain order count %d", len(personas), len(domainOrder))
+	}
+	for _, domain := range append([]string{""}, domainOrder...) {
+		if domain != "" {
+			if _, ok := personas[domain]; !ok {
+				t.Errorf("domain order includes unregistered persona %q", domain)
+			}
+		}
+		prompt := personaPrompt(domain)
+		if !strings.Contains(prompt, offensiveReasoningStandard) {
+			t.Errorf("grounded persona %q lost the operational standard", domain)
+		}
+		if !strings.Contains(prompt, promptguard.UntrustedInputClause) {
+			t.Errorf("grounded persona %q lost the input boundary", domain)
+		}
+	}
+	for name, prompt := range map[string]string{
+		"direct":  directAnswerSystemPrompt,
+		"advisor": adviseSystemPrompt,
+	} {
+		if !strings.Contains(prompt, offensiveReasoningStandard) {
+			t.Errorf("%s prompt lost the operational standard", name)
+		}
+	}
+	if !strings.Contains(personaPrompt("ai"), "tool-output laundering") {
+		t.Error("AI persona must address agent tool boundaries")
+	}
+	if !strings.Contains(personaPrompt("api"), "paired requests") {
+		t.Error("API persona must compare authorized and unauthorized requests")
+	}
+	if !strings.Contains(personaPrompt("supply"), "workflow triggers") {
+		t.Error("supply persona must trace pipeline trust boundaries")
 	}
 }

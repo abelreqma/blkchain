@@ -12,14 +12,14 @@ import (
 // across tiers; only separators, icons, and background fills change.
 
 const (
-	iconDatabase = "\uf1c0"
-	iconCPU      = "\uf2db"
-	iconBolt     = "\uf0e7"
-	iconHealth   = "\uf21e"
-	iconChart    = "\uf201"
-	iconLoader   = "\uf110"
-	iconPlay     = "\uf04b"
-	iconRadar    = "\uf140"
+	iconDatabase = "\U0001f4da"
+	iconCPU      = "\U0001f9e0"
+	iconBolt     = "\u26a1"
+	iconHealth   = "\U0001fa7a"
+	iconChart    = "\U0001f4ca"
+	iconLoader   = "\U0001f504"
+	iconPlay     = "\u25b6\ufe0f"
+	iconRadar    = "\U0001f4e1"
 )
 
 type plTier int

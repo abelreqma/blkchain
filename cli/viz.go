@@ -43,33 +43,33 @@ func vizSanitizeLabel(s string) string {
 	return ellipsize(s, vizLabelMax)
 }
 
-// vizDomainIcons maps domains to Nerd Font glyphs.
+// vizDomainIcons maps domains to diagram icons.
 var vizDomainIcons = map[string]string{
-	"recon":           "\uf140",
-	"web":             "\uf0ac",
-	"ad":              "\uf0e8",
-	"cloud":           "\uf0c2",
-	"k8s":             "\uf1b3",
-	"wifi":            "\uf1eb",
-	"exploit-dev":     "\uf188",
-	"generic":         "\uf013",
-	"local":           "\uf120",
-	"target-analysis": "\uf1c9",
+	"recon":           "\U0001f50e",
+	"web":             "\U0001f310",
+	"ad":              "\U0001faaa",
+	"cloud":           "\u2601\ufe0f",
+	"k8s":             "\u2638\ufe0f",
+	"wifi":            "\U0001f4e1",
+	"exploit-dev":     "\U0001f41b",
+	"generic":         "\U0001f9ed",
+	"local":           "\U0001f4bb",
+	"target-analysis": "\U0001f52c",
 }
 
 // vizCandidateMark is the bracket-free caution glyph that marks an unarmed
-// exploit/post-ex candidate node: a filled triangle when unicode is available,
+// exploit/post-ex candidate node: a warning emoji when unicode is available,
 // "!" in the ascii tier. It must stay bracket-free because it is rendered inside
 // a mermaid node label ("id[...]").
 func vizCandidateMark() string {
 	if plCurrentTier() == plASCII {
 		return "!"
 	}
-	return "\u25B2"
+	return "\u26a0\ufe0f"
 }
 
 // vizCoverageGapMark is the bracket-free mark for a coverage-gap node: a detection
-// the corpus has no playbook for (non-actionable). It is an empty-set glyph when
+// the corpus has no playbook for (non-actionable). It is a stop emoji when
 // unicode is available, "x" in the ascii tier, and must stay bracket-free because
 // it is rendered inside a mermaid node label. It is distinct from vizCandidateMark
 // so a non-actionable gap never reads as an armable candidate.
@@ -77,7 +77,7 @@ func vizCoverageGapMark() string {
 	if plCurrentTier() == plASCII {
 		return "x"
 	}
-	return "\u2205"
+	return "\U0001f6ab"
 }
 
 // domainIcon returns the node glyph for a task kind, generic when unknown.

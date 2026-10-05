@@ -274,8 +274,16 @@ func TestVizMermaidDomainIconNerdTier(t *testing.T) {
 		eng.Task{ID: "c", Kind: "mystery", Objective: "x"},
 		eng.Task{ID: "d", Kind: "local", Objective: "privesc"},
 		eng.Task{ID: "e", Kind: "target-analysis", Objective: "parse"},
+		eng.Task{ID: "f", Kind: "ad", Objective: "map domain"},
+		eng.Task{ID: "g", Kind: "cloud", Objective: "map account"},
+		eng.Task{ID: "h", Kind: "k8s", Objective: "map cluster"},
+		eng.Task{ID: "i", Kind: "wifi", Objective: "map radio"},
+		eng.Task{ID: "j", Kind: "exploit-dev", Objective: "analyze crash"},
 	))
-	for id, glyph := range map[string]string{"a": "\uf140", "b": "\uf0ac", "c": "\uf013", "d": "\uf120", "e": "\uf1c9"} {
+	for id, glyph := range map[string]string{
+		"a": "\U0001f50e", "b": "\U0001f310", "c": "\U0001f9ed", "d": "\U0001f4bb", "e": "\U0001f52c",
+		"f": "\U0001faaa", "g": "\u2601\ufe0f", "h": "\u2638\ufe0f", "i": "\U0001f4e1", "j": "\U0001f41b",
+	} {
 		if ln := vizNodeLine(t, m, id); !strings.Contains(ln, "["+glyph+" ") {
 			t.Fatalf("node %s missing glyph %U: %q", id, []rune(glyph)[0], ln)
 		}
@@ -289,10 +297,8 @@ func TestVizMermaidDomainIconAbsentOutsideNerd(t *testing.T) {
 			eng.Task{ID: "a", Kind: "recon", Objective: "scan"},
 			eng.Task{ID: "b", Kind: "web", Objective: "probe"},
 		))
-		for _, r := range m {
-			if r >= 0xE000 && r <= 0xF8FF {
-				t.Fatalf("tier %v leaked glyph %U: %q", tier, r, m)
-			}
+		if strings.Contains(m, vizDomainIcons["recon"]) {
+			t.Fatalf("tier %v leaked a diagram emoji: %q", tier, m)
 		}
 		if ln := vizNodeLine(t, m, "a"); !strings.Contains(ln, "[recon: scan]") {
 			t.Fatalf("tier %v label not plain: %q", tier, ln)
@@ -311,7 +317,7 @@ func TestVizMultipleActiveNodesStyledWarn(t *testing.T) {
 	if !strings.Contains(m, "a[") || !strings.Contains(m, "b[") {
 		t.Fatalf("both active nodes must render: %q", m)
 	}
-	fr := &fakeRunner{out: "| \uf140 recon: scan |   | \uf0ac web: SQLi |"}
+	fr := &fakeRunner{out: "| \U0001f50e recon: scan |   | \U0001f310 web: SQLi |"}
 	block := newVizRenderer(fr).blockFor(context.Background(), e)
 	for _, label := range []string{"recon: scan", "web: SQLi"} {
 		if !strings.Contains(block, vizStatusStyle(eng.StatusActive).Render(label)) {
@@ -321,7 +327,7 @@ func TestVizMultipleActiveNodesStyledWarn(t *testing.T) {
 }
 
 // Unarmed exploit/post-ex tasks are candidates: vizMermaid marks their node with
-// a bracket-free caution glyph (triangle in unicode tiers, "!" in ascii), and only
+// a bracket-free caution glyph (emoji in unicode tiers, "!" in ascii), and only
 // them.
 func TestVizMermaidMarksExploitCandidates(t *testing.T) {
 	vizForceTier(t, plNerd)
@@ -331,30 +337,30 @@ func TestVizMermaidMarksExploitCandidates(t *testing.T) {
 		eng.Task{ID: "c", Kind: "web", Objective: "armed", Phase: eng.PhaseExploit, Armed: true},
 		eng.Task{ID: "d", Kind: "local", Objective: "privesc", Phase: eng.PhasePostEx},
 	))
-	if ln := vizNodeLine(t, m, "b"); !strings.Contains(ln, "▲") {
+	if ln := vizNodeLine(t, m, "b"); !strings.Contains(ln, "\u26a0\ufe0f") {
 		t.Fatalf("unarmed exploit node b should carry the caution mark: %q", ln)
 	}
-	if ln := vizNodeLine(t, m, "d"); !strings.Contains(ln, "▲") {
+	if ln := vizNodeLine(t, m, "d"); !strings.Contains(ln, "\u26a0\ufe0f") {
 		t.Fatalf("unarmed post-ex node d should carry the caution mark: %q", ln)
 	}
-	if ln := vizNodeLine(t, m, "a"); strings.Contains(ln, "▲") {
+	if ln := vizNodeLine(t, m, "a"); strings.Contains(ln, "\u26a0\ufe0f") {
 		t.Fatalf("recon node a must not be marked: %q", ln)
 	}
-	if ln := vizNodeLine(t, m, "c"); strings.Contains(ln, "▲") {
+	if ln := vizNodeLine(t, m, "c"); strings.Contains(ln, "\u26a0\ufe0f") {
 		t.Fatalf("armed exploit node c must not be marked a candidate: %q", ln)
 	}
 }
 
 // In the ascii tier the candidate mark is a bracket-free "!" (not "[!]", which
-// would break the mermaid node), and never the unicode triangle.
+// would break the mermaid node), and never the unicode emoji.
 func TestVizMermaidCandidateMarkAsciiTier(t *testing.T) {
 	vizForceTier(t, plASCII)
 	m := vizMermaid(basisEngagement(
 		eng.Task{ID: "b", Kind: "web", Objective: "SQLi", Phase: eng.PhaseExploit},
 	))
 	ln := vizNodeLine(t, m, "b")
-	if strings.Contains(m, "▲") {
-		t.Fatalf("ascii tier must not use the triangle: %q", m)
+	if strings.Contains(m, "\u26a0\ufe0f") {
+		t.Fatalf("ascii tier must not use the warning emoji: %q", m)
 	}
 	if strings.Contains(ln, "[!]") {
 		t.Fatalf("ascii candidate mark must be bracket-free, not [!]: %q", ln)
@@ -381,7 +387,7 @@ func TestVizColorizeCandidateIsCaution(t *testing.T) {
 	vizForceColor(t)
 	vizForceTier(t, plNerd)
 	e := basisEngagement(eng.Task{ID: "b", Kind: "web", Objective: "SQLi", Phase: eng.PhaseExploit, Status: eng.StatusTodo})
-	fr := &fakeRunner{out: "| \uf0ac web: SQLi |"}
+	fr := &fakeRunner{out: "| \U0001f310 web: SQLi |"}
 	block := newVizRenderer(fr).blockFor(context.Background(), e)
 	want := lipgloss.NewStyle().Foreground(Warn).Render("web: SQLi")
 	if !strings.Contains(block, want) {
@@ -398,13 +404,13 @@ func TestVizMermaidMarksCoverageGapDistinctly(t *testing.T) {
 		eng.Task{ID: "g", Kind: "ai-security", Objective: "pi", Phase: eng.PhaseExploit, CoverageGap: true, Status: eng.StatusBlocked},
 	))
 	gl := vizNodeLine(t, m, "g")
-	if !strings.Contains(gl, "\u2205") {
+	if !strings.Contains(gl, "\U0001f6ab") {
 		t.Errorf("coverage-gap node should carry the gap mark: %q", gl)
 	}
-	if strings.Contains(gl, "\u25B2") {
+	if strings.Contains(gl, "\u26a0\ufe0f") {
 		t.Errorf("coverage-gap node must not carry the candidate caution mark: %q", gl)
 	}
-	if bl := vizNodeLine(t, m, "b"); strings.Contains(bl, "\u2205") {
+	if bl := vizNodeLine(t, m, "b"); strings.Contains(bl, "\U0001f6ab") {
 		t.Errorf("an actionable candidate must not carry the gap mark: %q", bl)
 	}
 }
@@ -414,7 +420,7 @@ func TestVizMermaidCoverageGapMarkAsciiTier(t *testing.T) {
 	m := vizMermaid(basisEngagement(
 		eng.Task{ID: "g", Kind: "ai-security", Objective: "pi", Phase: eng.PhaseExploit, CoverageGap: true, Status: eng.StatusBlocked},
 	))
-	if strings.Contains(m, "\u2205") {
+	if strings.Contains(m, "\U0001f6ab") {
 		t.Errorf("ascii tier must not use the unicode gap glyph: %q", m)
 	}
 	if gl := vizNodeLine(t, m, "g"); !strings.Contains(gl, "x ") {

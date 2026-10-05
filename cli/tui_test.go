@@ -543,6 +543,71 @@ func printed(t *testing.T, cmd tea.Cmd) string {
 	return fmt.Sprint(cmd())
 }
 
+func TestTUIPersonaCueUsesEmojis(t *testing.T) {
+	expectedSymbols := map[string]string{
+		"":         "\U0001f9ed",
+		"web":      "\U0001f310",
+		"api":      "\U0001f50c",
+		"ad":       "\U0001faaa",
+		"cloud":    "\u2601\ufe0f",
+		"supply":   "\U0001f517",
+		"k8s":      "\u2638\ufe0f",
+		"linux":    "\U0001f427",
+		"windows":  "\U0001fa9f",
+		"wireless": "\U0001f4e1",
+		"binexp":   "\U0001f41b",
+		"network":  "\U0001f578\ufe0f",
+		"mobile":   "\U0001f4f1",
+		"recon":    "\U0001f50e",
+		"ai":       "\U0001f916",
+	}
+	if len(personaSymbols) != len(domainOrder)+1 {
+		t.Fatalf("persona symbols %d, want %d", len(personaSymbols), len(domainOrder)+1)
+	}
+	seen := map[string]string{}
+	for _, domain := range append([]string{""}, domainOrder...) {
+		symbol, ok := personaSymbols[domain]
+		if !ok || symbol != expectedSymbols[domain] {
+			t.Errorf("persona %q symbol = %q, want %q", domain, symbol, expectedSymbols[domain])
+		}
+		if width := lipgloss.Width(symbol); width < 1 || width > 2 {
+			t.Errorf("persona %q emoji width = %d", domain, width)
+		}
+		if previous, ok := seen[symbol]; ok {
+			t.Errorf("personas %q and %q share symbol %q", previous, domain, symbol)
+		}
+		seen[symbol] = domain
+		emoji := false
+		for _, r := range symbol {
+			if r >= 0x1f000 || r == 0xfe0f {
+				emoji = true
+			}
+		}
+		if !emoji || strings.ContainsRune(symbol, '\ufe0e') {
+			t.Errorf("persona %q does not use emoji presentation: %q", domain, symbol)
+		}
+		want := "answering as " + symbol + " " + personaLabel(domain)
+		if got := tuiPersonaCue(domain, plUnicode); got != want {
+			t.Errorf("unicode cue for %q = %q, want %q", domain, got, want)
+		}
+		if got := tuiPersonaCue(domain, plNerd); got != want {
+			t.Errorf("nerd cue for %q = %q, want %q", domain, got, want)
+		}
+		if got := tuiPersonaCue(domain, plASCII); got != "answering as "+personaLabel(domain) {
+			t.Errorf("ascii cue for %q = %q", domain, got)
+		}
+	}
+
+	vizForceTier(t, plUnicode)
+	for _, domain := range []string{"api", "supply"} {
+		m := model{working: true, ta: textarea.New()}
+		_, cmd := m.Update(personaMsg(domain))
+		if got := stripANSI(printed(t, cmd)); !strings.Contains(got, tuiPersonaCue(domain, plUnicode)) {
+			t.Errorf("TUI did not print the %s emoji cue: %q", domain, got)
+		}
+	}
+}
+
 func TestStageMsgSetsWorkingVerb(t *testing.T) {
 	m := model{working: true, ta: textarea.New()}
 	nm, _ := m.Update(stageMsg("grading"))
@@ -706,6 +771,37 @@ func TestStatusLineNamesWhichServiceIsDown(t *testing.T) {
 	// Unknown cause (for example a search error) keeps the generic label.
 	if line := (model{mode: "rag", width: 200, servicesChecked: true}).statusLine(); !strings.Contains(line, "services down") {
 		t.Errorf("fallback label lost: %q", line)
+	}
+}
+
+func TestStatusAndQueueMarksFollowTerminalTier(t *testing.T) {
+	cases := []struct {
+		name  string
+		tier  plTier
+		ok    string
+		down  string
+		wait  string
+		queue string
+	}{
+		{"nerd", plNerd, "\U0001f7e2", "\U0001f534", "\U0001f7e1", "\U0001f4e5 2 queued"},
+		{"unicode", plUnicode, "\u25cf", "\u25cf", "\u25cf", "\U0001f4e5 2 queued"},
+		{"ascii", plASCII, "*", "*", "*", "(2 queued)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			vizForceTier(t, c.tier)
+			for _, check := range []struct {
+				tone lipgloss.TerminalColor
+				want string
+			}{{Success, c.ok}, {Err, c.down}, {Warn, c.wait}} {
+				if got := statusMark(check.tone); got != check.want {
+					t.Errorf("statusMark = %q, want %q", got, check.want)
+				}
+			}
+			if got := (model{queue: []string{"one", "two"}}).queuedIndicator(); got != c.queue {
+				t.Errorf("queuedIndicator = %q, want %q", got, c.queue)
+			}
+		})
 	}
 }
 
@@ -1565,15 +1661,14 @@ func TestKeyPanelFooterSaysHowToClose(t *testing.T) {
 }
 
 func TestWelcomeBannerFitsEveryWidth(t *testing.T) {
-	// Unicode tiers render a full-width rounded box: exactly 3 lines, each exactly
-	// `width` columns wide (corners flush, right edge straight).
+	// Unicode tiers render a full-width rounded box with a separate title and tagline.
 	for _, tier := range []plTier{plUnicode, plNerd} {
 		vizForceTier(t, tier)
 		for w := 24; w <= 200; w++ {
 			b := welcomeBanner(w)
 			lines := strings.Split(b, "\n")
-			if len(lines) != 3 {
-				t.Fatalf("tier %v width %d: box is %d lines, want 3:\n%s", tier, w, len(lines), b)
+			if len(lines) != 4 {
+				t.Fatalf("tier %v width %d: box is %d lines, want 4:\n%s", tier, w, len(lines), b)
 			}
 			for i, ln := range lines {
 				if lipgloss.Width(ln) != w {
@@ -1582,8 +1677,8 @@ func TestWelcomeBannerFitsEveryWidth(t *testing.T) {
 			}
 		}
 		b := welcomeBanner(80)
-		if !strings.Contains(b, "blk") || !strings.Contains(b, "Autonomous Offensive Security Framework") {
-			t.Errorf("tier %v: box must name blk and the tagline:\n%s", tier, b)
+		if !strings.Contains(b, "📡 blkchain") || !strings.Contains(b, "Autonomous Offensive Security Framework") {
+			t.Errorf("tier %v: box must name blkchain with its icon and tagline:\n%s", tier, b)
 		}
 		for _, corner := range []string{"\u256D", "\u256E", "\u2570", "\u256F"} {
 			if !strings.Contains(b, corner) {
@@ -1591,16 +1686,7 @@ func TestWelcomeBannerFitsEveryWidth(t *testing.T) {
 			}
 		}
 	}
-	// Nerd tier leads the title with the radar glyph; the unicode tier does not.
-	vizForceTier(t, plNerd)
-	if !strings.Contains(welcomeBanner(80), iconRadar) {
-		t.Error("nerd banner should carry the radar icon")
-	}
-	vizForceTier(t, plUnicode)
-	if b := welcomeBanner(80); strings.Contains(b, iconRadar) {
-		t.Errorf("unicode banner must not carry a Plane-15 glyph:\n%s", b)
-	}
-	// ASCII tier: no box, plain lines, still naming blk and the tagline.
+	// ASCII tier: no box, plain lines, still naming blkchain and the tagline.
 	vizForceTier(t, plASCII)
 	b := welcomeBanner(80)
 	for _, corner := range []string{"\u256D", "\u2570"} {
@@ -1608,8 +1694,8 @@ func TestWelcomeBannerFitsEveryWidth(t *testing.T) {
 			t.Errorf("ascii banner must not draw a box:\n%s", b)
 		}
 	}
-	if !strings.Contains(b, "blk") || !strings.Contains(b, "Autonomous Offensive Security Framework") {
-		t.Errorf("ascii banner must still name blk and the tagline:\n%s", b)
+	if !strings.Contains(b, "blkchain") || !strings.Contains(b, "Autonomous Offensive Security Framework") {
+		t.Errorf("ascii banner must still name blkchain and the tagline:\n%s", b)
 	}
 }
 
@@ -1772,6 +1858,33 @@ func TestStatusLineGivesTheModelPriority(t *testing.T) {
 	m.width = 50
 	if line := m.statusLine(); strings.Contains(line, "reasoning") || strings.Contains(line, "new session") || strings.Contains(line, "embed") {
 		t.Errorf("50 columns should collapse to mode, model, and health: %q", line)
+	}
+}
+
+func TestEmojiStatusKeepsModelAndRetrievalAtEightyColumns(t *testing.T) {
+	vizForceTier(t, plNerd)
+	vizForceColor(t)
+	const long = "supergemma4-26b-uncensored-mlx-4bit-v2"
+	m := layoutModel(t, 80, 24)
+	m.ragModel = long
+	m.servicesChecked, m.servicesOK = true, true
+	m.health = &serviceHealth{Qdrant: true, EmbedServer: true, LLM: true}
+	m.rerankUp = true
+	m.prefs = defaultPrefs()
+	line := stripANSI(m.statusLine())
+	if lipgloss.Width(line) > 80 {
+		t.Errorf("emoji status is %d columns wide: %q", lipgloss.Width(line), line)
+	}
+	for _, want := range []string{"model " + long[:24], "embed ok", "rerank ok", "ok"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("emoji status lost %q at 80 columns: %q", want, line)
+		}
+	}
+	for width := 24; width <= 120; width++ {
+		m.width = width
+		if got := lipgloss.Width(m.statusLine()); got > width {
+			t.Errorf("emoji status at %d columns is %d columns wide", width, got)
+		}
 	}
 }
 
@@ -2165,6 +2278,78 @@ func TestVizBarShowsStageAndMeter(t *testing.T) {
 	}
 }
 
+func TestVizBarLoadsFromTaskStatusesWhenStageTotalMissing(t *testing.T) {
+	vizForceTier(t, plUnicode)
+	m := newTestModel(t)
+	m.prefs.Viz = true
+	stub := newStubEngagement("acme")
+	stub.setSnapshot(eng.Engagement{
+		Stage: eng.Stage{Label: "dispatch", Tool: "web"},
+		Tasks: []eng.Task{
+			{ID: "done", Status: eng.StatusDone},
+			{ID: "active", Status: eng.StatusActive},
+			{ID: "blocked", Status: eng.StatusBlocked},
+		},
+	})
+	m.engagement = stub
+	bar := stripANSI(m.vizBar())
+	if !strings.Contains(bar, "dispatch") || !strings.Contains(bar, "1/3 tasks") {
+		t.Fatalf("live dispatch should show task progress: %q", bar)
+	}
+	if got := strings.Count(bar, "\u2588"); got != 4 {
+		t.Fatalf("one of three tasks should fill four of twelve cells, got %d: %q", got, bar)
+	}
+	if got := strings.Count(bar, "\u2591"); got != 8 {
+		t.Fatalf("one of three tasks should leave eight cells empty, got %d: %q", got, bar)
+	}
+}
+
+func TestVizBarTracksPersistedTasksWithoutStageCounters(t *testing.T) {
+	vizForceTier(t, plUnicode)
+	ws, err := eng.OpenWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	stage := eng.Stage{Label: "dispatch", Tool: "web"}
+	if _, err := ws.Store.Apply(eng.Delta{
+		Kind: "dispatch",
+		Upserts: []eng.Task{
+			{ID: "t1", Kind: "recon", Target: "lab", Status: eng.StatusActive},
+			{ID: "t2", Kind: "web", Target: "lab", Status: eng.StatusTodo},
+		},
+		SetStage: &stage,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestModel(t)
+	m.prefs.Viz = true
+	m.engagement = ws.Store
+	m.working = true
+	m.workingVerb = "thinking"
+	m.turnStart = time.Now()
+	if bar := stripANSI(m.vizBar()); !strings.Contains(bar, "0/2 tasks") || strings.Count(bar, "\u2588") != 0 {
+		t.Fatalf("initial task bar = %q", bar)
+	}
+	if view := stripANSI(m.View()); !strings.Contains(view, "0/2 tasks") || strings.Contains(view, "thinking") {
+		t.Fatalf("working TUI did not load the persisted task bar: %q", view)
+	}
+	task, err := ws.Store.GetTask("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status = eng.StatusDone
+	if _, err := ws.Store.Apply(eng.Delta{Kind: "complete", Upserts: []eng.Task{task}}); err != nil {
+		t.Fatal(err)
+	}
+	if bar := stripANSI(m.vizBar()); !strings.Contains(bar, "1/2 tasks") || strings.Count(bar, "\u2588") != 6 {
+		t.Fatalf("advanced task bar = %q", bar)
+	}
+	if view := stripANSI(m.View()); !strings.Contains(view, "1/2 tasks") {
+		t.Fatalf("working TUI did not advance the task bar: %q", view)
+	}
+}
+
 var tsReadoutRe = regexp.MustCompile(`~\d+ t/s`)
 
 func TestVizBarShowsLiveTokensPerSec(t *testing.T) {
@@ -2226,7 +2411,7 @@ func TestVizBarTokensPerSecColoredTan(t *testing.T) {
 	}
 }
 
-// The rich bar uses the play and loader icons.
+// The rich bar uses the play and loader emojis.
 func TestVizBarNerdTierUsesPlayAndLoaderGlyphs(t *testing.T) {
 	vizForceTier(t, plNerd)
 	m := newTestModel(t)
@@ -2247,24 +2432,67 @@ func TestVizBarNerdTierUsesPlayAndLoaderGlyphs(t *testing.T) {
 	}
 }
 
-// Unicode and ascii tiers keep the braille loader and accent; no Plane-15 glyph
-// leaks into a terminal without the patched font.
-func TestVizBarNonNerdKeepsBrailleLoader(t *testing.T) {
-	for _, tier := range []plTier{plASCII, plUnicode} {
-		vizForceTier(t, tier)
-		m := newTestModel(t)
-		m.prefs.Viz = true
-		stub := newStubEngagement("acme")
-		stub.setSnapshot(eng.Engagement{Stage: eng.Stage{Label: "recon: scan", Step: 1, Total: 4}})
-		m.engagement = stub
-		bar := stripANSI(m.vizBar())
-		if !strings.Contains(bar, "⠿") || !strings.Contains(bar, "▎") {
-			t.Fatalf("tier %v should keep the braille loader and accent: %q", tier, bar)
+func TestVizBarEmojiKeepsProgressAtEightyColumns(t *testing.T) {
+	vizForceTier(t, plNerd)
+	m := newTestModel(t)
+	m.width = 80
+	m.prefs.Viz = true
+	stub := newStubEngagement("acme")
+	stub.setSnapshot(eng.Engagement{
+		Stage: eng.Stage{Label: "web: verify authorization across tenant accounts", Tool: "run_command"},
+		Tasks: []eng.Task{
+			{ID: "done", Status: eng.StatusDone},
+			{ID: "active", Status: eng.StatusActive},
+			{ID: "todo", Status: eng.StatusTodo},
+		},
+	})
+	m.engagement = stub
+	m.firstTokAt = time.Now().Add(-2 * time.Second)
+	m.liveTokens = 20
+	bar := stripANSI(m.vizBar())
+	if width := lipgloss.Width(bar); width > 80 {
+		t.Errorf("emoji bar is %d columns wide: %q", width, bar)
+	}
+	for _, want := range []string{"\u2588\u2588\u2588\u2588", "1/3 tasks", "t/s"} {
+		if !strings.Contains(bar, want) {
+			t.Errorf("emoji bar lost %q at 80 columns: %q", want, bar)
 		}
-		for _, r := range bar {
-			if r >= 0xE000 && r <= 0xF8FF {
-				t.Fatalf("tier %v leaked a Plane-15 glyph %U: %q", tier, r, bar)
-			}
+	}
+}
+
+// The Unicode tier keeps the braille loader and accent.
+func TestVizBarUnicodeFallbackKeepsBrailleLoader(t *testing.T) {
+	vizForceTier(t, plUnicode)
+	m := newTestModel(t)
+	m.prefs.Viz = true
+	stub := newStubEngagement("acme")
+	stub.setSnapshot(eng.Engagement{Stage: eng.Stage{Label: "recon: scan", Step: 1, Total: 4}})
+	m.engagement = stub
+	bar := stripANSI(m.vizBar())
+	if !strings.Contains(bar, "\u283f") || !strings.Contains(bar, "\u258e") {
+		t.Fatalf("Unicode tier should keep the braille loader and accent: %q", bar)
+	}
+	for _, icon := range []string{iconPlay, iconLoader, iconBolt} {
+		if strings.Contains(bar, icon) {
+			t.Fatalf("Unicode tier leaked a rich emoji %q: %q", icon, bar)
+		}
+	}
+}
+
+func TestVizBarAsciiFallbackUsesPlainCharacters(t *testing.T) {
+	vizForceTier(t, plASCII)
+	m := newTestModel(t)
+	m.prefs.Viz = true
+	stub := newStubEngagement("acme")
+	stub.setSnapshot(eng.Engagement{Stage: eng.Stage{Label: "dispatch", Step: 1, Total: 4}})
+	m.engagement = stub
+	bar := stripANSI(m.vizBar())
+	if !strings.Contains(bar, "| / dispatch") || !strings.Contains(bar, "[###.........]") {
+		t.Fatalf("ASCII bar lost its plain fallback: %q", bar)
+	}
+	for _, r := range bar {
+		if r > 127 {
+			t.Fatalf("ASCII bar contains non-ASCII rune %U: %q", r, bar)
 		}
 	}
 }

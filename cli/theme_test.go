@@ -217,23 +217,49 @@ func TestGlyphFor(t *testing.T) {
 		unicode   bool
 		wantGlyph string
 	}{
-		{GlyphOK, true, "✓"},
+		{GlyphOK, true, "\u2705"},
 		{GlyphOK, false, "[ok]"},
-		{GlyphErr, true, "✗"},
+		{GlyphErr, true, "\u274c"},
 		{GlyphErr, false, "[x]"},
-		{GlyphWarn, true, "▲"},
+		{GlyphWarn, true, "\u26a0\ufe0f"},
 		{GlyphWarn, false, "[!]"},
 		{GlyphPrompt, true, "❯"},
 		{GlyphPrompt, false, ">"},
 		{GlyphBullet, true, "·"},
 		{GlyphBullet, false, "-"},
-		{GlyphArrow, true, "→"},
+		{GlyphArrow, true, "\u27a1\ufe0f"},
 		{GlyphArrow, false, "->"},
 	}
 	for _, c := range cases {
 		if got := glyphFor(c.name, c.unicode); got != c.wantGlyph {
 			t.Errorf("glyphFor(%v, %v) = %q, want %q", c.name, c.unicode, got, c.wantGlyph)
 		}
+	}
+}
+
+func TestApprovedEmojiGlyphsReachRichTier(t *testing.T) {
+	vizForceTier(t, plNerd)
+	for _, c := range []struct {
+		name GlyphName
+		want string
+	}{
+		{GlyphOK, "\u2705"},
+		{GlyphErr, "\u274c"},
+		{GlyphWarn, "\u26a0\ufe0f"},
+		{GlyphArrow, "\u27a1\ufe0f"},
+		{GlyphUp, "\u2b06\ufe0f"},
+		{GlyphDown, "\u2b07\ufe0f"},
+	} {
+		if got := Glyph(c.name); got != c.want {
+			t.Errorf("Glyph(%v) = %q, want %q", c.name, got, c.want)
+		}
+	}
+	keys := defaultKeys()
+	if got := keys.HistPrev.Help().Key; got != "\u2b06\ufe0f" {
+		t.Errorf("previous key hint = %q", got)
+	}
+	if got := keys.HistNext.Help().Key; got != "\u2b07\ufe0f" {
+		t.Errorf("next key hint = %q", got)
 	}
 }
 
@@ -356,9 +382,9 @@ func TestSeparatorAndDashGlyphs(t *testing.T) {
 		{GlyphSep, false, "|"},
 		{GlyphDash, true, "—"},
 		{GlyphDash, false, "-"},
-		{GlyphUp, true, "↑"},
+		{GlyphUp, true, "\u2b06\ufe0f"},
 		{GlyphUp, false, "up"},
-		{GlyphDown, true, "↓"},
+		{GlyphDown, true, "\u2b07\ufe0f"},
 		{GlyphDown, false, "down"},
 	}
 	for _, c := range cases {

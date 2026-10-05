@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"blkchain/cli/internal/askuser"
+	eng "blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/histstore"
 	"blkchain/cli/internal/modeleval"
 	"blkchain/cli/internal/ragconfig"
@@ -348,6 +349,36 @@ type healthMsg struct { // status-dot check: qdrant, embed_server, llm
 // personaMsg carries the chosen domain-expert key for the current rag turn,
 // sent once before the answer streams.
 type personaMsg string
+
+var personaSymbols = map[string]string{
+	"":         "\U0001f9ed",
+	"web":      "\U0001f310",
+	"api":      "\U0001f50c",
+	"ad":       "\U0001faaa",
+	"cloud":    "\u2601\ufe0f",
+	"supply":   "\U0001f517",
+	"k8s":      "\u2638\ufe0f",
+	"linux":    "\U0001f427",
+	"windows":  "\U0001fa9f",
+	"wireless": "\U0001f4e1",
+	"binexp":   "\U0001f41b",
+	"network":  "\U0001f578\ufe0f",
+	"mobile":   "\U0001f4f1",
+	"recon":    "\U0001f50e",
+	"ai":       "\U0001f916",
+}
+
+func tuiPersonaCue(domain string, tier plTier) string {
+	const prefix = "answering as "
+	if tier == plASCII {
+		return prefix + personaLabel(domain)
+	}
+	symbol, ok := personaSymbols[domain]
+	if !ok {
+		symbol = personaSymbols[""]
+	}
+	return prefix + symbol + " " + personaLabel(domain)
+}
 
 type stageMsg string
 
@@ -864,7 +895,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.persona = string(msg)
 		// Print the cue above the streaming answer; set the status token too.
-		return m, tea.Println(Meta.Render("answering as " + personaLabel(string(msg))))
+		return m, tea.Println(Meta.Render(tuiPersonaCue(string(msg), plCurrentTier())))
 
 	case stageMsg:
 		if !m.working {
@@ -2906,8 +2937,22 @@ func parseInput(line string) (verb, arg string) {
 
 // --- rendering helpers (all return strings for tea.Println) ---
 
-// statusLine shows the active mode, the model, and a services-health dot on one
-// muted line. In rag mode the dot reflects qdrant, embed_server, and the LLM; in
+func statusMark(tone lipgloss.TerminalColor) string {
+	if plCurrentTier() != plNerd {
+		return Glyph(GlyphDot)
+	}
+	switch tone {
+	case Success:
+		return "\U0001f7e2"
+	case Err:
+		return "\U0001f534"
+	default:
+		return "\U0001f7e1"
+	}
+}
+
+// statusLine shows the active mode, the model, and services health. In rag mode
+// the status mark reflects qdrant, embed_server, and the LLM; in
 // agent mode it reflects the hermes gateway (or "subprocess" on fallback). Rag
 // mode also shows the embedder and reranker once the probe has run, and the
 // reranker switch.
@@ -2915,7 +2960,6 @@ func (m model) statusLine() string {
 	if m.mode == "agent" {
 		return m.agentStatusLine()
 	}
-	dot := Glyph(GlyphDot)
 	style := Caut
 	var tone lipgloss.TerminalColor = Warn
 	label := "checking services"
@@ -2966,7 +3010,7 @@ func (m model) statusLine() string {
 	if m.persona != "" {
 		retrieval = append(retrieval, "persona "+m.persona)
 	}
-	return m.composeStatus(style.Render(dot), tone, "rag", m.currentModel(), label, retrieval)
+	return m.composeStatus(style.Render(statusMark(tone)), tone, "rag", m.currentModel(), label, retrieval)
 }
 
 // webStatusSegment is the optional web entry in the rag status ribbon. It is
@@ -3002,7 +3046,8 @@ type statusLayout struct{ title, reasoning, retrieval, longHealth bool }
 // modelPriorityCols of the name would show, the session title goes first, then
 // the reasoning (and viz), then the word "services" in the health label. Past
 // that the line collapses to mode, model, and health, and the model is cut as
-// the last resort (with an ASCII "...").
+// the last resort (with an ASCII "..."). A narrow rich tier puts retrieval
+// labels on a second line.
 func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, modelID, health string, retrieval []string) string {
 	modelID = sanitizeTerminal(modelID)
 	title := ""
@@ -3064,6 +3109,21 @@ func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, mode
 		return line
 	}
 	w, _ := m.termSize()
+	if w < 45 {
+		state := "checking"
+		if tone == Success {
+			state = "ok"
+		} else if tone == Err {
+			state = "down"
+		}
+		first := fmt.Sprintf(" %s %s %s", dot, mode, state)
+		second := " " + engageModeSeg(m.engageMode, m.engageOverride, m.engageHITL)
+		if room := w - lipgloss.Width(second) - 2; room >= 4 && modelID != "" {
+			second += " " + ellipsize(modelID, room)
+		}
+		clip := lipgloss.NewStyle().MaxWidth(w)
+		return clip.Render(first) + "\n" + clip.Render(second)
+	}
 	for _, l := range []statusLayout{
 		{title: true, reasoning: true, retrieval: true, longHealth: true},
 		{reasoning: true, retrieval: true, longHealth: true},
@@ -3081,21 +3141,26 @@ func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, mode
 		}
 	}
 	collapsed := statusLayout{}
-	if over := lipgloss.Width(build(modelID, collapsed)) - w; over > 0 {
-		return build(ellipsize(modelID, max(lipgloss.Width(modelID)-over, 4)), collapsed)
+	base := build(modelID, collapsed)
+	if over := lipgloss.Width(base) - w; over > 0 {
+		base = build(ellipsize(modelID, max(lipgloss.Width(modelID)-over, 4)), collapsed)
 	}
-	return build(modelID, collapsed)
+	if len(retrieval) > 0 && plCurrentTier() == plNerd {
+		info := "  " + Meta.Render(strings.Join(retrieval, " "+Glyph(GlyphSep)+" "))
+		return base + "\n" + lipgloss.NewStyle().MaxWidth(w).Render(info)
+	}
+	return base
 }
 
 // queuedIndicator is the muted "N queued" status marker, empty when the queue is
-// empty. Uses a boxed-copy glyph when unicode is available.
+// empty.
 func (m model) queuedIndicator() string {
 	n := len(m.queue)
 	if n == 0 {
 		return ""
 	}
-	if useUnicode {
-		return fmt.Sprintf("⧉ %d queued", n)
+	if plCurrentTier() != plASCII {
+		return fmt.Sprintf("\U0001f4e5 %d queued", n)
 	}
 	return fmt.Sprintf("(%d queued)", n)
 }
@@ -3104,7 +3169,6 @@ func (m model) queuedIndicator() string {
 // transport. The transport is the one used on the last turn, or the health-probe
 // result before the first turn.
 func (m model) agentStatusLine() string {
-	dot := Glyph(GlyphDot)
 	xport := m.agentXport
 	if xport == "" {
 		switch {
@@ -3131,7 +3195,7 @@ func (m model) agentStatusLine() string {
 	case "checking":
 		label = "checking gateway"
 	}
-	return m.composeStatus(style.Render(dot), tone, "agent", m.currentModel(), label, nil)
+	return m.composeStatus(style.Render(statusMark(tone)), tone, "agent", m.currentModel(), label, nil)
 }
 
 // ragModelLabel is the oMLX model the plain REPL's /models marks active,
@@ -3220,48 +3284,88 @@ func (m model) spinnerLine() string {
 	return lipgloss.NewStyle().MaxWidth(w).Render(line)
 }
 
-// vizBar renders the active engagement stage as a progress bar. It returns ""
-// when viz is off, no engagement is wired, or the stage has no total, so the
-// caller falls back to the spinner line.
+// vizBar renders stage progress, or task progress when the stage has no total.
+// It returns "" when viz is off or no progress denominator exists.
 func (m model) vizBar() string {
 	if !m.prefs.Viz || m.engagement == nil {
 		return ""
 	}
 	e, err := m.engagement.Snapshot(context.Background())
-	if err != nil || e.Stage.Total <= 0 {
+	if err != nil {
 		return ""
 	}
-	frac := float64(e.Stage.Step) / float64(e.Stage.Total)
-	meter := plMeter(frac, 12, plCurrentTier())
-	right := fmt.Sprintf("%d/%d", e.Stage.Step, e.Stage.Total)
-	if e.Stage.Tool != "" {
-		right += " " + sanitizeTerminal(e.Stage.Tool)
+	step, total := e.Stage.Step, e.Stage.Total
+	taskProgress := false
+	if total <= 0 {
+		total = len(e.Tasks)
+		if total == 0 {
+			return ""
+		}
+		step = 0
+		for _, task := range e.Tasks {
+			if task.Status == eng.StatusDone || task.Status == eng.StatusNA {
+				step++
+			}
+		}
+		taskProgress = true
+	}
+	frac := float64(step) / float64(total)
+	count := fmt.Sprintf("%d/%d", step, total)
+	if taskProgress {
+		count += " tasks"
 	}
 	// Each piece carries the bar background itself: an inner style's reset would
 	// otherwise cut the outer background short.
 	on := func(fg lipgloss.Color) lipgloss.Style { return lipgloss.NewStyle().Foreground(fg).Background(wBarBg) }
 	gap := on(wBarBg).Render(" ")
-	label := on(wOffWhite).Render(sanitizeTerminal(e.Stage.Label))
 	// The rich tier uses the play and loader icons.
 	tier := plCurrentTier()
 	lead, spin := "\u258e", "\u283f"
-	if tier == plNerd {
+	switch tier {
+	case plNerd:
 		lead, spin = iconPlay, iconLoader
+	case plASCII:
+		lead, spin = "|", "/"
 	}
 	accent := on(wMeterOn).Render(lead)
 	spinner := on(wMeterOn).Render(spin)
-	line := accent + gap + spinner + gap + label + gap + gap + meter + gap + gap + on(wMutedFg).Render(right)
-	if !m.firstTokAt.IsZero() && m.liveTokens > 0 {
+	rate := !m.firstTokAt.IsZero() && m.liveTokens > 0
+	var rateText string
+	if rate {
 		tps := modeleval.TokensPerSec(m.liveTokens, time.Since(m.firstTokAt))
 		bolt := ""
 		if tier == plNerd {
 			bolt = on(wMeterOn).Render(iconBolt) + gap
 		}
-		// The rate is approximate: blk counts stream chunks, and one delta can carry
-		// several tokens, so the chunk count under-reports. A muted "~" marks it.
-		line += on(wMutedFg).Render(" "+Glyph(GlyphBar)+" ") + bolt + on(wMutedFg).Render("~") + on(wTanFg).Render(fmt.Sprintf("%.0f", tps)) + on(wMutedFg).Render(" t/s")
+		// The chunk count can under-report tokens, so the rate is approximate.
+		rateText = on(wMutedFg).Render(" "+glyphFor(GlyphBar, tier != plASCII)+" ") + bolt + on(wMutedFg).Render("~") + on(wTanFg).Render(fmt.Sprintf("%.0f", tps)) + on(wMutedFg).Render(" t/s")
+	}
+	render := func(label, tool string, cells int, showRate bool) string {
+		line := accent + gap + spinner + gap + on(wOffWhite).Render(label) + gap + gap + plMeter(frac, cells, tier) + gap + gap + on(wMutedFg).Render(count)
+		if tool != "" {
+			line += on(wMutedFg).Render(" " + tool)
+		}
+		if showRate {
+			line += rateText
+		}
+		return line
 	}
 	w, _ := m.termSize()
+	if rate && lipgloss.Width(render("....", "", 12, true)) > w {
+		rate = false
+	}
+	cells := 12
+	for cells > 1 && lipgloss.Width(render("", "", cells, rate)) > w {
+		cells--
+	}
+	label := oneLine(sanitizeTerminal(e.Stage.Label))
+	room := w - lipgloss.Width(render("", "", cells, rate))
+	shortLabel := ellipsize(label, room)
+	tool := oneLine(sanitizeTerminal(e.Stage.Tool))
+	if shortLabel != label || lipgloss.Width(render(shortLabel, tool, cells, rate)) > w {
+		tool = ""
+	}
+	line := render(shortLabel, tool, cells, rate)
 	return lipgloss.NewStyle().Background(wBarBg).MaxWidth(w).Render(line)
 }
 
@@ -3399,16 +3503,13 @@ func promptEcho(q string) string {
 // bannerTagline is the one-line framework descriptor shown inside the welcome box.
 const bannerTagline = "Autonomous Offensive Security Framework"
 
-// welcomeBanner is the startup greeting: a full-width rounded box in the ribbon's
-// palette, with the tool name on the top edge and the framework tagline inside.
-// The nerd tier leads the title with the radar glyph; the unicode tier draws the
-// box without it; a terminal without unicode gets two plain lines and no box.
-// Every rendered line is exactly width columns, so the box corners stay flush.
+// welcomeBanner shows the tool name and tagline inside a rounded box.
+// Terminals without Unicode get two plain lines.
 func welcomeBanner(width int) string {
 	if width < 1 {
 		width = 1
 	}
-	title := "blk"
+	title := "blkchain"
 	tagStyle := lipgloss.NewStyle().Foreground(wTanFg)
 
 	if !useUnicode {
@@ -3421,40 +3522,22 @@ func welcomeBanner(width int) string {
 	border := lipgloss.NewStyle().Foreground(Muted)
 	titleStyle := lipgloss.NewStyle().Foreground(wHeadFg).Bold(true)
 	iconStyle := lipgloss.NewStyle().Foreground(wSageFg)
-
-	icon, iconW := "", 0
-	if plCurrentTier() == plNerd {
-		icon, iconW = iconRadar, 2 // icon and trailing space
+	if width < 16 {
+		return lipgloss.NewStyle().MaxWidth(width).Render(titleStyle.Render(title))
 	}
-	// Top edge: "╭─ [icon ]blk " then a rule to the "╮". dashN fills to width.
-	dashN := width - 8 - iconW
-	if dashN < 0 {
-		// Too narrow for the box: one plain, bounded line.
-		return lipgloss.NewStyle().MaxWidth(width).Render(" " + titleStyle.Render(title))
-	}
-	var top strings.Builder
-	top.WriteString(border.Render("╭─ ")) // "╭─ "
-	if icon != "" {
-		top.WriteString(iconStyle.Render(icon))
-		top.WriteString(border.Render(" "))
-	}
-	top.WriteString(titleStyle.Render(title))
-	top.WriteString(border.Render(" " + strings.Repeat("─", dashN) + "╮")) // " " + rule + "╮"
-
-	inner := width - 2 // columns between the two side borders
+	inner := width - 2
+	top := border.Render("╭" + strings.Repeat("─", inner) + "╮")
+	name := iconStyle.Render(iconRadar) + " " + titleStyle.Render(title)
+	namePad := inner - 2 - lipgloss.Width(name)
+	nameLine := border.Render("│  ") + name + strings.Repeat(" ", namePad) + border.Render("│")
 	tag := bannerTagline
-	if lipgloss.Width(tag) > inner-2 {
-		tag = ellipsize(tag, max(inner-2, 1))
+	if lipgloss.Width(tag) > inner-4 {
+		tag = ellipsize(tag, inner-4)
 	}
-	padN := inner - 1 - lipgloss.Width(tag)
-	if padN < 0 {
-		padN = 0
-	}
-	mid := border.Render("│ ") + tagStyle.Render(tag) + strings.Repeat(" ", padN) + border.Render("│")
-
+	tagPad := inner - 4 - lipgloss.Width(tag)
+	tagLine := border.Render("│    ") + tagStyle.Render(tag) + strings.Repeat(" ", tagPad) + border.Render("│")
 	bottom := border.Render("╰" + strings.Repeat("─", inner) + "╯")
-
-	return top.String() + "\n" + mid + "\n" + bottom
+	return top + "\n" + nameLine + "\n" + tagLine + "\n" + bottom
 }
 
 // helpResponse renders the REPL /help output: the full command list when arg is
