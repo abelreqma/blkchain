@@ -188,34 +188,5 @@ func formatWebJSON(value any) (string, error) {
 }
 
 func runWeb(args []string) error {
-	if webIsSearchCommand(args) {
-		return runWebSearch(args)
-	}
-	return runWebAnalysis(args)
-}
-
-func webIsSearchCommand(args []string) bool {
-	command, _ := lookupCommand("web")
-	flags := commandFlagSet(command)
-	analysisFlags := false
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if strings.HasPrefix(arg, "-") {
-			name := strings.TrimLeft(strings.SplitN(arg, "=", 2)[0], "-")
-			if name != "json" && name != "top-k" && flags.Lookup(name) != nil {
-				analysisFlags = true
-			}
-			if flagTakesValue(flags, arg) {
-				i++
-			}
-			continue
-		}
-		switch strings.ToLower(arg) {
-		case "status", "on", "off", "provider", "search":
-			return true
-		default:
-			return false
-		}
-	}
-	return !analysisFlags
+	return runWebSearch(args)
 }

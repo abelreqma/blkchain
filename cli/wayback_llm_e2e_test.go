@@ -89,7 +89,7 @@ func TestWaybackLocalLLMStack(t *testing.T) {
 	}
 	assertSnapshot(webExecute(ctx, []string{"inspect", "--workspace", ws.Dir, "--json", "--no-rdns"}, secgate.Safe, nil, false, 100))
 	m := newKeyModel(t)
-	updated, command := m.dispatchWeb("inspect --workspace "+strconv.Quote(ws.Dir)+" --json --no-rdns", "/web inspect")
+	updated, command := m.dispatchWeb("inspect --workspace "+strconv.Quote(ws.Dir)+" --json --no-rdns", "/engage web inspect")
 	batch, ok := command().(tea.BatchMsg)
 	if !ok {
 		t.Fatal("TUI dispatch missing")

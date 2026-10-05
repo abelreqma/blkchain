@@ -154,6 +154,11 @@ func plainREPL() error {
 				printErr(copyToClipboard(pm.lastAnswer))
 			}
 		case "engage":
+			parts := strings.Fields(rest)
+			if len(parts) > 0 && parts[0] == "web" {
+				printErr(replWeb(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(rest), "web"))))
+				break
+			}
 			if strings.HasPrefix(rest, "resume /") || strings.HasPrefix(rest, "resume --workspace /") || strings.HasPrefix(rest, "resume \"") || strings.HasPrefix(rest, "resume --workspace \"") {
 				path := strings.TrimSpace(strings.TrimPrefix(rest, "resume "))
 				path = strings.TrimPrefix(path, "--workspace ")
@@ -207,16 +212,7 @@ func plainREPL() error {
 				fmt.Println(Meta.Render("mode: rag"))
 			}
 		case "web":
-			args, err := webArguments(rest)
-			if err != nil {
-				printErr(err)
-				break
-			}
-			if webIsSearchCommand(args) {
-				last = replWebSearch(rest, last)
-			} else {
-				printErr(replWeb(rest))
-			}
+			last = replWebSearch(rest, last)
 		case "search", "s":
 			query := rest
 			if !strings.HasPrefix(cmd, "/") && strings.EqualFold(cmd, "search") {
@@ -431,6 +427,7 @@ func replGroups() []rowGroup {
 		{hgAgent, []helpRow{
 			{"/hermes <prompt>", replSpecDesc("hermes")},
 			{"/engage [flags] <goal>", replSpecDesc("engage")},
+			{"/engage web <action>", "assess web targets within an engagement"},
 			{"/mode", replSlashDesc("mode")},
 			{"/agent", replSlashDesc("agent")},
 			{"/rag [on|off|question]", replSlashDesc("rag")},

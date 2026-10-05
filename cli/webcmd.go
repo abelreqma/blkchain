@@ -76,11 +76,17 @@ func runWebAnalysis(args []string) error {
 	return e
 }
 func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm secgate.Confirmer, interactive bool, width int) (string, error) {
-	if helpRequested(args) || len(args) > 0 && args[0] == "help" {
+	if len(args) > 0 && args[0] == "help" {
 		var b strings.Builder
-		c, _ := lookupCommand("web")
-		printCommandHelp(&b, c)
+		printCommandHelp(&b, engageWebSpec())
 		return b.String(), nil
+	}
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" || arg == "-help" {
+			var b strings.Builder
+			printCommandHelp(&b, engageWebSpec())
+			return b.String(), nil
+		}
 	}
 	command := "inspect"
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -91,7 +97,7 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 	if !valid[command] {
 		return "", usageErr("web: use collect, analyze, inspect, import, archive, export, or replay")
 	}
-	fs := newFlagSet("web")
+	fs := newFlagSet("engage web")
 	var o webOpts
 	defineWebFlags(fs, &o)
 	valueFlags := map[string]bool{}

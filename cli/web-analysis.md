@@ -1,30 +1,30 @@
 # Web JavaScript and API analysis
 
-`blk web`, `blk engage web`, and `/web` call the same Go service. The CLI prints
+`blk engage web` and `/engage web` run web assessment through the same Go service. The CLI prints
 plain text or structured JSON with exact operation records. The REPL and TUI use the approved icon headings,
 terminal theme, and width-aware wrapping. `inspect` reads stored evidence without
 visiting the target. Supply an existing workspace or use the latest engagement.
 
 ```sh
-blk web collect engagement.md --workspace ./assessment --browser --auto
-blk web inspect domain.com --workspace ./assessment --view apis
+blk engage web collect engagement.md --workspace ./assessment --browser --auto
+blk engage web inspect domain.com --workspace ./assessment --view apis
 blk engage web inspect domains.txt --workspace ./assessment --view artifacts
-blk web inspect 192.0.2.1 --workspace ./assessment --view all
-blk web analyze --workspace ./assessment
-blk web import --workspace ./assessment --scope scope.txt --file traffic.har
-blk web archive domain.com --workspace ./assessment --scope scope.txt --auto
-blk web export --workspace ./assessment
+blk engage web inspect 192.0.2.1 --workspace ./assessment --view all
+blk engage web analyze --workspace ./assessment
+blk engage web import --workspace ./assessment --scope scope.txt --file traffic.har
+blk engage web archive domain.com --workspace ./assessment --scope scope.txt --auto
+blk engage web export --workspace ./assessment
 ```
 
 The interactive equivalents include:
 
 ```text
-/web inspect domain.com --view apis
-/web inspect domains.txt --view features
-/web inspect engagement.md --view all
-/web inspect 192.0.2.1 --view artifacts
-/web collect engagement.md --workspace ./assessment --browser --auto
-/web export --workspace ./assessment
+/engage web inspect domain.com --view apis
+/engage web inspect domains.txt --view features
+/engage web inspect engagement.md --view all
+/engage web inspect 192.0.2.1 --view artifacts
+/engage web collect engagement.md --workspace ./assessment --browser --auto
+/engage web export --workspace ./assessment
 ```
 
 Views are `summary`, `apis`, `artifacts`, `functions`, `features`, `findings`,
@@ -180,7 +180,7 @@ runtime resolution remain coverage gaps. The analyzer does not resolve a target'
 
 The finding log uses mode 0600 and a 32 MiB limit. Individual credential values
 are capped at 64 KiB, with larger values retained as a coverage gap and in their
-source artifact. `blk web collect --json` keeps one final JSON document on stdout;
+source artifact. `blk engage web collect --json` keeps one final JSON document on stdout;
 its findings retain values, and its credential events still go to the JSONL log.
 
 Known-library scanning reads a local Retire-compatible advisory repository.
@@ -235,8 +235,8 @@ names. Run an exported template from its export directory after filling values.
 Shell metacharacters are quoted and control characters are rejected.
 
 ```sh
-blk web export --workspace ./assessment --operation OPERATION_ID
-blk web replay --workspace ./assessment --scope scope.txt \
+blk engage web export --workspace ./assessment --operation OPERATION_ID
+blk engage web replay --workspace ./assessment --scope scope.txt \
   --operation OPERATION_ID --values values.json --session sessions.json \
   --role reader --task EXISTING_ARMED_TASK --auto
 ```
@@ -248,7 +248,7 @@ Unsupported signatures and missing values remain gaps. Select an observed HTTP
 request with `--example N` to replay its original body bytes:
 
 ```sh
-blk web replay --workspace ./assessment --scope scope.txt \
+blk engage web replay --workspace ./assessment --scope scope.txt \
   --operation OPERATION_ID --example 1 --session sessions.json \
   --role writer --task EXISTING_ARMED_TASK --auto
 ```

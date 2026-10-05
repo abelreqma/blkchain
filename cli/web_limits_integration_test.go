@@ -150,7 +150,7 @@ func TestEvidenceJSONThroughTUIDispatch(t *testing.T) {
 	}
 	ws.Close()
 	m := newKeyModel(t)
-	updated, cmd := m.dispatchWeb("inspect --workspace "+strconv.Quote(dir)+" --json --no-rdns", "/web inspect")
+	updated, cmd := m.dispatchWeb("inspect --workspace "+strconv.Quote(dir)+" --json --no-rdns", "/engage web inspect")
 	batch, ok := cmd().(tea.BatchMsg)
 	if !ok {
 		t.Fatal("TUI dispatch missing")

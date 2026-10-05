@@ -78,17 +78,11 @@ func commandSpecs() []cmdSpec {
 		},
 		{
 			name: "web", args: "[action...]", group: hgAsk,
-			desc: "search the web and analyze JavaScript/API evidence",
+			desc: "search the web and synthesize cited answers",
 			long: "Controls internet search permission with on, off, status, and provider; search produces a cited answer when enabled. " +
-				"Providers are auto, duckduckgo, and tavily, with Tavily credentials read from TAVILY_API_KEY or TAVILY_SETUP_TOKEN. " +
-				"Also runs bounded collect, analyze, inspect, import, archive, export, and replay jobs in an engagement workspace. " +
-				"Acquisition retains the engagement scope and gate; those analysis commands also run through blk engage web and /web.",
-			flags: func(fs *flag.FlagSet) {
-				defineWebFlags(fs, &webOpts{})
-				fs.Int("top-k", 5, "maximum search results (1 to 20)")
-				fs.Lookup("json").Usage = "print structured JSON instead of formatted text"
-			},
-			examples: []string{"blk web on", `blk web search "current security guidance"`, "blk web inspect domain.com --view apis"},
+				"Providers are auto, duckduckgo, and tavily, with Tavily credentials read from TAVILY_API_KEY or TAVILY_SETUP_TOKEN.",
+			flags:    func(fs *flag.FlagSet) { defineWebSearchFlags(fs, &webCommand{}) },
+			examples: []string{"blk web on", `blk web search "current security guidance"`},
 			run:      runWeb,
 		},
 		{
@@ -259,7 +253,7 @@ func commandSpecs() []cmdSpec {
 		{
 			name: "engage", args: "<goal...>", group: hgAgent,
 			desc: "run a gated, multi-step engagement against a goal",
-			long: "Runs a bounded, gated engagement: the orchestrator plans tasks and hands each to a domain-specialized executor, which can run allowlisted commands against in-scope targets. " +
+			long: "Runs a bounded, gated engagement: the orchestrator plans tasks and hands each to a domain-specialized executor, which can run allowlisted commands against in-scope targets; blk engage web runs bounded web assessment in a workspace. " +
 				"In /safe, every command needs your confirmation; --auto uses ROE.md or --scope and runs authorized, allowlisted actions without prompting. " +
 				`A scope file lists in-scope targets (hostnames, IPs, or CIDRs), the line "local" to permit commands with no network target, and "allow <binary>" lines to extend the allowlist; a hostname target also needs its resolved IP or CIDR listed, since the gate re-checks the resolved address at run time. ` +
 				"ROE.md Autonomous Actions entries such as 'exploit/network 192.0.2.1' permit that action class on an exact in-scope host; LOCAL unattended commands also require local_unattended_binaries in .blkchain/config.yaml; every command still passes the gate, and decisions, plan, and evidence are recorded in the workspace.",
@@ -335,6 +329,19 @@ func commandSpecs() []cmdSpec {
 				"Type /help inside it to list its commands.",
 			examples: []string{"blk repl", "echo /status | blk repl"},
 			run:      func(_ []string) error { return runREPL() },
+		},
+	}
+}
+
+func engageWebSpec() cmdSpec {
+	return cmdSpec{
+		name: "engage web", args: "<collect|analyze|inspect|import|archive|export|replay> [targets...]",
+		desc:  "assess web targets within an engagement",
+		long:  "Runs bounded web collection and analysis in an engagement workspace. Acquisition uses the engagement scope and gate.",
+		flags: func(fs *flag.FlagSet) { defineWebFlags(fs, &webOpts{}) },
+		examples: []string{
+			"blk engage web collect example.com --scope scope.txt --workspace ./assessment",
+			"blk engage web inspect --workspace ./assessment --view apis",
 		},
 	}
 }
@@ -1018,6 +1025,10 @@ func usage(w *os.File) {
 
 // runHelp implements `blk help [command]`.
 func runHelp(args []string) error {
+	if len(args) == 2 && args[0] == "engage" && args[1] == "web" {
+		printCommandHelp(os.Stdout, engageWebSpec())
+		return nil
+	}
 	switch len(args) {
 	case 0:
 		usage(os.Stdout)

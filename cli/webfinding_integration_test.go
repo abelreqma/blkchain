@@ -185,7 +185,7 @@ func TestCredentialFindingFromRealCLIAndParserWorker(t *testing.T) {
 	}
 	for _, asJSON := range []bool{false, true} {
 		workspace := filepath.Join(root, fmt.Sprintf("workspace-%t", asJSON))
-		args := []string{"web", "collect", server.URL + "/app.js", "--workspace", workspace, "--scope", scopeFile, "--auto", "--no-rdns"}
+		args := []string{"engage", "web", "collect", server.URL + "/app.js", "--workspace", workspace, "--scope", scopeFile, "--auto", "--no-rdns"}
 		if asJSON {
 			args = append(args, "--json")
 		}

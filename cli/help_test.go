@@ -27,7 +27,7 @@ import (
 var wordingDescs = map[string]string{
 	"ask":        "answer a question, with cited sources",
 	"search":     "search the evidence and produce a cited answer",
-	"web":        "search the web and analyze JavaScript/API evidence",
+	"web":        "search the web and synthesize cited answers",
 	"sources":    "list indexed sources, with chunk counts",
 	"open":       "open a cited source in your pager or editor",
 	"add":        "add your own files, folders, or a web page",
@@ -1009,6 +1009,37 @@ func TestCompletionOffersEveryCommand(t *testing.T) {
 	}
 	assertASCII(t, "bash completion", bash)
 	assertASCII(t, "zsh completion", zsh)
+}
+
+func TestWebHelpAndCompletionAreSeparated(t *testing.T) {
+	noColor(t)
+	web, _ := lookupCommand("web")
+	searchHelp := renderCommandHelp(web, 88)
+	assessmentHelp := renderCommandHelp(engageWebSpec(), 88)
+	if !strings.Contains(searchHelp, "--top-k") || strings.Contains(searchHelp, "--workspace") || strings.Contains(searchHelp, "collect") {
+		t.Fatalf("web help mixes search and assessment: %q", searchHelp)
+	}
+	if !strings.Contains(assessmentHelp, "--workspace") || !strings.Contains(assessmentHelp, "collect") || strings.Contains(assessmentHelp, "--top-k") {
+		t.Fatalf("engage web help mixes assessment and search: %q", assessmentHelp)
+	}
+	if got := captureStdout(t, func() { _ = runHelp([]string{"engage", "web"}) }); !strings.Contains(got, "--workspace") {
+		t.Fatalf("blk help engage web: %q", got)
+	}
+	var dispatchErr error
+	if got := captureStdout(t, func() { dispatchErr = dispatch("engage", []string{"web", "inspect", "--help"}) }); dispatchErr != nil || !strings.Contains(got, "--workspace") {
+		t.Fatalf("blk engage web inspect --help: %q %v", got, dispatchErr)
+	}
+	if !strings.Contains(helpBlock(200), "<goal|web>") || !strings.Contains(captureStdout(t, replHelp), "/engage web <action>") {
+		t.Fatal("interactive help does not advertise /engage web")
+	}
+	for _, script := range []string{bashCompletion(), zshCompletion()} {
+		if !strings.Contains(script, "collect analyze inspect import archive export replay") || !strings.Contains(script, "status on off provider search") {
+			t.Fatalf("web actions missing from completion: %q", script)
+		}
+		if !strings.Contains(script, "--workspace") || !strings.Contains(script, "--top-k") {
+			t.Fatal("web flags missing from completion")
+		}
+	}
 }
 
 func TestCompletionScriptsParse(t *testing.T) {

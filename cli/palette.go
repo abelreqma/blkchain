@@ -69,7 +69,7 @@ func slashCommands() []command {
 		{"mode", "", "switch between knowledge-base answers and the Hermes agent (also /agent, /rag)", groupModes},
 		{"safe", "", "confirm every command before an engagement runs it", groupModes},
 		{"auto", "[override]", "run an engagement autonomously within scope", groupModes},
-		{"engage", "<goal>", "run a gated, multi-step engagement toward a goal", groupModes},
+		{"engage", "<goal|web>", "run a gated, multi-step engagement toward a goal", groupModes},
 		{"candidates", "", "list the engagement's exploit candidates and their source", groupModes},
 		{"evidence", "", "show the engagement's captured evidence (verified quotes)", groupModes},
 		{"kg", "[node <id>|type]", "query the engagement knowledge graph", groupModes},

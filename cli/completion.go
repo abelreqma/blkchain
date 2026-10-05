@@ -51,6 +51,7 @@ func flagCases(action string) string {
 
 func bashCompletion() string {
 	cmds := strings.Join(commandNames(), " ")
+	webFlags := strings.Join(flagNames(commandFlagSet(engageWebSpec())), " ")
 	return `# blk bash completion - add to ~/.bashrc:  source <(blk completion bash)
 _blk_complete() {
   local cur prev
@@ -59,6 +60,18 @@ _blk_complete() {
   if [ "$COMP_CWORD" -eq 1 ]; then
     COMPREPLY=( $(compgen -W "` + cmds + `" -- "$cur") )
     return
+  fi
+  if [[ "${COMP_WORDS[1]}" == engage && "${COMP_WORDS[2]}" == web && "$cur" == -* ]]; then
+    COMPREPLY=( $(compgen -W "` + webFlags + `" -- "$cur") ); return
+  fi
+  if [[ "${COMP_WORDS[1]}" == engage && "$COMP_CWORD" -eq 2 ]]; then
+    COMPREPLY=( $(compgen -W "web arm resume" -- "$cur") ); return
+  fi
+  if [[ "${COMP_WORDS[1]}" == engage && "${COMP_WORDS[2]}" == web && "$COMP_CWORD" -eq 3 ]]; then
+    COMPREPLY=( $(compgen -W "collect analyze inspect import archive export replay" -- "$cur") ); return
+  fi
+  if [[ "${COMP_WORDS[1]}" == web && "$COMP_CWORD" -eq 2 && "$cur" != -* ]]; then
+    COMPREPLY=( $(compgen -W "status on off provider search" -- "$cur") ); return
   fi
   if [[ "$cur" == -* ]]; then
     case "${COMP_WORDS[1]}" in
@@ -89,6 +102,7 @@ func zshCompletion() string {
 	for _, c := range commandSpecs() {
 		fmt.Fprintf(&entries, "    '%s:%s'\n", c.name, zshEscape(c.desc))
 	}
+	webFlags := strings.Join(flagNames(commandFlagSet(engageWebSpec())), " ")
 	return `# blk zsh completion - add to ~/.zshrc:  source <(blk completion zsh)
 _blk() {
   local -a cmds
@@ -96,6 +110,22 @@ _blk() {
 ` + entries.String() + `  )
   if (( CURRENT == 2 )); then
     _describe -t commands 'blk command' cmds
+    return
+  fi
+  if [[ "${words[2]}" == engage && "${words[3]}" == web && "${words[CURRENT]}" == -* ]]; then
+    compadd -- ` + webFlags + `
+    return
+  fi
+  if [[ "${words[2]}" == engage && CURRENT == 3 ]]; then
+    compadd web arm resume
+    return
+  fi
+  if [[ "${words[2]}" == engage && "${words[3]}" == web && CURRENT == 4 ]]; then
+    compadd collect analyze inspect import archive export replay
+    return
+  fi
+  if [[ "${words[2]}" == web && CURRENT == 3 && "${words[CURRENT]}" != -* ]]; then
+    compadd status on off provider search
     return
   fi
   if [[ "${words[CURRENT]}" == -* ]]; then

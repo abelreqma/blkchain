@@ -1973,9 +1973,6 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		if err != nil {
 			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
 		}
-		if !webIsSearchCommand(args) {
-			return m.dispatchWeb(arg, echo)
-		}
 		c, err := parseWebCommand(args)
 		if err != nil {
 			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
@@ -2082,6 +2079,10 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.pendingQ = question
 		return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.generateCmd(ctx, question, results, m.turnStart))
 	case "engage":
+		parts := strings.Fields(arg)
+		if len(parts) > 0 && parts[0] == "web" {
+			return m.dispatchWeb(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), "web")), echo)
+		}
 		if strings.TrimSpace(arg) == "resume" || strings.HasPrefix(strings.TrimSpace(arg), "resume ") {
 			workspace := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), "resume"))
 			if workspace == "" {

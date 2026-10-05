@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -251,7 +253,7 @@ func TestWebOffBlocksExplicitSearchAndWebAnswer(t *testing.T) {
 	}
 }
 
-func TestCombinedWebCommandsKeepBothSurfaces(t *testing.T) {
+func TestWebCommandsDispatchByPurpose(t *testing.T) {
 	isolateUserDirs(t)
 	workspace, err := engagement.OpenWorkspace(t.TempDir())
 	if err != nil {
@@ -262,16 +264,30 @@ func TestCombinedWebCommandsKeepBothSurfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	var commandErr error
-	output := captureStdout(t, func() { commandErr = runWeb([]string{"inspect", "--workspace", directory, "--no-rdns", "--json"}) })
+	if err := runWeb([]string{"inspect", "--workspace", directory, "--no-rdns", "--json"}); exitCode(err) != 2 {
+		t.Fatalf("web accepted assessment: %v", err)
+	}
+	output := captureStdout(t, func() {
+		commandErr = dispatch("engage", []string{"web", "inspect", "--workspace", directory, "--no-rdns", "--json"})
+	})
 	if commandErr != nil || !strings.Contains(output, `"operations"`) {
-		t.Fatalf("analysis dispatch: %q %v", output, commandErr)
+		t.Fatalf("engage web dispatch: %q %v", output, commandErr)
 	}
 	output = captureStdout(t, func() { commandErr = runWeb([]string{"status", "--json"}) })
 	if commandErr != nil || !strings.Contains(output, `"enabled": false`) {
 		t.Fatalf("search status: %q %v", output, commandErr)
 	}
 	m := newKeyModel(t)
-	_, command := m.dispatchInput("/web inspect --workspace " + directory + " --no-rdns --json")
+	blocked, blockedCommand := m.dispatchInput("/web inspect --workspace " + directory + " --no-rdns --json")
+	if blocked.(model).working {
+		t.Fatal("/web started an assessment")
+	}
+	for _, message := range drain(blockedCommand) {
+		if _, ok := message.(webDoneMsg); ok {
+			t.Fatal("/web dispatched assessment work")
+		}
+	}
+	_, command := m.dispatchInput("/engage web inspect --workspace " + directory + " --no-rdns --json")
 	found := false
 	for _, message := range drain(command) {
 		if done, ok := message.(webDoneMsg); ok {
@@ -290,8 +306,47 @@ func TestCombinedWebCommandsKeepBothSurfaces(t *testing.T) {
 		{[]string{"collect", "fixture.test"}, false},
 		{[]string{"provider", "duckduckgo"}, true},
 	} {
-		if got := webIsSearchCommand(test.args); got != test.search {
-			t.Fatalf("dispatch %v = %v", test.args, got)
+		if _, err := parseWebCommand(test.args); (err == nil) != test.search {
+			t.Fatalf("web parser %v: %v", test.args, err)
 		}
+	}
+}
+
+func TestPlainWebAssessmentUsesEngage(t *testing.T) {
+	isolateUserDirs(t)
+	workspace, err := engagement.OpenWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := workspace.Dir
+	if err := workspace.Close(); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(t.TempDir(), "commands")
+	lines := "/web inspect --workspace " + directory + " --no-rdns --json\n/engage web inspect --workspace " + directory + " --no-rdns --json\n/quit\n"
+	if err := os.WriteFile(input, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	old := os.Stdin
+	os.Stdin = f
+	defer func() { os.Stdin = old }()
+	var stderr string
+	stdout := captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			if err := plainREPL(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	})
+	if !strings.Contains(stderr, "web: unknown flag --workspace") {
+		t.Fatalf("/web did not reject assessment: %q", stderr)
+	}
+	if strings.Count(stdout, `"operations"`) != 1 {
+		t.Fatalf("/engage web did not run assessment exactly once: %q", stdout)
 	}
 }

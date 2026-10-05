@@ -172,7 +172,7 @@ func TestWebWorkerWebSocketE2E(t *testing.T) {
 			t.Fatal(err)
 		}
 		ws.Close()
-		out := run([]string{"web", "collect", origin, "--workspace", dir, "--scope", scopeFile, "--session", sessions, "--task", "stream-task", "--browser", "--auto", "--no-rdns", "--json"}, "")
+		out := run([]string{"engage", "web", "collect", origin, "--workspace", dir, "--scope", scopeFile, "--session", sessions, "--task", "stream-task", "--browser", "--auto", "--no-rdns", "--json"}, "")
 		var snapshot webanalysis.Snapshot
 		if json.Unmarshal([]byte(out), &snapshot) != nil {
 			t.Fatal("invalid CLI snapshot")
@@ -279,15 +279,15 @@ func TestWebWorkerWebSocketE2E(t *testing.T) {
 		if sent < 4 || received < 4 || !binaryFrame || repeated != 2 || writes.Load() < 4 || posts.Load() != 1 {
 			t.Errorf("armed message manifest: sent=%d received=%d binary=%t repeats=%d writes=%d posts=%d", sent, received, binaryFrame, repeated, writes.Load(), posts.Load())
 		}
-		inspect := []string{"web", "inspect", origin, "--workspace", dir, "--view", "apis", "--no-rdns"}
+		inspect := []string{"engage", "web", "inspect", origin, "--workspace", dir, "--view", "apis", "--no-rdns"}
 		if out := run(inspect, ""); !strings.Contains(out, token) || !strings.Contains(out, "WebSocket received") {
 			t.Error("CLI stream display missing")
 		}
-		out = run([]string{"repl"}, "/web inspect "+origin+" --workspace "+dir+" --view apis --no-rdns\n/quit\n")
+		out = run([]string{"repl"}, "/engage web inspect "+origin+" --workspace "+dir+" --view apis --no-rdns\n/quit\n")
 		if !strings.Contains(out, token) || !strings.Contains(out, "\U0001f310") || !strings.Contains(out, "WebSocket received") {
 			t.Error("REPL stream display missing")
 		}
-		run([]string{"web", "export", "--workspace", dir}, "")
+		run([]string{"engage", "web", "export", "--workspace", dir}, "")
 		files, _ := filepath.Glob(filepath.Join(dir, "evidence/web/exports/*.json"))
 		exact := false
 		for _, path := range files {
@@ -298,7 +298,7 @@ func TestWebWorkerWebSocketE2E(t *testing.T) {
 			t.Error("exact stream export missing")
 		}
 		m := newKeyModel(t)
-		updated, cmd := m.dispatchWeb("inspect "+origin+" --workspace "+dir+" --view apis --no-rdns", "/web inspect")
+		updated, cmd := m.dispatchWeb("inspect "+origin+" --workspace "+dir+" --view apis --no-rdns", "/engage web inspect")
 		batch, ok := cmd().(tea.BatchMsg)
 		if !ok {
 			t.Fatal("TUI dispatch missing")

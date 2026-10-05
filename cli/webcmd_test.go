@@ -165,7 +165,7 @@ func TestWebTUICallsSharedServiceAndCompletes(t *testing.T) {
 	}
 	workspace.Close()
 	m := newKeyModel(t)
-	updated, cmd := m.dispatchWeb("inspect fixture.test --workspace "+dir+" --view apis --no-rdns", "/web inspect")
+	updated, cmd := m.dispatchWeb("inspect fixture.test --workspace "+dir+" --view apis --no-rdns", "/engage web inspect")
 	current := updated.(model)
 	if !current.working || current.cancel == nil {
 		t.Fatal("web job did not start")
