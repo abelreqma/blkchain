@@ -974,7 +974,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		elapsed := time.Since(m.turnStart)
 		if msg.err != nil {
 			if errors.Is(msg.err, context.Canceled) {
-				return m, m.finish(tea.Println("   " + Meta.Render("engagement stopped")))
+				return m, m.finish(tea.Println("   " + Meta.Render("engagement stopped") + "\n" + msg.final))
 			}
 			return m, m.finish(tea.Println(formatEngageError(msg.final, fmt.Errorf("engage: %w", timeoutOrErr(msg.err)), m.renderWidth())))
 		}
@@ -1525,9 +1525,17 @@ func (m model) advanceEngageIntake(res ClarifyResult) (tea.Model, tea.Cmd) {
 // (reliable line input) rather than a Bubble Tea overlay, whose key events are
 // unreliable in some terminals during a long engagement; stop cancels the turn.
 func (m model) dispatchEngage(goal string) (tea.Model, tea.Cmd) {
+	return m.dispatchEngageAt(goal, "", "")
+}
+
+func (m model) dispatchEngageAt(goal, wsDir, projectDir string) (tea.Model, tea.Cmd) {
 	run, err := m.buildReplEngageRun(goal)
 	if err != nil {
 		return m, tea.Println(styleErr(err))
+	}
+	if wsDir != "" {
+		run.wsDir = wsDir
+		run.cwd = projectDir
 	}
 	m.working = true
 	m.tickGen++
@@ -2036,6 +2044,27 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.pendingQ = question
 		return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.generateCmd(ctx, question, results, m.turnStart))
 	case "engage":
+		if strings.TrimSpace(arg) == "resume" || strings.HasPrefix(strings.TrimSpace(arg), "resume ") {
+			workspace := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), "resume"))
+			if workspace == "" {
+				var err error
+				workspace, err = latestEngagementDir()
+				if err != nil {
+					return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
+				}
+			}
+			checkpoint, err := loadEngageCheckpoint(workspace)
+			if err != nil {
+				return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
+			}
+			m.engageMode = secgate.Safe
+			if checkpoint.Auto {
+				m.engageMode = secgate.Auto
+			}
+			m.engageOverride = checkpoint.AutoOverride
+			nm, cmd := m.dispatchEngageAt(checkpoint.Goal, workspace, checkpoint.ProjectDir)
+			return nm, tea.Batch(tea.Println(echo), cmd)
+		}
 		// A goal that already names a target is clear enough to dispatch; otherwise
 		// run the guided intake (domain, target, interactivity) at idle, where key
 		// input is reliable, to shape the goal before any run.

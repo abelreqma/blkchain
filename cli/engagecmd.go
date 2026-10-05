@@ -59,6 +59,9 @@ func runEngage(args []string) error {
 	if len(args) > 0 && args[0] == "arm" {
 		return runEngageArm(args[1:])
 	}
+	if len(args) > 0 && args[0] == "resume" {
+		return runEngageResume(args[1:])
+	}
 
 	var o engageOpts
 	fs := newFlagSet("engage")
@@ -72,8 +75,17 @@ func runEngage(args []string) error {
 	if strings.TrimSpace(goal) == "" {
 		return missingArg("engage", "missing goal", `engage --scope scope.txt "enumerate 10.0.0.5"`)
 	}
+	return runEngageWithOptions(o, goal, nil)
+}
 
+func runEngageWithOptions(o engageOpts, goal string, checkpoint *engageCheckpoint) error {
 	cwd, _ := os.Getwd()
+	if checkpoint != nil {
+		cwd = checkpoint.ProjectDir
+		if checkpoint.ScopeKind == "scope" {
+			o.scope = filepath.Join(o.workspace, "scope.txt")
+		}
+	}
 	// Shared memory store for RoE recall-by-directory (best-effort; nil degrades).
 	var roeDB *sql.DB
 	if store := histstore.OpenDefault(); store != nil {
@@ -81,7 +93,14 @@ func runEngage(args []string) error {
 		roeDB = store.DB()
 	}
 
-	scope, scopeDesc, roeUsed, err := resolveEngageScope(o, cwd, roeDB)
+	var scope *secgate.Scope
+	var scopeDesc, roeUsed string
+	var err error
+	if checkpoint != nil {
+		scope, scopeDesc, roeUsed, err = checkpointScope(o.workspace, *checkpoint)
+	} else {
+		scope, scopeDesc, roeUsed, err = resolveEngageScope(o, cwd, roeDB)
+	}
 	if err != nil {
 		return fmt.Errorf("engage: %w", err)
 	}
@@ -120,10 +139,30 @@ func runEngage(args []string) error {
 		return fmt.Errorf("engage: cannot open workspace: %w", err)
 	}
 	defer ws.Close()
+	if checkpoint == nil {
+		kind, source := "none", ""
+		if roeUsed != "" {
+			kind, source = "roe", roeUsed
+		} else if o.scope != "" {
+			kind, source = "scope", o.scope
+		}
+		entry := engageCheckpoint{Goal: goal, ProjectDir: cwd, ScopeKind: kind, Auto: o.auto, AutoOverride: o.autoOverride}
+		if err := saveEngageCheckpoint(ws.Dir, entry, source); err != nil {
+			return fmt.Errorf("engage: checkpoint: %w", err)
+		}
+		if kind == "roe" {
+			scope, scopeDesc, roeUsed, err = resolveEngageScope(engageOpts{}, ws.Dir, nil)
+		} else if kind == "scope" {
+			scope, scopeDesc, _, err = resolveEngageScope(engageOpts{scope: filepath.Join(ws.Dir, "scope.txt")}, cwd, nil)
+		}
+		if err != nil {
+			return fmt.Errorf("engage: snapshotted scope: %w", err)
+		}
+	}
 
 	// When no RoE was found and no explicit scope was given, drop a pre-formatted
 	// ROE.md template into the workspace (idempotent; never overwrites).
-	if roeUsed == "" && strings.TrimSpace(o.scope) == "" {
+	if checkpoint == nil && roeUsed == "" && strings.TrimSpace(o.scope) == "" {
 		if _, werr := writeRoETemplate(ws.Dir); werr != nil {
 			fmt.Fprintf(os.Stderr, "engage: could not write ROE.md template: %v\n", werr)
 		}

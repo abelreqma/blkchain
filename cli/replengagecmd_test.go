@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -116,14 +118,15 @@ func TestEngageDispatchReportsRetrievalError(t *testing.T) {
 // engageCmd invokes the injected engage entry and bridges its progress snapshots
 // to the live view; the result comes back as an engageDoneMsg.
 func TestEngageCmdInvokesRunAndBridgesProgress(t *testing.T) {
-	var gotGoal string
+	var gotGoal, gotWorkspace, gotCwd string
 	stubRunReplEngage(t, func(ctx context.Context, wsDir, cwd string, mode secgate.Mode, override bool, model toolLoopModel, rc searcher, cfg ragconfig.Config, prefs modelPrefs, cat *skillcat.Catalog, confirm secgate.Confirmer, asker askuser.Asker, roeDB *sql.DB, goal string, progress func(int64, eng.Engagement)) (string, error) {
 		gotGoal = goal
+		gotWorkspace, gotCwd = wsDir, cwd
 		progress(1, eng.Engagement{Name: "e", ActiveID: "t1"})
 		return "engagement summary", nil
 	})
 	stub := newStubEngagement("e")
-	run := replEngageRun{ctx: context.Background(), goal: "recon the scope", stub: stub, asker: askuser.AutoAsker{}}
+	run := replEngageRun{ctx: context.Background(), wsDir: "/tmp/engagement", cwd: "/tmp/project", goal: "recon the scope", stub: stub, asker: askuser.AutoAsker{}}
 	msg := engageCmd(run)()
 	done, ok := msg.(engageDoneMsg)
 	if !ok {
@@ -135,8 +138,30 @@ func TestEngageCmdInvokesRunAndBridgesProgress(t *testing.T) {
 	if gotGoal != "recon the scope" {
 		t.Fatalf("engage entry got goal %q", gotGoal)
 	}
+	if gotWorkspace != "/tmp/engagement" || gotCwd != "/tmp/project" {
+		t.Fatalf("engage entry got workspace=%q cwd=%q", gotWorkspace, gotCwd)
+	}
 	if rev, _ := stub.Revision(context.Background()); rev == 0 {
 		t.Fatalf("the progress callback should have advanced the live view")
+	}
+}
+
+func TestTUIResumeDisplaysCheckpointMode(t *testing.T) {
+	project, ws := t.TempDir(), t.TempDir()
+	roe := filepath.Join(project, "ROE.md")
+	if err := os.WriteFile(roe, []byte("## In Scope\n192.0.2.1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := engageCheckpoint{Goal: "inspect 192.0.2.1", ProjectDir: project, ScopeKind: "roe", Auto: true}
+	if err := saveEngageCheckpoint(ws, c, roe); err != nil {
+		t.Fatal(err)
+	}
+	m := engageReadyModel(t)
+	m.engageMode = secgate.Safe
+	next, _ := m.dispatchInput("/engage resume " + ws)
+	got := next.(model)
+	if got.engageMode != secgate.Auto || !got.working {
+		t.Fatalf("mode=%v working=%t", got.engageMode, got.working)
 	}
 }
 

@@ -173,6 +173,58 @@ func TestRunReplEngageRetainsPriorAssessmentOnRetryFailure(t *testing.T) {
 	}
 }
 
+func TestRunReplEngageResumesSavedScopeAndOpenTask(t *testing.T) {
+	wsDir, cwd := t.TempDir(), t.TempDir()
+	roePath := filepath.Join(cwd, "ROE.md")
+	if err := os.WriteFile(roePath, []byte("## In Scope\n192.0.2.1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	goal := "inspect 192.0.2.1"
+	run := func(model toolLoopModel) (string, error) {
+		return runReplEngage(context.Background(), wsDir, cwd, secgate.Safe, false,
+			model, nil, ragconfig.Config{TopK: 5}, modelPrefs{}, nil,
+			&countingConfirmer{ok: true}, askuser.AutoAsker{}, nil, goal, nil)
+	}
+	first := &scriptModel{resps: []*llms.ContentResponse{
+		toolCallResp("c1", "plan_add", `{"id":"t1","kind":"web","target":"192.0.2.1","objective":"inspect"}`),
+		finalResp("paused for continuation"),
+	}}
+	if _, err := run(first); err != nil {
+		t.Fatal(err)
+	}
+	before, err := engagement.OpenWorkspace(wsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vantage := engagement.VantageInternalFoothold
+	if _, err := before.Store.Apply(engagement.Delta{Kind: "vantage", SetVantage: &vantage}); err != nil {
+		t.Fatal(err)
+	}
+	before.Close()
+	if err := os.WriteFile(roePath, []byte("## In Scope\n198.51.100.2\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	final, err := run(&scriptModel{resps: []*llms.ContentResponse{finalResp("continued")}})
+	if err != nil || !strings.Contains(final, "continued") {
+		t.Fatalf("final=%q err=%v", final, err)
+	}
+	ws, err := engagement.OpenWorkspace(wsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	if _, err := ws.Store.GetTask("t1"); err != nil {
+		t.Fatalf("open task lost: %v", err)
+	}
+	if snap, err := ws.Store.Snapshot(context.Background()); err != nil || snap.Vantage != vantage {
+		t.Fatalf("resumed vantage=%q err=%v", snap.Vantage, err)
+	}
+	saved, err := os.ReadFile(filepath.Join(wsDir, "ROE.md"))
+	if err != nil || !strings.Contains(string(saved), "192.0.2.1") || strings.Contains(string(saved), "198.51.100.2") {
+		t.Fatalf("saved RoE=%q err=%v", saved, err)
+	}
+}
+
 type reportWriteFailureModel struct{ workspace string }
 
 func (m reportWriteFailureModel) GenerateContent(_ context.Context, _ []llms.MessageContent, _ ...llms.CallOption) (*llms.ContentResponse, error) {

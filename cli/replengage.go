@@ -78,7 +78,39 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 	confirm secgate.Confirmer, asker askuser.Asker, roeDB *sql.DB, goal string,
 	progress func(rev int64, snap engagement.Engagement)) (string, error) {
 
-	scope, scopeDesc, _, err := resolveEngageScope(engageOpts{}, cwd, roeDB)
+	var err error
+	if wsDir == "" {
+		wsDir, err = engageWorkspaceDir("")
+		if err != nil {
+			return "", fmt.Errorf("engage: %w", err)
+		}
+	}
+	var checkpoint *engageCheckpoint
+	if _, statErr := os.Stat(filepath.Join(wsDir, "checkpoint.json")); statErr == nil {
+		loaded, loadErr := loadEngageCheckpoint(wsDir)
+		if loadErr != nil {
+			return "", fmt.Errorf("engage resume: %w", loadErr)
+		}
+		if goal != loaded.Goal {
+			return "", errors.New("engage resume: goal differs from saved engagement")
+		}
+		checkpoint = &loaded
+		cwd = loaded.ProjectDir
+		mode = secgate.Safe
+		if loaded.Auto {
+			mode = secgate.Auto
+		}
+		override = loaded.AutoOverride
+	} else if !os.IsNotExist(statErr) {
+		return "", fmt.Errorf("engage: checkpoint: %w", statErr)
+	}
+	var scope *secgate.Scope
+	var scopeDesc, roeUsed string
+	if checkpoint != nil {
+		scope, scopeDesc, roeUsed, err = checkpointScope(wsDir, *checkpoint)
+	} else {
+		scope, scopeDesc, roeUsed, err = resolveEngageScope(engageOpts{}, cwd, roeDB)
+	}
 	if err != nil {
 		return "", fmt.Errorf("engage: %w", err)
 	}
@@ -95,16 +127,27 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 		return "", errors.New("engage: a local/post-access engagement needs interactive confirmation")
 	}
 
-	if wsDir == "" {
-		if wsDir, err = engageWorkspaceDir(""); err != nil {
-			return "", fmt.Errorf("engage: %w", err)
-		}
-	}
 	ws, err := engagement.OpenWorkspace(wsDir)
 	if err != nil {
 		return "", fmt.Errorf("engage: cannot open workspace: %w", err)
 	}
 	defer ws.Close()
+	if checkpoint == nil {
+		kind, source := "none", ""
+		if roeUsed != "" {
+			kind, source = "roe", roeUsed
+		}
+		entry := engageCheckpoint{Goal: goal, ProjectDir: cwd, ScopeKind: kind, Auto: mode == secgate.Auto, AutoOverride: override}
+		if err := saveEngageCheckpoint(ws.Dir, entry, source); err != nil {
+			return "", fmt.Errorf("engage: checkpoint: %w", err)
+		}
+		if kind == "roe" {
+			scope, scopeDesc, _, err = resolveEngageScope(engageOpts{}, ws.Dir, nil)
+			if err != nil {
+				return "", fmt.Errorf("engage: snapshotted scope: %w", err)
+			}
+		}
+	}
 
 	SetEngageEvidenceSource(ws.Store.EvidenceRowsFor)
 	defer SetEngageEvidenceSource(nil)
@@ -166,7 +209,8 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 		if ferr := rw.Flush("interrupted"); ferr != nil {
 			fmt.Fprintf(os.Stderr, "report: final write failed: %v\n", ferr)
 		}
-		return "", err
+		mdPath, jsonPath := reportPaths(wsDir)
+		return "Report: " + mdPath + "\n        " + jsonPath, err
 	}
 	rw.SetFinal(final)
 	if err := rw.Flush(reportStatus); err != nil {

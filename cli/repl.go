@@ -154,7 +154,13 @@ func plainREPL() error {
 				printErr(copyToClipboard(pm.lastAnswer))
 			}
 		case "engage":
-			printErr(runEngage(strings.Fields(rest)))
+			if strings.HasPrefix(rest, "resume /") || strings.HasPrefix(rest, "resume --workspace /") || strings.HasPrefix(rest, "resume \"") || strings.HasPrefix(rest, "resume --workspace \"") {
+				path := strings.TrimSpace(strings.TrimPrefix(rest, "resume "))
+				path = strings.TrimPrefix(path, "--workspace ")
+				printErr(runEngage([]string{"resume", strings.Trim(path, `"`)}))
+			} else {
+				printErr(runEngage(strings.Fields(rest)))
+			}
 		case "history":
 			var err error
 			convo, err = plainHistory(&pm, rest, convo)

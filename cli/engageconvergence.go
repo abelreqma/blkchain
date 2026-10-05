@@ -93,15 +93,21 @@ func synthesizeEngagement(ctx context.Context, d engageDeps, goal, reason string
 }
 
 func engagementStoreReport(ctx context.Context, store *engagement.Store, goal string) (string, error) {
-	snap, err := store.Snapshot(ctx)
+	const maxReportTasks = 128
+	const maxReportEvidence = 80
+	snap, tasksTruncated, err := store.ReportSnapshot(ctx, maxReportTasks)
 	if err != nil {
 		return "", err
 	}
-	evidence, err := store.AllEvidence()
+	evidence, evidenceTruncated, err := store.ReportEvidence(ctx, maxReportEvidence)
 	if err != nil {
 		return "", err
 	}
-	report := engreport.RenderMarkdown(engreport.Model{Goal: goal, Status: "paused", Engagement: snap, Evidence: evidence})
+	report := engreport.RenderMarkdown(engreport.Model{Goal: capRunes(goal, 8000), Status: "paused", Engagement: snap, Evidence: evidence})
+	report += "\n[Task text is limited to 1024 characters. Dependency, basis, and citation fields over 4096 characters are omitted from this bounded summary; inspect the store for complete task data.]\n"
+	if tasksTruncated || evidenceTruncated {
+		report += "\n[Stored tasks or evidence omitted from this bounded summary; inspect the workspace report and store.]\n"
+	}
 	if len(evidence) > 0 {
 		raw, err := json.Marshal(evidence)
 		if err != nil {

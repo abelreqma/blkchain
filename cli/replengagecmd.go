@@ -44,6 +44,7 @@ type engageRunStatus struct{ paused bool }
 // by the dispatch once the turn's context exists.
 type replEngageRun struct {
 	ctx      context.Context
+	wsDir    string
 	goal     string
 	mode     secgate.Mode
 	override bool
@@ -108,7 +109,7 @@ func engageCmd(r replEngageRun) tea.Cmd {
 				r.stub.setSnapshot(snap)
 			}
 		}
-		final, err := runReplEngageFn(ctx, "", r.cwd, r.mode, r.override, r.model, r.rc,
+		final, err := runReplEngageFn(ctx, r.wsDir, r.cwd, r.mode, r.override, r.model, r.rc,
 			r.cfg, r.prefs, r.cat, r.confirm, r.asker, r.roeDB, r.goal, progress)
 		return engageDoneMsg{final: final, err: err, paused: status.paused}
 	}

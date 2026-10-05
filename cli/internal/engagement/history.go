@@ -1,5 +1,7 @@
 package engagement
 
+import "context"
+
 // Transition is one recorded change to the engagement, as stored in the
 // transition table.
 type Transition struct {
@@ -46,4 +48,27 @@ func (s *Store) AllEvidence() (map[string][]string, error) {
 		out[id] = append(out[id], q)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) ReportEvidence(ctx context.Context, maxRows int) (map[string][]string, bool, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT task_id, substr(quote, 1, 4001) FROM evidence ORDER BY id ASC LIMIT ?`, maxRows+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	count := 0
+	for rows.Next() {
+		var id, quote string
+		if err := rows.Scan(&id, &quote); err != nil {
+			return nil, false, err
+		}
+		if count == maxRows {
+			return out, true, nil
+		}
+		out[id] = append(out[id], quote)
+		count++
+	}
+	return out, false, rows.Err()
 }

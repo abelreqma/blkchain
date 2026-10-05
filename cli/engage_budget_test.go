@@ -28,6 +28,35 @@ func TestEngageTotalWorkBudgetStopsBeforeAnotherModelCall(t *testing.T) {
 	}
 }
 
+func TestEngageBudgetCannotResetByResuming(t *testing.T) {
+	t.Setenv("BLKCHAIN_ENGAGE_MAX_ACTIONS", "2")
+	d := testDeps(t, &fakeModel{queue: []*llms.ContentResponse{
+		callResp("c1", "plan_add", `{"id":"t1","kind":"web","target":"192.0.2.1","objective":"inspect"}`),
+		textResp("done"),
+	}})
+	if _, err := runOrchestrator(context.Background(), d, "inspect target"); err != nil {
+		t.Fatal(err)
+	}
+	resumed := &fakeModel{queue: []*llms.ContentResponse{textResp("done")}}
+	d.Model = resumed
+	final, err := runOrchestrator(context.Background(), d, "inspect target")
+	if err != nil || resumed.calls != 0 || !strings.Contains(final, "work budget reached") {
+		t.Fatalf("calls=%d final=%q err=%v", resumed.calls, final, err)
+	}
+}
+
+func TestEngageWallBudgetPersistsAcrossResume(t *testing.T) {
+	d := testDeps(t, &fakeModel{queue: []*llms.ContentResponse{textResp("should not run")}})
+	if _, err := d.Store.EnsureEngagementStart(time.Now().Add(-2 * time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	d.WallSeconds = 60
+	final, err := runOrchestrator(context.Background(), d, "inspect target")
+	if err != nil || !strings.Contains(final, "wall-clock budget reached") || d.Model.(*fakeModel).calls != 0 {
+		t.Fatalf("final=%q model_calls=%d err=%v", final, d.Model.(*fakeModel).calls, err)
+	}
+}
+
 type waitingBudgetModel struct{}
 
 func (waitingBudgetModel) GenerateContent(ctx context.Context, _ []llms.MessageContent, _ ...llms.CallOption) (*llms.ContentResponse, error) {
@@ -48,7 +77,10 @@ func TestEngageWallBudgetStopsWaitingModel(t *testing.T) {
 func TestEngageBudgetEnvironmentOverridesProjectDefault(t *testing.T) {
 	check := func(want int) {
 		t.Helper()
-		ctx, stop := engageBudgetContext(context.Background(), 2, 120)
+		ctx, stop, err := engageBudgetContext(context.Background(), nil, 2, 120)
+		if err != nil {
+			t.Fatal(err)
+		}
 		defer stop()
 		for i := 0; i < want; i++ {
 			if err := consumeEngageWork(ctx); err != nil {
@@ -69,7 +101,10 @@ func TestEngageBudgetBoundsReturnedReport(t *testing.T) {
 	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{ID: "t1", Kind: "web", Objective: strings.Repeat("x", 100000), Status: engagement.StatusTodo}}}); err != nil {
 		t.Fatal(err)
 	}
-	ctx, stop := engageBudgetContext(context.Background(), 1, 60)
+	ctx, stop, err := engageBudgetContext(context.Background(), nil, 1, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer stop()
 	if err := consumeEngageWork(ctx); err != nil {
 		t.Fatal(err)
@@ -78,7 +113,37 @@ func TestEngageBudgetBoundsReturnedReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	final, stopped, err := engageBudgetStop(ctx, d.Store, "inspect target")
-	if err != nil || !stopped || len([]rune(final)) > 65650 || !strings.Contains(final, "[report truncated;") {
+	if err != nil || !stopped || len([]rune(final)) > 65650 || !strings.Contains(final, "Task text is limited to 1024 characters") {
 		t.Fatalf("length=%d stopped=%t err=%v", len([]rune(final)), stopped, err)
+	}
+}
+
+func TestEngageWithOpenTaskReportsPaused(t *testing.T) {
+	m := &fakeModel{queue: []*llms.ContentResponse{
+		callResp("c1", "plan_add", `{"id":"t1","kind":"web","target":"192.0.2.1","objective":"inspect"}`),
+		textResp("task planned"),
+	}}
+	d := testDeps(t, m)
+	reason := ""
+	d.OnStop = func(r string) { reason = r }
+	final, err := runOrchestrator(context.Background(), d, "inspect target")
+	if err != nil || reason != "open tasks remain" || !strings.Contains(final, "Engagement paused: open tasks remain") || !strings.Contains(final, "task planned") {
+		t.Fatalf("final=%q reason=%q err=%v", final, reason, err)
+	}
+}
+
+func TestEngageEmptyFinalReturnsStoredReport(t *testing.T) {
+	d := testDeps(t, &fakeModel{queue: []*llms.ContentResponse{textResp("")}})
+	final, err := runOrchestrator(context.Background(), d, "inspect target")
+	if err != nil || !strings.Contains(final, "Engagement paused: empty final response") || !strings.Contains(final, "# Engagement Report") {
+		t.Fatalf("final=%q err=%v", final, err)
+	}
+}
+
+func TestEngageOversizedFinalIsBoundedAndPaused(t *testing.T) {
+	d := testDeps(t, &fakeModel{queue: []*llms.ContentResponse{textResp(strings.Repeat("x", 70000))}})
+	final, err := runOrchestrator(context.Background(), d, "inspect target")
+	if err != nil || len([]rune(final)) > 65650 || !strings.Contains(final, "Engagement paused: oversized final response") || !strings.Contains(final, "[final response truncated]") {
+		t.Fatalf("length=%d err=%v", len([]rune(final)), err)
 	}
 }

@@ -66,9 +66,26 @@ func readRevision(ctx context.Context, q rowQueryer) (int64, error) {
 // scanAllTasks returns every task ordered by creation revision then id, read
 // through q.
 func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
+	return scanTasks(ctx, q, 0)
+}
+
+func scanTasks(ctx context.Context, q rowsQueryer, limit int) ([]Task, error) {
+	query := `SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, citation, advisory
+		 FROM task ORDER BY created_rev ASC, id ASC`
+	if limit > 0 {
+		query = `SELECT substr(id, 1, 256), substr(kind, 1, 256), substr(target, 1, 1024), substr(objective, 1, 1024), substr(done_when, 1, 1024), status,
+		 CASE WHEN length(depends_on) <= 4096 THEN depends_on ELSE NULL END,
+		 CASE WHEN length(basis_ids) <= 4096 THEN basis_ids ELSE NULL END,
+		 created_rev, updated_rev, phase, surface, capability, armed, coverage_gap,
+		 CASE WHEN length(citation) <= 4096 THEN citation ELSE NULL END, substr(advisory, 1, 1024)
+		 FROM task ORDER BY CASE WHEN status IN ('todo', 'active') THEN 0 ELSE 1 END, created_rev ASC, id ASC LIMIT ?`
+	}
+	var args []any
+	if limit > 0 {
+		args = append(args, limit)
+	}
 	rows, err := q.QueryContext(ctx,
-		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, citation, advisory
-		 FROM task ORDER BY created_rev ASC, id ASC`)
+		query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -110,14 +127,23 @@ func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
 }
 
 func (s *Store) Snapshot(ctx context.Context) (Engagement, error) {
+	e, _, err := s.snapshot(ctx, 0)
+	return e, err
+}
+
+func (s *Store) ReportSnapshot(ctx context.Context, maxTasks int) (Engagement, bool, error) {
+	return s.snapshot(ctx, maxTasks)
+}
+
+func (s *Store) snapshot(ctx context.Context, maxTasks int) (Engagement, bool, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return Engagement{}, err
+		return Engagement{}, false, err
 	}
 	defer conn.Close()
 
 	if _, err := conn.ExecContext(ctx, "BEGIN DEFERRED"); err != nil {
-		return Engagement{}, err
+		return Engagement{}, false, err
 	}
 	committed := false
 	defer func() {
@@ -129,37 +155,45 @@ func (s *Store) Snapshot(ctx context.Context) (Engagement, error) {
 	var e Engagement
 
 	if e.Revision, err = readRevision(ctx, conn); err != nil {
-		return Engagement{}, err
+		return Engagement{}, false, err
 	}
 	if e.Name, err = getMeta(ctx, conn, "name"); err != nil {
-		return Engagement{}, err
+		return Engagement{}, false, err
 	}
 	if e.ActiveID, err = getMeta(ctx, conn, "active_id"); err != nil {
-		return Engagement{}, err
+		return Engagement{}, false, err
 	}
 	stageJSON, err := getMeta(ctx, conn, "stage")
 	if err != nil {
-		return Engagement{}, err
+		return Engagement{}, false, err
 	}
 	if stageJSON != "" {
 		if err := json.Unmarshal([]byte(stageJSON), &e.Stage); err != nil {
-			return Engagement{}, err
+			return Engagement{}, false, err
 		}
 	}
-	if e.Tasks, err = scanAllTasks(ctx, conn); err != nil {
-		return Engagement{}, err
+	limit := 0
+	if maxTasks > 0 {
+		limit = maxTasks + 1
+	}
+	if e.Tasks, err = scanTasks(ctx, conn, limit); err != nil {
+		return Engagement{}, false, err
+	}
+	truncated := maxTasks > 0 && len(e.Tasks) > maxTasks
+	if truncated {
+		e.Tasks = e.Tasks[:maxTasks]
 	}
 	vantageRaw, err := getMeta(ctx, conn, "vantage")
 	if err != nil {
-		return Engagement{}, err
+		return Engagement{}, false, err
 	}
 	e.Vantage = Vantage(vantageRaw)
 
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return Engagement{}, err
+		return Engagement{}, false, err
 	}
 	committed = true
-	return e, nil
+	return e, truncated, nil
 }
 
 // Vantage returns the engagement's current access context, or "" when unset.

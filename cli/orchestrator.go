@@ -343,9 +343,20 @@ func runExecutor(ctx context.Context, d engageDeps, taskID string) (string, erro
 }
 
 // runOrchestrator runs the top-level engagement loop for a goal.
-func runOrchestrator(ctx context.Context, d engageDeps, goal string) (string, error) {
-	ctx, stopBudget := engageBudgetContext(ctx, d.MaxActions, d.WallSeconds)
+func runOrchestrator(ctx context.Context, d engageDeps, goal string) (final string, runErr error) {
+	ctx, stopBudget, err := engageBudgetContext(ctx, d.Store, d.MaxActions, d.WallSeconds)
+	if err != nil {
+		return "", err
+	}
 	defer stopBudget()
+	defer func() {
+		if report, stopped, stopErr := engageBudgetStop(ctx, d.Store, goal); stopped {
+			if d.OnStop != nil {
+				d.OnStop("engagement budget")
+			}
+			final, runErr = report, stopErr
+		}
+	}()
 	if d.Progress != nil {
 		remove := d.Store.AddOnApply(d.Progress)
 		defer remove()
@@ -394,22 +405,51 @@ func runOrchestrator(ctx context.Context, d engageDeps, goal string) (string, er
 		options = append(options, llms.WithModel(model))
 	}
 	caps := engageLoopCaps()
+	finalized := false
 	caps.Progress = func(ctx context.Context) (string, error) { return engagementProgress(ctx, d.Store) }
 	caps.Finalize = func(ctx context.Context, reason string) (string, error) {
 		if err := consumeEngageWork(ctx); err != nil {
 			return "", err
 		}
+		finalized = true
 		if d.OnStop != nil {
 			d.OnStop(reason)
 		}
 		return synthesizeEngagement(ctx, d, goal, reason, options...)
 	}
-	final, _, err := runToolLoop(ctx, d.Model, reg, msgs, caps, options...)
-	if report, stopped, stopErr := engageBudgetStop(ctx, d.Store, goal); stopped {
-		if d.OnStop != nil {
-			d.OnStop("engagement budget")
+	final, _, err = runToolLoop(ctx, d.Model, reg, msgs, caps, options...)
+	if finalized {
+		return final, err
+	}
+	if err == nil {
+		if strings.TrimSpace(final) == "" {
+			report, reportErr := engagementStoreReport(ctx, d.Store, goal)
+			if reportErr != nil {
+				return "", reportErr
+			}
+			if d.OnStop != nil {
+				d.OnStop("empty final response")
+			}
+			return "Engagement paused: empty final response.\n\n" + boundedEngageReport(report), nil
 		}
-		return report, stopErr
+		if len([]rune(final)) > 65536 {
+			if d.OnStop != nil {
+				d.OnStop("oversized final response")
+			}
+			return "Engagement paused: oversized final response.\n\n" + capRunes(final, 65536) + "\n[final response truncated]", nil
+		}
+		snap, snapErr := d.Store.Snapshot(ctx)
+		if snapErr != nil {
+			return "", snapErr
+		}
+		for _, task := range snap.Tasks {
+			if task.Status == engagement.StatusTodo || task.Status == engagement.StatusActive || task.Status == engagement.StatusBlocked {
+				if d.OnStop != nil {
+					d.OnStop("open tasks remain")
+				}
+				return "Engagement paused: open tasks remain.\n\n" + final, nil
+			}
+		}
 	}
 	return final, err
 }

@@ -267,7 +267,7 @@ func commandSpecs() []cmdSpec {
 			examples: []string{
 				`blk engage --scope scope.txt "enumerate 10.0.0.5 and report open ports"`,
 				`blk engage --auto --scope scope.txt "run recon against the scope"`,
-				`blk engage --workspace ~/engagements/acme "assess the acme staging host"`,
+				`blk engage resume --workspace ~/engagements/acme`,
 			},
 			run: runEngage,
 		},

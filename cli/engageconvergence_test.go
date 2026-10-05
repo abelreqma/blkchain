@@ -97,7 +97,7 @@ func TestEngageConvergencePlanDeltaResetIdle(t *testing.T) {
 		textResp("normal final report"),
 	}}
 	out, err := runOrchestrator(context.Background(), testDeps(t, m), "assess target")
-	if err != nil || out != "normal final report" || m.calls != 5 {
+	if err != nil || !strings.Contains(out, "Engagement paused: open tasks remain.") || !strings.Contains(out, "normal final report") || m.calls != 5 {
 		t.Fatalf("out=%q calls=%d err=%v", out, m.calls, err)
 	}
 }
@@ -143,7 +143,7 @@ func TestEngageConvergenceSynthesisContextBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := m.seen[0][1].Parts[0].(llms.TextContent).Text
-	if len(text) > 57000 || !strings.Contains(text, `"Truncated":true`) {
+	if len(text) > 57000 || !strings.Contains(text, "Task text is limited to 1024 characters") {
 		t.Fatalf("length=%d truncated=%v", len(text), strings.Contains(text, `"Truncated":true`))
 	}
 }
@@ -169,6 +169,33 @@ func TestEngageConvergenceCompletedEvidenceStaysExact(t *testing.T) {
 	encoded, _ := json.Marshal(quote)
 	if !strings.Contains(payload.Report, string(encoded)) {
 		t.Fatalf("raw completed evidence missing: %q", payload.Report)
+	}
+}
+
+func TestEngagementStoreReportBoundsEvidence(t *testing.T) {
+	d := testDeps(t, nil)
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{ID: "t1", Kind: "web", Status: engagement.StatusTodo}}}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 81; i++ {
+		if _, err := d.Store.RecordEvidence("t1", fmt.Sprintf("evidence-%03d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report, err := engagementStoreReport(context.Background(), d.Store, "inspect")
+	if err != nil || !strings.Contains(report, "evidence-079") || strings.Contains(report, "evidence-080") || !strings.Contains(report, "omitted from this bounded summary") {
+		t.Fatalf("bounded report err=%v report=%q", err, report)
+	}
+}
+
+func TestEngagementStoreReportBoundsTaskText(t *testing.T) {
+	d := testDeps(t, nil)
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{ID: "t1", Kind: "web", Status: engagement.StatusTodo, Objective: strings.Repeat("x", 100000)}}}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := engagementStoreReport(context.Background(), d.Store, "inspect")
+	if err != nil || len(report) > 10000 || !strings.Contains(report, strings.Repeat("x", 1024)) || strings.Contains(report, strings.Repeat("x", 1025)) || !strings.Contains(report, "basis, and citation fields over 4096 characters are omitted") {
+		t.Fatalf("unbounded task text: length=%d err=%v", len(report), err)
 	}
 }
 
@@ -233,7 +260,7 @@ func TestEngageConvergenceHigherDefaultCaps(t *testing.T) {
 	queue = append(queue, textResp("engagement report"))
 	m := &fakeModel{queue: queue}
 	out, err := runOrchestrator(context.Background(), testDeps(t, m), "assess target")
-	if err != nil || out != "engagement report" || m.calls != 11 {
+	if err != nil || !strings.Contains(out, "Engagement paused: open tasks remain.") || !strings.Contains(out, "engagement report") || m.calls != 11 {
 		t.Fatalf("out=%q calls=%d err=%v", out, m.calls, err)
 	}
 }
@@ -249,7 +276,7 @@ func TestEngageConvergenceRoundCapSynthesizes(t *testing.T) {
 	stopReason := ""
 	d.OnStop = func(reason string) { stopReason = reason }
 	out, err := runOrchestrator(context.Background(), d, "assess target")
-	if err != nil || !strings.Contains(out, "login remains untested") || m.calls != 2 || !strings.Contains(stopReason, "round cap") {
+	if err != nil || !strings.Contains(out, "login remains untested") || m.calls != 2 || !strings.Contains(stopReason, "round cap") || strings.Count(out, "Engagement paused:") != 1 {
 		t.Fatalf("out=%q calls=%d err=%v", out, m.calls, err)
 	}
 	last := m.opts[len(m.opts)-1]
@@ -282,7 +309,7 @@ func TestEngageConvergenceOrchestratorModelOverride(t *testing.T) {
 		textResp("orchestrator done"),
 	}}}
 	out, err := runOrchestrator(context.Background(), testDeps(t, m), "assess target")
-	if err != nil || out != "orchestrator done" || len(m.opts) != 4 {
+	if err != nil || !strings.Contains(out, "Engagement paused: open tasks remain.") || !strings.Contains(out, "orchestrator done") || len(m.opts) != 4 {
 		t.Fatalf("out=%q calls=%d err=%v", out, m.calls, err)
 	}
 	for i, want := range []string{"larger-model", "larger-model", "", "larger-model"} {

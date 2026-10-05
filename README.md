@@ -145,7 +145,9 @@ hardcoded.** See [`.env.example`](.env.example) for every variable; the essentia
   wall-clock deadline (default 1800 seconds). Set `engage_max_actions` and
   `engage_wall_seconds` in the project's `.blkchain/config.yaml`; the corresponding
   `BLKCHAIN_ENGAGE_MAX_ACTIONS` and `BLKCHAIN_ENGAGE_WALL_SECONDS` environment variables
-  take precedence. Budget exhaustion stops the run and returns a report from the store.
+  take precedence. The start time and action count are stored in the engagement database, so
+  resuming the same workspace does not reset either limit. Budget exhaustion stops the run and
+  returns a report from the store.
 - **Answer sampling** (read by `blk`): `BLKCHAIN_SYNTH_TEMPERATURE` (default 0.7),
   `BLKCHAIN_SYNTH_TOP_P` (0.95), `BLKCHAIN_SYNTH_TOP_K` (64), `BLKCHAIN_SYNTH_PRESENCE_PENALTY` (0.5).
   The answer call sends `temperature`, `top_p`, `top_k`, and `presence_penalty`. LangChainGo drops
@@ -246,6 +248,11 @@ an error; commands that require a picker identify the interactive TUI requiremen
 CLI and interactive engagements save `report.md` and `report.json` in their workspace. The final
 assessment is included in both files, and the Markdown report shows evidence from unfinished
 tasks. A capped or stalled TUI run displays a paused marker and the report paths.
+Each new engagement also saves `checkpoint.json` and a private copy of its `ROE.md` or scope file.
+`blk engage resume --workspace <dir>` and `/engage resume <dir>` reopen its goal, open tasks,
+evidence, and vantage under that saved scope. Omit the directory to select the latest engagement.
+The project's `.blkchain/config.yaml` remains the source for general options on resume. Ctrl+C
+or SIGTERM cancels an active CLI run and writes an interrupted report.
 
 **Models panel.** In the interactive session, `/models` lists every model: the chat models the LLM
 server serves, the embedder, the reranker, and web search. Keys: up/down move, space turns the
