@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"blkchain/cli/internal/askuser"
@@ -177,6 +179,7 @@ func runEngage(args []string) error {
 	r := newVizRenderer(newMmdfluxRunner())
 	deps := buildEngageDeps(model, rc, cfg, prefs, ws.Store, gate, scratch, cat, asker, confirm, makeEngageProgress(os.Stdout, r, prefs.Viz))
 	deps.ExploitTools = policy.ExploitTools
+	deps.MaxActions, deps.WallSeconds = policy.MaxActions, policy.WallSeconds
 	toolHelp, toolHelpClose := openToolHelpCache()
 	defer toolHelpClose()
 	deps.ToolHelp = toolHelp
@@ -207,12 +210,16 @@ func runEngage(args []string) error {
 		fmt.Fprintf(os.Stderr, "engage: vantage seed failed: %v\n", serr)
 	}
 
-	final, err := runOrchestrator(context.Background(), deps, goal)
+	runCtx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignal()
+	final, err := runOrchestrator(runCtx, deps, goal)
 	stopReport() // stop the live render loop before the terminal flush (idempotent)
 	if err != nil {
 		if ferr := rw.Flush("interrupted"); ferr != nil {
 			fmt.Fprintf(os.Stderr, "report: final write failed: %v\n", ferr)
 		}
+		mdPath, jsonPath := reportPaths(wsDir)
+		fmt.Fprintf(os.Stderr, "Report: %s\n        %s\n", mdPath, jsonPath)
 		return fmt.Errorf("engage: %w", err)
 	}
 	rw.SetFinal(final)
@@ -285,12 +292,14 @@ func resolveEngageConfigPolicy(o engageOpts, cwd string) (gatePolicy, error) {
 	}
 	var denied []string
 	var exploitTools []string
+	var maxActions, wallSeconds int
 	poc := false
 	// Default (no config): an empty, non-nil unattended bound, so unattended /auto
 	// falls back to HITL (the no-allowlist floor).
 	unattended := secgate.NewAllowlist()
 	if cfg != nil {
 		denied = cfg.DeniedBinaries
+		maxActions, wallSeconds = cfg.MaxActions, cfg.WallSeconds
 		poc = cfg.AllowInterpreterPoC
 		exploitTools = cfg.ExploitTools
 		if cfg.AllowedBinaries.All {
@@ -305,6 +314,8 @@ func resolveEngageConfigPolicy(o engageOpts, cwd string) (gatePolicy, error) {
 		UnattendedAllow:     unattended,
 		AllowInterpreterPoC: poc,
 		AutoScopeOverride:   o.autoOverride,
+		MaxActions:          maxActions,
+		WallSeconds:         wallSeconds,
 		ExploitTools:        exploitTools,
 	}, nil
 }

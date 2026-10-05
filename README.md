@@ -141,6 +141,11 @@ hardcoded.** See [`.env.example`](.env.example) for every variable; the essentia
   synthesis. Executors keep the `--model` selection, REPL/TUI model selection, or MCP model
   argument. An unset override uses that same model for both roles. The model must be available
   on the configured LLM server.
+  The whole engagement also has an action budget (default 512 model and tool calls) and a
+  wall-clock deadline (default 1800 seconds). Set `engage_max_actions` and
+  `engage_wall_seconds` in the project's `.blkchain/config.yaml`; the corresponding
+  `BLKCHAIN_ENGAGE_MAX_ACTIONS` and `BLKCHAIN_ENGAGE_WALL_SECONDS` environment variables
+  take precedence. Budget exhaustion stops the run and returns a report from the store.
 - **Answer sampling** (read by `blk`): `BLKCHAIN_SYNTH_TEMPERATURE` (default 0.7),
   `BLKCHAIN_SYNTH_TOP_P` (0.95), `BLKCHAIN_SYNTH_TOP_K` (64), `BLKCHAIN_SYNTH_PRESENCE_PENALTY` (0.5).
   The answer call sends `temperature`, `top_p`, `top_k`, and `presence_penalty`. LangChainGo drops

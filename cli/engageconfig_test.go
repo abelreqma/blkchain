@@ -16,6 +16,30 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+func TestEngageConfigWorkBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, path, "engage_max_actions: 240\nengage_wall_seconds: 3600\n")
+	cfg, err := loadEngageConfig(path)
+	if err != nil || cfg.MaxActions != 240 || cfg.WallSeconds != 3600 {
+		t.Fatalf("config=%+v err=%v", cfg, err)
+	}
+	for _, content := range []string{"engage_max_actions: -1\n", "engage_max_actions: 10001\n", "engage_wall_seconds: -1\n", "engage_wall_seconds: 86401\n"} {
+		writeFile(t, path, content)
+		if _, err := loadEngageConfig(path); err == nil {
+			t.Fatalf("accepted invalid budget: %q", content)
+		}
+	}
+}
+
+func TestResolvedEngagePolicyCarriesWorkBudget(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".blkchain", "config.yaml"), "engage_max_actions: 240\nengage_wall_seconds: 3600\n")
+	policy, err := resolveEngageConfigPolicy(engageOpts{}, root)
+	if err != nil || policy.MaxActions != 240 || policy.WallSeconds != 3600 {
+		t.Fatalf("policy=%+v err=%v", policy, err)
+	}
+}
+
 func TestLoadEngageConfigAllKeys(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.yaml")
 	writeFile(t, p, "denied_binaries: [nc, ncat]\nallowed_binaries: [nmap, curl]\nallow_interpreter_poc: true\n")

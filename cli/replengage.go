@@ -130,6 +130,7 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 	}
 	deps := buildEngageDeps(model, rc, cfg, prefs, ws.Store, gate, scratch, cat, asker, confirm, progress)
 	deps.ExploitTools = policy.ExploitTools
+	deps.MaxActions, deps.WallSeconds = policy.MaxActions, policy.WallSeconds
 	deps = applyArmReq(deps, replArmReq())
 	toolHelp, toolHelpClose := openToolHelpCache()
 	defer toolHelpClose()

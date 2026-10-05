@@ -76,6 +76,9 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 			return "", rounds, err
 		}
 		rounds++
+		if err := consumeEngageWork(ctx); err != nil {
+			return "", rounds, err
+		}
 		// Code-owned context budgeting: when the running history outgrows the
 		// budget, condense the middle span before the model call. Best-effort -
 		// a summarizer error leaves the full history in place rather than
@@ -117,6 +120,9 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 			name, args := "", ""
 			if tc.FunctionCall != nil {
 				name, args = tc.FunctionCall.Name, tc.FunctionCall.Arguments
+			}
+			if err := consumeEngageWork(ctx); err != nil {
+				return "", rounds, err
 			}
 			result := "tool call skipped: call cap reached"
 			if total < caps.MaxCalls {

@@ -47,8 +47,10 @@ type engageDeps struct {
 	// Progress, when set, is called after each committed plan mutation with the
 	// new revision and a fresh snapshot, for a live view of the engagement. It is
 	// nil-safe (nil disables it) and must not mutate the store.
-	Progress func(rev int64, snap engagement.Engagement)
-	OnStop   func(reason string)
+	Progress    func(rev int64, snap engagement.Engagement)
+	OnStop      func(reason string)
+	MaxActions  int
+	WallSeconds int
 	// ReconTiers routes recon-phase tasks through the code-orchestrated recon tier
 	// ladder (ReconLoop) instead of the generic single-pass executor loop. The
 	// production composition root (buildEngageDeps) sets it; tests default it off
@@ -342,6 +344,8 @@ func runExecutor(ctx context.Context, d engageDeps, taskID string) (string, erro
 
 // runOrchestrator runs the top-level engagement loop for a goal.
 func runOrchestrator(ctx context.Context, d engageDeps, goal string) (string, error) {
+	ctx, stopBudget := engageBudgetContext(ctx, d.MaxActions, d.WallSeconds)
+	defer stopBudget()
 	if d.Progress != nil {
 		remove := d.Store.AddOnApply(d.Progress)
 		defer remove()
@@ -392,12 +396,21 @@ func runOrchestrator(ctx context.Context, d engageDeps, goal string) (string, er
 	caps := engageLoopCaps()
 	caps.Progress = func(ctx context.Context) (string, error) { return engagementProgress(ctx, d.Store) }
 	caps.Finalize = func(ctx context.Context, reason string) (string, error) {
+		if err := consumeEngageWork(ctx); err != nil {
+			return "", err
+		}
 		if d.OnStop != nil {
 			d.OnStop(reason)
 		}
 		return synthesizeEngagement(ctx, d, goal, reason, options...)
 	}
 	final, _, err := runToolLoop(ctx, d.Model, reg, msgs, caps, options...)
+	if report, stopped, stopErr := engageBudgetStop(ctx, d.Store, goal); stopped {
+		if d.OnStop != nil {
+			d.OnStop("engagement budget")
+		}
+		return report, stopErr
+	}
 	return final, err
 }
 

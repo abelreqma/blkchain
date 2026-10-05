@@ -60,6 +60,8 @@ type gatePolicy struct {
 	UnattendedAllow     *secgate.Allowlist
 	AllowInterpreterPoC bool
 	AutoScopeOverride   bool
+	MaxActions          int
+	WallSeconds         int
 	// ExploitTools is the operator's config exploit_tools list. It is not a
 	// gate field (the gate does not read it); buildEngageGate ignores it and the
 	// engage entrypoints copy it onto engageDeps for the exploit executor.

@@ -60,21 +60,9 @@ func engagementProgress(ctx context.Context, store *engagement.Store) (string, e
 }
 
 func synthesizeEngagement(ctx context.Context, d engageDeps, goal, reason string, options ...llms.CallOption) (string, error) {
-	snap, err := d.Store.Snapshot(ctx)
+	report, err := engagementStoreReport(ctx, d.Store, goal)
 	if err != nil {
 		return "", err
-	}
-	evidence, err := d.Store.AllEvidence()
-	if err != nil {
-		return "", err
-	}
-	report := engreport.RenderMarkdown(engreport.Model{Goal: goal, Status: "paused", Engagement: snap, Evidence: evidence})
-	if len(evidence) > 0 {
-		raw, err := json.Marshal(evidence)
-		if err != nil {
-			return "", err
-		}
-		report += "\n## Stored evidence by task (JSON data)\n\n" + string(raw) + "\n"
 	}
 	prefix := "Engagement paused: " + reason + ".\n\n"
 	data, err := json.Marshal(struct {
@@ -102,4 +90,24 @@ func synthesizeEngagement(ctx context.Context, d engageDeps, goal, reason string
 		}
 	}
 	return prefix + "Final synthesis unavailable; report from stored evidence follows.\n\n" + report, nil
+}
+
+func engagementStoreReport(ctx context.Context, store *engagement.Store, goal string) (string, error) {
+	snap, err := store.Snapshot(ctx)
+	if err != nil {
+		return "", err
+	}
+	evidence, err := store.AllEvidence()
+	if err != nil {
+		return "", err
+	}
+	report := engreport.RenderMarkdown(engreport.Model{Goal: goal, Status: "paused", Engagement: snap, Evidence: evidence})
+	if len(evidence) > 0 {
+		raw, err := json.Marshal(evidence)
+		if err != nil {
+			return "", err
+		}
+		report += "\n## Stored evidence by task (JSON data)\n\n" + string(raw) + "\n"
+	}
+	return report, nil
 }
