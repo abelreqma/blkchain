@@ -210,3 +210,23 @@ func TestFormatEngageDone(t *testing.T) {
 		t.Fatalf("formatEngageDone dropped the summary: %q", out)
 	}
 }
+
+func TestEngageCmdBridgesDiscoveredCredentialOutput(t *testing.T) {
+	data := []byte(`{"finding":{"value":"fixture-password"}}`)
+	stubRunReplEngage(t, func(ctx context.Context, wsDir, cwd string, mode secgate.Mode, override bool, model toolLoopModel, rc searcher, cfg ragconfig.Config, prefs modelPrefs, cat *skillcat.Catalog, confirm secgate.Confirmer, asker askuser.Asker, roeDB *sql.DB, goal string, progress func(int64, eng.Engagement)) (string, error) {
+		sink, ok := ctx.Value(webFindingSinkKey{}).(func([]byte) error)
+		if !ok {
+			t.Fatal("TUI finding sink missing")
+		}
+		if err := sink(data); err != nil {
+			t.Fatal(err)
+		}
+		return "complete", nil
+	})
+	received := ""
+	run := replEngageRun{ctx: context.Background(), finding: func(data []byte) error { received = string(data); return nil }}
+	done, ok := engageCmd(run)().(engageDoneMsg)
+	if !ok || done.err != nil || received != string(data) {
+		t.Fatal("credential was lost at TUI engagement boundary")
+	}
+}

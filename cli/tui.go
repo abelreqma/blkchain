@@ -950,6 +950,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		out := formatAnswer(resp, elapsed, m.renderWidth(), msg.rerankOff) + "\n" + costFooter(cost)
 		return m, m.finish(tea.Println(out))
 
+	case webFindingMsg:
+		return m, tea.Println(msg.Data)
+
 	case webDoneMsg:
 		m.working = false
 		if m.cancel != nil {

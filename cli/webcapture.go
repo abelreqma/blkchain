@@ -40,6 +40,7 @@ func (d *capturedWebDriver) save(ctx context.Context, kind, rawURL, out string) 
 	if err != nil {
 		return "", err
 	}
+	snapshot = webFilter(snapshot, []string{rawURL})
 	safe := webModelPreview(kind, out, snapshot.Findings)
 	quote := fmt.Sprintf("web %s artifact=%s sha256=%s\n%s", kind, a.ID, a.Hash, safe)
 	d.mu.Lock()

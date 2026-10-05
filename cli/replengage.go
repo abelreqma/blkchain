@@ -155,6 +155,8 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 		(mode != secgate.Auto || !policy.AutoActions.hasLocalRule() || !policy.LocalUnattendedReady) {
 		return "", errors.New("engage: a local/post-access engagement needs interactive confirmation or RoE autonomous actions with local_unattended_binaries")
 	}
+	removeFindings := subscribeWebFindingOutput(ctx, ws.Store, os.Stdout)
+	defer removeFindings()
 
 	SetEngageEvidenceSource(ws.Store.EvidenceRowsFor)
 	defer SetEngageEvidenceSource(nil)

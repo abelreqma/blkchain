@@ -263,7 +263,8 @@ func (p *webProxy) http(m webProxyMessage) {
 	if resource == "empty" {
 		resource = "fetch"
 	}
-	example := d.cdpRequest(webanalysis.RequestExample{ResourceType: resource, URL: r.URL, Method: r.Method, Headers: r.Headers, Body: string(r.Body), Role: d.role, Status: out.Status})
+	example := d.cdpRequest(webanalysis.RequestExample{ResourceType: resource, URL: r.URL, Method: r.Method, Headers: r.Headers, Role: d.role, Status: out.Status, Denied: err != nil})
+	webanalysis.SetRequestBody(&example, r.Body)
 	artifact := webanalysis.Artifact{DocumentURL: r.Headers.Get("Referer"), Kind: kind, URL: r.URL, FinalURL: out.FinalURL, Headers: out.Headers, Status: out.Status, MIME: out.Headers.Get("Content-Type"), Role: d.role, Complete: out.Complete, Gap: out.Gap}
 	if resource == "worker" || resource == "sharedworker" || resource == "serviceworker" {
 		artifact.DocumentURL = r.URL
@@ -306,7 +307,7 @@ func (p *webProxy) open(m webProxyMessage) {
 		}
 	}
 	if d.observe != nil {
-		e := d.observe(webObservation{Artifact: webanalysis.Artifact{Kind: "websocket-handshake", URL: m.URL, FinalURL: m.URL, Headers: out.Headers, Status: out.Status, Role: d.role, Complete: out.Complete, Gap: out.Gap}, Body: out.Body, Request: webanalysis.RequestExample{ResourceType: "websocket", URL: m.URL, Method: "GET", Headers: h, Role: d.role, Status: out.Status, SocketID: webanalysis.ID(p.ID, m.ID)}})
+		e := d.observe(webObservation{Artifact: webanalysis.Artifact{Kind: "websocket-handshake", URL: m.URL, FinalURL: m.URL, Headers: out.Headers, Status: out.Status, Role: d.role, Complete: out.Complete, Gap: out.Gap}, Body: out.Body, Request: webanalysis.RequestExample{ResourceType: "websocket", URL: m.URL, Method: "GET", Headers: h, Role: d.role, Status: out.Status, SocketID: webanalysis.ID(p.ID, m.ID), Subprotocol: out.Headers.Get("Sec-WebSocket-Protocol")}})
 		if e != nil {
 			err = e
 		}

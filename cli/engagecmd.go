@@ -161,6 +161,8 @@ func runEngageWithOptions(o engageOpts, goal string, checkpoint *engageCheckpoin
 			}
 		}
 	}
+	removeFindings := subscribeWebFindingOutput(context.Background(), ws.Store, os.Stdout)
+	defer removeFindings()
 
 	// When no RoE was found and no explicit scope was given, drop a pre-formatted
 	// ROE.md template into the workspace (idempotent; never overwrites).

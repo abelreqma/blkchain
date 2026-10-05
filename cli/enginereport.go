@@ -185,6 +185,10 @@ func (w *reportWriter) Start() (stop func()) {
 		removeApply()
 		removeEvidence()
 	}
+	removeFindings := w.st.AddOnWebFinding(func([]byte) error {
+		signalDirty()
+		return nil
+	})
 	quit := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -208,6 +212,7 @@ func (w *reportWriter) Start() (stop func()) {
 	return func() {
 		once.Do(func() {
 			w.remove()
+			removeFindings()
 			close(quit)
 			<-done
 		})

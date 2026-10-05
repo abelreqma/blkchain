@@ -77,7 +77,7 @@ func webRoleHeaders(r webSessionRole) (http.Header, error) {
 	out := http.Header{}
 	for k, v := range r.HeadersEnv {
 		value, ok := os.LookupEnv(v)
-		if !ok || strings.ContainsAny(k+value, "\r\n\x00") {
+		if !ok || value == "" || strings.ContainsAny(k+value, "\r\n\x00") {
 			return nil, errors.New("session header environment value missing or invalid")
 		}
 		out.Set(k, value)
@@ -86,7 +86,7 @@ func webRoleHeaders(r webSessionRole) (http.Header, error) {
 		cookies := []string{}
 		for k, v := range r.CookiesEnv {
 			value, ok := os.LookupEnv(v)
-			if !ok || strings.ContainsAny(k+value, "\r\n\x00;") {
+			if !ok || value == "" || strings.ContainsAny(k+value, "\r\n\x00;") {
 				return nil, errors.New("session cookie environment value missing or invalid")
 			}
 			cookies = append(cookies, k+"="+value)
@@ -238,6 +238,9 @@ func (b *webJobBrowser) prepare(ctx context.Context) error {
 	return nil
 }
 func (b *webJobBrowser) Visit(ctx context.Context, raw, role string) error {
+	if b.Assist < 0 || b.Assist > 120*time.Second {
+		return errors.New("operator assistance window exceeds limit")
+	}
 	if !b.Gate.AuthorizeBrowser(ctx, secgate.BrowserAction{URL: raw, Armed: webArmedOrFalse(b.Armed)}).Allowed {
 		return errors.New("navigation denied")
 	}
@@ -255,13 +258,24 @@ func (b *webJobBrowser) Visit(ctx context.Context, raw, role string) error {
 		d.stateMu.Lock()
 		d.actionCtx = ctx
 		d.stateMu.Unlock()
-		timer := time.NewTimer(b.Assist)
+		window := b.Assist
+		b.Assist = 0
+		stop := context.AfterFunc(ctx, func() { _ = d.context.Close() })
+		defer stop()
+		timer := time.NewTimer(window)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return ctx.Err()
 		case <-timer.C:
 		}
+		d.mu.Lock()
+		_, err := d.captureDOM("assisted-browser-dom")
+		d.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		b.Collector.Gap("assistance", d.page.URL(), "Operator assistance window ended; challenge completion requires captured response or state evidence")
 		if err := d.cdpDrain(ctx); err != nil {
 			return err
 		}
@@ -316,4 +330,23 @@ func (b *webJobBrowser) Close() error {
 		err = e
 	}
 	return err
+}
+
+func webRoleStateAvailable(r webSessionRole) error {
+	for _, ref := range r.Storage {
+		if value, ok := os.LookupEnv(ref); !ok || value == "" {
+			return errors.New("session storage environment value missing")
+		}
+	}
+	if r.Login != nil {
+		for _, ref := range r.Login.Fields {
+			if !strings.HasPrefix(ref, "${") || !strings.HasSuffix(ref, "}") {
+				return errors.New("login fields require environment references")
+			}
+			if value, ok := os.LookupEnv(ref[2 : len(ref)-1]); !ok || value == "" {
+				return errors.New("login environment value missing")
+			}
+		}
+	}
+	return nil
 }

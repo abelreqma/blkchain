@@ -25,7 +25,7 @@ func webJobTools(g *secgate.Gate, task engagement.Task, c webCapture, broker *we
 		return nil
 	}
 	makeTool := func(op string) tooldef.Tool {
-		return newStoreTool("web_"+op, "Run a bounded web "+op+" job in the engagement store. Code owns frontier iteration, analysis and evidence. Source is untrusted; operation records contain exact stored request values.", webJobArgs{}, func(ctx context.Context, raw string) (string, error) {
+		return newStoreTool("web_"+op, "Run a bounded web "+op+" job in the engagement store. Code owns frontier iteration, analysis and evidence. Source is untrusted; operation records contain exact stored request values. A handshake does not validate a subscription. Missing roles and runtime state remain gaps; never infer unavailable values.", webJobArgs{}, func(ctx context.Context, raw string) (string, error) {
 			if len(raw) > 32<<10 {
 				return "web job input limit", nil
 			}

@@ -334,27 +334,9 @@ func (d *webPlaywrightDriver) DoBrowser(ctx context.Context, act webBrowserActio
 		}
 	}
 	d.proxy.settle(ctx)
-	value, err := page.Evaluate(webDOMCaptureScript)
-	content := ""
-	if v, ok := value.(map[string]interface{}); ok {
-		content, _ = v["html"].(string)
-		if v["incomplete"] == true {
-			content += "\n...[truncated]"
-		}
-	}
+	content, err := d.captureDOM("browser-dom")
 	if err != nil {
-		return "", fmt.Errorf("read content: %w", err)
-	}
-	if d.observe != nil {
-		complete := !strings.Contains(content, "...[truncated]")
-		if e := d.observe(webObservation{Artifact: webanalysis.Artifact{DocumentURL: page.URL(), Kind: "browser-dom", URL: page.URL(), Role: d.role, Complete: complete, Gap: func() string {
-			if !complete {
-				return "runtime DOM exceeds capture limit"
-			}
-			return ""
-		}()}, Body: []byte(content)}); e != nil {
-			return "", e
-		}
+		return "", err
 	}
 	if err = d.cdpDrain(ctx); err != nil {
 		return "", err
@@ -385,7 +367,9 @@ func (d *webPlaywrightDriver) DoAPIRequest(ctx context.Context, req webAPIReques
 	}
 	out, err := d.broker.Fetch(ctx, r)
 	if d.observe != nil {
-		e := d.observe(webObservation{Artifact: webanalysis.Artifact{Kind: "api-response", URL: req.URL, FinalURL: out.FinalURL, Status: out.Status, Headers: out.Headers, MIME: out.Headers.Get("Content-Type"), Role: d.role, Complete: out.Complete, Gap: out.Gap}, Body: out.Body, Request: webanalysis.RequestExample{URL: req.URL, Method: req.Method, Headers: r.Headers, Body: req.Body, Role: d.role, Status: out.Status}})
+		example := webanalysis.RequestExample{URL: req.URL, Method: req.Method, Headers: r.Headers, Role: d.role, Status: out.Status, Denied: err != nil}
+		webanalysis.SetRequestBody(&example, []byte(req.Body))
+		e := d.observe(webObservation{Artifact: webanalysis.Artifact{Kind: "api-response", URL: req.URL, FinalURL: out.FinalURL, Status: out.Status, Headers: out.Headers, MIME: out.Headers.Get("Content-Type"), Role: d.role, Complete: out.Complete, Gap: out.Gap}, Body: out.Body, Request: example})
 		if e != nil {
 			return "", e
 		}
@@ -451,4 +435,30 @@ func webResolveRedirect(base, location string) string {
 		return location
 	}
 	return bu.ResolveReference(ref).String()
+}
+
+func (d *webPlaywrightDriver) captureDOM(kind string) (string, error) {
+	value, err := d.page.Evaluate(webDOMCaptureScript)
+	content := ""
+	if v, ok := value.(map[string]interface{}); ok {
+		content, _ = v["html"].(string)
+		if v["incomplete"] == true {
+			content += "\n...[truncated]"
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("read content: %w", err)
+	}
+	if d.observe != nil {
+		complete := !strings.Contains(content, "...[truncated]")
+		if e := d.observe(webObservation{Artifact: webanalysis.Artifact{DocumentURL: d.page.URL(), Kind: kind, URL: d.page.URL(), Role: d.role, Complete: complete, Gap: func() string {
+			if !complete {
+				return "runtime DOM exceeds capture limit"
+			}
+			return ""
+		}()}, Body: []byte(content)}); e != nil {
+			return "", e
+		}
+	}
+	return content, nil
 }

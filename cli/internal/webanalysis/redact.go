@@ -34,6 +34,7 @@ func RedactURL(s string) string {
 	return u.String()
 }
 func Redacted(s Snapshot) Snapshot {
+	s = GradeSnapshot(s)
 	b, _ := json.Marshal(s)
 	var v any
 	_ = json.Unmarshal(b, &v)
@@ -101,8 +102,10 @@ func Redacted(s Snapshot) Snapshot {
 }
 
 func Display(s Snapshot) Snapshot {
+	s = GradeSnapshot(s)
 	out := Redacted(s)
 	out.Operations = append([]Operation(nil), s.Operations...)
 	out.Requests = append([]RequestExample(nil), s.Requests...)
+	out.Findings = append([]Finding(nil), s.Findings...)
 	return out
 }

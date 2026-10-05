@@ -5,8 +5,10 @@ import (
 	"blkchain/cli/internal/webanalysis"
 	"encoding/json"
 	"errors"
+	"golang.org/x/net/http/httpguts"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -15,7 +17,7 @@ var webReplayMethod = regexp.MustCompile(`^(GET|HEAD|OPTIONS|POST|PUT|PATCH|DELE
 func webReplayRequest(op webanalysis.Operation, values map[string]string) (webAPIRequest, error) {
 	out := webAPIRequest{Method: op.Method}
 	if webanalysis.UnsupportedObservedBody(op) {
-		return out, errors.New("body representation requires specialized replay")
+		return out, errors.New("structured replay cannot represent this body; select a stored example with --example")
 	}
 	if op.Protocol != "http" || !webReplayMethod.MatchString(op.Method) {
 		return out, errors.New("unsupported replay method or protocol")
@@ -169,4 +171,48 @@ func webReplayRequest(op webanalysis.Operation, values map[string]string) (webAP
 		out.Headers = append(out.Headers, k+": "+v)
 	}
 	return out, nil
+}
+
+func webReplayExample(op webanalysis.Operation, index int) (webAPIRequest, string, error) {
+	out := webAPIRequest{}
+	if op.Protocol != "http" || index < 1 || index > len(op.Examples) {
+		return out, "", errors.New("stored HTTP example not found")
+	}
+	example := op.Examples[index-1]
+	if example.Denied || !webReplayMethod.MatchString(example.Method) || example.BodyOmitted {
+		return out, "", errors.New("stored request unavailable or denied")
+	}
+	u, err := webacquire.URL(example.URL)
+	if err != nil || u.Scheme+"://"+u.Host != op.Origin || example.Method != op.Method {
+		return out, "", errors.New("stored request origin or method mismatch")
+	}
+	for k := range u.Query() {
+		if webanalysis.Sensitive(k) {
+			return out, "", errors.New("stored URL needs credential refresh; use structured replay")
+		}
+	}
+	_, body, err := webanalysis.ReplayBody(example)
+	if err != nil {
+		return out, "", err
+	}
+	out.URL = example.URL
+	out.Method = example.Method
+	out.Body = string(body)
+	keys := make([]string, 0, len(example.Headers))
+	for k := range example.Headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if webanalysis.Sensitive(k) || strings.EqualFold(k, "Host") || strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") || strings.EqualFold(k, "Connection") || strings.EqualFold(k, "Accept-Encoding") {
+			continue
+		}
+		for _, v := range example.Headers[k] {
+			if strings.ContainsAny(k+v, "\r\n\x00") || !httpguts.ValidHeaderFieldName(k) {
+				return out, "", errors.New("invalid stored request header")
+			}
+			out.Headers = append(out.Headers, k+": "+v)
+		}
+	}
+	return out, example.Role, nil
 }

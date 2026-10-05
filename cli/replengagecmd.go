@@ -58,6 +58,7 @@ type replEngageRun struct {
 	asker    askuser.Asker
 	roeDB    *sql.DB
 	stub     *stubEngagement
+	finding  func([]byte) error
 }
 
 // buildReplEngageRun assembles the engage dependencies from the session, failing
@@ -82,7 +83,12 @@ func (m model) buildReplEngageRun(goal string) (replEngageRun, error) {
 		roeDB = m.hist.DB()
 	}
 	cwd, _ := os.Getwd()
+	var finding func([]byte) error
+	if m.prog != nil {
+		finding = func(data []byte) error { m.prog.Send(webFindingMsg{Data: string(data)}); return nil }
+	}
 	return replEngageRun{
+		finding:  finding,
 		goal:     goal,
 		mode:     m.engageMode,
 		override: m.engageOverride,
@@ -108,6 +114,9 @@ func engageCmd(r replEngageRun) tea.Cmd {
 			if r.stub != nil {
 				r.stub.setSnapshot(snap)
 			}
+		}
+		if r.finding != nil {
+			ctx = context.WithValue(ctx, webFindingSinkKey{}, r.finding)
 		}
 		final, err := runReplEngageFn(ctx, r.wsDir, r.cwd, r.mode, r.override, r.model, r.rc,
 			r.cfg, r.prefs, r.cat, r.confirm, r.asker, r.roeDB, r.goal, progress)

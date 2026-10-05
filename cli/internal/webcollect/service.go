@@ -113,6 +113,7 @@ func (s *Service) Collect(ctx context.Context, targets []string, o Options) (web
 	defer cancel()
 	initialGaps := s.coverage.Gaps
 	s.coverage = webanalysis.Coverage{Targets: append([]string(nil), targets...), ID: webanalysis.ID(webanalysis.Now(), o.Role), Role: o.Role, Started: webanalysis.Now(), State: "running", Routes: []string{}, Interactions: []string{}, Downloaded: []string{}, Stages: []string{"collection"}, Gaps: initialGaps}
+	s.gap("state", "", "Only supplied roles and visited states are covered; unavailable roles, credentials and runtime values are not inferred")
 	if o.Browser != nil {
 		s.gap("browser", "", "worker cache responses may not reach the network; stream capture is bounded by page dwell and job lifetime")
 	}
@@ -197,8 +198,12 @@ func (s *Service) Collect(ctx context.Context, targets []string, o Options) (web
 		}
 		a := webanalysis.Artifact{DocumentURL: f.DocumentURL, MapLine: f.MapLine, MapColumn: f.MapColumn, CapturedAt: stamp, Kind: f.Kind, URL: f.URL, FinalURL: out.FinalURL, Role: o.Role, Status: out.Status, Headers: out.Headers, MIME: out.Headers.Get("Content-Type"), Complete: out.Complete, Parents: []string{f.Parent}, Gap: out.Gap}
 		if err != nil {
-			s.gap("fetch", f.URL, "request denied or acquisition failed")
-			a.Gap = "request denied or acquisition failed"
+			reason := "request denied or acquisition failed"
+			if f.Timestamp != "" {
+				reason = err.Error()
+			}
+			s.gap("fetch", f.URL, reason)
+			a.Gap = reason
 		}
 		if _, e := s.Accept(ctx, a, out.Body, f.Depth); e != nil {
 			s.gap("storage", f.URL, e.Error())
@@ -253,6 +258,24 @@ func (s *Service) Accept(ctx context.Context, a webanalysis.Artifact, body []byt
 	}
 	unit := webanalysis.SourceUnit{ID: webanalysis.ID(a.ID, "metadata"), Artifact: a.ID, Hash: a.Hash, URL: a.FinalURL, Kind: "response-metadata", Language: "metadata", Parse: "not-executable"}
 	findings := webanalysis.Technology(unit, body, a.Headers)
+	credentials, gaps := webanalysis.JSONCredentials(unit, a.Role, body)
+	headerCredentials, headerGaps := webanalysis.HeaderCredentials(unit, a.Role, a.Headers)
+	credentials = append(credentials, headerCredentials...)
+	gaps = append(gaps, headerGaps...)
+	if webanalysis.EnvironmentSource(unit) || !isScript(a) && !strings.Contains(a.MIME, "html") && a.Kind != "browser-dom" && a.Kind != "assisted-browser-dom" {
+		textCredentials, textGaps := webanalysis.TextCredentials(unit, a.Role, body)
+		credentials = append(credentials, textCredentials...)
+		gaps = append(gaps, textGaps...)
+	}
+	if strings.Contains(a.MIME, "html") || a.Kind == "html" || a.Kind == "page" || a.Kind == "frame" || a.Kind == "browser-dom" || a.Kind == "assisted-browser-dom" {
+		htmlCredentials, htmlGaps := webanalysis.HTMLCredentials(unit, a.Role, body)
+		credentials = append(credentials, htmlCredentials...)
+		gaps = append(gaps, htmlGaps...)
+	}
+	findings = append(findings, credentials...)
+	for _, gap := range gaps {
+		s.gap(gap.Stage, gap.URL, gap.Reason)
+	}
 	if len(findings) > 0 {
 		if err := s.Store.PutWeb(ctx, "unit", unit.ID, s.task, unit); err != nil {
 			return a, err
@@ -284,7 +307,7 @@ func (s *Service) Accept(ctx context.Context, a webanalysis.Artifact, body []byt
 	if !a.Complete {
 		return a, nil
 	}
-	if strings.Contains(a.MIME, "html") || a.Kind == "html" || a.Kind == "page" || a.Kind == "browser-dom" || a.Kind == "frame" {
+	if strings.Contains(a.MIME, "html") || a.Kind == "html" || a.Kind == "page" || a.Kind == "browser-dom" || a.Kind == "assisted-browser-dom" || a.Kind == "frame" {
 		parsed := parseHTML(body, a.FinalURL)
 		for _, g := range parsed.Gaps {
 			s.gap(g.Stage, g.URL, g.Reason)
@@ -299,6 +322,17 @@ func (s *Service) Accept(ctx context.Context, a webanalysis.Artifact, body []byt
 				unit := webanalysis.SourceUnit{ID: webanalysis.ID(ch.ID, fmt.Sprint(in.Offset), in.Name), Artifact: ch.ID, Hash: ch.Hash, URL: a.FinalURL, Name: in.Name, Language: in.Language, Kind: in.Kind, Offset: in.Offset, Parse: "not-executable"}
 				if e := s.Store.PutWeb(ctx, "unit", unit.ID, s.task, unit); e != nil {
 					return a, e
+				}
+				if in.Language == "json" {
+					credentials, gaps := webanalysis.JSONCredentials(unit, a.Role, in.Body)
+					for _, gap := range gaps {
+						s.gap(gap.Stage, gap.URL, gap.Reason)
+					}
+					for _, finding := range credentials {
+						if err := s.Store.PutWeb(ctx, "finding", finding.ID, s.task, finding); err != nil {
+							return a, err
+						}
+					}
 				}
 			}
 			if in.Language == "javascript" {
@@ -630,6 +664,17 @@ func (s *Service) RecordStage(ctx context.Context, stage string) error {
 	c.Stages = []string{stage}
 	if c.Role == "" {
 		c.Role = "workspace"
+	}
+	return s.Store.PutWeb(ctx, "coverage", c.ID, s.task, c)
+}
+
+func (s *Service) RecordGap(ctx context.Context, role, stage, raw, reason string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	now := webanalysis.Now()
+	c := webanalysis.Coverage{ID: webanalysis.ID("gap", role, stage, raw, reason, now), Role: role, Started: now, Ended: now, State: "blocked", Stages: []string{stage}, Gaps: []webanalysis.Gap{{Stage: stage, URL: raw, Reason: reason}}}
+	if raw != "" {
+		c.Targets = []string{raw}
 	}
 	return s.Store.PutWeb(ctx, "coverage", c.ID, s.task, c)
 }

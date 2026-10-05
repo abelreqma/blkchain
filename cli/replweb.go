@@ -76,6 +76,9 @@ func (m model) dispatchWeb(arg, echo string) (tea.Model, tea.Cmd) {
 		return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(e)))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	if m.prog != nil {
+		ctx = context.WithValue(ctx, webFindingSinkKey{}, func(data []byte) error { m.prog.Send(webFindingMsg{Data: string(data)}); return nil })
+	}
 	m.cancel = cancel
 	m.working = true
 	m.tickGen++

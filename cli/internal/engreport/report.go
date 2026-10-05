@@ -115,6 +115,16 @@ func RenderMarkdown(m Model) string {
 		}
 		b.WriteString("\n")
 	}
+	if m.Web != nil {
+		for _, finding := range webanalysis.Display(*m.Web).Findings {
+			if finding.Kind != "secret-candidate" || finding.Value == "" {
+				continue
+			}
+			findings++
+			data, _ := webanalysis.FindingEvent("", finding)
+			fmt.Fprintf(&b, "### Discovered credential\n\n```json\n%s\n```\n\n", data)
+		}
+	}
 	if findings == 0 {
 		b.WriteString("None yet.\n\n")
 	}
@@ -203,6 +213,9 @@ func RenderMarkdown(m Model) string {
 		}
 		b.WriteString("\n### Analysis leads\n\n")
 		for _, f := range w.Findings {
+			if f.Kind == "secret-candidate" && f.Value != "" {
+				continue
+			}
 			fmt.Fprintf(&b, "- %s [%s] unit=%s line=%d detector=%s version=%s %s\n", safeMarkdownLine(f.Kind), safeMarkdownLine(string(f.Confidence)), safeMarkdownLine(f.Location.Unit), f.Location.Line, safeMarkdownLine(f.Detector), safeMarkdownLine(f.Version), safeMarkdownLine(f.Preview))
 		}
 		b.WriteString("\n### Collection coverage\n\n")

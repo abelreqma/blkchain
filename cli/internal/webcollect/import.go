@@ -1,6 +1,7 @@
 package webcollect
 
 import (
+	"blkchain/cli/internal/webacquire"
 	"blkchain/cli/internal/webanalysis"
 	"context"
 	"encoding/base64"
@@ -18,8 +19,10 @@ type harEntry struct {
 		URL, Method string
 		Headers     []harPair
 		PostData    struct {
-			MimeType, Text string
-			Params         []harPair
+			MimeType string
+			Text     *string
+			Encoding string `json:"_encoding"`
+			Params   []harPair
 		}
 	}
 	Response struct {
@@ -58,8 +61,21 @@ func (s *Service) ImportHAR(ctx context.Context, r io.Reader, role string) error
 		if entry.Request.PostData.MimeType != "" {
 			headers.Set("Content-Type", entry.Request.PostData.MimeType)
 		}
-		req := webanalysis.RequestExample{ResourceType: entry.ResourceType, URL: entry.Request.URL, Method: entry.Request.Method, Role: role, Status: entry.Response.Status, Headers: headers, Body: entry.Request.PostData.Text}
-		if len(req.Body) > 1<<20 {
+		req := webanalysis.RequestExample{ResourceType: entry.ResourceType, URL: entry.Request.URL, Method: entry.Request.Method, Role: role, Status: entry.Response.Status, Headers: headers}
+		if entry.Request.PostData.Text != nil {
+			req.Body = *entry.Request.PostData.Text
+		}
+		if entry.Request.PostData.Encoding != "" {
+			req.BodyEncoding = entry.Request.PostData.Encoding
+		}
+		if entry.Request.PostData.Text == nil && (len(entry.Request.PostData.Params) > 0 || entry.Request.PostData.MimeType != "" || headers.Get("Content-Type") != "" && !webacquire.Passive(req.Method)) {
+			req.BodyOmitted = true
+			s.gap("replay", req.URL, "HAR omits original request body bytes")
+		}
+		if _, err := webanalysis.RequestBody(req); err != nil && !req.BodyOmitted {
+			return err
+		}
+		if len(req.Body) > (4<<20)/3+4 {
 			return errors.New("HAR request body limit")
 		}
 		body := []byte(entry.Response.Content.Text)

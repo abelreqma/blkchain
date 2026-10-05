@@ -20,7 +20,7 @@ const webSchema = `CREATE TABLE IF NOT EXISTS web_record (kind TEXT NOT NULL, id
 var webHash = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 func (s *Store) EvidenceDir() string { return filepath.Join(filepath.Dir(s.path), "evidence") }
-func (s *Store) PutWeb(ctx context.Context, kind, id, task string, v any) error {
+func (s *Store) PutWeb(ctx context.Context, kind, id, task string, v any) (err error) {
 	if !webHash.MatchString(id) {
 		return errors.New("invalid web record id")
 	}
@@ -31,8 +31,14 @@ func (s *Store) PutWeb(ctx context.Context, kind, id, task string, v any) error 
 	if len(data) > 1<<20 {
 		return errors.New("web metadata exceeds limit")
 	}
+	var findingEvent []byte
 	s.wmu.Lock()
-	defer s.wmu.Unlock()
+	defer func() {
+		s.wmu.Unlock()
+		if err == nil && len(findingEvent) > 0 {
+			err = s.notifyWebFinding(findingEvent)
+		}
+	}()
 	if kind == "operation" {
 		var old string
 		err = s.db.QueryRowContext(ctx, `SELECT document FROM web_record WHERE kind=? AND id=?`, kind, id).Scan(&old)
@@ -73,6 +79,16 @@ func (s *Store) PutWeb(ctx context.Context, kind, id, task string, v any) error 
 		}
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO web_record(kind,id,task_id,document,at) VALUES(?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET document=excluded.document,at=excluded.at`, kind, id, task, string(data), webanalysis.Now())
+	if err == nil && kind == "finding" {
+		var finding webanalysis.Finding
+		if json.Unmarshal(data, &finding) == nil && finding.Kind == "secret-candidate" && finding.Value != "" {
+			finding.Evidence = webanalysis.FindingEvidence(finding)
+			findingEvent, err = webanalysis.FindingEvent(task, finding)
+			if err == nil {
+				err = s.appendWebFinding(findingEvent)
+			}
+		}
+	}
 	return err
 }
 func (s *Store) WebSnapshot(ctx context.Context) (webanalysis.Snapshot, error) {
@@ -142,7 +158,7 @@ func (s *Store) WebSnapshot(ctx context.Context) (webanalysis.Snapshot, error) {
 			return out, err
 		}
 	}
-	return out, rows.Err()
+	return webanalysis.GradeSnapshot(out), rows.Err()
 }
 func (s *Store) SaveWebArtifact(ctx context.Context, a webanalysis.Artifact, body []byte) (webanalysis.Artifact, error) {
 	if len(body) > webanalysis.MaxSource {

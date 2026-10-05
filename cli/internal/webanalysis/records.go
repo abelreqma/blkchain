@@ -81,34 +81,39 @@ type Call struct {
 	Conditions []string `json:"conditions,omitempty"`
 }
 type Operation struct {
-	ID          string           `json:"id"`
-	Origin      string           `json:"origin"`
-	Method      string           `json:"method"`
-	Path        string           `json:"path"`
-	Query       string           `json:"query,omitempty"`
-	Protocol    string           `json:"protocol"`
-	Parameters  []Parameter      `json:"parameters"`
-	ContentType string           `json:"content_type,omitempty"`
-	GraphQL     string           `json:"graphql,omitempty"`
-	Variables   []string         `json:"variables,omitempty"`
-	Discoveries []string         `json:"discoveries"`
-	Validation  string           `json:"validation"`
-	Statuses    []int            `json:"statuses,omitempty"`
-	Calls       []string         `json:"calls,omitempty"`
-	Roles       []string         `json:"roles,omitempty"`
-	Features    []string         `json:"features"`
-	Examples    []RequestExample `json:"examples,omitempty"`
-	Unresolved  []string         `json:"unresolved,omitempty"`
+	Evidence    EvidenceGrade       `json:"evidence_grade"`
+	Exchange    *ExchangeValidation `json:"exchange_validation,omitempty"`
+	ID          string              `json:"id"`
+	Origin      string              `json:"origin"`
+	Method      string              `json:"method"`
+	Path        string              `json:"path"`
+	Query       string              `json:"query,omitempty"`
+	Protocol    string              `json:"protocol"`
+	Parameters  []Parameter         `json:"parameters"`
+	ContentType string              `json:"content_type,omitempty"`
+	GraphQL     string              `json:"graphql,omitempty"`
+	Variables   []string            `json:"variables,omitempty"`
+	Discoveries []string            `json:"discoveries"`
+	Validation  string              `json:"validation"`
+	Statuses    []int               `json:"statuses,omitempty"`
+	Calls       []string            `json:"calls,omitempty"`
+	Roles       []string            `json:"roles,omitempty"`
+	Features    []string            `json:"features"`
+	Examples    []RequestExample    `json:"examples,omitempty"`
+	Unresolved  []string            `json:"unresolved,omitempty"`
 }
 type RequestExample struct {
-	Cached    bool   `json:"cached,omitempty"`
-	SocketID  string `json:"socket_id,omitempty"`
-	Sequence  int    `json:"sequence,omitempty"`
-	Direction string `json:"direction,omitempty"`
-	Opcode    int    `json:"opcode,omitempty"`
-	Encoding  string `json:"encoding,omitempty"`
-	Denied    bool   `json:"denied,omitempty"`
-	Worker    string `json:"worker,omitempty"`
+	BodyEncoding string `json:"body_encoding,omitempty"`
+	BodyOmitted  bool   `json:"body_omitted,omitempty"`
+	Subprotocol  string `json:"subprotocol,omitempty"`
+	Cached       bool   `json:"cached,omitempty"`
+	SocketID     string `json:"socket_id,omitempty"`
+	Sequence     int    `json:"sequence,omitempty"`
+	Direction    string `json:"direction,omitempty"`
+	Opcode       int    `json:"opcode,omitempty"`
+	Encoding     string `json:"encoding,omitempty"`
+	Denied       bool   `json:"denied,omitempty"`
+	Worker       string `json:"worker,omitempty"`
 
 	ResourceType string      `json:"resource_type,omitempty"`
 	URL          string      `json:"url"`
@@ -130,18 +135,27 @@ type Relationship struct {
 	Expression string `json:"expression,omitempty"`
 }
 type Finding struct {
-	ID             string   `json:"id"`
-	Kind           string   `json:"kind"`
-	Detector       string   `json:"detector"`
-	Confidence     string   `json:"confidence"`
-	Location       Location `json:"location"`
-	Preview        string   `json:"preview"`
-	Fingerprint    string   `json:"fingerprint,omitempty"`
-	Version        string   `json:"analyzer_version"`
-	Library        string   `json:"library,omitempty"`
-	LibraryVersion string   `json:"library_version,omitempty"`
-	Advisory       string   `json:"advisory,omitempty"`
-	Snapshot       string   `json:"snapshot,omitempty"`
+	EnvironmentVariable bool          `json:"environment_variable,omitempty"`
+	Expression          string        `json:"expression,omitempty"`
+	Value               string        `json:"value,omitempty"`
+	CredentialType      string        `json:"credential_type,omitempty"`
+	Name                string        `json:"name,omitempty"`
+	SourceURL           string        `json:"source_url,omitempty"`
+	Artifact            string        `json:"artifact,omitempty"`
+	Role                string        `json:"role,omitempty"`
+	Evidence            EvidenceGrade `json:"evidence_grade"`
+	ID                  string        `json:"id"`
+	Kind                string        `json:"kind"`
+	Detector            string        `json:"detector"`
+	Confidence          string        `json:"confidence"`
+	Location            Location      `json:"location"`
+	Preview             string        `json:"preview"`
+	Fingerprint         string        `json:"fingerprint,omitempty"`
+	Version             string        `json:"analyzer_version"`
+	Library             string        `json:"library,omitempty"`
+	LibraryVersion      string        `json:"library_version,omitempty"`
+	Advisory            string        `json:"advisory,omitempty"`
+	Snapshot            string        `json:"snapshot,omitempty"`
 }
 type Gap struct {
 	Stage  string `json:"stage"`

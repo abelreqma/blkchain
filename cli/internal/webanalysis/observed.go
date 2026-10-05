@@ -24,6 +24,18 @@ func FromObserved(e RequestExample) (Operation, error) {
 			o.Validation = "access-response"
 		}
 	}
+	if o.Protocol == "websocket" {
+		o.Validation = "attempted"
+		if !e.Denied && e.Status == 101 {
+			o.Validation = "handshake-observed"
+		}
+		if !e.Denied && e.Status == 101 && (e.Direction == "received" || e.Direction == "sent") {
+			o.Validation = "message-observed"
+		}
+	}
+	if e.Denied {
+		o.Validation = "attempted"
+	}
 	if e.Cached {
 		o.Discoveries = append(o.Discoveries, "worker-cache")
 		o.Validation = "cache-response-observed"
@@ -42,7 +54,8 @@ func FromObserved(e RequestExample) (Operation, error) {
 		}
 	}
 	var body map[string]any
-	if json.Unmarshal([]byte(e.Body), &body) == nil {
+	decoded, _ := RequestBody(e)
+	if json.Unmarshal(decoded, &body) == nil {
 		for k, v := range body {
 			typ := "unknown"
 			switch v.(type) {

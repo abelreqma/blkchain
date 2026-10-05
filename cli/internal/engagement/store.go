@@ -24,10 +24,11 @@ type Store struct {
 	// snapshot read error skips the calls. They fire after the write lock is
 	// released, so under concurrent writers they may be invoked from multiple
 	// goroutines and revisions may arrive out of order. lmu guards the map.
-	lmu               sync.Mutex
-	listeners         map[int]func(rev int64, e Engagement)
-	evidenceListeners map[int]func()
-	nextID            int
+	lmu                 sync.Mutex
+	listeners           map[int]func(rev int64, e Engagement)
+	webFindingListeners map[int]func([]byte) error
+	evidenceListeners   map[int]func()
+	nextID              int
 }
 
 func (s *Store) AddOnEvidence(fn func()) (remove func()) {

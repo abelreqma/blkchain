@@ -10,7 +10,7 @@ import (
 func webModelPreview(kind, out string, findings []webanalysis.Finding) string {
 	if kind != "browser-dom" {
 		status, _, _ := strings.Cut(out, "\n")
-		return "HTTP status " + webanalysis.SafeText(status) + "; response body retained in restricted evidence"
+		return "HTTP status " + webanalysis.SafeText(status) + "; response body retained in restricted evidence\n" + webanalysis.CredentialSummary(findings)
 	}
 	var result strings.Builder
 	tokenizer := html.NewTokenizer(strings.NewReader(out))
@@ -52,5 +52,5 @@ func webModelPreview(kind, out string, findings []webanalysis.Finding) string {
 	if len(redacted.Calls) == 0 {
 		return "DOM preview unavailable"
 	}
-	return capRunes(redacted.Calls[0].Arguments[0], 16384)
+	return capRunes(redacted.Calls[0].Arguments[0], 16384) + "\n" + webanalysis.CredentialSummary(findings)
 }

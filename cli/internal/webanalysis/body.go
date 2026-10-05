@@ -12,6 +12,9 @@ func UnsupportedObservedBody(op Operation) bool {
 		return false
 	}
 	for _, example := range op.Examples {
+		if example.BodyOmitted || example.BodyEncoding != "" {
+			return true
+		}
 		if example.Body == "" {
 			continue
 		}

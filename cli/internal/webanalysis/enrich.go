@@ -3,6 +3,7 @@ package webanalysis
 import (
 	"encoding/base64"
 	"fmt"
+	"github.com/BishopFox/jsluice"
 	sitter "github.com/smacker/go-tree-sitter"
 	"math"
 	"regexp"
@@ -41,30 +42,72 @@ func (a *analyzer) secret(n *sitter.Node, e *lexical) {
 		return
 	}
 	s := v.text
+	if n.Type() == "string" || n.Type() == "template_string" && n.NamedChildCount() == 0 {
+		raw := a.text(n)
+		if len(raw) >= 2 {
+			decoded := jsluice.DecodeString("\"x" + raw[1:len(raw)-1] + "x\"")
+			if len(decoded) >= 2 {
+				s = decoded[1 : len(decoded)-1]
+			}
+		}
+	}
 	loc := a.loc(n)
 	detector := ""
 	confidence := "medium"
-	if providerValue.MatchString(s) {
+	parent := n.Parent()
+	key := ""
+	if parent != nil {
+		switch parent.Type() {
+		case "pair":
+			key = a.text(field(parent, "key"))
+		case "variable_declarator":
+			key = a.text(field(parent, "name"))
+		case "assignment_expression":
+			key = a.text(field(parent, "left"))
+			if at := strings.LastIndexByte(key, '.'); at >= 0 {
+				key = key[at+1:]
+			}
+		}
+	}
+	environment := false
+	for current, depth := n.Parent(), 0; current != nil && depth < 32; current, depth = current.Parent(), depth+1 {
+		if current.Type() == "pair" && environmentName(a.text(field(current, "key"))) {
+			environment = true
+			break
+		}
+		if current.Type() == "assignment_expression" {
+			left := a.text(field(current, "left"))
+			if left == "process.env" || strings.HasPrefix(left, "process.env.") {
+				environment = true
+				break
+			}
+		}
+	}
+	if s != "" && (secretType(key) != "" || environment) {
+		detector = "named-secret"
+		if PasswordName(key) {
+			detector = "password-context"
+		}
+	} else if providerValue.MatchString(s) {
 		detector = "provider-pattern"
 		confidence = "high"
-	} else {
-		parent := n.Parent()
-		key := ""
-		if parent != nil {
-			if parent.Type() == "pair" {
-				key = a.text(field(parent, "key"))
-			}
-			if parent.Type() == "variable_declarator" {
-				key = a.text(field(parent, "name"))
-			}
-		}
-		if Sensitive(key) && len(s) >= 20 && len(s) <= 512 && !hashOrID.MatchString(s) && secretAlphabet.MatchString(s) && entropy(s) >= 3.5 && !strings.Contains(strings.ToLower(s), "example") && !strings.Contains(strings.ToLower(s), "placeholder") {
-			detector = "entropy-context"
-		}
+	} else if Sensitive(key) && len(s) >= 20 && len(s) <= 512 && !hashOrID.MatchString(s) && secretAlphabet.MatchString(s) && entropy(s) >= 3.5 && !strings.Contains(strings.ToLower(s), "example") && !strings.Contains(strings.ToLower(s), "placeholder") {
+		detector = "entropy-context"
 	}
 	if detector != "" {
-		a.out.Findings = append(a.out.Findings, Finding{ID: ID(a.in.Unit.ID, detector, s), Kind: "secret-candidate", Detector: detector, Confidence: confidence, Location: loc, Preview: "[REDACTED]", Fingerprint: Fingerprint(s), Version: Version})
+		if len(s) > MaxCredentialValue {
+			a.gap("credential value exceeds finding limit")
+			return
+		}
+		f := credentialFinding(a.in.Unit, a.in.Role, detector, strings.Trim(key, "\"'`"), s, loc)
+		f.Confidence = confidence
+		f.EnvironmentVariable = environment
+		if environment && secretType(key) == "" {
+			f.CredentialType = "environment-variable"
+		}
+		a.out.Findings = append(a.out.Findings, f)
 	}
+
 }
 
 var libraryBanner = regexp.MustCompile(`(?i)\b(jquery|react|angular|vue|lodash|bootstrap|moment|axios)[ /@v-]+v?([0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?)`)

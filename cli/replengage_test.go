@@ -101,10 +101,11 @@ func TestUnattendedBoundEmpty(t *testing.T) {
 // returns a final answer with no tool calls, so this exercises scope resolve ->
 // buildEngageGate -> gate.Start -> runOrchestrator end to end in Safe mode.
 func TestRunReplEngageSmoke(t *testing.T) {
+	workspace := t.TempDir()
 	model := &scriptModel{resps: []*llms.ContentResponse{finalResp("engagement complete")}}
 	final, err := runReplEngage(
 		context.Background(),
-		t.TempDir(), // wsDir (hermetic)
+		workspace,   // wsDir (hermetic)
 		t.TempDir(), // cwd with no ROE.md -> scope nil, Safe is fine
 		secgate.Safe, false,
 		model, nil, ragconfig.Config{TopK: 5}, modelPrefs{}, nil,
@@ -116,6 +117,12 @@ func TestRunReplEngageSmoke(t *testing.T) {
 	if !strings.Contains(final, "engagement complete") {
 		t.Errorf("final = %q, want the model's answer", final)
 	}
+	for _, name := range []string{"report.md", "report.json"} {
+		if _, err := os.Stat(filepath.Join(workspace, name)); err != nil {
+			t.Fatalf("REPL report %s missing: %v", name, err)
+		}
+	}
+
 }
 
 func TestRunReplEngagePersistsFinalAssessment(t *testing.T) {

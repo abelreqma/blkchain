@@ -15,6 +15,7 @@ import (
 
 	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/secgate"
+	"blkchain/cli/internal/webacquire"
 	"blkchain/cli/internal/webanalysis"
 	"blkchain/cli/internal/webcollect"
 )
@@ -24,7 +25,7 @@ var webPlaceholder = regexp.MustCompile(`\{([^{}]+)\}`)
 type webOpts struct {
 	workspace, scope, roe, file, role, session, view, task, operation, values, resume string
 	asJSON, auto, browser, headed, noRDNS                                             bool
-	depth, states                                                                     int
+	depth, states, example                                                            int
 	assistSeconds                                                                     int
 	interactions                                                                      webStringFlags
 }
@@ -48,7 +49,8 @@ func defineWebFlags(fs *flag.FlagSet, o *webOpts) {
 	fs.StringVar(&o.view, "view", "summary", "summary, apis, artifacts, functions, features, findings, coverage, exports, all")
 	fs.StringVar(&o.task, "task", "", "existing engagement task for active actions")
 	fs.StringVar(&o.operation, "operation", "", "API operation id for export or replay")
-	fs.StringVar(&o.values, "values", "", "JSON file of replay parameter values")
+	fs.StringVar(&o.values, "values", "", "JSON replay values or WebSocket message transcript")
+	fs.IntVar(&o.example, "example", 0, "stored HTTP example number for exact body replay")
 	fs.StringVar(&o.resume, "resume", "", "archive resume key")
 	fs.BoolVar(&o.asJSON, "json", false, "emit structured JSON with exact operation records")
 	fs.BoolVar(&o.auto, "auto", false, "apply existing unattended engagement policy")
@@ -93,14 +95,14 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 	var o webOpts
 	defineWebFlags(fs, &o)
 	valueFlags := map[string]bool{}
-	for _, k := range []string{"workspace", "scope", "roe", "file", "role", "session", "view", "task", "operation", "values", "depth", "states", "interaction", "resume", "assist-seconds"} {
+	for _, k := range []string{"workspace", "scope", "roe", "file", "role", "session", "view", "task", "operation", "values", "depth", "states", "interaction", "resume", "assist-seconds", "example"} {
 		valueFlags[k] = true
 	}
 	if e := parseFlags(fs, reorder(args, valueFlags)); e != nil {
 		return "", e
 	}
 	views := map[string]bool{"summary": true, "apis": true, "artifacts": true, "functions": true, "features": true, "findings": true, "coverage": true, "exports": true, "all": true}
-	if !views[o.view] || o.depth < 1 || o.depth > 8 || o.states < 1 || o.states > 100 || o.assistSeconds < 0 || o.assistSeconds > 120 || o.assistSeconds > 0 && !o.headed {
+	if o.example < 0 || o.example > 20 || o.example > 0 && o.values != "" || !views[o.view] || o.depth < 1 || o.depth > 8 || o.states < 1 || o.states > 100 || o.assistSeconds < 0 || o.assistSeconds > 120 || o.assistSeconds > 0 && !o.headed {
 		return "", usageErr("web: invalid view or discovery budget")
 	}
 	inputs := append([]string{}, fs.Args()...)
@@ -128,6 +130,10 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 		return "", e
 	}
 	defer ws.Close()
+	if !o.asJSON {
+		removeFindings := subscribeWebFindingOutput(ctx, ws.Store, os.Stdout)
+		defer removeFindings()
+	}
 	cwd, _ := os.Getwd()
 	scope := targets.Scope
 	if o.roe != "" {
@@ -202,10 +208,14 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 		if e != nil {
 			return "", e
 		}
-		if o.role != "" && o.session == "" {
-			roles[0].Name = o.role
+		if o.role != "" && o.session == "" && o.role != "anonymous" {
+			if err := svc.RecordGap(ctx, o.role, "role", "", "Requested role has no supplied session"); err != nil {
+				return "", err
+			}
+			return "", errors.New("requested role requires a supplied session")
 		}
 		found := false
+		available := 0
 		for _, r := range roles {
 			if o.role != "" && r.Name != o.role {
 				continue
@@ -215,9 +225,22 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 			collector.DiscoveryAllowed = svc.DiscoveryAllowed
 			collector.SetTask(o.task)
 			headers, e := webRoleHeaders(r)
-			if e != nil {
-				return "", e
+			if e == nil {
+				e = webRoleStateAvailable(r)
 			}
+			if e != nil {
+				if err := svc.RecordGap(ctx, r.Name, "role", r.Origin, e.Error()); err != nil {
+					return "", err
+				}
+				continue
+			}
+			if (r.Login != nil || len(r.Storage) > 0) && !o.browser && !o.headed && command != "archive" {
+				if err := svc.RecordGap(ctx, r.Name, "state", r.Origin, "Supplied login or storage state requires browser collection"); err != nil {
+					return "", err
+				}
+				continue
+			}
+			available++
 			if r.Origin != "" && !webTargetMatches(r.Origin, targets.URLs) {
 				return "", errors.New("session origin is not a supplied target")
 			}
@@ -249,7 +272,13 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 			}
 		}
 		if !found {
+			if err := svc.RecordGap(ctx, o.role, "role", "", "Requested role is absent from supplied sessions"); err != nil {
+				return "", err
+			}
 			return "", errors.New("supplied session role not found")
+		}
+		if available == 0 {
+			return "", errors.New("no supplied role has usable session state; see coverage gaps")
 		}
 		if e = webScanLibraries(ctx, svc); e != nil {
 			return "", e
@@ -417,6 +446,9 @@ func webReplay(ctx context.Context, svc *webcollect.Service, g *secgate.Gate, ar
 	if op.ID == "" {
 		return errors.New("operation not found")
 	}
+	if op.Protocol == "websocket" {
+		return webReplaySocket(ctx, svc, op, o)
+	}
 	if op.Protocol != "http" {
 		return errors.New("protocol requires specialized replay")
 	}
@@ -430,8 +462,17 @@ func webReplay(ctx context.Context, svc *webcollect.Service, g *secgate.Gate, ar
 			return errors.New("invalid replay values")
 		}
 	}
-	request, e := webReplayRequest(op, values)
+	var request webAPIRequest
+	selectedRole := ""
+	if o.example > 0 {
+		request, selectedRole, e = webReplayExample(op, o.example)
+	} else {
+		request, e = webReplayRequest(op, values)
+	}
 	if e != nil {
+		if err := svc.RecordGap(ctx, o.role, "replay", op.Origin+op.Path, e.Error()); err != nil {
+			return err
+		}
 		return e
 	}
 	raw := request.URL
@@ -445,6 +486,9 @@ func webReplay(ctx context.Context, svc *webcollect.Service, g *secgate.Gate, ar
 		return e
 	}
 	role := roles[0]
+	if o.role == "" && selectedRole != "" {
+		o.role = selectedRole
+	}
 	if o.role != "" {
 		found := false
 		for _, r := range roles {
@@ -454,11 +498,43 @@ func webReplay(ctx context.Context, svc *webcollect.Service, g *secgate.Gate, ar
 			}
 		}
 		if !found {
+			if err := svc.RecordGap(ctx, o.role, "role", op.Origin, "Replay role has no supplied session"); err != nil {
+				return err
+			}
 			return errors.New("replay role missing")
 		}
 	}
 	if role.Origin != "" && !webSameOrigin(raw, role.Origin) {
 		return errors.New("replay origin differs from session")
+	}
+	if len(role.Storage) == 0 && role.Login == nil {
+		hs, err := webRoleHeaders(role)
+		if err != nil {
+			if e := svc.RecordGap(ctx, role.Name, "role", raw, err.Error()); e != nil {
+				return e
+			}
+			return err
+		}
+		h := webHeaders(headers)
+		for k, vs := range hs {
+			h[k] = vs
+		}
+		out, err := svc.Broker.Fetch(ctx, webacquire.Request{Method: request.Method, URL: raw, Headers: h, Body: []byte(request.Body)})
+		a, saveErr := svc.Accept(ctx, webanalysis.Artifact{Kind: "api-response", URL: raw, FinalURL: out.FinalURL, Role: role.Name, Status: out.Status, Headers: out.Headers, MIME: out.Headers.Get("Content-Type"), Complete: out.Complete, Gap: out.Gap}, out.Body, 0)
+		if saveErr != nil {
+			return saveErr
+		}
+		example := webanalysis.RequestExample{URL: raw, Method: request.Method, Headers: h, Role: role.Name, Status: out.Status, Artifact: a.ID, Denied: err != nil}
+		webanalysis.SetRequestBody(&example, []byte(request.Body))
+		if saveErr = svc.Observe(ctx, example); saveErr != nil {
+			return saveErr
+		}
+		if err != nil {
+			if e := svc.RecordGap(ctx, role.Name, "replay", raw, err.Error()); e != nil {
+				return e
+			}
+		}
+		return err
 	}
 	b, e := webNewJobBrowser(g, armed, svc, role, false)
 	if e != nil {

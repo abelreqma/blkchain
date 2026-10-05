@@ -83,9 +83,12 @@ Unavailable source/body metadata and exhausted limits appear in coverage. Detect
 parser failures, and exhausted limits also appear in coverage.
 
 Use an operator-provisioned isolated headed container for assisted challenges.
+The assistance window is consumed once per role job, capped at 120 seconds, and
+captures DOM state after the window. Cancellation closes the isolated context.
+An elapsed window never proves a challenge was solved.
 Set `BLKCHAIN_PLAYWRIGHT_HEADED=1`, then supply `--headed --assist-seconds 60`.
 The assistance window defaults to 30 seconds and cannot exceed 120 seconds per
-visited page. Request policy remains active throughout the window. Provisioning
+role job. Request policy remains active throughout the window. Provisioning
 uses the same verified driver, image, restricted mounts, and network boundary as
 headless collection. See [webbrowser-provisioning.md](webbrowser-provisioning.md).
 
@@ -148,10 +151,37 @@ GraphQL operations/variables, observed WebSocket operations/messages, and EventS
 computed origins, conditional interceptors, and unsupported decoder patterns
 remain unresolved. Formatting and static transformations preserve original blobs
 and record source locations. A sink or secret match is an analysis lead.
+Discovered credential values remain exact in finding records and operator output.
 
 Technology findings report source or header signals and unknown versions when
 version evidence is absent. Provider patterns and entropy/context candidates use
-separate detectors and confidence. Secrets are fingerprinted without validation.
+separate detectors and evidence grades. Discovered passwords and secret values are retained in the finding's `value`
+field, with credential type, source URL, artifact, location and role. A password
+literal does not need high entropy to become a finding. JSON response fields, embedded JSON state and nonempty HTML password inputs
+also produce credential findings. A fingerprint supports correlation; it does
+not replace the value. Detection does not establish that a credential works.
+
+During `blk engage`, the CLI and REPL/TUI emit each discovered credential as a
+structured JSON event. The same event is appended to
+`evidence/web/findings.jsonl`. Reports retain the exact value in `report.json`
+and in a JSON block in `report.md`, even when the originating task is unfinished.
+The report refreshes when a credential is stored. Control and Unicode characters
+use reversible JSON escapes in live output. Passwords are not replaced with masks.
+The same output contract covers named API keys, access/client secrets, tokens,
+authorization and cookie headers, signing/encryption/private keys, connection
+strings, exposed environment assignments and JSON environment objects. Known
+provider patterns and entropy/context matches remain additional detectors.
+Captured environment documents retain all supplied assignment values, including
+ordinary configuration settings, with `environment_variable: true`. Their grade
+is `configuration-observed`; sensitivity and runtime use remain unverified.
+Assignment records also retain their expression. Variable references that require
+runtime resolution remain coverage gaps. The analyzer does not resolve a target's
+`process.env` reference using the runner's environment.
+
+The finding log uses mode 0600 and a 32 MiB limit. Individual credential values
+are capped at 64 KiB, with larger values retained as a coverage gap and in their
+source artifact. `blk web collect --json` keeps one final JSON document on stdout;
+its findings retain values, and its credential events still go to the JSONL log.
 
 Known-library scanning reads a local Retire-compatible advisory repository.
 Set `BLKCHAIN_RETIRE_MANIFEST` to a JSON file containing `path`, `sha256`, `date`
@@ -167,6 +197,31 @@ and retrieval times remain distinct. Archived source is never executed. Provider
 requests contain no target credentials, and private session URLs are excluded.
 Use `--resume` with a recorded continuation key when pagination exceeds the job
 budget. Missing captures or provider failures preserve existing live evidence.
+The adapter accepts the CDX JSON resume rows documented by the
+[Wayback CDX API](https://github.com/internetarchive/wayback/blob/master/wayback-cdx-server/README.md).
+Archive requests identify themselves as `blkChain/1.0 (Wayback archive collection)`.
+The infrastructure policy allows only that fixed User-Agent and rejects target
+credentials and other headers.
+Every archive index query, capture fetch and retry passes through one shared
+process-wide limiter. Requests are serialized, and the next request starts at
+least one second after the previous request completes. Concurrent archive jobs
+and roles share this limit; there is no burst allowance. Rate waits honor
+cancellation and remain inside the request timeout.
+It stops on a repeated key, caps jobs at three pages, and retries 429 or 503 once.
+It honors Retry-After only within a five-second wait budget; longer waits remain
+throttling gaps. Archive responses do not follow redirects to live targets.
+
+Run the opt-in public-service check serially:
+
+```sh
+cd cli
+BLKCHAIN_WAYBACK_E2E=1 go test ./internal/webcollect -run '^TestWaybackPublicServiceE2E$' -v -count=1
+```
+
+It uses public example.com captures to check index access, resume pagination,
+an indexed body and a missing capture. Provider outages fail this check and
+leave live validation incomplete. Controlled fixtures test throttling; the live
+check does not induce rate limits.
 Source maps support embedded content, HTTP references, and bounded indexed maps;
 logical `webpack://` sources never trigger local-file reads.
 
@@ -189,10 +244,71 @@ blk web replay --workspace ./assessment --scope scope.txt \
 `values.json` maps parameter names to strings. Numeric, boolean, object, and array
 parameters accept JSON encoded in those strings. Path/query values are encoded
 for their URL context. GraphQL variable names are independent parameters.
-Unsupported signatures, missing values, and non-HTTP protocols cannot replay.
-Observed text, scalar JSON, JSON arrays, empty JSON objects, and other unsupported
-body representations remain exact in stored records and are explicitly rejected
-by structured replay and cURL export.
+Unsupported signatures and missing values remain gaps. Select an observed HTTP
+request with `--example N` to replay its original body bytes:
+
+```sh
+blk web replay --workspace ./assessment --scope scope.txt \
+  --operation OPERATION_ID --example 1 --session sessions.json \
+  --role writer --task EXISTING_ARMED_TASK --auto
+```
+
+Example numbers refer to the operation's stored `examples` array, starting at 1.
+Inspect the array with `--view apis --json`. Exact replay accepts text, JSON objects, arrays and scalars,
+form bodies, multipart uploads with their captured boundary, and octet-stream
+bodies. Other valid media types use an opaque adapter without interpreting or
+changing their body bytes. It preserves the captured URL and body bytes. Binary HTTP bodies use
+`body_encoding: base64` in records. The adapter decodes them before sending.
+`--example` and `--values` cannot be combined. Stored session headers are replaced
+with supplied credentials for the selected role and origin. A role absent from
+supplied sessions remains a coverage gap. Missing HAR wire bytes, unsupported
+encodings, malformed bodies and oversized bodies cannot replay. HAR `_encoding`
+may supply `base64` for an exact binary request body. Multipart `params` without
+`postData.text` cannot reconstruct the original boundary or file bytes.
+
+Structured cURL export still uses placeholders. For bodies it cannot represent,
+it directs the operator to exact example replay instead of emitting an empty
+request. HTTP replay uses the scoped broker directly for header/cookie sessions;
+login or local-storage sessions require the isolated browser.
+
+WebSocket replay requires an operator-supplied application transcript in
+`--values`. The `exact-message` adapter sends and expects bounded text or binary
+messages on a negotiated connection. Every expect step compares opcode and exact
+bytes. It does not infer application messages, subscription ids or authentication
+values. A subscription transcript can supply initialization, acknowledgement,
+subscribe and data steps:
+
+```json
+{
+  "adapter": "exact-message",
+  "protocols": ["graphql-transport-ws"],
+  "steps": [
+    {"send": {"opcode": 1, "body": "{\"type\":\"connection_init\"}"}},
+    {"expect": {"opcode": 1, "body": "{\"type\":\"connection_ack\"}"}},
+    {"send": {"opcode": 1, "body": "{\"id\":\"one\",\"type\":\"subscribe\",\"payload\":{\"query\":\"subscription { event }\"}}"}},
+    {"expect": {"opcode": 1, "body": "{\"id\":\"one\",\"type\":\"next\",\"payload\":{\"data\":{\"event\":\"fixture\"}}}"}}
+  ]
+}
+```
+
+This example follows the [GraphQL WebSocket protocol](https://github.com/enisdenjo/graphql-ws/blob/master/PROTOCOL.md).
+It validates only the supplied exchange for its recorded role and time. Variable
+response fields require a newly supplied expectation. Binary frames use opcode 2
+and `encoding: base64`. Plans allow 20 steps, 256 KiB per frame, 1 MiB total body
+bytes, 10 seconds per receive and 30 seconds total. Sends retain armed-task and
+scope authorization. Browser-only state requires refreshed header or cookie
+credentials for this replay adapter. Failure retains messages and a coverage gap.
+HTTP cURL templates never claim WebSocket application validation.
+
+Operation and finding records carry `evidence_grade` with `grade` and
+`explanation`. JSON inspection exposes both on CLI and REPL/TUI surfaces. Text-view additions
+require approval of the terminal preview.
+Grades distinguish discovered, historical, attempted, access, cached response,
+HTTP response, WebSocket handshake, message and validated exchange evidence.
+Detector findings remain leads, signature detections or advisory matches.
+The older finding `confidence` field remains for compatibility and is not a
+calibrated probability. No grade represents a percentage. Numerical confidence
+requires measurement against a labeled validation dataset.
 Historical discovery alone never marks an operation validated. A 401 or 403
 records an access response rather than declaring the operation dead.
 

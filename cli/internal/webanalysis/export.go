@@ -35,7 +35,7 @@ func CurlTemplate(op Operation) (Template, error) {
 	t := Template{Operation: op.ID, Replayable: true, Gaps: []string{}}
 	if UnsupportedObservedBody(op) {
 		t.Replayable = false
-		t.Gaps = append(t.Gaps, "body representation requires specialized replay")
+		t.Gaps = append(t.Gaps, "structured export cannot represent this body; select a stored example with --example for exact replay")
 		return t, nil
 	}
 	if op.Protocol != "http" || op.Method == "UNKNOWN" || op.Method == "" {

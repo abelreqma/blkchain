@@ -2,6 +2,7 @@ package webanalysis
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -127,7 +128,21 @@ func Analyze(ctx context.Context, in Input) (Result, error) {
 		for _, hit := range baseline.GetSecrets() {
 			b := fmt.Sprint(hit.Data)
 			loc := Location{Unit: in.Unit.ID, Line: 1}
-			a.out.Findings = append(a.out.Findings, Finding{ID: ID(in.Unit.ID, "jsluice", b), Kind: "secret-candidate", Detector: "jsluice:" + hit.Kind, Confidence: "high", Location: loc, Preview: "[REDACTED]", Fingerprint: Fingerprint(b), Version: Version})
+			data, err := json.Marshal(hit.Data)
+			if err != nil || len(data) > MaxCredentialValue {
+				a.gap("credential data exceeds finding limit")
+				continue
+			}
+			value := string(data)
+			if fields, ok := hit.Data.(map[string]string); ok && len(fields) == 1 {
+				for _, entry := range fields {
+					value = entry
+				}
+			}
+			f := credentialFinding(in.Unit, in.Role, "jsluice:"+hit.Kind, hit.Kind, value, loc)
+			f.ID = ID(in.Unit.ID, "jsluice", b)
+			f.Confidence = "high"
+			a.out.Findings = append(a.out.Findings, f)
 		}
 		if formatted, e := baseline.RootNode().Format(); e == nil && len(formatted) <= MaxSource {
 			a.out.Formatted = []byte(formatted)
@@ -483,6 +498,9 @@ func (a *analyzer) walk(n *sitter.Node, e *lexical, depth int) error {
 		}
 		name := field(n, "name")
 		v := field(n, "value")
+		if v != nil && strings.Contains(a.text(v), "process.env") && !a.eval(v, e, 0).known {
+			a.gap("environment value unavailable at runtime: " + a.text(name))
+		}
 		if name != nil && name.Type() == "identifier" {
 			s := &symbol{v: a.eval(v, e, 0)}
 			e.vars[a.text(name)] = s
@@ -537,6 +555,7 @@ func (a *analyzer) walk(n *sitter.Node, e *lexical, depth int) error {
 	case "binary_expression", "template_string", "subscript_expression":
 		if v := a.eval(n, e, 0); v.known {
 			a.out.Units[0].Transformations = AddUnique(a.out.Units[0].Transformations, fmt.Sprintf("static-%s offset=%d", n.Type(), a.loc(n).Offset))
+			a.secret(n, e)
 		}
 	case "assignment_expression":
 		a.assignment(n, e)
@@ -834,6 +853,9 @@ func (a *analyzer) addOperation(op Operation, c Call) {
 	}
 }
 func MergeOperation(a, b Operation) Operation {
+	if b.Exchange != nil {
+		a.Exchange = b.Exchange
+	}
 	if a.ContentType == "" {
 		a.ContentType = b.ContentType
 	}
@@ -855,7 +877,7 @@ func MergeOperation(a, b Operation) Operation {
 	for _, x := range b.Unresolved {
 		a.Unresolved = AddUnique(a.Unresolved, x)
 	}
-	rank := map[string]int{"": 0, "unvalidated": 0, "attempted": 1, "access-response": 2, "cache-response-observed": 2, "response-observed": 3}
+	rank := map[string]int{"": 0, "unvalidated": 0, "attempted": 1, "access-response": 2, "cache-response-observed": 2, "response-observed": 3, "handshake-observed": 2, "message-observed": 3, "application-exchange-validated": 4}
 	if rank[b.Validation] > rank[a.Validation] {
 		a.Validation = b.Validation
 	}
