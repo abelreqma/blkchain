@@ -70,3 +70,54 @@ func TestEngageTranscriptRejectsDuplicateJSONFields(t *testing.T) {
 		t.Fatalf("duplicate transcript key accepted: %v", err)
 	}
 }
+
+// TestTranscriptKeepsToolCredentialsAndRedactsOperatorSecrets pins a deliberate
+// asymmetry in what the transcript shows.
+//
+// The credential-bearing target operands of the AD tools are left intact, in the
+// argv and in the recorded command: impacket and smbclient take them on the
+// command line by design, the audit record in toolaudit.go states that they stay
+// visible, and an engagement transcript is expected to show exactly what ran.
+// That behavior currently holds only because no redaction pattern happens to
+// match a user:password@host operand, so a plausible hardening of RedactText
+// would silently remove evidence the operator depends on and make that audit
+// record false.
+//
+// The operator's own secrets are the other half: a bearer token, a key=value
+// secret, and private key material must not survive into the rendered
+// transcript, whichever side of the engagement they came from.
+func TestTranscriptKeepsToolCredentialsAndRedactsOperatorSecrets(t *testing.T) {
+	kept := []struct{ name, text string }{
+		{"impacket domain user password host", "secretsdump.py ACME/svc:Winter2026@dc01.acme.test"},
+		{"impacket password containing at", "secretsdump.py ACME/svc:Win@2026@dc01.acme.test"},
+		{"impacket hashes pair", "secretsdump.py -hashes aad3b435b51404ee:31d6cfe0d16ae931 ACME/svc@dc01.acme.test"},
+		{"smbclient percent form", `smbclient -U ACME/svc%Winter2026 //dc01.acme.test/C$`},
+		{"kerberos principal", "kinit svc@ACME.TEST"},
+	}
+	for _, tc := range kept {
+		t.Run("keeps "+tc.name, func(t *testing.T) {
+			if got := redactEngageText(tc.text); got != tc.text {
+				t.Errorf("the recorded command lost evidence\n got: %s\nwant: %s", got, tc.text)
+			}
+		})
+	}
+
+	removed := []struct{ name, text, secret string }{
+		{"bearer token", "curl -H 'Authorization: Bearer abc123def456ghi' https://10.0.0.1/", "abc123def456ghi"},
+		{"password assignment", "app --password=Winter2026", "Winter2026"},
+		{"api key assignment", "app --api_key: sk-operator-value", "sk-operator-value"},
+		{"openssh private key", "-----BEGIN OPENSSH PRIVATE KEY-----", "BEGIN OPENSSH PRIVATE KEY"},
+		{"aws access key id", "env AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"},
+	}
+	for _, tc := range removed {
+		t.Run("redacts "+tc.name, func(t *testing.T) {
+			got := redactEngageText(tc.text)
+			if strings.Contains(got, tc.secret) {
+				t.Errorf("the transcript leaked %q: %s", tc.secret, got)
+			}
+			if !strings.Contains(got, "REDACTED") {
+				t.Errorf("no redaction marker in %q", got)
+			}
+		})
+	}
+}
