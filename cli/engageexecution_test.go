@@ -100,7 +100,7 @@ func TestWildcardCommandUsesActionGuardAndRecordsEvidence(t *testing.T) {
 		return runResult{}, nil
 	}}
 	ctx := context.WithValue(context.Background(), engageRuntimeKey{}, &engageRuntime{runner: runner, trace: trace, policy: roe.Policy, cancel: func() {}})
-	result := runAuthorized(ctx, gate, "curl", []string{"http://api.example.test/"}, "task", 65536, time.Second, "t1")
+	result := runAuthorized(ctx, gate, "curl", []string{"http://api.example.test/"}, "task", 65536, time.Second, actionOrigin{TaskID: "t1"})
 	data, readErr := os.ReadFile(filepath.Join(workspace, "actions.jsonl"))
 	if result.Err != nil || result.Output != "wildcard-evidence" || !created || !removed || shared || readErr != nil || !strings.Contains(string(data), "wildcard-evidence") {
 		t.Fatalf("wildcard action result=%+v created=%v removed=%v shared=%v transcript=%q read=%v", result, created, removed, shared, data, readErr)

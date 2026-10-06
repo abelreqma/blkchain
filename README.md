@@ -50,7 +50,7 @@ and AI application assessment paths. Depth differs by surface:
 | --- | --- |
 | Network | Tiered asset and service discovery, fingerprinting, and evidence-backed candidate tasks. A candidate is an investigation lead, not a verified exploit. |
 | Web | Bounded browser and HTTP collection, source analysis, role-aware observations, and scoped replay. The detailed workflow appears below. |
-| Local host | Read-only enumeration of identity, privileges, file permissions, capabilities, scheduled tasks, and services, with focused analysis of a selected executable. |
+| Local host | Read-only enumeration of identity, privileges, file permissions, capabilities, scheduled tasks, and services, with focused analysis of a selected executable. Runs on a declared foothold when the RoE names one, and in the isolated runner otherwise. |
 | Container | Container and Kubernetes reconnaissance through a specialized tier ladder and the shared gated executor. |
 | Active Directory | Domain-controller discovery and staged anonymous, authenticated, and finding-driven enumeration through the shared executor. |
 | Cloud | Shared metadata, storage, and identity reconnaissance with AWS, Azure, and GCP-specific ladders. These are not three independent cloud API engines. |
@@ -59,6 +59,26 @@ and AI application assessment paths. Depth differs by surface:
 Reconnaissance, candidate generation, and task execution are separate steps. A retrieved technique
 or model suggestion does not establish a vulnerability or authorize execution. Candidate targets and
 armed state are derived by code and remain subject to the RoE gate.
+
+#### External to internal pivot
+
+An engagement that reaches internal access can execute on it. An optional `Foothold` section of the
+RoE names one host the operator already controls, and tasks on the surfaces it covers run there
+instead of in the isolated runner. The default covered surface is the local host; `surfaces=` extends
+it to Active Directory, container, or network work. Without a foothold every command runs in the
+runner, and a local-host task therefore describes the runner rather than a target.
+
+The carrier is selected by how the access was acquired, not fixed to one client. `transport=ssh`
+needs a user and a key. `transport=command` takes an argv prefix of the operator's own, such as
+`kubectl exec -i web-0 --`, for access ssh cannot reach. Key material is named by environment
+variable and read at setup, never written into the policy or a prompt, and is delivered to the worker
+as an owner-only file rather than mounted from the operator's filesystem.
+
+The declaration is authorization data. It is sealed into the policy, so a resume with a different
+foothold is refused; its host must also be in scope, so the runner's firewall permits the connection;
+and the surface of a task, not the model, decides where that task's commands run. Declaring a
+foothold starts the engagement at the internal-foothold vantage, which is what opens the local and
+Active Directory surfaces.
 
 ### Web application analysis
 
@@ -115,7 +135,9 @@ separately through an OpenAI-compatible local endpoint.
 Use blkChain only on systems and applications you are authorized to assess. The RoE is the authority
 for target-facing actions. Authorized private and internal targets are supported when they appear in
 scope. The isolated command runner restricts host access, network destinations, CPU, memory,
-processes, output, and time. The web request broker checks destinations on resolution and redirect,
+processes, output, and time. A command carried to a declared foothold is the one exception to the
+network restriction: it executes on a host whose egress is not the runner's to filter, so its scope
+is enforced by the command gate alone, and every such action records the host it ran on. The web request broker checks destinations on resolution and redirect,
 and the browser runs in an isolated container. Target responses, retrieved documents, and tool
 output are untrusted data.
 
@@ -233,6 +255,14 @@ The addresses above are documentation examples. Replace them with the actual aut
 A `*.` entry matches subdomains of that suffix and not the bare apex, so list the apex
 separately when it is in scope. A wildcard command resolves its own targets and runs behind a
 guard limited to those checked addresses.
+
+To run local-host work on a host you already control, add the host to `In Scope` by name and declare
+it as the foothold:
+
+```markdown
+## Foothold
+- 192.0.2.10 user=svc-deploy key=$BLKCHAIN_FOOTHOLD_KEY
+```
 
 ```sh
 cli/blk engage setup

@@ -95,7 +95,7 @@ func newTaskGrounder(cache toolHelpCache, g *secgate.Gate, workDir string, cmdCt
 			if g.Audit != nil {
 				g.Audit("exec", secgate.Signature(hc))
 			}
-			res := runAuthorized(ctx, g, authorized.Binary, authorized.Args, workDir, helpCaptureCapBytes, helpCaptureTimeout, cmdCtx.TaskID)
+			res := runAuthorized(ctx, g, authorized.Binary, authorized.Args, workDir, helpCaptureCapBytes, helpCaptureTimeout, actionOrigin{TaskID: cmdCtx.TaskID, Surface: cmdCtx.Surface})
 			if res.TimedOut {
 				continue
 			}

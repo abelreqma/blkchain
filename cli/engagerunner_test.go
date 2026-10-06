@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -36,7 +37,7 @@ func TestEngageRunnerCleanupFailureIsReportedAndRetried(t *testing.T) {
 }
 
 func TestEngageWorkerHasNoHostAccess(t *testing.T) {
-	args := engageWorkerArgs("worker", "guard", "sha256:"+strings.Repeat("a", 64), "")
+	args := engageWorkerArgs("worker", "guard", "sha256:"+strings.Repeat("a", 64), "", nil)
 	s := strings.Join(args, " ")
 	for _, want := range []string{"--read-only", "--cap-drop ALL", "--security-opt no-new-privileges", "--user 1000:1000", "--network container:guard", "--pids-limit", "--memory", "--tmpfs"} {
 		if !strings.Contains(s, want) {
@@ -67,7 +68,7 @@ func TestEngageWorkerPinsHostsFromPrivateReadOnlyFile(t *testing.T) {
 	if info.Mode().Perm() != 0700 {
 		t.Fatalf("host pin directory mode=%v", info.Mode())
 	}
-	args := strings.Join(engageWorkerArgs("worker", "guard", "sha256:"+strings.Repeat("a", 64), path), " ")
+	args := strings.Join(engageWorkerArgs("worker", "guard", "sha256:"+strings.Repeat("a", 64), path, nil), " ")
 	if !strings.Contains(args, "--mount type=bind,src="+path+",dst=/etc/hosts,readonly") {
 		t.Fatalf("worker did not mount only its generated host pins: %s", args)
 	}
@@ -198,8 +199,14 @@ func TestWildcardRunUsesActionScopedGuardAndCleansUp(t *testing.T) {
 	var child *engageRunner
 	newEngageRunnerForRun = func(_ context.Context, roe *RoE) (*engageRunner, error) {
 		in, _ := roe.Scope.Entries()
-		if strings.Join(in, ",") != "10.20.0.6" || roe.Policy != policy {
-			t.Errorf("action runner received scope=%v policy=%p", in, roe.Policy)
+		// The sub-runner inherits every operator cap unchanged. It receives a copy
+		// rather than the same pointer for one reason: the foothold is stripped,
+		// because no pivoted action reaches the dynamic path and the foothold's
+		// address does not belong in this runner's deliberately narrow accept list.
+		inherited := *policy
+		inherited.Foothold = nil
+		if strings.Join(in, ",") != "10.20.0.6" || roe.Policy == nil || !reflect.DeepEqual(*roe.Policy, inherited) {
+			t.Errorf("action runner received scope=%v policy=%+v", in, roe.Policy)
 		}
 		child = &engageRunner{guard: "guard", workers: map[string]string{"task": "worker"}, remove: func(_ context.Context, id string) error {
 			removed[id] = true
@@ -339,7 +346,7 @@ func TestWildcardActionRunnerLiveBoundary(t *testing.T) {
 
 func TestEngageRawWorkerAddsOnlyRawSocketCapability(t *testing.T) {
 	image := "sha256:" + strings.Repeat("a", 64)
-	raw := strings.Join(engageRawWorkerArgs("rawworker", "guard", image, ""), " ")
+	raw := strings.Join(engageRawWorkerArgs("rawworker", "guard", image, "", nil), " ")
 	// Raw sockets need a root process: Docker exposes no ambient capability and
 	// no-new-privileges blocks the file-capability route, so an unprivileged
 	// process keeps an empty effective set however the capability is added.
@@ -360,7 +367,7 @@ func TestEngageRawWorkerAddsOnlyRawSocketCapability(t *testing.T) {
 		}
 	}
 	// The general worker keeps its unprivileged identity and gains nothing.
-	general := strings.Join(engageWorkerArgs("worker", "guard", image, ""), " ")
+	general := strings.Join(engageWorkerArgs("worker", "guard", image, "", nil), " ")
 	if strings.Contains(general, "NET_RAW") {
 		t.Fatalf("general worker gained NET_RAW: %s", general)
 	}
@@ -377,8 +384,8 @@ func TestBothWorkerPoolsPinHostsReadOnly(t *testing.T) {
 	image := "sha256:" + strings.Repeat("a", 64)
 	want := "--mount type=bind,src=/tmp/pins/hosts,dst=/etc/hosts,readonly"
 	for name, args := range map[string][]string{
-		"general": engageWorkerArgs("worker", "guard", image, "/tmp/pins/hosts"),
-		"raw":     engageRawWorkerArgs("rawworker", "guard", image, "/tmp/pins/hosts"),
+		"general": engageWorkerArgs("worker", "guard", image, "/tmp/pins/hosts", nil),
+		"raw":     engageRawWorkerArgs("rawworker", "guard", image, "/tmp/pins/hosts", nil),
 	} {
 		if s := strings.Join(args, " "); !strings.Contains(s, want) {
 			t.Errorf("%s worker does not mount the host pins read-only: %s", name, s)

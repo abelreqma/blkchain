@@ -175,7 +175,7 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 				if g.Audit != nil {
 					g.Audit("exec", secgate.Signature(run))
 				}
-				res := runAuthorized(ctx, g, run.Binary, run.Args, workDir, capBytes, timeout, activeTask())
+				res := runAuthorized(ctx, g, run.Binary, run.Args, workDir, capBytes, timeout, actionOrigin{TaskID: activeTask(), Surface: run.Surface})
 				if capture != nil {
 					capture(activeTask(), res.Output)
 				}
@@ -254,7 +254,7 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 				}
 				g.Audit("exec", strings.Join(sigs, " | "))
 			}
-			res := runAuthorizedPipeline(ctx, g, a.Pipeline, workDir, capBytes, timeout, activeTask())
+			res := runAuthorizedPipeline(ctx, g, a.Pipeline, workDir, capBytes, timeout, actionOrigin{TaskID: activeTask(), Surface: cmdCtx.Surface})
 			if capture != nil {
 				capture(activeTask(), res.Output)
 			}

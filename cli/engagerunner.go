@@ -34,13 +34,14 @@ type engageRunner struct {
 	hostsFile    string
 	slots        chan struct{}
 	closed       bool
+	foothold     *footholdTransport
 	remove       func(context.Context, string) error
 	resolve      func(context.Context, string) ([]net.IPAddr, error)
 	runFn        func(context.Context, []pipelineStage, string, int, time.Duration) (runResult, []isolatedStageResult)
 }
 
-func engageWorkerArgs(name, guard, image, hostsFile string) []string {
-	return workerArgs(name, guard, image, hostsFile, false)
+func engageWorkerArgs(name, guard, image, hostsFile string, env []string) []string {
+	return workerArgs(name, guard, image, hostsFile, env, false)
 }
 
 // engageRawWorkerArgs builds the raw-socket worker. It differs from the general
@@ -53,11 +54,15 @@ func engageWorkerArgs(name, guard, image, hostsFile string) []string {
 // no-new-privileges, the same memory, cpu, pid and file limits, the same
 // read-only host pins, and the guard's network namespace, so the firewall still
 // bounds every destination.
-func engageRawWorkerArgs(name, guard, image, hostsFile string) []string {
-	return workerArgs(name, guard, image, hostsFile, true)
+func engageRawWorkerArgs(name, guard, image, hostsFile string, env []string) []string {
+	return workerArgs(name, guard, image, hostsFile, env, true)
 }
 
-func workerArgs(name, guard, image, hostsFile string, raw bool) []string {
+// workerArgs builds a worker container. env names environment variables the
+// operator declared for a foothold carrier; their values are forwarded from this
+// process so a carrier can authenticate, and nothing else from the operator
+// environment crosses into the worker.
+func workerArgs(name, guard, image, hostsFile string, env []string, raw bool) []string {
 	// The raw worker runs as uid 0 but holds only NET_RAW, so it has no
 	// CAP_DAC_OVERRIDE and cannot write a scratch mount owned by another uid. Its
 	// /work must therefore be root-owned; it is still a private tmpfs per
@@ -73,6 +78,9 @@ func workerArgs(name, guard, image, hostsFile string, raw bool) []string {
 	args = append(args, "--security-opt", "no-new-privileges", "--user", user, "--memory", "256m", "--cpus", "1", "--pids-limit", "64", "--ulimit", "nofile=256:256", "--ulimit", "fsize=67108864:67108864", "--tmpfs", work, "--tmpfs", "/tmp:rw,nosuid,nodev,size=32m", "--env", "HOME=/work", "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "--entrypoint", "/bin/sh")
 	if hostsFile != "" {
 		args = append(args, "--mount", "type=bind,src="+hostsFile+",dst=/etc/hosts,readonly")
+	}
+	for _, name := range env {
+		args = append(args, "--env", name)
 	}
 	args = append(args, image, "-c", "exec sleep 86400")
 	return args
@@ -234,8 +242,15 @@ func newEngageRunner(ctx context.Context, roe *RoE) (result *engageRunner, err e
 	if !strings.HasPrefix(imageID, "sha256:") || len(imageID) != 71 {
 		return nil, errors.New("invalid runner image identity")
 	}
+	// The carrier is constructed before any container exists, so a missing key,
+	// an unset environment variable, or an unbuildable transport fails the
+	// engagement at setup.
+	transport, err := newFootholdTransport(p.Foothold)
+	if err != nil {
+		return nil, err
+	}
 	guardName := runnerName("blk-guard-")
-	r := &engageRunner{image: imageID, workers: map[string]string{}, rawWorkers: map[string]string{}, slots: make(chan struct{}, p.Parallel)}
+	r := &engageRunner{image: imageID, workers: map[string]string{}, rawWorkers: map[string]string{}, slots: make(chan struct{}, p.Parallel), foothold: transport}
 	ok := false
 	defer func() {
 		if !ok {
@@ -248,7 +263,9 @@ func newEngageRunner(ctx context.Context, roe *RoE) (result *engageRunner, err e
 	if err != nil {
 		return nil, err
 	}
-	commandIPs := runnerCommandIPs(roe.Scope)
+	// The foothold is a code-derived destination the operator declared, so its
+	// address is pinned directly rather than extracted from a carrier's argv.
+	commandIPs := append(runnerCommandIPs(roe.Scope), footholdPinIPs(p.Foothold, hosts)...)
 	r.hosts = hosts
 	_, err = runnerDocker(check, nil, "run", "-d", "--name", guardName, "--network", "bridge", "--read-only", "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges", "--user", "0:0", "--memory", "64m", "--cpus", "0.25", "--pids-limit", "16", "--entrypoint", "/bin/sh", imageID, "-c", "exec sleep 86400")
 	if err != nil {
@@ -336,6 +353,27 @@ func runnerScope(ctx context.Context, scope *secgate.Scope) (in, out, hosts []st
 	out, err = resolve(excluded, true)
 	sort.Strings(hosts)
 	return
+}
+
+// footholdPinIPs returns the foothold's addresses for the guard's accept list.
+// An IP declaration pins itself; a hostname declaration must be an explicit
+// in-scope entry, so runnerScope has already resolved it into the host pin lines
+// and its addresses are read back from there.
+func footholdPinIPs(f *secgate.Foothold, hosts []string) []string {
+	if f == nil {
+		return nil
+	}
+	if ip := net.ParseIP(f.Host); ip != nil {
+		return []string{ip.String()}
+	}
+	var out []string
+	for _, line := range hosts {
+		address, name, ok := strings.Cut(line, " ")
+		if ok && strings.EqualFold(strings.TrimSpace(name), f.Host) {
+			out = append(out, address)
+		}
+	}
+	return out
 }
 
 func runnerCommandIPs(scope *secgate.Scope) []string {
@@ -470,7 +508,15 @@ func (r *engageRunner) RunScoped(ctx context.Context, stages []pipelineStage, di
 	if err != nil {
 		return runResult{Err: err}, nil
 	}
-	worker, err := newEngageRunnerForRun(ctx, &RoE{Scope: scope, Policy: policy})
+	// An action-scoped runner exists for a wildcard command whose own targets
+	// were just resolved, and a pivoted action never takes this path: it skips
+	// the egress plan, so its plan is never dynamic. Stripping the foothold from
+	// this runner's policy copy keeps the foothold's address out of a deliberately
+	// narrow accept list and avoids provisioning carrier secrets into a worker
+	// that cannot use them.
+	narrowed := *policy
+	narrowed.Foothold = nil
+	worker, err := newEngageRunnerForRun(ctx, &RoE{Scope: scope, Policy: &narrowed})
 	if err != nil {
 		return runResult{Err: err}, nil
 	}
@@ -510,8 +556,23 @@ func (r *engageRunner) worker(ctx context.Context, dir string, raw bool) (string
 			return "", err
 		}
 	}
-	if _, err := runnerDocker(ctx, nil, args(id, r.guard, r.image, r.hostsFile)...); err != nil {
+	var env []string
+	if r.foothold != nil {
+		env = r.foothold.env
+	}
+	if _, err := runnerDocker(ctx, nil, args(id, r.guard, r.image, r.hostsFile, env)...); err != nil {
 		return "", err
+	}
+	// Carrier secrets are written by the worker itself, so the files carry its
+	// own owner and a 0600 mode. A worker that cannot be provisioned is removed
+	// rather than left usable without its carrier.
+	for _, path := range r.foothold.secretPaths() {
+		if _, err := runnerDocker(ctx, r.foothold.secrets[path], "exec", "-i", id, "python3", "-c", footholdSecretWriter, path); err != nil {
+			if rmErr := r.removeContainer(ctx, id); rmErr != nil {
+				err = errors.Join(err, rmErr)
+			}
+			return "", fmt.Errorf("foothold carrier provisioning failed: %w", err)
+		}
 	}
 	pool[dir] = id
 	return id, nil

@@ -42,14 +42,18 @@ type actionRecord struct {
 	Runner        string `json:"runner"`
 	Kind          string `json:"kind"`
 	Command       string `json:"command"`
-	Status        string `json:"status"`
-	At            string `json:"at"`
-	DurationMS    int64  `json:"duration_ms,omitempty"`
-	ExitCode      int    `json:"exit_code"`
-	Stdout        string `json:"stdout,omitempty"`
-	Stderr        string `json:"stderr,omitempty"`
-	Dropped       int64  `json:"dropped_bytes,omitempty"`
-	Reason        string `json:"reason,omitempty"`
+	// Destination is the foothold host a pivoted action ran on, and is empty when
+	// the action ran in the sandbox worker. A pivoted action executes outside the
+	// guard's firewall, so the evidence records where it ran.
+	Destination string `json:"destination,omitempty"`
+	Status      string `json:"status"`
+	At          string `json:"at"`
+	DurationMS  int64  `json:"duration_ms,omitempty"`
+	ExitCode    int    `json:"exit_code"`
+	Stdout      string `json:"stdout,omitempty"`
+	Stderr      string `json:"stderr,omitempty"`
+	Dropped     int64  `json:"dropped_bytes,omitempty"`
+	Reason      string `json:"reason,omitempty"`
 }
 
 type actionTranscript struct {
@@ -222,7 +226,13 @@ func (t *actionTranscript) restore() error {
 
 func renderActionRecord(rec actionRecord, mode string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s [%s] %s %s\n", rec.ID, redactEngageText(rec.Task), strings.ToUpper(rec.Status), redactEngageText(rec.Command))
+	// A pivoted action names its destination, so an operator watching the run
+	// sees which commands executed on the foothold rather than in the runner.
+	where := ""
+	if rec.Destination != "" {
+		where = " on " + redactEngageText(rec.Destination)
+	}
+	fmt.Fprintf(&b, "%s [%s]%s %s %s\n", rec.ID, redactEngageText(rec.Task), where, strings.ToUpper(rec.Status), redactEngageText(rec.Command))
 	for _, stream := range []struct{ name, text string }{{"stdout", rec.Stdout}, {"stderr", rec.Stderr}} {
 		if stream.text == "" {
 			continue

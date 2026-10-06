@@ -29,6 +29,7 @@ type Policy struct {
 	Parallel       int             `json:"parallel"`
 	RunnerImage    string          `json:"runner_image,omitempty"`
 	RunnerID       string          `json:"runner_id"`
+	Foothold       *Foothold       `json:"foothold,omitempty"`
 	Canonical      string          `json:"-"`
 	Hash           string          `json:"-"`
 	CommandIPs     *Scope          `json:"-"`

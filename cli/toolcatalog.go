@@ -195,7 +195,7 @@ var toolCatalog = []tool{
 		Binary: "kinit", Package: "krb5", Tier: tierEnum,
 		Personas:  []string{"ad"},
 		Probe:     []string{},
-		ProbeWant: "Unable to identify",
+		ProbeWant: "does not specify default realm",
 		Note:      "the KDC is resolved from the realm through DNS and krb5.conf, so the destination is not visible to the scope extractor; the guard firewall is the enforcing layer",
 	},
 	{

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"blkchain/cli/internal/secgate"
 )
 
 const sampleRoE = `## Summary
@@ -198,5 +200,78 @@ func TestRoELocalAutoActionNeedsLocalScope(t *testing.T) {
 	}
 	if _, err := ParseRoE(strings.NewReader("## In Scope\nlocal\n## Out of Scope\nlocal\n## Autonomous Actions\nrecon/local local\n")); err == nil {
 		t.Fatal("out-of-scope local directive was ignored")
+	}
+}
+
+// TestRoEFootholdSection covers the declaration path end to end: the section is
+// recognized, it takes exactly one entry, its host must be in scope, and an
+// unparsable entry fails the whole RoE closed rather than being dropped.
+func TestRoEFootholdSection(t *testing.T) {
+	roe, err := ParseRoE(strings.NewReader("## In Scope\n10.10.5.21\n\n## Foothold\n- 10.10.5.21 user=svc key=$FOOTHOLD_KEY surfaces=local,ad\n"))
+	if err != nil {
+		t.Fatalf("ParseRoE: %v", err)
+	}
+	f := roe.Policy.Foothold
+	if f == nil {
+		t.Fatal("the Foothold section produced no declaration")
+	}
+	if f.Host != "10.10.5.21" || f.User != "svc" || f.Transport != "ssh" {
+		t.Errorf("declaration = %+v", f)
+	}
+	if !f.Covers(secgate.SurfaceLocal) || !f.Covers(secgate.SurfaceAD) || f.Covers(secgate.SurfaceWeb) {
+		t.Errorf("covered surfaces = %v", f.Surfaces)
+	}
+
+	cases := []struct {
+		name, body, want string
+	}{
+		{
+			"host out of scope",
+			"## In Scope\n10.10.5.21\n\n## Foothold\n- 10.99.0.1 user=svc key=$K\n",
+			"not in scope",
+		},
+		{
+			"wildcard-only host",
+			"## In Scope\n*.cluster.internal\n\n## Foothold\n- web-0.cluster.internal user=svc key=$K\n",
+			"must be listed in In Scope by name",
+		},
+		{
+			"two entries",
+			"## In Scope\n10.10.5.21\n10.10.5.22\n\n## Foothold\n- 10.10.5.21 user=a key=$K\n- 10.10.5.22 user=b key=$K\n",
+			"takes one entry",
+		},
+		{
+			"unparsable entry",
+			"## In Scope\n10.10.5.21\n\n## Foothold\n- 10.10.5.21 transport=telnet user=svc key=$K\n",
+			"is not one of",
+		},
+		{
+			"no scope at all",
+			"## Foothold\n- 10.10.5.21 user=svc key=$K\n",
+			"not in scope",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseRoE(strings.NewReader(tc.body))
+			if err == nil {
+				t.Fatalf("ParseRoE accepted %q: %+v", tc.name, got.Policy.Foothold)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestRoEWithoutFootholdDeclaresNone pins the default: an RoE that says nothing
+// about a foothold produces none, so no surface pivots.
+func TestRoEWithoutFootholdDeclaresNone(t *testing.T) {
+	roe, err := ParseRoE(strings.NewReader("## In Scope\n10.10.5.21\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roe.Policy.Foothold != nil {
+		t.Errorf("an RoE with no Foothold section produced %+v", roe.Policy.Foothold)
 	}
 }

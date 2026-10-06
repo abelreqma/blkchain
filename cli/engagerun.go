@@ -256,6 +256,12 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 			recordWriteFailure("audit queue", errors.New("action transcript queue is full"))
 		}
 	})
+	// The carrier is a binary that runs inside the worker, so it clears the same
+	// reachability allowlist as any other command. Without this check an RoE
+	// could nominate any binary in the image as its carrier.
+	if err = authorizeFootholdCarrier(gate, runner.foothold); err != nil {
+		return "", err
+	}
 	if err = gate.Start(); err != nil {
 		return "", err
 	}
@@ -352,7 +358,7 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 		defer SetEngageGraphSource(nil)
 	}
 	if o.resume == "" {
-		if err = seedInitialVantage(ctx, ws.Store, roe.Scope); err != nil {
+		if err = seedInitialVantage(ctx, ws.Store, roe.Scope, roe.Policy.Foothold); err != nil {
 			return "", err
 		}
 	} else if err = reopenInterruptedTasks(ctx, ws.Store); err != nil {

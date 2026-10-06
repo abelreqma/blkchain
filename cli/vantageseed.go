@@ -12,17 +12,27 @@ import (
 // exploit yields new access. It is pure package-main glue over the existing
 // engagement store; it executes no commands.
 
-// seedVantageFor derives the starting Vantage from scope, deterministically and
-// fail-safe: anything other than a confirmed local scope gets the most-locked
-// vantage, external-unauth.
-func seedVantageFor(scope *secgate.Scope) engagement.Vantage {
+// seedVantageFor derives the starting Vantage from the operator's declarations,
+// deterministically and fail-safe: anything other than a confirmed local scope
+// or a declared foothold gets the most-locked vantage, external-unauth.
+//
+// A declared foothold is internal access the operator asserts, the same kind of
+// assertion as a local scope, so it starts the engagement at internal-foothold
+// and the surfaces that vantage reaches are open from the first task. An
+// engagement with no foothold still advances through advanceVantage when an
+// exploit yields access; it simply has no carrier, so those tasks run in the
+// sandbox worker and record that as their destination.
+func seedVantageFor(scope *secgate.Scope, foothold *secgate.Foothold) engagement.Vantage {
+	if foothold != nil {
+		return engagement.VantageInternalFoothold
+	}
 	if scope != nil && scope.Local() {
 		return engagement.VantageInternalFoothold
 	}
 	return engagement.VantageExternalUnauth
 }
 
-func seedInitialVantage(ctx context.Context, store *engagement.Store, scope *secgate.Scope) error {
+func seedInitialVantage(ctx context.Context, store *engagement.Store, scope *secgate.Scope, foothold *secgate.Foothold) error {
 	cur, err := store.Vantage(ctx)
 	if err != nil {
 		return err
@@ -30,7 +40,7 @@ func seedInitialVantage(ctx context.Context, store *engagement.Store, scope *sec
 	if cur != "" {
 		return nil
 	}
-	v := seedVantageFor(scope)
+	v := seedVantageFor(scope, foothold)
 	_, err = store.Apply(engagement.Delta{
 		Kind:       "vantage",
 		Detail:     "seed " + string(v),

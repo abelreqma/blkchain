@@ -56,6 +56,7 @@ func TestUntrustedInputPromptFloor(t *testing.T) {
 		"networkTierPrompt":         "the paired executor system prompt carries the clause",
 		"containerTierPrompt":       "the paired executor system prompt carries the clause",
 		"localTargetAnalysisPrompt": "the paired executor system prompt carries the clause",
+		"footholdPromptClause":      "a fragment of effectiveEngagePrompt, which carries the clause; its content is the sealed policy, not observed input",
 		"Prompt":                    "UI style value, not LLM prompt text",
 		"GlyphPrompt":               "UI glyph value, not LLM prompt text",
 		"promptArm":                 "interactive confirmation UI text",

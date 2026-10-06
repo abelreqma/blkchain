@@ -32,6 +32,28 @@ Describe the authorized engagement here.
 ## Rate
 10/s
 
+## Foothold
+<!-- Optional. One host you already control, through which tasks on the covered
+     surfaces run instead of in the isolated runner. The host must also be listed
+     In Scope by name. Omit this section for an entirely external engagement.
+
+     transport=ssh (the default) needs user= and key=; key= is a path, or $NAME
+     naming an environment variable that holds the path. Add knownhosts= to pin
+     the host key and refuse an unverified one. Add env=A,B to forward named
+     environment variables to the carrier.
+
+       10.0.0.9 user=svc-deploy key=$BLKCHAIN_FOOTHOLD_KEY
+
+     transport=command carries commands with an argv prefix of your own, for
+     access ssh cannot reach. exec= takes the rest of the line. Add quote=shell
+     when the carrier hands the command to a shell rather than exec'ing argv.
+
+       10.0.0.9 transport=command exec=kubectl exec -i web-0 --
+
+     surfaces= selects which surfaces pivot; the default is local. Commands run
+     on the foothold are outside the runner's network guard, so scope is enforced
+     by the command gate alone and every such action records its destination. -->
+
 ## Allowed Actions
 <!-- All actions below are enabled. Wrap an entire entry in an HTML comment to disable it. -->
 - command
@@ -104,6 +126,7 @@ func ParseRoE(r io.Reader) (*RoE, error) {
 	var summary []string
 	var spec secgate.ScopeSpec
 	var autoEntries []string
+	var foothold *secgate.Foothold
 	section := ""
 	inComment := false
 
@@ -132,7 +155,7 @@ func ParseRoE(r io.Reader) (*RoE, error) {
 			}
 			key := normalizeSection(h)
 			if !isKnownSection(key) {
-				return nil, fmt.Errorf("ROE.md: unrecognized section heading %q (expected: Summary, Targets, In Scope, Out of Scope, Rate, Autonomous Actions)", h)
+				return nil, fmt.Errorf("ROE.md: unrecognized section heading %q (expected: Summary, Targets, In Scope, Out of Scope, Rate, Foothold, Autonomous Actions)", h)
 			}
 			if seen[key] {
 				return nil, fmt.Errorf("ROE.md: duplicate section %q", h)
@@ -185,6 +208,15 @@ func ParseRoE(r io.Reader) (*RoE, error) {
 			}
 		case "autonomous actions":
 			autoEntries = append(autoEntries, entry)
+		case "foothold":
+			if foothold != nil {
+				return nil, fmt.Errorf("ROE.md: Foothold takes one entry")
+			}
+			f, err := secgate.ParseFoothold(entry)
+			if err != nil {
+				return nil, fmt.Errorf("ROE.md: %w", err)
+			}
+			foothold = f
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -197,6 +229,14 @@ func ParseRoE(r io.Reader) (*RoE, error) {
 	autoActions, err := buildAutoActionPolicy(autoEntries, scope)
 	if err != nil {
 		return nil, err
+	}
+	// The foothold is sealed with the rest of the policy, so a resume with a
+	// different foothold is a different policy and is refused.
+	if foothold != nil {
+		if err := secgate.FootholdInScope(scope, foothold); err != nil {
+			return nil, fmt.Errorf("ROE.md: %w", err)
+		}
+		policy.Foothold = foothold
 	}
 	if err := policy.Seal(strings.Join(summary, "\n"), spec.Targets, scope); err != nil {
 		return nil, fmt.Errorf("ROE.md: %w", err)
@@ -228,7 +268,7 @@ func headingText(line string) (text string, level int, ok bool) {
 // ROE.md sections.
 func isKnownSection(key string) bool {
 	switch key {
-	case "summary", "targets", "in scope", "out of scope", "rate", "autonomous actions", "allowed actions", "denied actions", "denied commands", "resource caps", "runner":
+	case "summary", "targets", "in scope", "out of scope", "rate", "autonomous actions", "allowed actions", "denied actions", "denied commands", "resource caps", "runner", "foothold":
 		return true
 	}
 	return false

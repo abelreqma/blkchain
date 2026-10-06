@@ -242,7 +242,7 @@ func localNewTargetAnalysisRunCommand(g *secgate.Gate, task engagement.Task, sto
 			if g != nil && g.Audit != nil {
 				g.Audit("exec", secgate.Signature(run))
 			}
-			res := runAuthorized(ctx, g, run.Binary, run.Args, workDir, capBytes, timeout, task.ID)
+			res := runAuthorized(ctx, g, run.Binary, run.Args, workDir, capBytes, timeout, actionOrigin{TaskID: task.ID, Surface: run.Surface})
 			if capture != nil {
 				capture(activeTask(), res.Output)
 			}

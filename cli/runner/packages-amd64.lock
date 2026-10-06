@@ -56,6 +56,7 @@ d81631e1a710f3851246516e37aeeaa875b3c921a130c1210e3643a7e24e3b2d https://dl-cdn.
 9c82c86f051f3372445ecdbae5068ccc39dbc423ba8f779eaa84549fef1cfc77 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/libcrypto3-3.5.9-r0.apk
 f4070c2bce6aeb660a96f767f5a0eb6876d6c8421b51334d24678e0039720507 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/libcurl-8.22.0-r0.apk
 9a6c216b9c2bf4077bfc1ffe6986e3e69df301594b23764ed55f8003b89d2784 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/libeconf-0.8.3-r0.apk
+3ba80d87818d7e23c96607373655ab8eeef42d9fd5252d7a2a5b48d9e2973f35 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/libedit-20251016.3.1-r0.apk
 10739fb9f854c5406d660b803da72bba8e5d924811838043d9b3f69def71aa7c https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/libevent-2.1.13-r0.apk
 5216046085b92da88a6b107dbbb558f69d49c347a6335291fcf199ebd1670a8f https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/libexpat-2.8.5-r0.apk
 0b3473a1468bed5fbb913a1ffa121e253080b21b013fe47e0300bd7e85224e76 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/libffi-3.5.2-r0.apk
@@ -112,6 +113,9 @@ d4f1f0e49c05d4dd6c2e21da860a526ee3c381cfa532946d7dbdf806da4e8662 https://dl-cdn.
 1738ccfd121036cee7edb2f7820cd8aa61badff5bc9e85c59d930a5cfc5b662f https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/oniguruma-6.9.10-r0.apk
 c6628c887fdd336d4e0c67726d3a38f5f9612ad8ca475e64908a2d1ab3ef3060 https://dl-cdn.alpinelinux.org/alpine/v3.23/community/x86_64/opencl-2025.07.23-r0.apk
 b24bae716a29cd606044df91b7688cc1d1bbd1963bd48050b3b964de786ef7f0 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/openldap-clients-2.6.13-r0.apk
+aa7cbbeca8a8d92ec854a9149e3f8a12f93e152f185e22ee0abf6569d96fe4b6 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/openssh-client-common-10.2_p1-r0.apk
+41f05d0cf07e79b87c4d2b08a093ed8b0025ee50d82e0519aa51619211a8ebfa https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/openssh-client-default-10.2_p1-r0.apk
+6b24d17c7d17125064bfd381668197bc02afd8bac0fcf8c66feb9894283f7e7e https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/openssh-keygen-10.2_p1-r0.apk
 80332be2dcd7a9a0408a1eeca8efd4b66adf8f79d1e99d7022d3be4a34433c4a https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/openssl-3.5.9-r0.apk
 d757635fc2aab4a29abf16e770f1165b70abf65cca9a1175f67957917100712b https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/p11-kit-0.26.2-r0.apk
 306d832854d51318186b94834ad5a37c29bc1b9180e1fb71e86bf8b6359c6491 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/popt-1.19-r4.apk

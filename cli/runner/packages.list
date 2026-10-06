@@ -13,6 +13,12 @@ libcap-utils
 openssl
 python3
 
+# foothold carrier: the ssh client an operator-declared foothold uses to carry
+# commands to a host the operator already controls. It is deliberately absent
+# from the tool catalog, so it is not a reachable command and the model cannot
+# invoke it; only the code-built carrier in cli/foothold.go runs it.
+openssh-client
+
 # network and DNS reconnaissance
 bind-tools
 curl

@@ -14,11 +14,13 @@ import (
 // infrastructurePackages are packages.list entries that provide no
 // model-runnable binary, so the catalog does not claim them: bash and python3
 // are denied interpreters that the runner itself uses (execute.py runs the
-// worker's commands), and iptables writes the guard's firewall.
+// worker's commands), iptables writes the guard's firewall, and openssh-client
+// is the foothold carrier.
 var infrastructurePackages = map[string]string{
-	"bash":     "the runner's own shell; the classifier denies it as a command",
-	"python3":  "runs execute.py, the worker's command shim; the classifier denies it as a command",
-	"iptables": "writes the network guard's allowlist firewall",
+	"bash":           "the runner's own shell; the classifier denies it as a command",
+	"python3":        "runs execute.py, the worker's command shim; the classifier denies it as a command",
+	"iptables":       "writes the network guard's allowlist firewall",
+	"openssh-client": "the ssh foothold carrier, invoked only by the code-built transport in foothold.go and absent from the catalog so the model cannot reach it",
 }
 
 func readPackagesList(t *testing.T) []string {

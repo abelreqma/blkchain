@@ -55,21 +55,54 @@ func recordEngageDenial(ctx context.Context, c secgate.Command, reason string) {
 	}
 }
 
-func runAuthorized(ctx context.Context, g *secgate.Gate, bin string, args []string, dir string, limit int, timeout time.Duration, taskID string) runResult {
+// actionOrigin is the task context an action inherits. Its surface decides where
+// the action executes: a declared foothold covers a surface set, and an action on
+// a covered surface runs on the foothold instead of in the sandbox worker.
+type actionOrigin struct {
+	TaskID  string
+	Surface secgate.Surface
+}
+
+func runAuthorized(ctx context.Context, g *secgate.Gate, bin string, args []string, dir string, limit int, timeout time.Duration, origin actionOrigin) runResult {
 	if g == nil || g.Policy == nil {
 		return execRunner(ctx, bin, args, dir, limit, timeout)
 	}
-	return runIsolatedAction(ctx, g, []pipelineStage{{Binary: bin, Args: args}}, dir, limit, timeout, taskID)
+	return runIsolatedAction(ctx, g, []pipelineStage{{Binary: bin, Args: args}}, dir, limit, timeout, origin)
 }
 
-func runAuthorizedPipeline(ctx context.Context, g *secgate.Gate, stages []pipelineStage, dir string, limit int, timeout time.Duration, taskID string) runResult {
+func runAuthorizedPipeline(ctx context.Context, g *secgate.Gate, stages []pipelineStage, dir string, limit int, timeout time.Duration, origin actionOrigin) runResult {
 	if g == nil || g.Policy == nil {
 		return execPipeline(ctx, stages, dir, limit, timeout)
 	}
-	return runIsolatedAction(ctx, g, stages, dir, limit, timeout, taskID)
+	return runIsolatedAction(ctx, g, stages, dir, limit, timeout, origin)
 }
 
-func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineStage, dir string, limit int, timeout time.Duration, taskID string) runResult {
+// footholdStages rewrites authorized stages to run on the foothold. The rewrite
+// happens after authorization and after the egress decision, so the gate and the
+// scope check always read the operator's own command and never the carrier argv.
+func footholdStages(t *footholdTransport, stages []pipelineStage) []pipelineStage {
+	out := make([]pipelineStage, len(stages))
+	for i, s := range stages {
+		argv := t.Wrap(append([]string{s.Binary}, s.Args...))
+		out[i] = pipelineStage{Binary: argv[0], Args: argv[1:], DiscardStderr: s.DiscardStderr}
+	}
+	return out
+}
+
+// pivotDestination reports the foothold an action on this surface runs on, or ""
+// when it runs in the sandbox worker. The decision is code-derived from the
+// sealed policy and the task's surface; no model or corpus text reaches it.
+func pivotDestination(g *secgate.Gate, r *engageRuntime, surface secgate.Surface) string {
+	if r == nil || r.runner == nil || r.runner.foothold == nil || g == nil || g.Policy == nil {
+		return ""
+	}
+	if !g.Policy.Foothold.Covers(surface) {
+		return ""
+	}
+	return g.Policy.Foothold.Host
+}
+
+func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineStage, dir string, limit int, timeout time.Duration, origin actionOrigin) runResult {
 	r := runtimeFor(ctx)
 	if r == nil || r.runner == nil || r.trace == nil || r.policy != g.Policy {
 		return runResult{Err: errors.New("isolated runner context missing; host execution is disabled")}
@@ -87,7 +120,7 @@ func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineSt
 	for _, s := range stages {
 		commands = append(commands, secgate.Signature(secgate.Command{Binary: s.Binary, Args: s.Args}))
 	}
-	id, remaining, err := r.trace.begin(taskID, "command", strings.Join(commands, " | "), len(stages))
+	id, remaining, err := r.trace.begin(origin.TaskID, "command", strings.Join(commands, " | "), len(stages))
 	if err != nil {
 		r.cancel()
 		return runResult{Err: err}
@@ -109,7 +142,23 @@ func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineSt
 	if resolve == nil {
 		resolve = net.DefaultResolver.LookupIPAddr
 	}
-	plan, planErr := planWildcardEgress(ctx, g.Scope, stages, resolve)
+	// A pivoted action contacts exactly one address from the worker, the
+	// foothold, which the guard already pins. Its own targets are reached by the
+	// foothold, outside this firewall, so the resolve-time egress plan does not
+	// apply and resolution cannot be rechecked there: scope for a pivoted action
+	// is enforced by the gate alone. Every such action records its destination.
+	destination := pivotDestination(g, r, origin.Surface)
+	exec := stages
+	var plan engageEgressPlan
+	var planErr error
+	if destination != "" {
+		exec = footholdStages(r.runner.foothold, stages)
+		if g.Audit != nil {
+			g.Audit("foothold", "destination="+destination+" transport="+r.runner.foothold.name+" :: "+strings.Join(commands, " | "))
+		}
+	} else {
+		plan, planErr = planWildcardEgress(ctx, g.Scope, stages, resolve)
+	}
 	var result runResult
 	var outputs []isolatedStageResult
 	if planErr != nil {
@@ -118,7 +167,7 @@ func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineSt
 			g.Audit("deny:scope-recheck", strings.Join(commands, " | ")+" :: "+planErr.Error())
 		}
 	} else {
-		result, outputs = r.runner.RunScoped(ctx, stages, dir, limit, timeout, plan, g.Policy)
+		result, outputs = r.runner.RunScoped(ctx, exec, dir, limit, timeout, plan, g.Policy)
 	}
 	status := "complete"
 	if planErr != nil {
@@ -147,7 +196,7 @@ func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineSt
 				command = commands[index]
 			}
 		}
-		rec := actionRecord{ID: eventID, Task: taskID, Kind: "command", Command: command, Status: status, DurationMS: time.Since(start).Milliseconds(), ExitCode: output.ExitCode, Stdout: output.Stdout, Stderr: output.Stderr, Dropped: output.Dropped}
+		rec := actionRecord{ID: eventID, Task: origin.TaskID, Kind: "command", Command: command, Destination: destination, Status: status, DurationMS: time.Since(start).Milliseconds(), ExitCode: output.ExitCode, Stdout: output.Stdout, Stderr: output.Stderr, Dropped: output.Dropped}
 		if result.Err != nil {
 			rec.Reason = result.Err.Error()
 		}
@@ -164,5 +213,27 @@ func effectiveEngagePrompt(g *secgate.Gate, prompt string) string {
 		return prompt
 	}
 	return prompt + "\n\nOperator rules of engagement (code-enforced policy):\n" + g.Policy.Canonical +
-		"\nCommands run inside the isolated target runner, not on the operator workstation. Use its installed tools and /work for scratch files. The runner has no DNS: every in-scope hostname is pre-resolved in /etc/hosts, and any other lookup is dropped and stalls until the command timeout, so pass -n to nmap and address other tools by a scoped hostname or an IP. Auto performs RoE-authorized actions without approval or arming prompts. Safe approves unapproved actions. Scope, caps, and denials apply in both modes.\n" + promptguard.UntrustedInputClause
+		"\nCommands run inside the isolated target runner, not on the operator workstation. Use its installed tools and /work for scratch files. The runner has no DNS: every in-scope hostname is pre-resolved in /etc/hosts, and any other lookup is dropped and stalls until the command timeout, so pass -n to nmap and address other tools by a scoped hostname or an IP. Auto performs RoE-authorized actions without approval or arming prompts. Safe approves unapproved actions. Scope, caps, and denials apply in both modes.\n" +
+		footholdPromptClause(g.Policy.Foothold) + promptguard.UntrustedInputClause
+}
+
+// footholdPromptClause tells the model which surfaces execute on the operator's
+// foothold rather than in the runner, because the two destinations differ in
+// ways that change what a command should look like: the foothold has its own
+// installed tools, its own filesystem, and its own resolver, so the runner's
+// pre-resolved /etc/hosts and its missing DNS do not apply there. The clause is
+// derived from the sealed policy; it states where commands go and never invites
+// the model to choose.
+func footholdPromptClause(f *secgate.Foothold) string {
+	if f == nil {
+		return ""
+	}
+	surfaces := make([]string, 0, len(f.Surfaces))
+	for _, s := range f.Surfaces {
+		surfaces = append(surfaces, string(s))
+	}
+	return "The operator has declared a foothold. Tasks on the " + strings.Join(surfaces, ", ") +
+		" surface run on " + f.Host + ", a host the operator already controls, and every other task runs in the runner." +
+		" On the foothold use its own tools, its own paths, and its own name resolution; the runner's /etc/hosts pins and its lack of DNS do not apply there." +
+		" You do not choose where a command runs: the surface of its task decides, and each action records its destination.\n"
 }

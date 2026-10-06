@@ -14,14 +14,14 @@ func TestVantageSeedForLocalScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := seedVantageFor(scope); got != engagement.VantageInternalFoothold {
+	if got := seedVantageFor(scope, nil); got != engagement.VantageInternalFoothold {
 		t.Errorf("seedVantageFor(local scope) = %q, want %q", got, engagement.VantageInternalFoothold)
 	}
 }
 
 func TestVantageSeedForNilScope(t *testing.T) {
-	if got := seedVantageFor(nil); got != engagement.VantageExternalUnauth {
-		t.Errorf("seedVantageFor(nil) = %q, want %q", got, engagement.VantageExternalUnauth)
+	if got := seedVantageFor(nil, nil); got != engagement.VantageExternalUnauth {
+		t.Errorf("seedVantageFor(nil, nil) = %q, want %q", got, engagement.VantageExternalUnauth)
 	}
 }
 
@@ -30,7 +30,7 @@ func TestVantageSeedForNonLocalScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := seedVantageFor(scope); got != engagement.VantageExternalUnauth {
+	if got := seedVantageFor(scope, nil); got != engagement.VantageExternalUnauth {
 		t.Errorf("seedVantageFor(non-local scope) = %q, want %q", got, engagement.VantageExternalUnauth)
 	}
 }
@@ -39,7 +39,7 @@ func TestVantageSeedInitialFreshStoreNilScope(t *testing.T) {
 	st := openStore(t)
 	ctx := context.Background()
 
-	if err := seedInitialVantage(ctx, st, nil); err != nil {
+	if err := seedInitialVantage(ctx, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	v, err := st.Vantage(ctx)
@@ -55,11 +55,11 @@ func TestVantageSeedInitialIsNoopWhenAlreadySet(t *testing.T) {
 	st := openStore(t)
 	ctx := context.Background()
 
-	if err := seedInitialVantage(ctx, st, nil); err != nil {
+	if err := seedInitialVantage(ctx, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Calling it again must not error and must not change the stored value.
-	if err := seedInitialVantage(ctx, st, nil); err != nil {
+	if err := seedInitialVantage(ctx, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	v, err := st.Vantage(ctx)
@@ -80,7 +80,7 @@ func TestVantageSeedInitialLeavesHigherVantageAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := seedInitialVantage(ctx, st, nil); err != nil {
+	if err := seedInitialVantage(ctx, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	v, err := st.Vantage(ctx)
@@ -149,5 +149,26 @@ func TestVantageAdvanceBackwardIsRejected(t *testing.T) {
 	}
 	if err := advanceVantage(ctx, st, engagement.VantageExternalUnauth, "10.0.0.5", ""); err == nil {
 		t.Error("advanceVantage backward: want non-nil error, got nil")
+	}
+}
+
+// TestDeclaredFootholdSeedsInternalVantage pins the authorization half of the
+// pivot: a declared foothold is internal access the operator asserts, so the
+// surfaces that vantage reaches are open from the first task rather than waiting
+// for an exploit to yield access.
+func TestDeclaredFootholdSeedsInternalVantage(t *testing.T) {
+	scope, err := secgate.BuildScope(secgate.ScopeSpec{In: []string{"10.10.5.21"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foothold := &secgate.Foothold{Host: "10.10.5.21", Transport: "ssh", User: "svc", Key: "k", Surfaces: []secgate.Surface{secgate.SurfaceLocal}}
+	if got := seedVantageFor(scope, foothold); got != engagement.VantageInternalFoothold {
+		t.Errorf("seedVantageFor(foothold) = %q, want %q", got, engagement.VantageInternalFoothold)
+	}
+	if got := seedVantageFor(scope, nil); got != engagement.VantageExternalUnauth {
+		t.Errorf("seedVantageFor(no foothold) = %q, want %q", got, engagement.VantageExternalUnauth)
+	}
+	if !engagement.VantageInternalFoothold.Reaches(engagement.SurfaceLocal) {
+		t.Error("internal-foothold does not reach the local surface; the seed would not open it")
 	}
 }

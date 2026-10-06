@@ -8,12 +8,15 @@ RUN set -eu; mkdir /packages; cd /packages; \
     done < /packages.lock; \
     apk add --no-network /packages/*.apk; \
     rm -rf /packages /packages.lock; \
+    mkdir /work; chown 1000:1000 /work; \
+    addgroup -g 1000 worker; \
+    adduser -D -H -u 1000 -G worker -h /work -s /sbin/nologin worker; \
+    id -u worker >/dev/null; \
     find / -xdev -type f -perm /6000 -exec chmod ug-s {} ';'; \
     setuid="$(find / -xdev -type f -perm /6000)"; \
     [ -z "$setuid" ] || { echo "setuid or setgid files remain: $setuid" >&2; exit 1; }; \
     caps="$(getcap -r / 2>/dev/null)"; \
-    [ -z "$caps" ] || { echo "file capabilities remain: $caps" >&2; exit 1; }; \
-    mkdir /work; chown 1000:1000 /work
+    [ -z "$caps" ] || { echo "file capabilities remain: $caps" >&2; exit 1; }
 ENV PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/work LANG=C
 WORKDIR /work
 USER 1000:1000

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -59,16 +60,6 @@ func workerShell(t *testing.T, image, user, network string, extra []string, scri
 	return string(out)
 }
 
-// shellQuote renders argv as a single-quoted sh word list, so no catalog probe
-// argument can be reinterpreted by the harness shell.
-func shellQuote(argv []string) string {
-	quoted := make([]string, 0, len(argv))
-	for _, a := range argv {
-		quoted = append(quoted, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
-	}
-	return strings.Join(quoted, " ")
-}
-
 // TestCatalogToolsRunInTheImage asserts every catalog tool the image ships is
 // present and executes. A nil Probe marks a tool that is deliberately not
 // shipped; an empty ProbeWant marks one with no stable output, so only its
@@ -87,7 +78,7 @@ func TestCatalogToolsRunInTheImage(t *testing.T) {
 				}
 				return
 			}
-			script := "timeout 20 " + shellQuote(append([]string{tl.Binary}, tl.Probe...)) + " 2>&1"
+			script := "timeout 20 " + shellQuoteArgv(append([]string{tl.Binary}, tl.Probe...)) + " 2>&1"
 			out := workerShell(t, image, generalWorkerUser, "none", nil, script)
 			if !strings.Contains(out, tl.ProbeWant) {
 				t.Fatalf("%s %v output does not contain %q: %s",
@@ -229,5 +220,116 @@ func TestRunnerRoutesRawScanToTheRawWorker(t *testing.T) {
 	}
 	if len(runner.workers) != 1 {
 		t.Fatalf("connect scan did not create a general worker: %+v", runner.workers)
+	}
+}
+
+// TestFootholdCarrierIsPresentButUnreachable asserts both halves of the ssh
+// carrier's position in the image: the binary exists and runs, so an
+// operator-declared ssh foothold works, and it is absent from the catalog and
+// from the external allowlist, so the model cannot invoke ssh as a command and
+// reach its proxy, port-forwarding, and local-command options.
+func TestFootholdCarrierIsPresentButUnreachable(t *testing.T) {
+	image := requireRunnerImage(t)
+	out := workerShell(t, image, generalWorkerUser, "none", nil, "command -v ssh && ssh -V 2>&1")
+	if !strings.Contains(out, "/usr/bin/ssh") {
+		t.Errorf("ssh is not installed in the image: %s", out)
+	}
+	if !strings.Contains(out, "OpenSSH") {
+		t.Errorf("ssh does not report a version: %s", out)
+	}
+	if _, ok := toolFor("ssh"); ok {
+		t.Error("ssh is in the tool catalog, which would make it a reachable command")
+	}
+	for _, bin := range externalEngageAllowlist() {
+		if strings.EqualFold(bin, "ssh") {
+			t.Error("ssh is in the external allowlist, which would make it a reachable command")
+		}
+	}
+}
+
+// TestFootholdCarrierProvisionsAndConnects is the whole-chain proof for the
+// pivot's execution half: a real engageRunner, a real guard firewall, a real
+// worker, and a real ssh carrier.
+//
+// It asserts the four things this repository owns. The declared key reaches the
+// worker as a 0600 file owned by the worker rather than by the operator; the
+// carrier starts as uid 1000, which needs the image's passwd entry; the guard
+// permits the foothold address, which needs the declared host pinned into the
+// accept list; and ssh reaches TCP connect, so the argv, the options, and the
+// identity file are all usable. The fixture listens on 8080 and not on 22, so
+// the connection is refused immediately and the test stays deterministic.
+//
+// What this does not cover is the remote half: a successful session against a
+// live sshd, which depends on an operator's own foothold. Everything up to the
+// moment the foothold would answer is exercised here.
+func TestFootholdCarrierProvisionsAndConnects(t *testing.T) {
+	requireRunnerImage(t)
+	ip, _ := startDockerHTTPFixture(t, "foothold", "foothold-fixture")
+
+	keyDir := t.TempDir()
+	keyPath := filepath.Join(keyDir, "id_ed25519")
+	if out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-C", "blk-foothold-test", "-f", keyPath).CombinedOutput(); err != nil {
+		t.Skipf("ssh-keygen unavailable: %v %s", err, out)
+	}
+	roe, err := ParseRoE(strings.NewReader("# Rules of Engagement\n\n## Summary\nfoothold carrier test\n\n## Targets\n" +
+		ip + "\n\n## In Scope\n" + ip + "\nlocal\n\n## Foothold\n" + ip + " user=root key=" + keyPath + "\n\n## Rate\n100/s\n"))
+	if err != nil {
+		t.Fatalf("parse RoE: %v", err)
+	}
+	if roe.Policy.Foothold == nil || roe.Policy.Foothold.Host != ip {
+		t.Fatalf("foothold declaration = %+v", roe.Policy.Foothold)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	runner, err := newEngageRunner(ctx, roe)
+	if err != nil {
+		t.Skipf("isolated runner unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := runner.Close(); err != nil {
+			t.Errorf("runner cleanup: %v", err)
+		}
+	})
+	if runner.foothold == nil {
+		t.Fatal("the runner built no carrier from a declared foothold")
+	}
+
+	// Creating the worker provisions the carrier secrets.
+	worker, err := runner.worker(ctx, "footholdtask", false)
+	if err != nil {
+		t.Fatalf("worker: %v", err)
+	}
+	stat, err := exec.Command("docker", "exec", worker, "/usr/bin/python3", "-c",
+		"import os,sys; p=sys.argv[1]; s=os.stat(p); print(oct(s.st_mode & 0o777), s.st_uid, open(p).read().splitlines()[0])",
+		footholdSecretDir+"/key").CombinedOutput()
+	if err != nil {
+		t.Fatalf("cannot inspect the provisioned key: %v %s", err, stat)
+	}
+	fields := strings.Fields(string(stat))
+	if len(fields) < 3 || fields[0] != "0o600" || fields[1] != "1000" {
+		t.Errorf("provisioned key mode/owner = %q, want 0o600 owned by uid 1000", stat)
+	}
+	if !strings.Contains(string(stat), "BEGIN OPENSSH PRIVATE KEY") {
+		t.Errorf("provisioned key content = %q, want the declared key", stat)
+	}
+
+	// A local-surface command is carried to the foothold. The fixture refuses
+	// port 22, which proves ssh ran and reached connect rather than failing on
+	// its own startup, its options, or the guard's firewall.
+	carried := footholdStages(runner.foothold, []pipelineStage{{Binary: "id", Args: nil}})
+	if carried[0].Binary != "ssh" {
+		t.Fatalf("carried stage binary = %q, want ssh", carried[0].Binary)
+	}
+	res, _ := runner.Run(ctx, carried, "footholdtask", 1<<20, time.Minute)
+	out := terminalSafe(res.Output)
+	// Only ssh's own startup failures are rejections here. An authentication
+	// failure would mean the carrier reached a server, which this fixture is not.
+	for _, reject := range []string{"No user exists", "usage:", "Bad configuration option", "no such identity"} {
+		if strings.Contains(out, reject) {
+			t.Fatalf("carrier failed before connecting: %s", out)
+		}
+	}
+	if !strings.Contains(out, "Connection refused") && !strings.Contains(out, "Connection closed") {
+		t.Fatalf("carrier did not reach TCP connect against the fixture: %q", out)
 	}
 }
