@@ -26,12 +26,14 @@ func (g *Gate) recheck(c Command) Decision {
 			g.audit(denialAction(c, "scope-recheck"), Signature(c))
 			return Decision{Allowed: false, Reason: "a target resolves to an out-of-scope address: " + ip}
 		}
-		if host, ip, bad := ResolveScopeViolation(g.Scope, c); bad {
-			g.audit(denialAction(c, "resolve"), Signature(c))
-			if ip != "" {
-				return Decision{Allowed: false, Reason: host + " resolves to an out-of-scope address: " + ip}
+		if g.Policy == nil || c.Surface == SurfaceWeb {
+			if host, ip, bad := ResolveScopeViolation(g.Scope, c); bad {
+				g.audit(denialAction(c, "resolve"), Signature(c))
+				if ip != "" {
+					return Decision{Allowed: false, Reason: host + " resolves to an out-of-scope address: " + ip}
+				}
+				return Decision{Allowed: false, Reason: "could not resolve " + host + " to verify it is in scope"}
 			}
-			return Decision{Allowed: false, Reason: "could not resolve " + host + " to verify it is in scope"}
 		}
 	}
 	if g.Policy != nil {
@@ -51,12 +53,12 @@ func (g *Gate) recheck(c Command) Decision {
 				}
 			}
 			for _, target := range targets {
-				if ips == nil || ips.Empty() {
+				if g.Scope == nil {
 					g.audit("deny:scope-recheck", Signature(c))
-					return Decision{Reason: "command destination needs an explicit in-scope IP or CIDR entry"}
+					return Decision{Reason: "command destination is outside RoE scope"}
 				}
 				if ip := net.ParseIP(target); ip != nil {
-					if !ips.InScope(ip.String()) {
+					if !g.Scope.WebAddressAllowed(target, ip) || ips == nil || !ips.InScope(ip.String()) {
 						g.audit("deny:scope-recheck", Signature(c))
 						return Decision{Reason: "command destination needs an explicit in-scope IP or CIDR entry"}
 					}
@@ -65,10 +67,14 @@ func (g *Gate) recheck(c Command) Decision {
 				resolved, err := lookupIPFn(target)
 				if err != nil || len(resolved) == 0 {
 					g.audit("deny:resolve", Signature(c))
-					return Decision{Reason: "command destination could not be resolved into the explicit IP scope"}
+					return Decision{Reason: "command destination could not be resolved into RoE scope"}
 				}
 				for _, ip := range resolved {
-					if !ips.InScope(ip.String()) {
+					if !g.Scope.WebAddressAllowed(target, ip) {
+						g.audit("deny:scope-recheck", Signature(c))
+						return Decision{Reason: target + " resolves to an out-of-scope address: " + ip.String()}
+					}
+					if (ips == nil || !ips.InScope(ip.String())) && !g.Scope.WildcardHost(target) {
 						g.audit("deny:scope-recheck", Signature(c))
 						return Decision{Reason: "command destination needs an explicit in-scope IP or CIDR entry"}
 					}

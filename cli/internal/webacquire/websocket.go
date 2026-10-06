@@ -106,7 +106,7 @@ func (b *Broker) OpenWebSocket(ctx context.Context, raw string, headers http.Hea
 		return nil, out, errors.New("web destination resolution failed")
 	}
 	for _, ip := range ips {
-		if !b.Policy.IPAllowed(ip) {
+		if !b.Policy.IPAllowed(u.Hostname(), ip) {
 			return nil, out, errors.New("web destination resolves outside scope")
 		}
 	}

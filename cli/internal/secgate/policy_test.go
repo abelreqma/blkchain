@@ -99,6 +99,41 @@ func TestPolicyDNSChangeAndProtectedDestination(t *testing.T) {
 	}
 }
 
+func TestPolicyWildcardCommandRequiresMatchingPinnedHostname(t *testing.T) {
+	scope, err := BuildScope(ScopeSpec{In: []string{"*.example.test"}, Out: []string{"blocked.example.test", "10.20.0.7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scope.PinNetwork(nil, []string{"10.20.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	policy := DefaultPolicy()
+	if err := policy.Seal("", nil, scope); err != nil {
+		t.Fatal(err)
+	}
+	gate := &Gate{Mode: Auto, Scope: scope, Policy: policy}
+	if err := gate.Start(); err != nil {
+		t.Fatal(err)
+	}
+	withStubLookup(t, map[string][]net.IP{
+		"api.example.test":       {net.ParseIP("10.20.0.6")},
+		"deep.api.example.test":  {net.ParseIP("8.8.8.8")},
+		"bad.example.test":       {net.ParseIP("10.20.0.7")},
+		"protected.example.test": {net.ParseIP("10.20.0.1")},
+		"mixed.example.test":     {net.ParseIP("8.8.8.8"), net.ParseIP("169.254.169.254")},
+	}, nil)
+	for _, host := range []string{"api.example.test", "deep.api.example.test"} {
+		if d := gate.Authorize(context.Background(), Command{Binary: "curl", Args: []string{"http://" + host + "/"}}); !d.Allowed {
+			t.Errorf("wildcard command to %s denied: %s", host, d.Reason)
+		}
+	}
+	for _, host := range []string{"blocked.example.test", "bad.example.test", "protected.example.test", "mixed.example.test", "example.test", "evil-example.test", "10.20.0.6"} {
+		if d := gate.Authorize(context.Background(), Command{Binary: "curl", Args: []string{"http://" + host + "/"}}); d.Allowed {
+			t.Errorf("command to %s bypassed wildcard scope", host)
+		}
+	}
+}
+
 func TestPolicyActiveWebActionAllowedByRoEWithoutPrompt(t *testing.T) {
 	scope, err := ParseScope(strings.NewReader("10.20.0.6\n"))
 	if err != nil {

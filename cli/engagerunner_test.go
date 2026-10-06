@@ -4,6 +4,7 @@ import (
 	"blkchain/cli/internal/secgate"
 	"context"
 	"errors"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -35,7 +36,7 @@ func TestEngageRunnerCleanupFailureIsReportedAndRetried(t *testing.T) {
 }
 
 func TestEngageWorkerHasNoHostAccess(t *testing.T) {
-	args := engageWorkerArgs("worker", "guard", "sha256:"+strings.Repeat("a", 64), nil)
+	args := engageWorkerArgs("worker", "guard", "sha256:"+strings.Repeat("a", 64), "")
 	s := strings.Join(args, " ")
 	for _, want := range []string{"--read-only", "--cap-drop ALL", "--security-opt no-new-privileges", "--user 1000:1000", "--network container:guard", "--pids-limit", "--memory", "--tmpfs"} {
 		if !strings.Contains(s, want) {
@@ -46,6 +47,39 @@ func TestEngageWorkerHasNoHostAccess(t *testing.T) {
 		if strings.Contains(s, bad) {
 			t.Fatalf("host access %q in %s", bad, s)
 		}
+	}
+}
+
+func TestEngageWorkerPinsHostsFromPrivateReadOnlyFile(t *testing.T) {
+	dir, path, err := writeRunnerHosts([]string{"10.20.0.6 api.example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	data, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(data), "10.20.0.6 api.example.test\n") {
+		t.Fatalf("host pin file=%q err=%v", data, err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0700 {
+		t.Fatalf("host pin directory mode=%v", info.Mode())
+	}
+	args := strings.Join(engageWorkerArgs("worker", "guard", "sha256:"+strings.Repeat("a", 64), path), " ")
+	if !strings.Contains(args, "--mount type=bind,src="+path+",dst=/etc/hosts,readonly") {
+		t.Fatalf("worker did not mount only its generated host pins: %s", args)
+	}
+	if _, _, err := writeRunnerHosts([]string{""}); err == nil {
+		t.Fatal("empty host pin was accepted")
+	}
+	runner := &engageRunner{hostsDir: dir, hostsFile: path, workers: map[string]string{}}
+	if err := runner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("runner host pins remained after cleanup: %v", err)
 	}
 }
 
@@ -72,6 +106,152 @@ func TestRunnerCommandFirewallUsesOnlyExplicitIPScope(t *testing.T) {
 	allowed := runnerCommandIPs(scope)
 	if len(allowed) != 1 || allowed[0] != "10.20.0.0/24" {
 		t.Fatalf("hostname pin broadened command firewall: %v", allowed)
+	}
+}
+
+func TestRunnerScopeDoesNotResolveWildcardPattern(t *testing.T) {
+	scope, err := secgate.BuildScope(secgate.ScopeSpec{
+		In:  []string{"*.example.test", "10.20.0.5", "192.0.2.0/28"},
+		Out: []string{"*.blocked.example.test", "10.20.0.7"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, out, hosts, err := runnerScope(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(in, ",") != "10.20.0.5,192.0.2.0/28" || strings.Join(out, ",") != "10.20.0.7" || len(hosts) != 0 {
+		t.Fatalf("runner scope in=%v out=%v hosts=%v", in, out, hosts)
+	}
+	if got := runnerCommandIPs(scope); strings.Join(got, ",") != "10.20.0.5,192.0.2.0/28" {
+		t.Fatalf("wildcard broadened command egress: %v", got)
+	}
+}
+
+func TestPlanWildcardEgressPinsOnlyActionTargets(t *testing.T) {
+	scope, err := secgate.BuildScope(secgate.ScopeSpec{
+		In:  []string{"*.example.test", "10.20.0.9"},
+		Out: []string{"10.20.0.7", "blocked.example.test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scope.PinNetwork(nil, []string{"10.20.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	resolve := func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if host == "mixed.example.test" {
+			return []net.IPAddr{{IP: net.ParseIP("10.20.0.6")}, {IP: net.ParseIP("10.20.0.7")}}, nil
+		}
+		addresses := map[string]string{"api.example.test": "10.20.0.6", "bad.example.test": "10.20.0.7", "protected.example.test": "10.20.0.1"}
+		if value := addresses[host]; value != "" {
+			return []net.IPAddr{{IP: net.ParseIP(value)}}, nil
+		}
+		return nil, errors.New("unresolved")
+	}
+	stages := []pipelineStage{
+		{Binary: "curl", Args: []string{"http://api.example.test:8080/"}},
+		{Binary: "nmap", Args: []string{"10.20.0.9"}},
+	}
+	plan, err := planWildcardEgress(context.Background(), scope, stages, resolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Dynamic || strings.Join(plan.IPs, ",") != "10.20.0.6,10.20.0.9" || strings.Join(plan.Hosts, ",") != "10.20.0.6 api.example.test" {
+		t.Fatalf("wildcard egress plan = %+v", plan)
+	}
+	plain, err := planWildcardEgress(context.Background(), scope, stages[1:], resolve)
+	if err != nil || plain.Dynamic {
+		t.Fatalf("numeric-only action became dynamic: %+v %v", plain, err)
+	}
+	for _, host := range []string{"bad.example.test", "protected.example.test", "mixed.example.test", "blocked.example.test", "evil-example.test"} {
+		if _, err := planWildcardEgress(context.Background(), scope, []pipelineStage{{Binary: "curl", Args: []string{"http://" + host + "/"}}}, resolve); err == nil {
+			t.Errorf("wildcard plan accepted %s", host)
+		}
+	}
+}
+
+func TestPlanWildcardEgressStopsOnCanceledContext(t *testing.T) {
+	scope, err := secgate.BuildScope(secgate.ScopeSpec{In: []string{"*.example.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	_, err = planWildcardEgress(ctx, scope, []pipelineStage{{Binary: "curl", Args: []string{"http://api.example.test/"}}},
+		func(context.Context, string) ([]net.IPAddr, error) {
+			called = true
+			return []net.IPAddr{{IP: net.ParseIP("10.20.0.6")}}, nil
+		})
+	if !errors.Is(err, context.Canceled) || called {
+		t.Fatalf("canceled action resolved a target: err=%v called=%v", err, called)
+	}
+}
+
+func TestWildcardRunUsesActionScopedGuardAndCleansUp(t *testing.T) {
+	previous := newEngageRunnerForRun
+	t.Cleanup(func() { newEngageRunnerForRun = previous })
+	policy := secgate.DefaultPolicy()
+	removed := map[string]bool{}
+	var child *engageRunner
+	newEngageRunnerForRun = func(_ context.Context, roe *RoE) (*engageRunner, error) {
+		in, _ := roe.Scope.Entries()
+		if strings.Join(in, ",") != "10.20.0.6" || roe.Policy != policy {
+			t.Errorf("action runner received scope=%v policy=%p", in, roe.Policy)
+		}
+		child = &engageRunner{guard: "guard", workers: map[string]string{"task": "worker"}, remove: func(_ context.Context, id string) error {
+			removed[id] = true
+			return nil
+		}}
+		child.runFn = func(_ context.Context, _ []pipelineStage, _ string, _ int, _ time.Duration) (runResult, []isolatedStageResult) {
+			if strings.Join(child.hosts, ",") != "10.20.0.6 api.example.test" {
+				t.Errorf("worker host pin = %v", child.hosts)
+			}
+			return runResult{Output: "observed"}, []isolatedStageResult{{Stdout: "observed"}}
+		}
+		return child, nil
+	}
+	parent := &engageRunner{slots: make(chan struct{}, 1)}
+	plan := engageEgressPlan{Dynamic: true, IPs: []string{"10.20.0.6"}, Hosts: []string{"10.20.0.6 api.example.test"}}
+	result, outputs := parent.RunScoped(context.Background(), []pipelineStage{{Binary: "curl", Args: []string{"http://api.example.test/"}}}, "task", 1024, time.Second, plan, policy)
+	if result.Err != nil || result.Output != "observed" || len(outputs) != 1 || !removed["worker"] || !removed["guard"] {
+		t.Fatalf("scoped run result=%+v outputs=%+v removed=%v", result, outputs, removed)
+	}
+}
+
+func TestWildcardRunRejectsClosedParent(t *testing.T) {
+	previous := newEngageRunnerForRun
+	t.Cleanup(func() { newEngageRunnerForRun = previous })
+	called := false
+	newEngageRunnerForRun = func(context.Context, *RoE) (*engageRunner, error) {
+		called = true
+		return nil, errors.New("runner should not start")
+	}
+	parent := &engageRunner{closed: true, slots: make(chan struct{}, 1)}
+	plan := engageEgressPlan{Dynamic: true, IPs: []string{"10.20.0.6"}}
+	result, _ := parent.RunScoped(context.Background(), []pipelineStage{{Binary: "curl", Args: []string{"http://api.example.test/"}}}, "task", 1024, time.Second, plan, secgate.DefaultPolicy())
+	if result.Err == nil || called {
+		t.Fatalf("closed runner launched an action: err=%v called=%v", result.Err, called)
+	}
+}
+
+func TestWildcardRunReportsGuardCleanupFailure(t *testing.T) {
+	previous := newEngageRunnerForRun
+	t.Cleanup(func() { newEngageRunnerForRun = previous })
+	newEngageRunnerForRun = func(context.Context, *RoE) (*engageRunner, error) {
+		return &engageRunner{guard: "guard", workers: map[string]string{}, remove: func(context.Context, string) error {
+			return errors.New("cleanup refused")
+		}, runFn: func(context.Context, []pipelineStage, string, int, time.Duration) (runResult, []isolatedStageResult) {
+			return runResult{Output: "partial"}, []isolatedStageResult{{Stdout: "partial"}}
+		}}, nil
+	}
+	parent := &engageRunner{slots: make(chan struct{}, 1)}
+	plan := engageEgressPlan{Dynamic: true, IPs: []string{"10.20.0.6"}}
+	result, outputs := parent.RunScoped(context.Background(), []pipelineStage{{Binary: "curl", Args: []string{"http://api.example.test/"}}}, "task", 1024, time.Second, plan, secgate.DefaultPolicy())
+	if len(outputs) != 1 || !strings.Contains(result.Output, "partial") || result.Err == nil || !strings.Contains(result.Err.Error(), "cleanup refused") {
+		t.Fatalf("cleanup failure or partial output lost: result=%+v outputs=%+v", result, outputs)
 	}
 }
 
@@ -123,9 +303,43 @@ func TestEngageRunnerLiveBoundary(t *testing.T) {
 	}
 }
 
+func TestWildcardActionRunnerLiveBoundary(t *testing.T) {
+	if os.Getenv("BLKCHAIN_ENGAGE_RUNNER_E2E") != "1" {
+		t.Skip("requires the pinned local Docker runner")
+	}
+	allowedIP, _ := startDockerHTTPFixture(t, "wildcard-allowed", "wildcard-fixture-ok")
+	blockedIP, _ := startDockerHTTPFixture(t, "wildcard-blocked", "blocked-fixture")
+	roe, err := ParseRoE(strings.NewReader("## In Scope\n*.example.test\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	runner, err := newEngageRunner(ctx, roe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.Close()
+	plan, err := planWildcardEgress(ctx, roe.Scope, []pipelineStage{{Binary: "curl", Args: []string{"http://api.example.test:8080/"}}},
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP(allowedIP)}}, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, stages := runner.RunScoped(ctx, []pipelineStage{{Binary: "curl", Args: []string{"--max-time", "5", "http://api.example.test:8080/"}}}, "wildcard", 65536, 8*time.Second, plan, roe.Policy)
+	if result.Err != nil || len(stages) != 1 || stages[0].ExitCode != 0 || !strings.Contains(result.Output, "wildcard-fixture-ok") {
+		t.Fatalf("pinned wildcard command failed: result=%+v stages=%+v", result, stages)
+	}
+	result, stages = runner.RunScoped(ctx, []pipelineStage{{Binary: "curl", Args: []string{"--connect-timeout", "2", "--max-time", "3", "http://" + blockedIP + ":8080/"}}}, "wildcard", 65536, 5*time.Second, plan, roe.Policy)
+	if len(stages) != 1 || (result.Err == nil && stages[0].ExitCode == 0) || strings.Contains(result.Output, "blocked-fixture") {
+		t.Fatalf("action guard reached another IP: result=%+v stages=%+v", result, stages)
+	}
+}
+
 func TestEngageRawWorkerAddsOnlyRawSocketCapability(t *testing.T) {
 	image := "sha256:" + strings.Repeat("a", 64)
-	raw := strings.Join(engageRawWorkerArgs("rawworker", "guard", image, nil), " ")
+	raw := strings.Join(engageRawWorkerArgs("rawworker", "guard", image, ""), " ")
 	// Raw sockets need a root process: Docker exposes no ambient capability and
 	// no-new-privileges blocks the file-capability route, so an unprivileged
 	// process keeps an empty effective set however the capability is added.
@@ -146,12 +360,29 @@ func TestEngageRawWorkerAddsOnlyRawSocketCapability(t *testing.T) {
 		}
 	}
 	// The general worker keeps its unprivileged identity and gains nothing.
-	general := strings.Join(engageWorkerArgs("worker", "guard", image, nil), " ")
+	general := strings.Join(engageWorkerArgs("worker", "guard", image, ""), " ")
 	if strings.Contains(general, "NET_RAW") {
 		t.Fatalf("general worker gained NET_RAW: %s", general)
 	}
 	if !strings.Contains(general, "--user 1000:1000") {
 		t.Fatalf("general worker is not unprivileged: %s", general)
+	}
+}
+
+// TestBothWorkerPoolsPinHostsReadOnly is the reconciliation between the
+// host-pin file and the raw-socket pool: the pins are mounted read-only into
+// both workers, so a raw command resolves scoped names the same way an
+// enumeration command does and neither can rewrite the file.
+func TestBothWorkerPoolsPinHostsReadOnly(t *testing.T) {
+	image := "sha256:" + strings.Repeat("a", 64)
+	want := "--mount type=bind,src=/tmp/pins/hosts,dst=/etc/hosts,readonly"
+	for name, args := range map[string][]string{
+		"general": engageWorkerArgs("worker", "guard", image, "/tmp/pins/hosts"),
+		"raw":     engageRawWorkerArgs("rawworker", "guard", image, "/tmp/pins/hosts"),
+	} {
+		if s := strings.Join(args, " "); !strings.Contains(s, want) {
+			t.Errorf("%s worker does not mount the host pins read-only: %s", name, s)
+		}
 	}
 }
 

@@ -60,7 +60,7 @@ func TestWebSocketSubscriptionValidationAndFailureEvidence(t *testing.T) {
 					return errors.New("fixture denies send")
 				}
 				return nil
-			}, IPAllowed: func(ip net.IP) bool { return ip.IsLoopback() }}}
+			}, IPAllowed: func(_ string, ip net.IP) bool { return ip.IsLoopback() }}}
 			svc := webcollect.New(ws.Store, broker, nil)
 			data, _ := json.Marshal(plan)
 			current, err := webSocketDecodePlan(data)
@@ -136,7 +136,7 @@ func TestWebSocketTranscriptBoundsAndCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ws.Close()
-	svc := webcollect.New(ws.Store, &webacquire.Broker{Policy: webacquire.Policy{Authorize: func(context.Context, webacquire.Request) error { return nil }, IPAllowed: func(ip net.IP) bool { return ip.IsLoopback() }}}, nil)
+	svc := webcollect.New(ws.Store, &webacquire.Broker{Policy: webacquire.Policy{Authorize: func(context.Context, webacquire.Request) error { return nil }, IPAllowed: func(_ string, ip net.IP) bool { return ip.IsLoopback() }}}, nil)
 	op := webanalysis.Operation{ID: webanalysis.ID("cancel-socket"), Origin: strings.Replace(server.URL, "http:", "ws:", 1), Protocol: "websocket", Method: "GET"}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()

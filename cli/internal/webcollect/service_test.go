@@ -28,7 +28,7 @@ func fixtureStore(t *testing.T) *engagement.Store {
 	return s
 }
 func fixtureBroker(server *httptest.Server) *webacquire.Broker {
-	return &webacquire.Broker{Policy: webacquire.Policy{IPAllowed: func(ip net.IP) bool { return ip.IsLoopback() }, Authorize: func(ctx context.Context, r webacquire.Request) error {
+	return &webacquire.Broker{Policy: webacquire.Policy{IPAllowed: func(_ string, ip net.IP) bool { return ip.IsLoopback() }, Authorize: func(ctx context.Context, r webacquire.Request) error {
 		if !strings.HasPrefix(r.URL, server.URL+"/") {
 			return fmt.Errorf("outside fixture")
 		}

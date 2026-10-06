@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 )
@@ -104,9 +105,25 @@ func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineSt
 		timeout = g.Policy.Timeout()
 	}
 	start := time.Now()
-	result, outputs := r.runner.Run(ctx, stages, dir, limit, timeout)
+	resolve := r.runner.resolve
+	if resolve == nil {
+		resolve = net.DefaultResolver.LookupIPAddr
+	}
+	plan, planErr := planWildcardEgress(ctx, g.Scope, stages, resolve)
+	var result runResult
+	var outputs []isolatedStageResult
+	if planErr != nil {
+		result.Err = planErr
+		if g.Audit != nil {
+			g.Audit("deny:scope-recheck", strings.Join(commands, " | ")+" :: "+planErr.Error())
+		}
+	} else {
+		result, outputs = r.runner.RunScoped(ctx, stages, dir, limit, timeout, plan, g.Policy)
+	}
 	status := "complete"
-	if result.TimedOut {
+	if planErr != nil {
+		status = "denied"
+	} else if result.TimedOut {
 		status = "timeout"
 	} else if ctx.Err() != nil {
 		status = "canceled"

@@ -55,7 +55,7 @@ func NewArchive(allowed func(string) bool) *Archive {
 			return errors.New("archive infrastructure request denied")
 		}
 		return nil
-	}, IPAllowed: func(ip net.IP) bool {
+	}, IPAllowed: func(_ string, ip net.IP) bool {
 		return ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()
 	}}}
 	return a

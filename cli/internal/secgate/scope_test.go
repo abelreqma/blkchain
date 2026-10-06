@@ -1,6 +1,7 @@
 package secgate
 
 import (
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -196,6 +197,91 @@ func TestBuildScopeOutWinsOverIn(t *testing.T) {
 	}
 	if s.InScope("dup.example.com") {
 		t.Error("a host in both In and Out must be denied (out wins, fail closed)")
+	}
+}
+
+func TestBuildScopeWildcardAndMultipleTargets(t *testing.T) {
+	s, err := BuildScope(ScopeSpec{
+		In:  []string{"10.20.0.5", "192.0.2.0/28", "app.example.test", "*.example.test"},
+		Out: []string{"192.0.2.2", "blocked.example.test", "*.private.example.test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		target string
+		want   bool
+	}{
+		{"10.20.0.5", true}, {"192.0.2.9", true}, {"192.0.2.2", false},
+		{"app.example.test", true}, {"API.EXAMPLE.TEST", true},
+		{"deep.api.example.test", true}, {"example.test", false},
+		{"evil-example.test", false}, {"api.example.test.evil", false},
+		{"blocked.example.test", false}, {"x.private.example.test", false},
+	} {
+		if got := s.InScope(tc.target); got != tc.want {
+			t.Errorf("InScope(%q) = %v, want %v", tc.target, got, tc.want)
+		}
+	}
+	in, out := s.Entries()
+	if len(in) != 4 || in[3] != "*.example.test" || len(out) != 3 || out[2] != "*.private.example.test" {
+		t.Fatalf("wildcard entries changed: in=%v out=%v", in, out)
+	}
+}
+
+func TestBuildScopeRejectsMalformedWildcards(t *testing.T) {
+	for _, entry := range []string{"*example.test", "a.*.example.test", "**.example.test", "*.com", "*.10.20.0.5"} {
+		if scope, err := BuildScope(ScopeSpec{In: []string{entry}}); err == nil || scope != nil {
+			t.Errorf("accepted malformed wildcard %q", entry)
+		}
+	}
+}
+
+func TestWildcardWebAddressRequiresMatchingHostAndSafeIP(t *testing.T) {
+	s, err := BuildScope(ScopeSpec{
+		In:  []string{"*.example.test", "exact.test", "10.20.0.0/28"},
+		Out: []string{"blocked.example.test", "*.private.example.test", "10.20.0.7"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		host, ip string
+		want     bool
+	}{
+		{"api.example.test", "8.8.8.8", true},
+		{"deep.api.example.test", "10.20.0.6", true},
+		{"api.example.test", "10.20.0.7", false},
+		{"api.example.test", "10.20.0.15", false},
+		{"api.example.test", "127.0.0.1", false},
+		{"api.example.test", "169.254.169.254", false},
+		{"blocked.example.test", "8.8.8.8", false},
+		{"x.private.example.test", "8.8.8.8", false},
+		{"example.test", "8.8.8.8", false},
+		{"evil-example.test", "8.8.8.8", false},
+		{"exact.test", "8.8.8.8", false},
+		{"exact.test", "10.20.0.6", true},
+	} {
+		if got := s.WebAddressAllowed(tc.host, net.ParseIP(tc.ip)); got != tc.want {
+			t.Errorf("WebAddressAllowed(%q, %q) = %v, want %v", tc.host, tc.ip, got, tc.want)
+		}
+	}
+}
+
+func TestWildcardCannotInheritPinnedSpecialAddress(t *testing.T) {
+	scope, err := BuildScope(ScopeSpec{In: []string{"*.example.test", "exact.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scope.PinNetwork([]string{"169.254.169.254"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	ip := net.ParseIP("169.254.169.254")
+	if scope.WebAddressAllowed("api.example.test", ip) || scope.WebAddressAllowed("exact.test", ip) {
+		t.Fatal("hostname scope inherited a pinned link-local address")
+	}
+	explicit, err := BuildScope(ScopeSpec{In: []string{"127.0.0.1"}})
+	if err != nil || !explicit.WebAddressAllowed("127.0.0.1", net.ParseIP("127.0.0.1")) {
+		t.Fatalf("explicit numeric loopback scope was lost: %v", err)
 	}
 }
 

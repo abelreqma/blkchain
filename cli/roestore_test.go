@@ -3,6 +3,8 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"blkchain/cli/internal/histstore"
@@ -90,5 +92,39 @@ func TestRoETemplateParsesAsRoE(t *testing.T) {
 	defer f.Close()
 	if _, err := ParseRoE(f); err != nil {
 		t.Errorf("the ROE.md template must parse as a valid RoE: %v", err)
+	}
+}
+
+func TestRoETemplateAllowedActionsCanBeCommentedOut(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := writeRoETemplate(dir); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "ROE.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roe, err := ParseRoE(strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"command", "local", "api-read", "api-write", "browser-read", "browser-write"}
+	if !slices.Equal(roe.Policy.Allowed, want) {
+		t.Fatalf("template allowed actions = %v, want %v", roe.Policy.Allowed, want)
+	}
+	if !roe.Scope.Empty() || roe.Scope.Local() {
+		t.Fatal("template must still require an operator-defined scope")
+	}
+
+	commented := strings.Replace(string(data), "- api-write\n", "<!-- - api-write -->\n", 1)
+	if commented == string(data) {
+		t.Fatal("template has no api-write entry to comment out")
+	}
+	roe, err = ParseRoE(strings.NewReader(commented))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roe.Policy.Allows("api-write") || !roe.Policy.Allows("browser-write") {
+		t.Fatalf("commented action was not disabled: %v", roe.Policy.Allowed)
 	}
 }

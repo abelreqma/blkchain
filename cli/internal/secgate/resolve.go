@@ -27,7 +27,11 @@ func ResolveScopeViolation(s *Scope, c Command) (host string, ip string, violati
 			return t, "", true
 		}
 		for _, resolved := range ips {
-			if !s.InScope(resolved.String()) {
+			allowed := s.InScope(resolved.String())
+			if c.Surface == SurfaceWeb {
+				allowed = s.WebAddressAllowed(t, resolved)
+			}
+			if !allowed {
 				return t, resolved.String(), true
 			}
 		}

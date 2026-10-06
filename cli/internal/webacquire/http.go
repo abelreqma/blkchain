@@ -38,7 +38,7 @@ type Response struct {
 }
 type Policy struct {
 	Authorize     func(context.Context, Request) error
-	IPAllowed     func(net.IP) bool
+	IPAllowed     func(string, net.IP) bool
 	Resolve       func(context.Context, string) ([]net.IP, error)
 	MaxBodyBytes  int
 	MaxTotalBytes int
@@ -257,7 +257,7 @@ func (b *Broker) Once(ctx context.Context, r Request) (Response, error) {
 		return out, errors.New("web destination resolution failed")
 	}
 	for _, ip := range ips {
-		if !b.Policy.IPAllowed(ip) {
+		if !b.Policy.IPAllowed(u.Hostname(), ip) {
 			return out, errors.New("web destination resolves outside scope")
 		}
 	}

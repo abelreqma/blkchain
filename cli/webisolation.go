@@ -137,7 +137,9 @@ func newWebBroker(g *secgate.Gate, armed webArmedFunc) *webacquire.Broker {
 				return errors.New("request denied: " + d.Reason)
 			}
 			return nil
-		}, IPAllowed: func(ip net.IP) bool { return g != nil && g.Scope != nil && g.Scope.InScope(ip.String()) }}
+		}, IPAllowed: func(host string, ip net.IP) bool {
+			return g != nil && g.Scope != nil && g.Scope.WebAddressAllowed(host, ip)
+		}}
 	if g != nil && g.Policy != nil {
 		policy.MaxBodyBytes = g.Policy.OutputBytes
 		policy.MaxTotalBytes = g.Policy.TotalBytes

@@ -67,6 +67,7 @@ func (s *Scope) PinNetwork(in, out []string) error {
 			if err != nil {
 				return err
 			}
+			matcher.pinned = true
 			if group.excluded {
 				s.out = append(s.out, matcher)
 			} else {

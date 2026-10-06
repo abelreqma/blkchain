@@ -162,6 +162,9 @@ func (s *Scope) Entries() (in, out []string) {
 		if m.ip != nil {
 			return m.ip.String()
 		}
+		if m.wildcard != "" {
+			return "*." + m.wildcard
+		}
 		return m.host
 	}
 	for _, m := range s.in {

@@ -3,6 +3,7 @@ package main
 import (
 	"blkchain/cli/internal/secgate"
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,6 +62,48 @@ func TestRoEExecutionCannotFallBackToHost(t *testing.T) {
 	}
 	if calls != 0 || !strings.Contains(out, "isolated runner") {
 		t.Fatalf("host fallback calls=%d result=%s", calls, out)
+	}
+}
+
+func TestWildcardCommandUsesActionGuardAndRecordsEvidence(t *testing.T) {
+	roe, err := ParseRoE(strings.NewReader("## In Scope\n*.example.test\n## Allowed Actions\ncommand\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &secgate.Gate{Mode: secgate.Auto, Scope: roe.Scope, Policy: roe.Policy}
+	if err := gate.Start(); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "actions.jsonl"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	trace := newActionTranscript(workspace, "off", "worker", 10, 65536, nil)
+	previous := newEngageRunnerForRun
+	t.Cleanup(func() { newEngageRunnerForRun = previous })
+	created, removed, shared := false, false, false
+	newEngageRunnerForRun = func(_ context.Context, action *RoE) (*engageRunner, error) {
+		created = true
+		in, _ := action.Scope.Entries()
+		if len(in) != 1 || in[0] != "10.20.0.6" {
+			t.Errorf("action scope = %v", in)
+		}
+		return &engageRunner{guard: "action-guard", workers: map[string]string{}, remove: func(context.Context, string) error { removed = true; return nil },
+			runFn: func(context.Context, []pipelineStage, string, int, time.Duration) (runResult, []isolatedStageResult) {
+				return runResult{Output: "wildcard-evidence"}, []isolatedStageResult{{Stdout: "wildcard-evidence"}}
+			}}, nil
+	}
+	runner := &engageRunner{slots: make(chan struct{}, 1), resolve: func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("10.20.0.6")}}, nil
+	}, runFn: func(context.Context, []pipelineStage, string, int, time.Duration) (runResult, []isolatedStageResult) {
+		shared = true
+		return runResult{}, nil
+	}}
+	ctx := context.WithValue(context.Background(), engageRuntimeKey{}, &engageRuntime{runner: runner, trace: trace, policy: roe.Policy, cancel: func() {}})
+	result := runAuthorized(ctx, gate, "curl", []string{"http://api.example.test/"}, "task", 65536, time.Second, "t1")
+	data, readErr := os.ReadFile(filepath.Join(workspace, "actions.jsonl"))
+	if result.Err != nil || result.Output != "wildcard-evidence" || !created || !removed || shared || readErr != nil || !strings.Contains(string(data), "wildcard-evidence") {
+		t.Fatalf("wildcard action result=%+v created=%v removed=%v shared=%v transcript=%q read=%v", result, created, removed, shared, data, readErr)
 	}
 }
 

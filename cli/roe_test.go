@@ -65,6 +65,26 @@ func TestParseRoEOutWinsClosed(t *testing.T) {
 	}
 }
 
+func TestParseRoEWildcardAndMultipleTargets(t *testing.T) {
+	roe, err := ParseRoE(strings.NewReader("## In Scope\n10.20.0.5\n192.0.2.0/28\napp.example.test\n*.example.test\n## Out of Scope\nblocked.example.test\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"10.20.0.5", "192.0.2.9", "app.example.test", "api.example.test", "deep.api.example.test"} {
+		if !roe.Scope.InScope(target) {
+			t.Errorf("authorized target %q was lost", target)
+		}
+	}
+	for _, target := range []string{"blocked.example.test", "example.test", "evil-example.test"} {
+		if roe.Scope.InScope(target) {
+			t.Errorf("unauthorized target %q was accepted", target)
+		}
+	}
+	if !strings.Contains(roe.Policy.Canonical, "*.example.test") {
+		t.Fatal("sealed policy lost the wildcard entry")
+	}
+}
+
 func TestParseRoEMissingOptionalRate(t *testing.T) {
 	src := "## In Scope\n- 10.0.0.5\n"
 	roe, err := ParseRoE(strings.NewReader(src))

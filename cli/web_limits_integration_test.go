@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	tea "github.com/charmbracelet/bubbletea"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -107,6 +108,33 @@ func TestExactReplayThroughSharedWebCommand(t *testing.T) {
 	}
 	if received.Load() != int32(len(bodies)) {
 		t.Fatal("replay did not reach fixture", received.Load())
+	}
+}
+
+func TestWebBrokerWildcardAddressPolicy(t *testing.T) {
+	scope, err := secgate.BuildScope(secgate.ScopeSpec{
+		In:  []string{"*.example.test"},
+		Out: []string{"blocked.example.test", "10.20.0.7"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &secgate.Gate{Mode: secgate.Auto, Scope: scope, Policy: secgate.DefaultPolicy()}
+	broker := newWebBroker(gate, nil)
+	for _, tc := range []struct {
+		host, ip string
+		want     bool
+	}{
+		{"api.example.test", "10.20.0.5", true},
+		{"deep.api.example.test", "8.8.8.8", true},
+		{"example.test", "8.8.8.8", false},
+		{"blocked.example.test", "8.8.8.8", false},
+		{"api.example.test", "10.20.0.7", false},
+		{"api.example.test", "127.0.0.1", false},
+	} {
+		if got := broker.Policy.IPAllowed(tc.host, net.ParseIP(tc.ip)); got != tc.want {
+			t.Errorf("broker IPAllowed(%q, %q) = %v, want %v", tc.host, tc.ip, got, tc.want)
+		}
 	}
 }
 

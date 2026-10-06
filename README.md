@@ -215,6 +215,7 @@ For an engagement, prepare an RoE for the authorized target, then build the isol
 
 ## In Scope
 - 192.0.2.10
+- *.example.com
 
 ## Out of Scope
 - 192.0.2.11
@@ -229,6 +230,9 @@ For an engagement, prepare an RoE for the authorized target, then build the isol
 ```
 
 The addresses above are documentation examples. Replace them with the actual authorized scope.
+A `*.` entry matches subdomains of that suffix and not the bare apex, so list the apex
+separately when it is in scope. A wildcard command resolves its own targets and runs behind a
+guard limited to those checked addresses.
 
 ```sh
 cli/blk engage setup

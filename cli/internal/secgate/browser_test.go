@@ -2,6 +2,7 @@ package secgate
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 )
@@ -159,5 +160,39 @@ func TestAuthorizeWebRedirectInScopeAllowed(t *testing.T) {
 	d := g.AuthorizeWebRedirect("http://10.0.0.9/next")
 	if !d.Allowed {
 		t.Fatalf("in-scope redirect hop denied: %q", d.Reason)
+	}
+}
+
+func TestWildcardPolicyChecksAPIAndRedirectAddresses(t *testing.T) {
+	scope, err := BuildScope(ScopeSpec{In: []string{"*.example.test"}, Out: []string{"blocked.example.test", "10.20.0.7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := DefaultPolicy()
+	if err := policy.Seal("", nil, scope); err != nil {
+		t.Fatal(err)
+	}
+	gate := &Gate{Mode: Auto, Scope: scope, Policy: policy}
+	if err := gate.Start(); err != nil {
+		t.Fatal(err)
+	}
+	withStubLookup(t, map[string][]net.IP{
+		"api.example.test":      {net.ParseIP("10.20.0.6")},
+		"deep.api.example.test": {net.ParseIP("8.8.8.8")},
+		"blocked.example.test":  {net.ParseIP("8.8.8.8")},
+		"bad.example.test":      {net.ParseIP("10.20.0.7")},
+		"metadata.example.test": {net.ParseIP("169.254.169.254")},
+		"mixed.example.test":    {net.ParseIP("8.8.8.8"), net.ParseIP("127.0.0.1")},
+	}, nil)
+	if d := gate.AuthorizeAPIRequest(context.Background(), APIRequest{Method: "GET", URL: "http://api.example.test/"}); !d.Allowed {
+		t.Fatalf("private wildcard target denied: %s", d.Reason)
+	}
+	if d := gate.AuthorizeWebRedirect("http://deep.api.example.test/next"); !d.Allowed {
+		t.Fatalf("nested wildcard redirect denied: %s", d.Reason)
+	}
+	for _, host := range []string{"example.test", "evil-example.test", "blocked.example.test", "bad.example.test", "metadata.example.test", "mixed.example.test"} {
+		if d := gate.AuthorizeWebRedirect("http://" + host + "/"); d.Allowed {
+			t.Errorf("redirect to %s was allowed", host)
+		}
 	}
 }

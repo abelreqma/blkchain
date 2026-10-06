@@ -30,14 +30,17 @@ type engageRunner struct {
 	workers      map[string]string
 	rawWorkers   map[string]string
 	hosts        []string
+	hostsDir     string
+	hostsFile    string
 	slots        chan struct{}
 	closed       bool
 	remove       func(context.Context, string) error
+	resolve      func(context.Context, string) ([]net.IPAddr, error)
 	runFn        func(context.Context, []pipelineStage, string, int, time.Duration) (runResult, []isolatedStageResult)
 }
 
-func engageWorkerArgs(name, guard, image string, hosts []string) []string {
-	return workerArgs(name, guard, image, hosts, false)
+func engageWorkerArgs(name, guard, image, hostsFile string) []string {
+	return workerArgs(name, guard, image, hostsFile, false)
 }
 
 // engageRawWorkerArgs builds the raw-socket worker. It differs from the general
@@ -47,13 +50,14 @@ func engageWorkerArgs(name, guard, image string, hosts []string) []string {
 // however the capability is added: masscan, tcpdump, and the nmap raw scan modes
 // need a root process or they fail with a permission error. Every other control
 // is unchanged: read-only rootfs, the rest of the capability set dropped,
-// no-new-privileges, the same memory, cpu, pid and file limits, and the guard's
-// network namespace, so the firewall still bounds every destination.
-func engageRawWorkerArgs(name, guard, image string, hosts []string) []string {
-	return workerArgs(name, guard, image, hosts, true)
+// no-new-privileges, the same memory, cpu, pid and file limits, the same
+// read-only host pins, and the guard's network namespace, so the firewall still
+// bounds every destination.
+func engageRawWorkerArgs(name, guard, image, hostsFile string) []string {
+	return workerArgs(name, guard, image, hostsFile, true)
 }
 
-func workerArgs(name, guard, image string, hosts []string, raw bool) []string {
+func workerArgs(name, guard, image, hostsFile string, raw bool) []string {
 	// The raw worker runs as uid 0 but holds only NET_RAW, so it has no
 	// CAP_DAC_OVERRIDE and cannot write a scratch mount owned by another uid. Its
 	// /work must therefore be root-owned; it is still a private tmpfs per
@@ -67,6 +71,9 @@ func workerArgs(name, guard, image string, hosts []string, raw bool) []string {
 		args = append(args, "--cap-add", "NET_RAW")
 	}
 	args = append(args, "--security-opt", "no-new-privileges", "--user", user, "--memory", "256m", "--cpus", "1", "--pids-limit", "64", "--ulimit", "nofile=256:256", "--ulimit", "fsize=67108864:67108864", "--tmpfs", work, "--tmpfs", "/tmp:rw,nosuid,nodev,size=32m", "--env", "HOME=/work", "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "--entrypoint", "/bin/sh")
+	if hostsFile != "" {
+		args = append(args, "--mount", "type=bind,src="+hostsFile+",dst=/etc/hosts,readonly")
+	}
 	args = append(args, image, "-c", "exec sleep 86400")
 	return args
 }
@@ -81,6 +88,39 @@ func pipelineNeedsRawSocket(stages []pipelineStage) bool {
 		}
 	}
 	return false
+}
+
+// Docker rejects --add-host with container networking, so workers mount this generated file.
+func writeRunnerHosts(hosts []string) (dir, path string, err error) {
+	if len(hosts) > 8192 {
+		return "", "", errors.New("runner host pin limit reached")
+	}
+	var data strings.Builder
+	data.WriteString("127.0.0.1 localhost\n::1 localhost\n")
+	for _, line := range hosts {
+		fields := strings.Fields(line)
+		if strings.ContainsAny(line, "\r\n\x00") || len(fields) != 2 || net.ParseIP(fields[0]) == nil {
+			return "", "", errors.New("invalid runner host pin")
+		}
+		data.WriteString(line)
+		data.WriteByte('\n')
+		if data.Len() > 1<<20 {
+			return "", "", errors.New("runner host pins exceed 1 MiB")
+		}
+	}
+	dir, err = os.MkdirTemp("/tmp", "blk-engage-hosts-")
+	if err != nil {
+		return "", "", err
+	}
+	path = filepath.Join(dir, "hosts")
+	if err = os.WriteFile(path, []byte(data.String()), 0600); err == nil {
+		err = os.Chmod(path, 0644)
+	}
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return "", "", err
+	}
+	return dir, path, nil
 }
 
 func engageFirewall(in, out, protected []string, v6 bool) (string, error) {
@@ -267,6 +307,9 @@ func runnerScope(ctx context.Context, scope *secgate.Scope) (in, out, hosts []st
 			return nil, errors.New("runner scope exceeds 256 entries")
 		}
 		for _, entry := range list {
+			if strings.HasPrefix(entry, "*.") {
+				continue
+			}
 			if net.ParseIP(entry) != nil || strings.Contains(entry, "/") {
 				result = append(result, entry)
 				continue
@@ -308,10 +351,141 @@ func runnerCommandIPs(scope *secgate.Scope) []string {
 	return allowed
 }
 
+type engageEgressPlan struct {
+	IPs     []string
+	Hosts   []string
+	Dynamic bool
+}
+
+func planWildcardEgress(ctx context.Context, scope *secgate.Scope, stages []pipelineStage, resolve func(context.Context, string) ([]net.IPAddr, error)) (engageEgressPlan, error) {
+	if err := ctx.Err(); err != nil {
+		return engageEgressPlan{}, err
+	}
+	if scope == nil {
+		return engageEgressPlan{}, errors.New("engagement scope missing")
+	}
+	var targets []string
+	for _, stage := range stages {
+		found, ok := secgate.ExtractTargets(secgate.Command{Binary: stage.Binary, Args: stage.Args})
+		if !ok || len(targets)+len(found) > 16 {
+			return engageEgressPlan{}, errors.New("command targets cannot be verified within the limit")
+		}
+		targets = append(targets, found...)
+	}
+	plan := engageEgressPlan{}
+	for _, target := range targets {
+		if !scope.InScope(target) {
+			return engageEgressPlan{}, errors.New("command target is outside the engagement scope")
+		}
+		plan.Dynamic = plan.Dynamic || scope.WildcardHost(target)
+	}
+	if !plan.Dynamic {
+		return plan, nil
+	}
+	if resolve == nil {
+		return engageEgressPlan{}, errors.New("command resolver missing")
+	}
+	seen := map[string]bool{}
+	hosts := map[string]string{}
+	add := func(ip net.IP) error {
+		if ip == nil || !ip.IsGlobalUnicast() {
+			return errors.New("command destination has an unsafe address")
+		}
+		address := ip.String()
+		if !seen[address] {
+			if len(plan.IPs) >= 32 {
+				return errors.New("command destination address limit reached")
+			}
+			plan.IPs = append(plan.IPs, address)
+			seen[address] = true
+		}
+		return nil
+	}
+	for _, target := range targets {
+		if ip := net.ParseIP(target); ip != nil {
+			if !scope.WebAddressAllowed(target, ip) {
+				return engageEgressPlan{}, errors.New("command destination is outside the engagement scope")
+			}
+			if err := add(ip); err != nil {
+				return engageEgressPlan{}, err
+			}
+			continue
+		}
+		lookup, cancel := context.WithTimeout(ctx, 5*time.Second)
+		addresses, err := resolve(lookup, target)
+		cancel()
+		if err := ctx.Err(); err != nil {
+			return engageEgressPlan{}, err
+		}
+		if err != nil || len(addresses) == 0 || len(addresses) > 32 {
+			return engageEgressPlan{}, errors.New("command hostname cannot be resolved within the limit")
+		}
+		var chosen net.IP
+		for _, address := range addresses {
+			ip := address.IP
+			if !scope.WebAddressAllowed(target, ip) {
+				return engageEgressPlan{}, errors.New("command hostname resolves outside the engagement scope")
+			}
+			if err := add(ip); err != nil {
+				return engageEgressPlan{}, err
+			}
+			if chosen == nil || (chosen.To4() == nil && ip.To4() != nil) {
+				chosen = ip
+			}
+		}
+		hosts[strings.ToLower(target)] = chosen.String()
+	}
+	sort.Strings(plan.IPs)
+	for host, ip := range hosts {
+		plan.Hosts = append(plan.Hosts, ip+" "+host)
+	}
+	sort.Strings(plan.Hosts)
+	return plan, nil
+}
+
+// RunScoped gives a wildcard action its own network guard and checked IP list.
+func (r *engageRunner) RunScoped(ctx context.Context, stages []pipelineStage, dir string, limit int, timeout time.Duration, plan engageEgressPlan, policy *secgate.Policy) (runResult, []isolatedStageResult) {
+	if !plan.Dynamic {
+		return r.Run(ctx, stages, dir, limit, timeout)
+	}
+	if r == nil || r.slots == nil || policy == nil || len(plan.IPs) == 0 {
+		return runResult{Err: errors.New("action-scoped runner configuration missing")}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return runResult{Err: err}, nil
+	}
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		return runResult{Err: errors.New("isolated runner stopped")}, nil
+	}
+	select {
+	case r.slots <- struct{}{}:
+		defer func() { <-r.slots }()
+	case <-ctx.Done():
+		return runResult{Err: ctx.Err()}, nil
+	}
+	scope, err := secgate.BuildScope(secgate.ScopeSpec{In: plan.IPs})
+	if err != nil {
+		return runResult{Err: err}, nil
+	}
+	worker, err := newEngageRunnerForRun(ctx, &RoE{Scope: scope, Policy: policy})
+	if err != nil {
+		return runResult{Err: err}, nil
+	}
+	worker.hosts = append([]string(nil), plan.Hosts...)
+	result, outputs := worker.Run(ctx, stages, dir, limit, timeout)
+	if err := worker.Close(); err != nil {
+		result.Err = errors.Join(result.Err, fmt.Errorf("action-scoped runner cleanup failed: %w", err))
+	}
+	return result, outputs
+}
+
 // worker returns the container for an executor directory, creating it on first
 // use. raw selects the privileged raw-socket worker, which is created only when
 // a command actually needs the capability, so an enumeration command never runs
-// in it. Both pools share one cap.
+// in it. Both pools share one cap and the same read-only host pins.
 func (r *engageRunner) worker(ctx context.Context, dir string, raw bool) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -329,19 +503,17 @@ func (r *engageRunner) worker(ctx context.Context, dir string, raw bool) (string
 		return "", errors.New("runner worker cap reached")
 	}
 	id := runnerName(name)
-	if _, err := runnerDocker(ctx, nil, args(id, r.guard, r.image, r.hosts)...); err != nil {
-		return "", err
-	}
-	pool[dir] = id
-	if len(r.hosts) > 0 {
-		if _, err := runnerDocker(ctx, []byte(strings.Join(r.hosts, "\n")+"\n"), "exec", "-i", "--user", "0:0", id, "sh", "-c", "cat >> /etc/hosts"); err != nil {
-			if cleanupErr := r.removeContainer(ctx, id); cleanupErr != nil {
-				return "", errors.Join(err, fmt.Errorf("remove failed worker %s: %w", id, cleanupErr))
-			}
-			delete(pool, dir)
+	if len(r.hosts) > 0 && r.hostsFile == "" {
+		var err error
+		r.hostsDir, r.hostsFile, err = writeRunnerHosts(r.hosts)
+		if err != nil {
 			return "", err
 		}
 	}
+	if _, err := runnerDocker(ctx, nil, args(id, r.guard, r.image, r.hostsFile)...); err != nil {
+		return "", err
+	}
+	pool[dir] = id
 	return id, nil
 }
 
@@ -397,6 +569,13 @@ func (r *engageRunner) Close() error {
 			failures = append(failures, fmt.Errorf("remove network guard %s: %w", r.guard, err))
 		} else {
 			r.guard = ""
+		}
+	}
+	if r.hostsDir != "" && len(r.workers) == 0 && len(r.rawWorkers) == 0 {
+		if err := os.RemoveAll(r.hostsDir); err != nil {
+			failures = append(failures, fmt.Errorf("remove runner host pins: %w", err))
+		} else {
+			r.hostsDir, r.hostsFile = "", ""
 		}
 	}
 	return errors.Join(failures...)

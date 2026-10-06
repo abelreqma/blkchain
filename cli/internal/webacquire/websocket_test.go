@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,7 +15,7 @@ import (
 )
 
 func wsBroker() *Broker {
-	return &Broker{Policy: Policy{Authorize: func(context.Context, Request) error { return nil }, IPAllowed: func(ip net.IP) bool { return ip.IsLoopback() }}}
+	return &Broker{Policy: Policy{Authorize: func(context.Context, Request) error { return nil }, IPAllowed: func(_ string, ip net.IP) bool { return ip.IsLoopback() }}}
 }
 func TestWebSocketPinnedMessagesPoliciesAndCancellation(t *testing.T) {
 	var headers http.Header
@@ -87,6 +88,38 @@ func TestWebSocketPinnedMessagesPoliciesAndCancellation(t *testing.T) {
 	}
 	if _, _, err = broker.OpenWebSocket(context.Background(), target, nil, nil); err == nil {
 		t.Fatal("mixed DNS scope bypass")
+	}
+}
+
+func TestWebSocketPinnedAddressChecksHostname(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(w, r, nil)
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer server.Close()
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Scheme = "ws"
+	u.Host = net.JoinHostPort("socket.example.test", u.Port())
+	broker := wsBroker()
+	broker.Policy.Resolve = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("127.0.0.1")}, nil
+	}
+	broker.Policy.IPAllowed = func(host string, ip net.IP) bool {
+		return host == "socket.example.test" && ip.IsLoopback()
+	}
+	socket, _, err := broker.OpenWebSocket(context.Background(), u.String(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.Close()
+	u.Host = net.JoinHostPort("evil.example.test", u.Port())
+	if _, _, err := broker.OpenWebSocket(context.Background(), u.String(), nil, nil); err == nil {
+		t.Fatal("WebSocket accepted another hostname at the same IP")
 	}
 }
 func TestWebSocketLimitsRedirectsAndTLSVerification(t *testing.T) {

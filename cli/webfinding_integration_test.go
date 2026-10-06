@@ -54,7 +54,7 @@ func TestDiscoveredCredentialReachesStdoutLogAndReports(t *testing.T) {
 			return fmt.Errorf("outside fixture")
 		}
 		return nil
-	}, IPAllowed: func(ip net.IP) bool { return ip.IsLoopback() }}}, nil)
+	}, IPAllowed: func(_ string, ip net.IP) bool { return ip.IsLoopback() }}}, nil)
 	svc.SetTask("credential-task")
 	svc.DiscoveryAllowed = func(raw string) bool { return strings.HasPrefix(raw, target.URL+"/") }
 	if _, err = svc.Collect(context.Background(), []string{target.URL + "/app.js", target.URL + "/api/password"}, webcollect.Options{Role: "reader"}); err != nil {
@@ -254,7 +254,7 @@ func TestAPIKeysEnvironmentAndOtherSecretsReachAllOutputs(t *testing.T) {
 			return fmt.Errorf("outside fixture")
 		}
 		return nil
-	}, IPAllowed: func(ip net.IP) bool { return ip.IsLoopback() }}}
+	}, IPAllowed: func(_ string, ip net.IP) bool { return ip.IsLoopback() }}}
 	svc := webcollect.New(ws.Store, broker, nil)
 	svc.DiscoveryAllowed = func(raw string) bool { return strings.HasPrefix(raw, target.URL+"/") }
 	if _, err = svc.Collect(context.Background(), []string{target.URL + "/api/secrets", target.URL + "/config/env", target.URL + "/key.pem"}, webcollect.Options{Role: "reader"}); err != nil {

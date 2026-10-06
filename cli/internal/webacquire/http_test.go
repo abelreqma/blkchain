@@ -7,13 +7,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
 )
 
 func fixtureBroker() *Broker {
-	return &Broker{Policy: Policy{Authorize: func(context.Context, Request) error { return nil }, IPAllowed: func(ip net.IP) bool { return ip.IsLoopback() }}}
+	return &Broker{Policy: Policy{Authorize: func(context.Context, Request) error { return nil }, IPAllowed: func(_ string, ip net.IP) bool { return ip.IsLoopback() }}}
 }
 func TestPinnedResolutionAndRedirectCredentials(t *testing.T) {
 	leaked := false
@@ -34,6 +35,37 @@ func TestPinnedResolutionAndRedirectCredentials(t *testing.T) {
 	}
 	if _, e = b.Fetch(context.Background(), Request{Method: "GET", URL: src.URL}); e == nil {
 		t.Fatal("mixed DNS accepted")
+	}
+}
+
+func TestPinnedRequestChecksHostnameWithAddress(t *testing.T) {
+	var reached atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Add(1)
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, "http://evil.example.test"+r.URL.RequestURI(), http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte("authorized"))
+	}))
+	defer server.Close()
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Host = net.JoinHostPort("api.example.test", u.Port())
+	broker := fixtureBroker()
+	broker.Policy.Resolve = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("127.0.0.1")}, nil
+	}
+	broker.Policy.IPAllowed = func(host string, ip net.IP) bool {
+		return host == "api.example.test" && ip.IsLoopback()
+	}
+	if out, err := broker.Fetch(context.Background(), Request{URL: u.String() + "/ok"}); err != nil || string(out.Body) != "authorized" {
+		t.Fatalf("authorized hostname failed: %+v %v", out, err)
+	}
+	if _, err := broker.Fetch(context.Background(), Request{URL: u.String() + "/redirect"}); err == nil || reached.Load() != 2 {
+		t.Fatalf("redirect to another hostname at the same IP was accepted: requests=%d err=%v", reached.Load(), err)
 	}
 }
 func TestCompressedBombCancellationAndBudget(t *testing.T) {

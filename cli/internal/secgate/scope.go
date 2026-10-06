@@ -13,9 +13,11 @@ import (
 // scopeMatcher matches a target string (hostname or IP text) against one scope
 // entry.
 type scopeMatcher struct {
-	host string     // set for an exact hostname (lowercased) match
-	ip   net.IP     // set for an exact IP match
-	cidr *net.IPNet // set for a CIDR match
+	host     string     // set for an exact hostname (lowercased) match
+	wildcard string     // set for a subdomain suffix (lowercased)
+	ip       net.IP     // set for an exact IP match
+	cidr     *net.IPNet // set for a CIDR match
+	pinned   bool       // set for addresses added after resolving a hostname
 }
 
 func (m scopeMatcher) matches(target string) bool {
@@ -35,6 +37,9 @@ func (m scopeMatcher) matches(target string) bool {
 		}
 		return false
 	}
+	if m.wildcard != "" {
+		return strings.HasSuffix(t, "."+m.wildcard) && isHostname(t)
+	}
 	return m.host != "" && m.host == t
 }
 
@@ -46,6 +51,9 @@ func parseMatcher(entry string) (scopeMatcher, error) {
 	}
 	if ip := net.ParseIP(e); ip != nil {
 		return scopeMatcher{ip: ip}, nil
+	}
+	if strings.HasPrefix(e, "*.") && len(e) <= 253 && strings.Contains(e[2:], ".") && isHostname(e[2:]) {
+		return scopeMatcher{wildcard: strings.ToLower(e[2:])}, nil
 	}
 	if isHostname(e) {
 		return scopeMatcher{host: strings.ToLower(e)}, nil
@@ -287,6 +295,56 @@ func (s *Scope) InScope(target string) bool {
 	}
 	for _, m := range s.in {
 		if m.matches(target) {
+			return true
+		}
+	}
+	return false
+}
+
+// WebAddressAllowed ties resolved web and wildcard-command addresses to the requested hostname.
+func (s *Scope) WebAddressAllowed(host string, ip net.IP) bool {
+	if s == nil || ip == nil || !s.InScope(host) {
+		return false
+	}
+	if s.IsDirectedBroadcast(ip) {
+		return false
+	}
+	address := ip.String()
+	for _, matcher := range s.out {
+		if matcher.matches(address) {
+			return false
+		}
+	}
+	if !ip.IsGlobalUnicast() {
+		explicit := false
+		for _, matcher := range s.in {
+			if !matcher.pinned && (matcher.ip != nil || matcher.cidr != nil) && matcher.matches(address) {
+				explicit = true
+				break
+			}
+		}
+		if !explicit {
+			return false
+		}
+	}
+	if s.InScope(address) {
+		return true
+	}
+	for _, matcher := range s.in {
+		if matcher.wildcard != "" && matcher.matches(host) {
+			return true
+		}
+	}
+	return false
+}
+
+// WildcardHost reports whether an allowed hostname matches a wildcard entry.
+func (s *Scope) WildcardHost(host string) bool {
+	if s == nil || !s.InScope(host) {
+		return false
+	}
+	for _, matcher := range s.in {
+		if matcher.wildcard != "" && matcher.matches(host) {
 			return true
 		}
 	}

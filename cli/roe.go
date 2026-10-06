@@ -32,6 +32,15 @@ Describe the authorized engagement here.
 ## Rate
 10/s
 
+## Allowed Actions
+<!-- All actions below are enabled. Wrap an entire entry in an HTML comment to disable it. -->
+- command
+- local
+- api-read
+- api-write
+- browser-read
+- browser-write
+
 ## Autonomous Actions
 <!-- phase/surface target, e.g. exploit/network 192.0.2.1 or recon/local local -->
 `
