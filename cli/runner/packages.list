@@ -1,0 +1,50 @@
+# Top-level packages installed into the isolated runner image. The per-arch
+# .lock files are the digest-pinned dependency closure of this list; regenerate
+# them with gen-lock.sh after any change here. cli/toolcatalog.go declares which
+# binary each entry provides, and TestCatalogPackagesAreDeclared asserts the two
+# agree.
+
+# base: shell-free execution, scratch handling, and the guard firewall
+bash
+binutils
+file
+iptables
+libcap-utils
+openssl
+python3
+
+# network and DNS reconnaissance
+bind-tools
+curl
+masscan
+nmap
+nmap-ncat
+tcpdump
+
+# service enumeration
+net-snmp-tools
+nbtscan
+nfs-utils
+openldap-clients
+samba-client
+sslscan
+
+# web and content discovery
+# dnsrecon is deliberately absent: Alpine's package imports the stamina module,
+# which has no Alpine package, so the tool fails at startup. DNS enumeration
+# uses bind-tools (dig, host, nslookup) instead.
+ffuf
+jq
+
+# identity and directory
+krb5
+
+# cloud and cluster
+aws-cli
+kubectl
+
+# exploitation and analysis
+gdb
+john
+py3-impacket
+socat
