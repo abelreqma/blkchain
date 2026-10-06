@@ -6,8 +6,6 @@ import (
 	"sort"
 
 	"github.com/qdrant/go-client/qdrant"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // sourceFacetLimit caps how many distinct sources SourceCounts asks Qdrant
@@ -41,8 +39,7 @@ func (c *Client) SourceCounts(ctx context.Context) ([]SourceCount, bool, error) 
 		Exact:          qdrant.PtrOf(true),
 	})
 	if err != nil {
-		switch status.Code(err) {
-		case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled:
+		if unreachable(err) {
 			return nil, false, fmt.Errorf("%w: qdrant: %v", ErrUnreachable, err)
 		}
 		return nil, false, fmt.Errorf("listing sources: %w", err)

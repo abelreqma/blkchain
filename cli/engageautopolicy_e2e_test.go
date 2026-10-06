@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,9 +12,7 @@ import (
 )
 
 func TestRoEAutoArmLocalLLM(t *testing.T) {
-	if os.Getenv("BLKCHAIN_ENGAGE_LLM_E2E") != "1" {
-		t.Skip("requires the local LLM stack")
-	}
+	requireLocalStack(t, "requires the local LLM stack")
 	t.Setenv("BLK_ENABLE_THINKING", "0")
 	cfg := ragconfig.Load()
 	model, err := newOMLX(cfg, resolveModel(cfg))

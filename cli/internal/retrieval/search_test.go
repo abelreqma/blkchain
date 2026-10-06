@@ -12,6 +12,8 @@ import (
 
 	"github.com/qdrant/go-client/qdrant"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"blkchain/cli/internal/ragconfig"
 )
@@ -129,5 +131,35 @@ func TestSearchUnreachableQdrantGivesActionableError(t *testing.T) {
 	_, err = c.Search(context.Background(), "ssrf", 5, nil)
 	if err == nil || !errors.Is(err, ErrUnreachable) {
 		t.Fatalf("want ErrUnreachable, got %v", err)
+	}
+}
+
+// TestUnreachableClassifiesOnlyTransportFailures pins the distinction the
+// operator-facing error depends on: a service that could not be reached says so
+// and names `blk up`, while a request the service answered and refused, such as
+// one naming a collection that does not exist, must not, because the services
+// are already running and the advice would send the operator after the wrong
+// problem.
+func TestUnreachableClassifiesOnlyTransportFailures(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"unavailable", status.Error(codes.Unavailable, "connection refused"), true},
+		{"deadline", status.Error(codes.DeadlineExceeded, "timed out"), true},
+		{"canceled", status.Error(codes.Canceled, "canceled"), true},
+		{"missing collection", status.Error(codes.NotFound, "Collection `x` doesn't exist!"), false},
+		{"invalid argument", status.Error(codes.InvalidArgument, "bad vector name"), false},
+		{"internal", status.Error(codes.Internal, "boom"), false},
+		{"plain error", errors.New("not a status"), false},
+		{"nil", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := unreachable(tc.err); got != tc.want {
+				t.Errorf("unreachable(%v) = %t, want %t", tc.err, got, tc.want)
+			}
+		})
 	}
 }

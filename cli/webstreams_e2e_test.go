@@ -136,14 +136,30 @@ func TestWebWorkerWebSocketE2E(t *testing.T) {
 	if err := os.WriteFile(certFile, certs, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(root, ".blkchain"), 0700); err != nil {
-		t.Fatal(err)
+	// One RoE carries scope and the permitted action classes. The retired
+	// .blkchain/config.yaml allowed_binaries list named web actions, not
+	// binaries: navigate is browser-read, GET is api-read, and POST and the
+	// websocket upgrade are api-write. A run started beside a config.yaml is
+	// refused outright, so the fixture writes none, which also leaves the
+	// unattended allowlist unset and lets --auto run unattended.
+	//
+	// The two loop passes below are two policies, which is what the traffic
+	// assertions distinguish: the read-only RoE must see every write denied, and
+	// the write-authorized one must see them performed.
+	writeRoE := func(name string, actions ...string) string {
+		t.Helper()
+		body := "## In Scope\n127.0.0.1\n\n## Allowed Actions\n"
+		for _, a := range actions {
+			body += "- " + a + "\n"
+		}
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
 	}
-	if err := os.WriteFile(filepath.Join(root, ".blkchain/config.yaml"), []byte("allowed_binaries:\n  - web-browser:navigate\n  - web-api:GET\n  - web-api:POST\n  - web-api:WEBSOCKET\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	scopeFile := filepath.Join(root, "scope.txt")
-	_ = os.WriteFile(scopeFile, []byte("127.0.0.1\n"), 0600)
+	readOnlyRoE := writeRoE("ROE-read.md", "browser-read", "api-read")
+	writeAuthorizedRoE := writeRoE("ROE-write.md", "browser-read", "browser-write", "api-read", "api-write")
 	sessions := filepath.Join(root, "sessions.json")
 	data, _ := json.Marshal(map[string]any{"roles": []any{map[string]any{"name": "reader", "origin": origin, "headers_env": map[string]string{"Authorization": "BLK_FIXTURE_AUTH"}, "cookies_env": map[string]string{"session": "BLK_FIXTURE_SESSION"}}}})
 	_ = os.WriteFile(sessions, data, 0600)
@@ -172,7 +188,11 @@ func TestWebWorkerWebSocketE2E(t *testing.T) {
 			t.Fatal(err)
 		}
 		ws.Close()
-		out := run([]string{"engage", "web", "collect", origin, "--workspace", dir, "--scope", scopeFile, "--session", sessions, "--task", "stream-task", "--browser", "--auto", "--no-rdns", "--json"}, "")
+		roeFile := readOnlyRoE
+		if armed {
+			roeFile = writeAuthorizedRoE
+		}
+		out := run([]string{"engage", "web", "collect", origin, "--workspace", dir, "--roe", roeFile, "--session", sessions, "--task", "stream-task", "--browser", "--auto", "--no-rdns", "--json"}, "")
 		var snapshot webanalysis.Snapshot
 		if json.Unmarshal([]byte(out), &snapshot) != nil {
 			t.Fatal("invalid CLI snapshot")

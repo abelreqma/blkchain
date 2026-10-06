@@ -78,9 +78,7 @@ func (m *convergenceLiveModel) GenerateContent(ctx context.Context, msgs []llms.
 }
 
 func TestEngageConvergenceLocalLLM(t *testing.T) {
-	if os.Getenv("BLKCHAIN_ENGAGE_LLM_E2E") != "1" {
-		t.Skip("requires the local LLM and retrieval stack")
-	}
+	requireLocalStack(t, "requires the local LLM and retrieval stack")
 	t.Setenv("BLK_ENABLE_THINKING", "0")
 	cfg := ragconfig.Load()
 	modelID := resolveModel(cfg)

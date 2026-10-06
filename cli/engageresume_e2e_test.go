@@ -18,9 +18,7 @@ import (
 )
 
 func TestEngageResumeLocalLLM(t *testing.T) {
-	if os.Getenv("BLKCHAIN_ENGAGE_LLM_E2E") != "1" {
-		t.Skip("requires the local LLM stack and a built blk binary")
-	}
+	requireLocalStack(t, "requires the local LLM stack and a built blk binary")
 	project, wsDir := t.TempDir(), t.TempDir()
 	roePath := filepath.Join(project, "ROE.md")
 	if err := os.WriteFile(roePath, []byte("## In Scope\n192.0.2.1\n"), 0600); err != nil {
@@ -102,9 +100,7 @@ func TestEngageResumeLocalLLM(t *testing.T) {
 }
 
 func TestEngageExternalStopFlushesReport(t *testing.T) {
-	if os.Getenv("BLKCHAIN_ENGAGE_LLM_E2E") != "1" {
-		t.Skip("requires a built blk binary")
-	}
+	requireLocalStack(t, "requires a built blk binary")
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

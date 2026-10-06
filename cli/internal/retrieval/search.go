@@ -9,6 +9,8 @@ import (
 	"strconv"
 
 	"github.com/qdrant/go-client/qdrant"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"blkchain/cli/internal/ragconfig"
 )
@@ -19,6 +21,19 @@ const defaultQdrantPort = 6334
 // ErrUnreachable indicates the retrieval backend (embed_server or Qdrant)
 // could not be reached at all. Its text says how to fix that.
 var ErrUnreachable = errors.New("blkChain retrieval services are not reachable, start them with `blk up`")
+
+// unreachable reports whether a Qdrant error is a transport failure, so the
+// service could not be reached at all. A request the service answered and
+// refused, such as one naming a collection that does not exist, is not a
+// transport failure: reporting it as one sends the operator to start services
+// that are already running.
+func unreachable(err error) bool {
+	switch status.Code(err) {
+	case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled:
+		return true
+	}
+	return false
+}
 
 // Client is the hybrid retrieval client: it talks to embed_server (dense
 // embeddings and cross-encoder rerank) and Qdrant (hybrid dense+sparse search)
@@ -108,7 +123,10 @@ func (c *Client) Search(ctx context.Context, query string, topK int, filter map[
 		c.cfg.SparseModel, query, dense, filter, c.cfg.PoolSize)
 	points, err := c.qc.Query(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: qdrant: %v", ErrUnreachable, err)
+		if unreachable(err) {
+			return nil, fmt.Errorf("%w: qdrant: %v", ErrUnreachable, err)
+		}
+		return nil, fmt.Errorf("searching collection %q: %w", c.collection, err)
 	}
 	if len(points) == 0 {
 		return []Result{}, nil
