@@ -1,462 +1,306 @@
 # blkChain
 
-Local, offline, agentic **hybrid RAG over offensive-security / bug-bounty knowledge**, built for
-Apple Silicon beside a locally served LLM. Ask or search for security information and get a
-synthesized, **cited** answer. Machine retrieval through `kb_search` or `blk search --json` returns
-ranked source chunks. The knowledge base and inference can run locally
-and privately. The separate `blk engage` harness can connect to authorized target systems included in
-the engagement scope.
+blkChain is a local-first framework for authorized security assessment. Its core is `blk engage`, a
+Go harness that plans and executes bounded assessment tasks under an operator-defined rules of
+engagement (RoE) policy. A local security knowledge base supplies retrieval, cited answers, and
+technique context during an engagement. The terminal client and interactive session expose the
+harness; the MCP server provides retrieval and RoE-bound engagement tools.
 
-> Tested on an Apple Silicon Mac (arm64, 24 GB unified memory, macOS 27).
+The project is under active development. It already supports scoped engagement runs, evidence
+collection, web application analysis, local research, and saved reports. It does not claim to find
+or verify every vulnerability. The sections below distinguish current behavior from intended work.
 
-## What it does
-- **`kb_search`**: hybrid retrieval (dense + BM25 sparse, fused by Qdrant RRF) then a cross-encoder
-  rerank, returning the top few chunks with source pointers. Sub-second. Your fast recall tool.
-- **`kb_answer`**: a bounded agentic loop that retrieves, grades sufficiency, optionally rewrites or
-  web-searches (Tavily), then synthesizes a grounded, source-cited answer.
-- **`blk engage`**: a Go harness for autonomous penetration testing within an operator-approved
-  engagement scope.
+## Product model
 
-Both are reachable from the `blk` terminal client and from the Hermes agent through the MCP server
-`blk mcp`.
+An engagement starts with an operator-approved RoE and a goal. The harness creates a task graph,
+selects an executor for each reachable surface, runs permitted actions, captures exact evidence, and
+writes a report that preserves completed and unfinished work. The model can propose tasks, tool
+arguments, and advisory techniques. Code owns scope, action authorization, task identity, resource
+limits, and execution.
 
-**Architecture.** The Go `blk` binary is the single implementation for search, ask, health, and MCP.
-It owns retrieval orchestration and the answer loop. Python serves the MLX models (`embed_server`)
-and builds the index offline (`blk add` and the indexing scripts). There is no Python query path,
-HTTP API, or Python MCP server.
+The intended end state is a repeatable assessment workflow that can move from asset discovery
+through focused testing, evidence-backed validation, and reporting while keeping the operator's
+authorization and the target's data separate. The knowledge base supports that workflow; it is also
+available as a standalone research tool.
 
-## Engagement security model
+| Status | Scope |
+| --- | --- |
+| Available | Local hybrid retrieval and cited answers; CLI, interactive, and MCP access; RoE-gated engagements; isolated command execution; persistent tasks, evidence, and reports; bounded web collection and replay. |
+| In development | Deeper finding correlation and validation across assessment surfaces; more consistent evidence grades and report semantics; broader end-to-end engagement evaluation. |
+| Planned direction | A unified web assessment workflow, richer surface-specific testing, and release processes that make behavior and limits reproducible across supported installations. These are goals, not commands or guarantees in the current release. |
 
-The operator's authorization is the premise for target testing. The engagement's rules of engagement
-(RoE) define allowed targets and actions. When the RoE authorizes active testing, `blk engage` is
-designed to run those actions autonomously within the RoE, rate, time, and resource limits. Per-action
-confirmation is not a universal security requirement. Capabilities may still require confirmation in
-the current implementation; check the capability's actual gate behavior before relying on unattended
-execution.
+## Current capabilities
 
-The runner and operator environment are protected boundaries. Target-controlled pages, responses,
-files, and tool output are hostile input. Target-facing workers must not gain access to unrelated host
-files, credentials, local services, or network destinations. Scope enforcement must cover DNS
-resolution, redirects, and browser subresources. Private or internal targets are allowed when the RoE
-explicitly includes them; target network actions with missing or ambiguous scope fail closed. Target
-content cannot choose the target, authorize an action, or arm a task.
+### Authorized engagement harness
 
-## Services
-Local processes, started on demand (nothing autostarts). Retrieval needs only Qdrant and
-`embed_server`. The LLM is an external process you run separately.
+`blk engage` runs multi-step assessments in Auto or Safe mode. Auto executes actions allowed by the
+RoE without a prompt for every action. Safe requests interactive approval. The policy specifies
+in-scope and excluded targets, allowed and denied action types, command denials, rate limits,
+resource caps, and the isolated runner. Empty or ambiguous scope fails closed.
 
-| Service | Port | What |
-|---|---|---|
-| Qdrant | 6333 (HTTP), 6334 (gRPC) | vector store (hardened image), hybrid dense+sparse collection |
-| embed_server | 8100 | dense embedder (Qwen3-Embedding-0.6B-4bit-DWQ) + reranker (default gte-reranker-modernbert-base; Qwen3-Reranker-0.6B or jina-v3 optional), MLX, resident |
-| LLM | 8000 | any OpenAI-compatible local model, run separately (e.g. via the oMLX app or CLI) |
+The harness records tasks, dependencies, evidence, coverage gaps, policy decisions, and action
+transcripts in an engagement workspace. It supports stop and resume. Resume requires the same sealed
+policy and retains the original deadline and usage counters. A run that reaches a limit or cannot
+finish produces an incomplete report rather than claiming completion.
 
-## Quickstart
-Use the pinned Apple Silicon setup below. It locks the Python interpreter, Python dependency graph,
-Go modules, Qdrant image, and model revisions. The corpus and synthesis LLM remain user supplied.
+The current executor registry covers network, web, local host, container, Active Directory, cloud,
+and AI application assessment paths. Depth differs by surface:
+
+| Surface | Current implementation |
+| --- | --- |
+| Network | Tiered asset and service discovery, fingerprinting, and evidence-backed candidate tasks. A candidate is an investigation lead, not a verified exploit. |
+| Web | Bounded browser and HTTP collection, source analysis, role-aware observations, and scoped replay. The detailed workflow appears below. |
+| Local host | Read-only enumeration of identity, privileges, file permissions, capabilities, scheduled tasks, and services, with focused analysis of a selected executable. |
+| Container | Container and Kubernetes reconnaissance through a specialized tier ladder and the shared gated executor. |
+| Active Directory | Domain-controller discovery and staged anonymous, authenticated, and finding-driven enumeration through the shared executor. |
+| Cloud | Shared metadata, storage, and identity reconnaissance with AWS, Azure, and GCP-specific ladders. These are not three independent cloud API engines. |
+| AI application | Endpoint and model discovery, capability and prompt-injection probes, and evidence-derived follow-on candidates. |
+
+Reconnaissance, candidate generation, and task execution are separate steps. A retrieved technique
+or model suggestion does not establish a vulnerability or authorize execution. Candidate targets and
+armed state are derived by code and remain subject to the RoE gate.
+
+### Web application analysis
+
+`blk engage web` provides `collect`, `analyze`, `inspect`, `import`, `archive`, `export`, and
+`replay` actions. Collection and replay require the operator RoE; inspection and export can read
+saved evidence without contacting a target.
+
+The collector follows a bounded discovery frontier and can use an isolated browser to capture
+rendered pages, runtime scripts, frames, workers, WebSocket traffic, and observed requests. Analysis
+processes JavaScript, TypeScript, JSX, source maps, and selected framework patterns to recover API
+operations, parameters, GraphQL calls, and source locations. It records unresolved dependencies and
+exhausted limits as coverage gaps. Role sessions use credentials supplied through environment
+references and keep them bound to the configured origin.
+
+The web workflow supports HAR import, historical source collection, structured HTTP replay, and
+operator-supplied exact WebSocket exchanges. Operations and findings carry evidence grades that
+distinguish discovery, an observed response, an advisory match, and a validated exchange. A static
+match or detected credential is a lead until its relevance and impact are checked. The workspace
+retains captured artifacts and exact request data; treat its files and JSON exports as sensitive.
+
+Run `blk engage web help` for current flags. See [web analysis details](cli/web-analysis.md) for
+limits and data formats.
+
+### Local knowledge and research
+
+The offline indexer accepts user-supplied Markdown, code and text files, supported JSON content,
+PDFs, and catalog-style wordlist metadata. It chunks content structurally, creates dense and BM25
+sparse vectors, and reconciles changed content by hash. Go queries Qdrant using hybrid retrieval,
+then optionally reranks the candidate pool with a local cross-encoder.
+
+`blk search --json` and the `kb_search` MCP tool return ranked source chunks. `blk ask` and
+`kb_answer` run a bounded answer loop that can grade context, rewrite a query, and synthesize a
+cited response. Optional public web research is controlled separately by the saved web permission.
+Retrieved text is evidence for the model, never an instruction or executable command. Cited answers
+still require human review when accuracy matters.
+
+The knowledge base is not the execution authority for an engagement. It can supply an advisory
+technique and citation; the command gate makes its decision from code-owned task and RoE fields.
+
+### Operator interfaces and integration
+
+The `blk` binary provides one-shot commands, a keyboard-driven interactive session, a plain REPL,
+model controls, history, context attachments, queued questions, source viewing, and service
+diagnostics. `blk mcp` exposes `kb_search`, `kb_answer`, `route_skill`, `engage`, and `kg` over
+stdio. MCP engagement requires an operator-owned RoE file named by `BLKCHAIN_MCP_ROE_PATH`; a
+caller-supplied policy must match it.
+
+`blk health`, `blk doctor`, `blk models`, and `blk status` report the state of the local stack.
+`blk up` and `blk down` manage Qdrant and the embedding server. The synthesis LLM is served
+separately through an OpenAI-compatible local endpoint.
+
+## Authorization and data boundaries
+
+Use blkChain only on systems and applications you are authorized to assess. The RoE is the authority
+for target-facing actions. Authorized private and internal targets are supported when they appear in
+scope. The isolated command runner restricts host access, network destinations, CPU, memory,
+processes, output, and time. The web request broker checks destinations on resolution and redirect,
+and the browser runs in an isolated container. Target responses, retrieved documents, and tool
+output are untrusted data.
+
+The workspace can contain raw responses, request bodies, tokens, and credential candidates. It uses
+owner-only permissions on supported Unix systems, but operators remain responsible for storage,
+retention, and sharing. Web exports and `--json` output can contain exact values. Do not publish an
+engagement workspace or a report without reviewing it.
+
+Web research for answers is a separate permission from engagement authorization. Enabling it can
+send a research query to a configured provider. It does not expand engagement scope.
+
+## Architecture
+
+| Component | Responsibility |
+| --- | --- |
+| `cli/` | Go terminal client, engagement orchestration, policy gate, executors, web workflow, retrieval client, answer loop, reports, and MCP server. |
+| `cli/internal/engagement/` | Persistent task, evidence, and graph state. |
+| `cli/internal/secgate/` | Scope, action, command, and resource policy. |
+| `cli/internal/webcollect/`, `webanalysis/`, `webacquire/` | Web acquisition, analysis, and scoped HTTP/WebSocket access. |
+| `blkchain/` | Python MLX embedding and reranking server, offline ingestion and indexing, and evaluation tools. |
+| Qdrant | Local dense and sparse index queried by Go. |
+| Local LLM server | Separately managed OpenAI-compatible inference endpoint. |
+
+Go owns query-time retrieval, answering, engagement execution, and MCP. Python serves embeddings and
+reranking over localhost and builds the index offline. The corpus and model weights are supplied by
+the operator and are not distributed in this repository.
+
+| Service | Default endpoint | Role |
+| --- | --- | --- |
+| Qdrant | `127.0.0.1:6333` HTTP, `127.0.0.1:6334` gRPC | Persistent hybrid index. |
+| Embedding server | `127.0.0.1:8100` | Resident MLX embedder and reranker. |
+| Local LLM | `127.0.0.1:8000/v1` | Separately managed answer and engagement model. |
+
+## Requirements and setup
+
+The MLX model service requires macOS on Apple Silicon. The repository pins Python 3.12.14 in
+`pyproject.toml`, Go 1.27.1 in `cli/go.mod`, Python packages in `uv.lock`, and Go modules in
+`cli/go.sum`. Docker is required for Qdrant and the isolated engagement runner. A local
+OpenAI-compatible LLM is required for answers and model-driven engagements; raw search does not
+require it.
+
+From the repository root:
+
 ```sh
-# 1. Install the pinned tools: uv 0.12.16, Go 1.27.1, and Docker Engine 29.8.1.
-#    Install Python 3.12.14 through uv, then install the locked Python graph.
 uv python install 3.12.14
 uv venv .venv --python 3.12.14
 uv sync --locked
+(cd cli && go mod download && go build -o blk .)
+cp .env.example .env
+```
 
-# 2. Verify/install Go dependencies from the checked-in go.mod and go.sum.
-cd cli && go mod download && cd ..
+Set corpus and model locations in `.env` or the process environment. The default model paths under
+`BLKCHAIN_MODELS_DIR` expect `Qwen3-Embedding-0.6B-4bit-DWQ` and `gte-reranker-modernbert-base-mlx`.
+Download the model revisions appropriate to the configured paths before starting the embedding
+server. No model weights or corpus files ship with blkChain. Keep credentials in the environment and
+leave `.env` untracked.
 
-# 3. Point blkChain at your models and corpus. Keep API keys in the ignored .env.
-cp .env.example .env    # then edit (see Configuration)
+With the Hugging Face `hf` CLI installed, provision the default model revisions:
 
-# 4. Start Qdrant (pinned by digest; loopback only; storage under ./data)
+```sh
+export BLKCHAIN_MODELS_DIR="${BLKCHAIN_MODELS_DIR:-$PWD/models}"
+mkdir -p "$BLKCHAIN_MODELS_DIR"
+hf download mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ \
+  --revision 6c3ae70858513f1a78e9cdca3cae330d9075cd2a \
+  --local-dir "$BLKCHAIN_MODELS_DIR/Qwen3-Embedding-0.6B-4bit-DWQ"
+hf download afanjul/gte-reranker-modernbert-base-mlx \
+  --revision 0b1cfb9141dd1452e07a328a0dec430f2324da12 \
+  --local-dir "$BLKCHAIN_MODELS_DIR/gte-reranker-modernbert-base-mlx"
+```
+
+The optional Qwen3 and Jina rerankers use different model paths and licenses. Select one with
+`BLKCHAIN_RERANKER_KIND` only after reviewing its upstream terms. A different embedding dimension
+requires a new Qdrant collection.
+
+Start the local retrieval services and index your supplied corpus:
+
+```sh
+mkdir -p data/qdrant_storage
 docker run -d --name blkchain-qdrant --restart unless-stopped \
   -p 127.0.0.1:6333:6333 -p 127.0.0.1:6334:6334 \
   -v "$PWD/data/qdrant_storage:/qdrant/storage" \
   dhi.io/qdrant@sha256:047fe742edb0c61908acca3fb726b14018f5361d2e0dbabb1a94e47a72448cba
-
-# 5. Start the embed + rerank server (:8100)
 .venv/bin/python -m blkchain.embed_server &
-
-# 6. Build or reconcile the index after changing configured corpus sources
 .venv/bin/python -c "from blkchain import index; print(index.build_index(snapshot_version='v1'))"
-
-# 7. Build the Go client and query it
-(cd cli && go build -o blk .)
-cli/blk search --top-k 5 stacked queries sqli
-cli/blk ask what is reflected XSS
-```
-The synthesis LLM (:8000) is brought up separately (e.g. via the oMLX app or its CLI). The `blk`
-terminal client is a first-class way to drive the stack; see [Terminal client](#terminal-client-blk).
-
-The lock files are part of the setup contract: `uv.lock` records exact Python transitive versions
-and package hashes, and `cli/go.mod` plus `cli/go.sum` pin and verify Go modules. Use `uv sync --locked`;
-do not install with an unlocked `uv pip install -e .`. The setup requires macOS on Apple
-Silicon for MLX. The Python tests and Go tests run without live Qdrant, embedding models, or an LLM.
-
-## Layout
-```
-blkchain/                Python 3.12: MLX model server, offline indexing, evaluation harness
-  config.py              central config + corpus manifest (all paths/params via env; secrets via env only)
-  contract/rag.json      shared RAG parameter contract, read by the Go CLI (Python keeps its own copies of what it needs)
-  schema.py              the Chunk + Qdrant payload contract
-  httputil.py            shared HTTP helpers (strict-JSON writer, bounded body reader, sanitized errors)
-  embed_server.py        resident embed + rerank HTTP server (:8100), MLX
-  reranker.py            reranker dispatcher (selects the backend via BLKCHAIN_RERANKER_KIND)
-  reranker_qwen3.py      Qwen3-Reranker-0.6B causal-LM reranker (Apache-2.0, instruction-aware)
-  reranker_modernbert.py gte-reranker-modernbert-base cross-encoder (default, Apache-2.0, fastest)
-  reranker_jina.py       jina-reranker-v3 listwise backend (CC-BY-NC-4.0, non-commercial)
-  rerank_scores.py       score sanitization (ranks empty or non-finite scores last)
-  ingest.py              structure-aware chunking of the corpus
-  index.py               embed + BM25 sparse -> Qdrant, resumable; add_path for `blk add`; SSRF guard
-  add.py                 `blk add` backend surface (file, directory, or URL into the live index)
-  eval/                  evaluation harness + labeled dataset (retrieval gate, optional LLM judge); drives the Go `blk` binary
-cli/                     Go `blk` client: retrieval, answer loop, health, MCP server, stack control (see Terminal client)
-scripts/                 helper scripts (rendering utilities)
-tests/                   Python unit tests (hermetic: no live services, models, or network)
-pyproject.toml           pinned direct dependencies and Python runtime
-uv.lock                  full transitive Python lock with artifact hashes
+cli/blk search --json --top-k 5 "server-side request forgery"
 ```
 
-## Configuration
-The project is self-contained: `blkchain/config.py` defaults every path to a project-relative
-location, and machine-specific locations come from the environment or a gitignored `.env` at the
-project root (`cp .env.example .env`). Nothing assumes a parent or sibling directory. Precedence is
-**environment > `.env` > built-in default**. **Secrets are read from the environment only, never
-hardcoded.** See [`.env.example`](.env.example) for every variable; the essentials:
+Start the synthesis LLM separately, then run `cli/blk doctor` and `cli/blk ask "What is SSRF?"`.
+`cli/blk install` copies the built binary to a directory on `PATH` if you want to use `blk` from
+other directories. Run `blk help env` for current environment variables and `blk help <command>` for
+command flags.
 
-- **Data:** `BLKCHAIN_MODELS_DIR` (dense embedder + reranker; default `<project>/models`),
-  `BLKCHAIN_SOURCES_DIR` (corpus root; default `<project>/corpus`), `BLKCHAIN_WSTG_PDF`.
-- **Optional corpora** (omit to skip): `BLKCHAIN_SECLISTS_DIR`, `BLKCHAIN_SKILLS_DIR`.
-- **Services:** `QDRANT_URL`, `BLKCHAIN_EMBED_HOST/PORT`, `BLKCHAIN_COLLECTION`.
-- **LLM:** `OMLX_BASE_URL`, `OMLX_MODEL`, `OMLX_API_KEY` (read by `blk` and the eval judge).
-- **Engagement convergence:** `BLKCHAIN_ENGAGE_MAX_ROUNDS` (default 32, clamped to 1..256),
-  `BLKCHAIN_ENGAGE_MAX_CALLS` (128, 1..2048), and `BLKCHAIN_ENGAGE_NO_PROGRESS_ROUNDS` (3, 1..32).
-  Unset or invalid integers use defaults. These settings apply to orchestration in the CLI,
-  REPL/TUI, and MCP. New evidence, task changes or completions, and recon coverage reset the idle
-  counter. Repeated identical updates, duplicate evidence, and dispatch bookkeeping do not.
-  A capped or stalled run makes one final report call with tools disabled; if it fails, the run
-  returns a report from stored evidence. This extra call falls outside the orchestration caps and
-  has a 2048-token output cap. Saved CLI reports mark capped or stalled runs as paused.
-  Executor loop limits remain separate.
-  `BLKCHAIN_ENGAGE_ORCHESTRATOR_MODEL` selects a separate model ID for orchestration and final
-  synthesis. Executors keep the `--model` selection, REPL/TUI model selection, or MCP model
-  argument. An unset override uses that same model for both roles. The model must be available
-  on the configured LLM server.
-  The whole engagement also has an action budget (default 512 model and tool calls) and a
-  wall-clock deadline (default 1800 seconds). Set `engage_max_actions` and
-  `engage_wall_seconds` in the project's `.blkchain/config.yaml`; the corresponding
-  `BLKCHAIN_ENGAGE_MAX_ACTIONS` and `BLKCHAIN_ENGAGE_WALL_SECONDS` environment variables
-  take precedence. The start time and action count are stored in the engagement database, so
-  resuming the same workspace does not reset either limit. Budget exhaustion stops the run and
-  returns a report from the store.
-- **Answer sampling** (read by `blk`): `BLKCHAIN_SYNTH_TEMPERATURE` (default 0.7),
-  `BLKCHAIN_SYNTH_TOP_P` (0.95), `BLKCHAIN_SYNTH_TOP_K` (64), `BLKCHAIN_SYNTH_PRESENCE_PENALTY` (0.5).
-  The answer call sends `temperature`, `top_p`, `top_k`, and `presence_penalty`. LangChainGo drops
-  `top_p` and `top_k`, so the `blk` HTTP transport adds them as top-level fields. The grade call
-  sends only `temperature` 0, so grading stays deterministic. An unparsable value is ignored, and an
-  out-of-range one falls back to the default, with a one-line note on stderr.
-- **Web provider:** `BLKCHAIN_WEB_PROVIDER=auto|duckduckgo|tavily` overrides the saved selection.
-- **Secrets:** `TAVILY_API_KEY` or `TAVILY_SETUP_TOKEN` configures Tavily. `NVD_API_KEY` increases
-  the NVD request allowance for direct CVE lookups. Credentials alone do not
-  authorize web access.
+For an engagement, prepare an RoE for the authorized target, then build the isolated runner image:
 
-The corpus is defined by `config.CORPUS_SOURCES` (source dirs + handling kind), all derived from the
-paths above; no module hardcodes a document path, and sources whose directory is absent are skipped.
-Full `build_index()` reconciles removed or changed files only for configured source paths that are
-present, and only after ingestion completes successfully. Missing source roots are preserved because
-they may be offline or unmounted. `blk add` entries are marked as manual content and survive corpus
-reconciliation.
-When a configured root was intentionally removed, pass `prune_missing_sources=True` to `build_index()`
-to delete its old points. Use this only when the corpus is not temporarily offline.
+```markdown
+# Rules of Engagement
 
-## Usage
-```sh
-blk search --top-k 5 stacked queries sqli
-blk search --json --source hacktricks LFI to RCE
-blk ask what is reflected XSS
-blk sources
-blk health
+## In Scope
+- 192.0.2.10
+
+## Out of Scope
+- 192.0.2.11
+
+## Rate
+2/s
+
+## Allowed Actions
+- command
+- api-read
+- browser-read
 ```
-**Hermes:** the MCP server is `blk mcp`. Register it under `mcp_servers.blkchain` in your Hermes
-config with `blk` as the command and `mcp` as its argument; the agent then calls `kb_search` /
-`kb_answer` as tools. An older entry that runs `python -m blkchain.mcp_server` must be changed to
-run `blk mcp`, because that Python module no longer exists. The server also exposes
-`route_skill`, `engage`, and `kg`. Set `BLKCHAIN_MCP_ROE_PATH` to an operator-owned RoE file
-before calling `engage`; the inline policy must match it.
 
-## Terminal client (`blk`)
-`blk` is the Go terminal client for the stack and the single implementation of search, ask, health,
-and MCP. It performs retrieval natively (reading Qdrant over gRPC on :6334 and calling `embed_server`
-on :8100 directly) and runs its own bounded, cited answer loop. It shares the same Qdrant
-collection, the same `embed_server`, and the RAG parameter contract in `blkchain/contract/rag.json`
-(the Go build carries a compiled-in fallback that a test keeps byte-for-byte in sync with that file).
-
-Build and install:
-```sh
-cd cli && go build -o blk . && ./blk install   # install onto PATH; run once, from the project
-```
-Common commands (run `blk help` for the full list):
-
-| Command | What |
-|---|---|
-| `blk ask <query>` | synthesized, cited answer (streamed); `--agent` routes through the Hermes agent; `--json` adds `model` and marks web citations `untrusted` |
-| `blk search <query>` | synthesized, cited answer; `--json` returns raw ranked chunks; supports `--top-k`, `--source`, `--type`, `--filter`, `--json` |
-| `blk add <path>` | index your own file, directory, or URL into the live KB |
-| `blk sources` | list each indexed source with its chunk count, largest first, and the total; `--json` prints `{collection, total_chunks, sources: [{source, chunks}]}` |
-| `blk web <action>` | control or search the optional web research provider |
-| `blk engage web <verb> [targets]` | collect, analyze, inspect, import, archive, export, or replay JavaScript/API evidence under the RoE; [usage and limits](cli/web-analysis.md) |
-| `blk repl` | interactive REPL (bare `blk` too) for repeated search/ask |
-| `blk up / down / status` | start, stop, or check the local services (Qdrant and `embed_server`) |
-| `blk health` | check Qdrant, `embed_server`, and the LLM; `--json` prints `{ok, qdrant, embed_server, llm}`; exits 0 when all are up, 1 when any is down |
-
-| `blk doctor` | diagnose the whole stack, including Hermes MCP wiring |
-| `blk models` | readiness and live performance of the chat, embed, and rerank models |
-| `blk mcp` | native Go MCP stdio server exposing retrieval, answer, skill, engagement, and knowledge graph tools |
-| `blk open <path>` | open a source file in `$PAGER` or `$EDITOR`; opens at the cited section when your pager is less (`--section`, or `/open N` in the TUI) |
-| `blk logs [service]` | tail a service log (`embed_server`) |
-JSON answers include `llm_calls` with the stage, requested model, elapsed milliseconds,
-cache status, and reported token usage. Missing usage remains unavailable. The record list
-is bounded; `llm_calls_partial` indicates omitted calls. `/cost` shows these details in both
-terminal interfaces. Prompts, retrieved content, credentials, and error messages are excluded.
-
-Exact deterministic routing and RAG grading responses use a bounded, in-process cache.
-Entries expire after five minutes. Model, endpoint, credential, response-format, thinking,
-sampling, and evidence changes separate cached results. Generation, reconnaissance
-decisions, command execution, and authorization remain uncached.
-
-Structured graders request JSON mode. `blk analyze` uses a dedicated strict JSON-schema
-client while retaining local field validation and bounded retries. The model endpoint must
-support the requested response format. Prose and tool-calling clients retain their formats.
-
-
-`blk help <command>` (or `blk <command> --help`) shows one command's flags and examples, and
-`blk help env` lists every environment variable blk reads. A usage
-error (unknown command, missing argument, bad flag) exits with code 2; any other failure exits 1.
-
-**Typing.** The draft wraps to the terminal width and grows to six rows. Up/down move through
-wrapped drafts; they recall command history on a single unwrapped line. Enter submits, Ctrl-J
-inserts a newline, Ctrl-V pastes, and Ctrl-G opens `$VISUAL` or `$EDITOR`. Pasted text and editor
-results stay editable until Enter. Left/right, Backspace, Delete, and Ctrl-T preserve joined
-emoji and accented characters. Press `?` with an empty draft for the editing keys. Drafts have
-a 64 KiB UTF-8 limit and a 10,000-line limit; truncated input shows a notice.
-
-Unicode output renders emoji shortcodes such as `:thumbsup:` outside code blocks. The rich
-status ribbon uses standard Nerd Font icons. Terminals without that font use Unicode or ASCII
-fallbacks with `BLKCHAIN_POWERLINE=0` or `NO_COLOR=1`, respectively.
-
-The plain REPL supports `/history` to list saved sessions and `/history <number>` to reopen one,
-`/editor` to prepare a multiline draft, `/init` to reload project context, `/copy`, and `/clear`.
-`/clear` starts a new conversation and preserves saved history. `/undo` removes the last completed
-exchange from replay and the memory sent to subsequent native answers. `/help <command>` also
-describes interactive-only commands.
-Undo rejects inconsistent saved transcript and memory stores without changing either; `/clear`
-starts a fresh session while preserving those records.
-
-In the TUI, Tab completes slash commands and supported arguments, model names, source numbers, and file paths.
-Completion only fills the draft. It does not submit a question, load a model, or fetch a URL.
-The history picker supports `/` title filtering and a last-question preview.
-
-Use `/attach <path|URL>` or `/context add <path|URL>` to prepare the next question. `/context` opens
-the review panel; Enter previews an item and `d` removes it. The plain REPL provides the same
-actions as `/context list`, `/context preview N`, `/context remove N`, and `/context clear`.
-HTTP(S) links are detected in drafts with a URL pattern and validated with the URL parser.
-They remain references; their contents are not fetched. URL credentials are rejected. Pending
-context is capped at 16 items and 128 KiB, with 64 KiB per attached file. In the CLI, repeat
-`--context` to add files or links: `blk ask --context notes.txt --context https://example.org/notes "compare these notes"`.
-
-`/queue` pauses pending questions and opens their review panel while the active turn continues.
-Enter moves the selected question into the draft; `d` removes it and `r` resumes the queue.
-Explicit forms are `/queue list`, `/queue edit N`, `/queue remove N`, `/queue pause`, `/queue resume`,
-and `/queue clear`. The queue is capped at 16 questions and 256 KiB. An error or cancellation
-preserves queued questions and pauses automatic submission until `/queue resume`.
-`/open` with no argument opens a source picker; `p` previews bounded text and Enter uses the
-existing viewer. Web sources remain URL references. `/copy` copies the last answer.
-
-Unknown slash commands show an error; commands that require a picker identify the interactive TUI requirement.
-
-Both terminal interfaces support `/engage <goal>`, `/auto`, `/safe`, and
-`/transcript off|important|full`. Auto is the default: code runs actions permitted
-by the operator's `ROE.md` without per-action prompts. Safe asks for approval
-through an interactive terminal. `blk engage --roe ROE.md "assess the lab"` uses
-the same session path; `blk engage web collect ... --roe ROE.md` applies the RoE
-to standalone web collection and replay.
-
-`ROE.md` defines in-scope and excluded targets, allowed and denied actions,
-denied commands, rate and resource caps, and the runner. Run `blk engage setup`
-to build the isolated runner image before an engagement. Commands run as a
-non-root user in a read-only container with bounded CPU, memory, processes,
-output, time, and temporary storage. The network guard pins permitted DNS
-addresses, applies exclusions first, and blocks operator-host destinations.
-Command output and web broker bytes share the RoE total-byte counter across
-resume; captured web artifacts also obey the per-action output cap.
-Authorized private targets remain available when the RoE permits them. The
-browser uses an isolated container and the web broker checks each request and
-redirect against scope. The command gate blocks curl redirect flags and wget;
-use the browser or API path when redirects are needed. Command egress requires
-an explicit in-scope IP or CIDR entry. A hostname-only RoE can use the browser
-or API broker, which checks the hostname on every request.
-
-A workspace saves `run.json`, `policy.json`, `audit.jsonl`, `actions.jsonl`,
-exact captured evidence, and Markdown and JSON reports. Terminal action output
-is bounded and redacted; the private action record preserves captured bytes
-within the RoE caps. Denials, coverage gaps, unfinished tasks, and paused or
-interrupted status remain in reports. `blk engage stop --workspace PATH` cancels
-a running session. `blk engage --resume PATH` or `/engage resume PATH` requires
-the original RoE policy hash and retains the deadline, usage, evidence, and
-action sequence. `blk engage migrate` previews the proposed policy; `--write`
-creates a new file without replacing an existing operator RoE. Migrated
-allowed actions start empty until the operator grants them.
-
-The MCP `engage` tool requires `BLKCHAIN_MCP_ROE_PATH` to name an operator-owned
-RoE file. Its inline `roe` argument must resolve to the same policy hash; a
-caller cannot grant itself a different scope or action set. The tool returns
-the saved workspace, policy hash, report, and transcript paths.
-
-**Models panel.** In the interactive session, `/models` lists every model: the chat models the LLM
-server serves, the embedder, the reranker, and web search. Keys: up/down move, space turns the
-selected row on or off, `l` loads and `u` unloads a chat model (the active model needs a second
-`u`), enter uses a chat model for the rest of the session, `r` refreshes, esc closes. The same
-actions work as `/models on|off|load|unload <name>` in both REPLs, with `<name>` a chat model id (or
-a unique prefix), `reranker`, or `web`.
-
-- A chat model switched off is hidden from the `/model` picker; the active model cannot be hidden.
-- The reranker switch turns the cross-encoder rerank on or off; the web switch grants or revokes
-  permission for automatic web search in answers. Both apply to the CLI and interactive sessions;
-  `kb_answer` over MCP also respects the web permission.
-- Load and unload ask the LLM server's admin API to load or unload a chat model.
-- The switches are saved in `models.json` in `$XDG_CONFIG_HOME/blkchain` (default
-  `~/.config/blkchain`).
-
-**Web access.** A fresh configuration keeps automatic web search off. `blk web on` or `/web on`
-saves permission for answers to search the internet. `blk web off` or `/web off` revokes it. Existing
-saved web settings remain in effect. `blk web` and `/web` report permission and the selected provider.
+The addresses above are documentation examples. Replace them with the actual authorized scope.
 
 ```sh
-blk web provider auto
-blk web on
-blk web search --top-k 5 "OWASP XSS prevention"
-blk web search --json "current security guidance"
-blk ask --web "current security guidance"
-blk web off
+cli/blk engage setup
+cli/blk engage --roe ROE.md --workspace ./assessment \
+  "Enumerate the authorized target and report the observed services"
 ```
 
-Use `/web provider auto|duckduckgo|tavily`, `/web search <query>`, and `/ask --web <question>` in the
-plain REPL or TUI. `/search`, bare requests, and text search commands
-retrieve evidence and synthesize an answer. `/web search` uses web evidence and also synthesizes an
-answer. Internet requests require the saved web permission, including explicit web searches and
-`ask --web`; these commands do not change that permission. Text searches need the LLM, and local
-search also needs the retrieval services. `blk search --json` retains raw local retrieval output for
-scripts and evaluation, and `blk web search --json` returns raw web evidence when web is enabled.
-The TUI retains the evidence for `/generate` and citations for `/open`.
+`ROE.md` must name the actual authorized scope. The command will not infer authority from a goal or
+a model response. `blk engage web collect TARGET --roe ROE.md --workspace ./assessment --browser`
+runs the web collector under the same policy. Browser collection also requires its provisioned
+Playwright container and driver. Inspect `blk engage web help` for the available modes and flags.
 
-`auto` uses Tavily when a key is configured, otherwise DuckDuckGo. It falls back to DuckDuckGo on an
-empty or failed Tavily search. Explicit `tavily` or `duckduckgo` selection uses only that provider.
-DuckDuckGo uses HTML search and can require a CAPTCHA; blk reports that failure. Tavily reads
-`TAVILY_API_KEY` first, then `TAVILY_SETUP_TOKEN`. Search requests reject redirects, time out after
-20 seconds per provider, read at most 2 MiB, and return at most 20 results. Web content remains
-untrusted evidence, and answer citations identify web sources as untrusted. These commands provide
-search and cited answers; target browser automation belongs to the engagement browser tooling.
+## Common commands
 
-With web access enabled, a question containing an exact CVE ID fetches its NVD record directly and
-searches for matching public PoC leads on GitHub, Exploit-DB, and Sploitus. The CVE researcher
-uses the NVD description, score, affected-product hints, and references to explain prerequisites and
-give a scoped payload or validation playbook. Search results are leads, not verified exploits. The
-NVD lookup reads `NVD_API_KEY` from the environment when present and works without a key at the
-public rate limit. NVD and web citations are marked untrusted. `blk ask`, bare interactive questions,
-the plain REPL, the TUI, and `kb_answer` use the same answer loop.
+| Command | Purpose |
+| --- | --- |
+| `blk search --json <query>` | Return ranked local evidence without answer synthesis. |
+| `blk ask <question>` | Produce a cited answer from local evidence and optional permissioned web research. |
+| `blk add <path-or-url>` | Add a file, directory, or public URL to the local index. URL ingestion rejects unsafe destinations. |
+| `blk sources` | List indexed sources and chunk counts. |
+| `blk engage --roe ROE.md <goal>` | Start an RoE-gated assessment. |
+| `blk engage --resume <workspace>` | Resume under the original policy and remaining limits. |
+| `blk engage stop --workspace <path>` | Stop a running engagement. |
+| `blk engage web <action>` | Collect, analyze, inspect, import, archive, export, or replay web evidence. |
+| `blk kg --workspace <path>` | Query the engagement task and evidence graph. |
+| `blk mcp` | Serve retrieval and engagement tools over MCP stdio. |
+| `blk doctor` | Diagnose local services and configuration. |
 
-**Status line.** The interactive session's status line shows the mode (`rag` or `agent`), the model
-a turn uses (the `/model` pick, else `OMLX_MODEL`, else the first model the LLM server lists), the
-reasoning level, the embedder and reranker state in rag mode, the service health (or the Hermes
-gateway state in agent mode), the session title, and any queued questions.
+The interactive session starts with bare `blk`. Use `/help` for its commands. Model and web-search
+settings persist in the local configuration directory.
 
-`BLKCHAIN_ROOT` locates the project when `blk` runs from outside the repo; `NO_COLOR` disables colored output; `BLK_THEME=light|dark|auto` forces the palette when the terminal
-background cannot be detected (tmux, SSH), and `auto` falls back to `COLORFGBG`. Go tests run with
-`cd cli && go test ./...`.
+## Development and evaluation
 
-## Corpus
-blkChain indexes a corpus **you supply**; no documents are distributed with this repository. Point
-`BLKCHAIN_SOURCES_DIR` at a directory of your chosen sources and build the index. It is designed for
-public offensive-security references such as:
+The default test suites use fixtures and do not require live models or target services:
 
-- HackTricks: https://github.com/HackTricks-wiki/hacktricks
-- HackTricks Cloud: https://github.com/HackTricks-wiki/hacktricks-cloud
-- PayloadsAllTheThings: https://github.com/swisskyrepo/payloadsallthethings
-- AI-penetration-testing: https://github.com/Mr-Infect/AI-penetration-testing
-- OWASP Web Security Testing Guide (WSTG v4.2): https://owasp.org/www-project-web-security-testing-guide/
-- SecLists: https://github.com/danielmiessler/SecLists (indexed **catalog-only**: one manifest card per wordlist, never line-by-line)
-- Arsenal: https://github.com/inflictx/Arsenal (a curated web-security technique database; two subtrees are indexed: `seed/curated-en/*.json`, 60+ vulnerability classes read by the `json` ingest kind, and `seed/checklists-en/*.md`, operational and research methodology)
-- violin: https://github.com/Strategic-Automation/violin (its `skills/` methodology subtree)
-- A curated, deduplicated snapshot of your own offensive-* Claude skills, staged into the corpus (about 79 skills covering the wider offensive surface: AD, wifi/RF, mobile, exploit development, and more)
-- CAI: https://github.com/aliasrobotics/CAI (two cherry-picked docs only, `research.md` and the prompt-injection doc, not the whole framework)
-
-Markdown, plain-text/code, JSON, and PDF sources are chunked structurally; wordlist-scale trees are indexed
-catalog-only. CVE/PoC lookups use the live Tavily web route rather than a local clone (e.g.
-https://github.com/nomi-sec/PoC-in-GitHub). Stored document paths are relative to the corpus root, so
-the index is portable across machines.
-
-## Models & licenses
-blkChain references models by name and you download them at setup; **no model weights are bundled or
-redistributed in this repository** (the models directory is external and gitignored). Each model
-keeps its own license:
-
-| Role | Model | License |
-|---|---|---|
-| Dense embedder | [`mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ`](https://huggingface.co/mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ) (1024-dim) | Apache-2.0 |
-| Reranker (default) | [`afanjul/gte-reranker-modernbert-base-mlx`](https://huggingface.co/afanjul/gte-reranker-modernbert-base-mlx) | Apache-2.0 |
-| Reranker (alternatives) | [`mlx-community/Qwen3-Reranker-0.6B-4bit`](https://huggingface.co/mlx-community/Qwen3-Reranker-0.6B-4bit) (instruction-aware) / `jina-reranker-v3` | Apache-2.0 / CC-BY-NC-4.0 |
-| Synthesis LLM | any OpenAI-compatible local model, served separately | its own license; referenced, not bundled |
-
-**The default stack is fully commercial-clean (Apache-2.0).** The default reranker
-(`gte-reranker-modernbert-base`) and the `qwen3` alternative are both Apache-2.0; only the optional
-`jina-reranker-v3` backend (`BLKCHAIN_RERANKER_KIND=jina`) is CC-BY-NC-4.0 and **not**
-commercial-clean. Fetch the models into `BLKCHAIN_MODELS_DIR` (default `<project>/models`):
 ```sh
-hf download mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ --revision 6c3ae70858513f1a78e9cdca3cae330d9075cd2a --local-dir "$MODELS/Qwen3-Embedding-0.6B-4bit-DWQ"
-hf download afanjul/gte-reranker-modernbert-base-mlx --revision 0b1cfb9141dd1452e07a328a0dec430f2324da12 --local-dir "$MODELS/gte-reranker-modernbert-base-mlx"   # default reranker
-# instruction-aware alternative (then set BLKCHAIN_RERANKER_KIND=qwen3):
-# hf download mlx-community/Qwen3-Reranker-0.6B-4bit --revision 5f324548f1d20c2b5a450f126fc6ef2fb1126524 --local-dir "$MODELS/Qwen3-Reranker-0.6B-4bit"
+(cd cli && go test ./... && go vet ./...)
+.venv/bin/python -m unittest discover tests
 ```
-The **corpus** is user-supplied and not distributed here; see [Corpus](#corpus) and
-[Configuration](#configuration). blkChain's own code is licensed under Apache-2.0 (see
-[LICENSE](LICENSE) and [NOTICE](NOTICE)); that is independent of the model and corpus licenses.
 
-## Evaluation
-The harness drives the Go binary: it runs `blk search --json` per case and `blk ask --json` for the
-judge. It finds the binary through `BLK_BIN`, else `blk` on `PATH`; build it with
-`cd cli && go build -o blk .`. Each call is bounded by a timeout and a 16 MiB stdout cap. A failed
-call (non-zero exit, timeout, invalid JSON) counts as a miss for that case and is listed in the
-report; it does not stop the run.
+The retrieval evaluation drives the built Go binary against labeled queries and reports hit rate and
+reciprocal rank. It measures retrieval against its dataset, not answer accuracy or vulnerability
+detection:
+
 ```sh
-export BLK_BIN="$PWD/cli/blk"    # or put blk on PATH
-# retrieval gate (deterministic; needs qdrant + embed_server). Primary quality metric.
+export BLK_BIN="$PWD/cli/blk"
 .venv/bin/python -m blkchain.eval.run --no-judge
-# with a local LLM judge (faithfulness + answer relevancy; needs the LLM running)
-.venv/bin/python -m blkchain.eval.run --judge-limit 3
-```
-`blkchain/eval/dataset.jsonl` holds hand-labeled cases tagged `difficulty` (`core` on-topic, `hard`
-paraphrase/typo/multi-hop); the run reports hit_rate@5/@10 and MRR overall and split by difficulty.
-Labeled expected source and CWE requirements must match the same result as the expected text. This
-keeps unrelated CWE tags or source matches from making a case pass. The dataset is a compact
-regression gate; it does not measure exploit validity, safety policy, or broad adversarial behavior.
-Flags: `--top-k`, `--limit`, `--no-judge`, `--judge-limit`, `--collection`.
-
-**Embedder A/B:** build a second collection with an alternate embedder, then compare with
-`--collection`:
-```sh
-BLKCHAIN_EMBEDDER_PATH=... .venv/bin/python -m blkchain.embed_server &
-BLKCHAIN_COLLECTION=blkchain_alt .venv/bin/python -c "from blkchain import index; index.build_index(snapshot_version='ab')"
-.venv/bin/python -m blkchain.eval.run --no-judge --collection blkchain_alt
 ```
 
-## Notes
-- **Nothing autostarts.** Start the services when you need them and stop them when you are done.
-- **Re-indexing.** The index is resumable (content-hash based): re-running skips unchanged chunks and
-  re-embeds changed ones. A completed full corpus build also deletes stale manifest-owned points;
-  interrupted/failed ingestion never runs this deletion step. Changing the stored path scheme changes
-  chunk ids, so rebuild cleanly (drop the collection or delete `data/qdrant_storage`, then reindex).
-- **Retrieved content.** Corpus and web text are serialized as JSON evidence records and labeled
-  untrusted before they enter grading or synthesis prompts. This reduces delimiter spoofing and
-  prompt-injection risk; it does not make an LLM a security boundary. Retrieved text is never run as
-  a command.
-- **Saved data.** Session transcripts, session indexes, REPL history, stack logs, and saved install
-  paths use private directories and owner-only file permissions on Unix-like systems.
+Browser, runner, MCP, and local-model integration tests are opt-in because they require provisioned
+services or containers. Evaluation output depends on the supplied corpus, model, and lab conditions;
+the repository does not present a general detection or exploit-success rate.
+
+## Planned development
+
+These items describe product direction. They are not available as a complete command today.
+
+1. **Unified web assessment:** connect existing collection, role-aware analysis, replay, focused checks,
+   and reporting into one bounded workflow. Require direct evidence before calling a finding verified.
+2. **Deeper surface-specific analysis:** expand native finding parsers and validation paths for network,
+   web, local, container, AD, cloud, and AI assessments. Preserve code-owned scope and task identity.
+3. **Evidence-led reporting:** distinguish observations, candidate leads, and confirmed impact in the
+   task store, terminal output, and exported reports.
+4. **Repeatable quality gates:** measure discovery coverage, task completion, detection quality, false
+   positives, and policy behavior on controlled targets before broader effectiveness claims.
+5. **Operational maturity:** improve installation, controlled integration testing, and release checks
+   for the multi-service stack.
+
+The local execution and operator-controlled policy boundaries remain part of the product model.
+
+## License
+
+blkChain code is licensed under Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Models,
+corpus content, target data, and optional external services retain their own terms. Review those
+terms before redistribution or commercial use.
