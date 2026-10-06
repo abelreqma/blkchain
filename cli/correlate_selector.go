@@ -96,22 +96,19 @@ func isWordByte(b byte) bool {
 		(b >= '0' && b <= '9')
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 func acceptCitation(results []retrieval.Result, term string) (engagement.Citation, bool) {
+	cit, _, ok := acceptCitationAt(results, term)
+	return cit, ok
+}
+
+// acceptCitationAt is acceptCitation plus the index of the accepted result, -1
+// when none grounds. A Citation names only source/path/section, which every chunk
+// of one corpus section shares, so the index is the only unambiguous handle on the
+// chunk that actually grounded; a caller feeding the accepted chunk's body to a
+// prompt must key on it rather than re-matching the citation fields.
+func acceptCitationAt(results []retrieval.Result, term string) (engagement.Citation, int, bool) {
 	term = strings.ToLower(strings.TrimSpace(term))
-	for _, r := range results {
+	for i, r := range results {
 		if r.Score < MinCitationScore {
 			continue
 		}
@@ -124,9 +121,9 @@ func acceptCitation(results []retrieval.Result, term string) (engagement.Citatio
 			Section:  r.Payload.Section,
 			CWEClass: r.Payload.CWEClass,
 			Origin:   "trusted",
-		}, true
+		}, i, true
 	}
-	return engagement.Citation{}, false
+	return engagement.Citation{}, -1, false
 }
 
 // groundCitation runs one read-only kb_search for query and returns an accepted,
@@ -249,25 +246,50 @@ func computeExploitSelection(ctx context.Context, m toolLoopModel, rc searcher, 
 	if err := ctx.Err(); err != nil {
 		return "", engagement.Citation{}
 	}
-	query := strings.TrimSpace(svc.Product + " " + svc.Version + " exploit")
-	results, err := rc.Search(ctx, query, cfg.TopK, nil)
-	if err != nil || len(results) == 0 {
+	// Two retrieval queries - version-bearing first, then version-free - merged and
+	// de-duplicated by result id. The version token helps retrieval for a product
+	// whose exploit page names the version (GitLab 11.4.7) and hurts it for one whose
+	// page omits it (Elasticsearch 1.4.2), so scanning the union surfaces the real
+	// exploit page in either case. Both queries use generic technique vocabulary,
+	// never a product-specific hint, so detection stays corpus-grounded rather than
+	// catalog-driven.
+	var results []retrieval.Result
+	seen := map[string]bool{}
+	for _, q := range buildExploitQueries(svc) {
+		rs, err := rc.Search(ctx, q, cfg.TopK, nil)
+		if err != nil {
+			continue
+		}
+		for _, r := range rs {
+			if r.ID != "" && seen[r.ID] {
+				continue
+			}
+			if r.ID != "" {
+				seen[r.ID] = true
+			}
+			results = append(results, r)
+		}
+	}
+	if len(results) == 0 {
 		return "", engagement.Citation{}
 	}
-	// Grounding is decided IN CODE by acceptCitation (version-bearing query above +
-	// product-specific top hit + score), never by the model: a keyword-adjacent hit
-	// from a loose query does not ground (no false grounding).
-	cit, ok := acceptCitation(results, citationTerm(svc.Product))
+	// Grounding is decided IN CODE by acceptCitation over the union (product-specific
+	// hit + score), never by the model: a keyword-adjacent hit from a loose query does
+	// not ground (no false grounding). The union keeps query order rather than a
+	// merged score order, because reranker scores are query-conditional and so are
+	// not comparable across the two queries; the version-bearing query is issued
+	// first, so its product-specific hits ground ahead of the version-free query's.
+	cit, accepted, ok := acceptCitationAt(results, citationTerm(svc.Product))
 	if !ok {
 		return "", engagement.Citation{}
 	}
+	// The notes feature the BODY of the accepted, product-specific hit, not just the
+	// first line of the top few results. A chunk filed under a pivot service (the
+	// GitLab 11.4.7 RCE lives under "Pentesting Redis") has an on-topic body under an
+	// off-topic heading; feeding headings alone made the model abstain on a
+	// correctly-grounded citation.
 	var notes strings.Builder
-	for i, r := range results {
-		if i >= 3 {
-			break
-		}
-		notes.WriteString("- " + firstLine(r.Payload.Text) + "\n")
-	}
+	notes.WriteString(exploitNotes(results, accepted))
 	// Advisory, non-binding: surface prior successful episodes for this service as
 	// reference-only lines. Bounded in code; the label the model returns is still
 	// parsed and owned by correlateService, so this never changes the candidate.
@@ -302,4 +324,73 @@ func computeExploitSelection(ctx context.Context, m toolLoopModel, rc searcher, 
 	// still grounds a deterministic (catalog) detector match; the non-catalog path
 	// requires a non-empty technique, so it reads "" as no candidate.
 	return parseExploitSelection(cr.Choices[0].Content), cit
+}
+
+// buildExploitQueries returns the retrieval queries for a discovered service: a
+// version-bearing query first, then a version-free one (the version-free query
+// alone when the service has no version). See computeExploitSelection for why both
+// are issued. The suffix is generic technique vocabulary, never a product-specific
+// hint, so detection stays corpus-grounded rather than catalog-driven.
+func buildExploitQueries(svc Service) []string {
+	const suffix = "exploit vulnerability CVE"
+	product := strings.TrimSpace(svc.Product)
+	var queries []string
+	if v := strings.TrimSpace(svc.Version); v != "" {
+		queries = append(queries, strings.TrimSpace(product+" "+v+" "+suffix))
+	}
+	queries = append(queries, strings.TrimSpace(product+" "+suffix))
+	return queries
+}
+
+// maxNoteLine bounds one rendered notes line, matching firstLine's cap.
+const maxNoteLine = 200
+
+// exploitNotes renders the corpus notes for the prompt: up to four body lines of
+// the accepted hit, then one heading line from each of up to four other results,
+// so the notes carry the accepted citation's detail without losing the breadth of
+// sibling techniques. accepted is the index acceptCitationAt returned, or -1.
+func exploitNotes(results []retrieval.Result, accepted int) string {
+	var b strings.Builder
+	if accepted >= 0 && accepted < len(results) {
+		for _, ln := range noteLines(results[accepted].Payload.Text, 4) {
+			b.WriteString("- " + ln + "\n")
+		}
+	}
+	n := 0
+	for i := range results {
+		if i == accepted {
+			continue
+		}
+		lines := noteLines(results[i].Payload.Text, 1)
+		if len(lines) == 0 {
+			continue
+		}
+		b.WriteString("- " + lines[0] + "\n")
+		n++
+		if n >= 4 {
+			break
+		}
+	}
+	return b.String()
+}
+
+// noteLines returns up to n substantive lines of text, skipping blank lines and
+// bare code fences so a heading is followed by the actual exploit prose. Each line
+// is truncated to maxNoteLine, since corpus text is untrusted and unbounded.
+func noteLines(text string, n int) []string {
+	var out []string
+	for _, ln := range strings.Split(text, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.HasPrefix(ln, "```") {
+			continue
+		}
+		if len(ln) > maxNoteLine {
+			ln = ln[:maxNoteLine]
+		}
+		out = append(out, ln)
+		if len(out) >= n {
+			break
+		}
+	}
+	return out
 }
