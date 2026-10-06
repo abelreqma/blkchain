@@ -62,6 +62,12 @@ func ExtractTargetSet(c Command) (hosts []string, nets []*net.IPNet, ok bool) {
 		h, good := impacketTargets(c.Args)
 		return h, nil, good
 	}
+	if strings.EqualFold(name, "socat") {
+		// socat addresses its destination as TYPE:host:port, which the generic
+		// token reader cannot separate from an address option.
+		h, good := socatTargets(c.Args)
+		return h, nil, good
+	}
 	e := &extractor{seen: map[string]bool{}, ok: true}
 	switch strings.ToLower(name) {
 	case "smbclient", "rpcclient":

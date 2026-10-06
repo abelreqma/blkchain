@@ -260,6 +260,9 @@ func classifyNonStructuralExternal(c Command) Decision {
 	if d, tripped := masscanViolation(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); tripped {
 		return d
 	}
+	if d, tripped := socatViolation(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); tripped {
+		return d
+	}
 	name := strings.ToLower(baseName(strings.TrimSpace(c.Binary)))
 	if a, bad := readOnlyForms(name, c.Args); bad {
 		return Decision{

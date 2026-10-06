@@ -57,8 +57,9 @@ var auditedBinaries = map[string]string{
 	"ps":         "secgate/toolgate_test.go: no flag surface of concern in the busybox build",
 	"netstat":    "secgate/toolgate_test.go: no flag surface of concern in the busybox build",
 	"lsof":       "secgate/toolgate_test.go: no flag surface of concern in the busybox build",
+	"socat":      "secgate/socat_test.go: socatViolation audits socat by its addresses rather than its flags, permitting only the connect types whose host the scope check can read (TCP, TCP4, TCP6, UDP, OPENSSL and their -CONNECT and -SENDTO forms) plus STDIO, and denying EXEC, SYSTEM, SHELL, OPEN, CREATE, GOPEN, UNIX-*, SOCKS, PROXY, every -LISTEN form, TUN and any unknown keyword; keywords are compared case-folded with - and _ removed, as socat accepts them. socatTargets extracts the host of each end, including a bracketed IPv6 literal, and fails closed on an address with no usable host. Exploit tier, so the phase forces per-action confirmation",
 	"masscan":    "secgate/masscan_test.go: masscanViolation denies every file channel in masscan's own normalized spelling, because masscan lowercases a flag name and strips - and _ before comparing it, so --excludefile, --exclude-file, --exclude_file and --EXCLUDEFILE are one flag; requiredFlags demands a port bound and an explicit rate; evidence is the captured stdout. A range target is authorized by Scope.NetworkInScope when one in-scope CIDR covers it",
-	"kubectl":    "secgate/toolgate_test.go: execFlag denies the exec, run, attach, debug, cp, port-forward and proxy verbs over every non-flag token, denyFlags denies --kubeconfig because it can carry an exec credential plugin, fileaccess bounds the certificate and cache paths, and the server must be named as --server so the scope check reads it. Exploit tier, so it is never unattended",
+	"kubectl":    "secgate/toolgate_test.go: execFlag denies the exec, run, attach, debug, cp, port-forward and proxy verbs over every non-flag token, denyFlags denies --kubeconfig because it can carry an exec credential plugin, fileaccess bounds the certificate and cache paths, and the server must be named as --server so the scope check reads it. Exploit tier, so the phase forces per-action confirmation",
 }
 
 // pendingAudits are catalog binaries that are present in the image but not yet
@@ -67,14 +68,13 @@ var auditedBinaries = map[string]string{
 var pendingAudits = map[string]string{
 	"kinit": "the destination is a KDC resolved from the realm through DNS and krb5.conf, so the scope check cannot see it, and a principal of the form user@REALM makes the extractor scope-check the realm as if it were a host. Needs either a realm-aware extractor rule or the execution-location work, with the worker firewall as the enforcing layer meanwhile",
 	"aws":   "exploit tier, so never unattended; still needs --endpoint-url scope-checked, --cli-input-json/--cli-input-yaml denied as config indirection, and the mutating operations enumerated",
-	"socat": "exploit tier, so never unattended; still needs an address-spec parser that permits only TCP, TCP4, TCP6, OPENSSL, UDP and STDIO, denies EXEC/SYSTEM/SHELL/PTY and OPEN/CREATE/GOPEN, extracts the host from each permitted spec, and fails closed on an unparsable spec",
 }
 
 // impacketAudit is the audit every impacket entry point shares. The credential
 // in its target operand is deliberately left intact, in the argv and in the
 // recorded command: these tools take it on the command line by design, and an
 // engagement transcript is expected to show exactly what ran.
-const impacketAudit = "secgate/impacket_test.go: impacketTargets parses the [domain/]user[:password]@host operand so the host reaches the scope check, takes the host after the LAST @ so a password containing @ cannot shift it, and discards the values that read as hosts but are not (a -hashes LM:NT pair parses as host:port, an -outputfile name parses as a hostname); an operand with no usable host fails closed. ntlmrelayx.py must name one -t target, and -tf is denied because it reads targets from a file the scope check never sees. fileaccess confines -outputfile to the scratch directory. Exploit tier, so never unattended"
+const impacketAudit = "secgate/impacket_test.go: impacketTargets parses the [domain/]user[:password]@host operand so the host reaches the scope check, takes the host after the LAST @ so a password containing @ cannot shift it, and discards the values that read as hosts but are not (a -hashes LM:NT pair parses as host:port, an -outputfile name parses as a hostname); an operand with no usable host fails closed. ntlmrelayx.py must name one -t target, and -tf is denied because it reads targets from a file the scope check never sees. fileaccess confines -outputfile to the scratch directory. Exploit tier, so the phase forces per-action confirmation"
 
 // auditStatus returns the recorded audit for a binary and whether it is
 // complete. An impacket entry point shares one audit note.
@@ -91,17 +91,25 @@ func auditStatus(binary string) (note string, audited bool) {
 	return "", false
 }
 
-// externalEngageAllowlist is the EXTERNAL-profile allowlist: the catalog's
-// tierEnum binaries that address a network destination and whose flag surface
-// has been audited. A tierExploit binary is never on it, so it cannot run
-// unattended; it reaches execution only through the armed,
-// per-action-confirmed exploit tier. A reachLocal binary is never on it either:
-// the external profile denies a command with no verifiable target, and keeping
-// read utilities off the list closes the file-disclosure path.
+// externalEngageAllowlist is the EXTERNAL-profile allowlist: every audited
+// catalog binary that addresses a network destination, of either tier.
+//
+// This list is the gate's reachability control, not its autonomy control. A
+// binary missing from it cannot run at all, so an exploit-tier tool belongs on
+// it; what keeps that tool from running unattended is the exploit and post-ex
+// phase forcing per-action confirmation whatever the mode, the operator's
+// allowed_binaries bound, and the per-finding catalog in exploitallow.go.
+// Conflating the two controls would leave every exploit tool unreachable rather
+// than merely attended.
+//
+// A reachLocal binary is never on it: the external profile denies a command with
+// no verifiable target, and keeping read utilities off the list closes the
+// file-disclosure path where an in-scope host operand passes the scope check
+// while a file operand is read.
 func externalEngageAllowlist() []string {
 	var out []string
 	for _, t := range toolCatalog {
-		if t.Tier != tierEnum || t.Reach != reachExternal {
+		if t.Reach != reachExternal {
 			continue
 		}
 		if _, audited := auditStatus(t.Binary); audited {

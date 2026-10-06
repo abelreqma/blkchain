@@ -1,6 +1,9 @@
 package main
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // toolcatalog.go is the single source of truth for every binary the harness may
 // run inside the isolated runner. The persona prompts, the EXTERNAL-profile
@@ -422,6 +425,12 @@ var unavailableTools = map[string]string{
 	"onesixtyone": "no Alpine package on either architecture; snmpwalk with an explicit community string covers SNMP enumeration",
 	"dnsrecon":    "the Alpine package imports the stamina module, which has no Alpine package, so the tool fails at startup; dig, host and nslookup cover DNS enumeration",
 	"hashcat":     "needs an OpenCL runtime the image does not carry; john covers offline cracking",
+	// Named by the per-finding exploit-tier catalog in exploitallow.go, which
+	// predates the image work. None is installed, so none can run.
+	"searchsploit": "part of exploitdb, which has no Alpine package on either architecture; kb_answer covers exploit lookup",
+	"nuclei":       "no Alpine package on either architecture; ffuf and curl cover templated HTTP probing",
+	"sqlmap":       "no Alpine package on either architecture",
+	"hydra":        "available in Alpine community but not installed: its target rides a protocol://host form and its -L, -P and -o flags need their own audit before it can be reached",
 }
 
 // discouragedTools are present in the image but no persona may name them, with
@@ -432,10 +441,13 @@ var discouragedTools = map[string]string{
 	"wget": "the base image provides only busybox wget, whose flag surface differs from the audited GNU build the gate's rules describe; curl covers retrieval",
 }
 
-// toolFor returns the catalog entry for a binary basename.
+// toolFor returns the catalog entry for a binary basename. The comparison folds
+// case, because every gate lookup does: Allowlist.Permits and
+// exploitToolPermitted both lowercase the binary before comparing, so a catalog
+// lookup that did not would disagree with the gate about the same command.
 func toolFor(binary string) (tool, bool) {
 	for _, t := range toolCatalog {
-		if t.Binary == binary {
+		if strings.EqualFold(t.Binary, binary) {
 			return t, true
 		}
 	}
@@ -558,7 +570,7 @@ var nmapRawFlags = map[string]bool{
 // rawScanFlag reports whether argv selects a raw-socket mode of a rawByFlag
 // tool.
 func rawScanFlag(binary string, args []string) bool {
-	if binary != "nmap" {
+	if !strings.EqualFold(binary, "nmap") {
 		return false
 	}
 	for _, a := range args {

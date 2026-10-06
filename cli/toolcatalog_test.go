@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"os"
 	"slices"
 	"strings"
 	"testing"
 
+	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/secgate"
 )
 
@@ -86,17 +88,17 @@ func TestEveryCatalogToolHasAnAuditRecord(t *testing.T) {
 	}
 }
 
-// TestExternalAllowlistCarriesOnlyAuditedEnumTools asserts the allowlist
-// contract: an allowlist entry authorizes a binary's whole flag surface, so only
-// an audited tierEnum tool may be on it. A tierLocal tool is excluded because in
-// external Auto a read utility with an in-scope host operand and a file operand
-// would disclose that file; a tierExploit tool is excluded so it can only run
-// armed and confirmed.
-func TestExternalAllowlistCarriesOnlyAuditedEnumTools(t *testing.T) {
+// TestExternalAllowlistCarriesOnlyAuditedNetworkTools asserts the allowlist
+// contract: an entry authorizes a binary's whole flag surface, so only an
+// audited tool may be on it, and only one that addresses a network destination.
+// Both tiers belong on it, because this list is the gate's reachability control
+// and not its autonomy control; TestExploitPhaseAlwaysConfirms covers the
+// control that actually keeps an exploit tool attended.
+func TestExternalAllowlistCarriesOnlyAuditedNetworkTools(t *testing.T) {
 	al := secgate.NewAllowlist(externalEngageAllowlist()...)
 	for _, tl := range toolCatalog {
 		_, audited := auditStatus(tl.Binary)
-		want := tl.Tier == tierEnum && tl.Reach == reachExternal && audited
+		want := tl.Reach == reachExternal && audited
 		if got := al.Permits(tl.Binary); got != want {
 			t.Errorf("allowlist permits %s = %t, want %t (tier=%d reach=%d audited=%t)",
 				tl.Binary, got, want, tl.Tier, tl.Reach, audited)
@@ -104,19 +106,78 @@ func TestExternalAllowlistCarriesOnlyAuditedEnumTools(t *testing.T) {
 	}
 }
 
-// TestExploitToolsNeverRunUnattended asserts no exploit-tier binary can be
-// reached by the unattended path, whatever the operator's config says, because
-// the allowlist the composition root builds comes from the catalog.
-func TestExploitToolsNeverRunUnattended(t *testing.T) {
-	al := secgate.NewAllowlist(externalEngageAllowlist()...)
-	exploit := exploitToolBinaries()
-	if len(exploit) == 0 {
+// TestExploitPhaseAlwaysConfirms pins the control that keeps an exploit-tier
+// tool attended. It is the phase, not the allowlist: an exploit or post-ex
+// command is confirmed whatever the mode, while a recon command on an audited
+// enum tool runs unattended in Auto. Keeping exploit tools off the allowlist
+// instead would make them unreachable rather than merely attended.
+func TestExploitPhaseAlwaysConfirms(t *testing.T) {
+	if len(exploitToolBinaries()) == 0 {
 		t.Fatal("the catalog declares no exploit-tier tool, so this test proves nothing")
 	}
-	for _, b := range exploit {
-		if al.Permits(b) {
-			t.Errorf("exploit-tier %s must not be on the unattended allowlist", b)
+	scope, err := secgate.ParseScope(strings.NewReader("192.0.2.0/24\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newGate := func(c *countingConfirmer) *secgate.Gate {
+		g := &secgate.Gate{
+			Mode:    secgate.Auto,
+			Scope:   scope,
+			Allow:   secgate.NewAllowlist(externalEngageAllowlist()...),
+			Confirm: c,
 		}
+		g.Start()
+		return g
+	}
+
+	recon := &countingConfirmer{ok: true}
+	d := newGate(recon).Authorize(context.Background(), secgate.Command{
+		Binary: "nmap", Args: []string{"-p", "80", "-n", "192.0.2.10"}, Phase: secgate.PhaseRecon})
+	if !d.Allowed {
+		t.Fatalf("a recon command on an audited enum tool should run: %s", d.Reason)
+	}
+	if recon.calls.Load() != 0 {
+		t.Errorf("a recon command in Auto was confirmed %d times, want 0", recon.calls.Load())
+	}
+
+	for _, phase := range []secgate.Phase{secgate.PhaseExploit, secgate.PhasePostEx} {
+		exploit := &countingConfirmer{ok: true}
+		d := newGate(exploit).Authorize(context.Background(), secgate.Command{
+			Binary: "secretsdump.py", Args: []string{"CORP/svc:p@192.0.2.10"},
+			Phase: phase, Armed: true})
+		if !d.Allowed {
+			t.Fatalf("an armed %s command on an audited exploit tool should run: %s", phase, d.Reason)
+		}
+		if exploit.calls.Load() != 1 {
+			t.Errorf("an armed %s command was confirmed %d times, want 1", phase, exploit.calls.Load())
+		}
+	}
+
+	// Unarmed, the same command is refused outright.
+	unarmed := &countingConfirmer{ok: true}
+	d = newGate(unarmed).Authorize(context.Background(), secgate.Command{
+		Binary: "secretsdump.py", Args: []string{"CORP/svc:p@192.0.2.10"},
+		Phase: secgate.PhaseExploit})
+	if d.Allowed {
+		t.Error("an unarmed exploit command must be denied")
+	}
+}
+
+// TestExploitToolsAreInTheExploitTierCatalog asserts the second allowlist an
+// exploit command must pass: the executor's own per-finding catalog. A tool
+// missing from it is denied even when armed and confirmed.
+func TestExploitToolsAreInTheExploitTierCatalog(t *testing.T) {
+	task := engagement.Task{ID: "t1", Kind: "exploit", Phase: engagement.PhaseExploit, Objective: "validate the finding"}
+	for _, b := range exploitToolBinaries() {
+		if _, audited := auditStatus(b); !audited {
+			continue
+		}
+		if !exploitToolPermitted(task, b) {
+			t.Errorf("audited exploit tool %s is not on the per-finding exploit-tier catalog", b)
+		}
+	}
+	if exploitToolPermitted(task, "bash") {
+		t.Error("the exploit-tier catalog must not permit a shell")
 	}
 }
 
@@ -228,6 +289,8 @@ func TestRawSocketRouting(t *testing.T) {
 		{"nmap", []string{"-sU", "-p", "161", "192.0.2.1"}},
 		{"nmap", []string{"-O", "192.0.2.1"}},
 		{"nmap", []string{"--traceroute", "-p", "80", "192.0.2.1"}},
+		{"NMAP", []string{"-sS", "-p", "80", "192.0.2.1"}},
+		{"Masscan", []string{"-p", "80", "--rate", "100", "192.0.2.1"}},
 	}
 	for _, c := range raw {
 		if !rawSocketCommand(c.binary, c.args) {
@@ -246,6 +309,8 @@ func TestRawSocketRouting(t *testing.T) {
 		{"ffuf", []string{"-u", "http://192.0.2.1/FUZZ", "-w", "words"}},
 		{"id", nil},
 		{"socat", []string{"-", "TCP:192.0.2.1:80"}},
+		// Case folding matches the gate, which lowercases every binary it looks up.
+		{"NMAP", []string{"-sT", "-p", "80", "192.0.2.1"}},
 		// A binary with no catalog entry never reaches the privileged worker.
 		{"sh", []string{"-c", "nmap -sS 192.0.2.1"}},
 		{"unknown-tool", []string{"-sS"}},
@@ -299,4 +364,40 @@ func TestPromptToolMentionsAreCataloguedAndAudited(t *testing.T) {
 		t.Fatal("no prompt names any distinctive tool, so this test proves nothing")
 	}
 	t.Logf("checked %d prompt tool mentions", checked)
+}
+
+// TestExploitTierCatalogNamesOnlyUsableTools closes the loop the other way:
+// every tool the per-finding exploit-tier catalog names must be installed and
+// audited, or recorded as unavailable with the reason. That catalog predates the
+// image work and named five tools, none of which was installed.
+func TestExploitTierCatalogNamesOnlyUsableTools(t *testing.T) {
+	task := engagement.Task{ID: "t1", Kind: "exploit", Phase: engagement.PhaseExploit}
+	named := map[string]bool{}
+	for b := range baseExploitTools {
+		named[b] = true
+	}
+	for _, tools := range productExploitTools {
+		for b := range tools {
+			named[b] = true
+		}
+	}
+	if len(named) == 0 {
+		t.Fatal("the exploit-tier catalog is empty, so this test proves nothing")
+	}
+	for b := range named {
+		if _, ok := unavailableTools[b]; ok {
+			continue
+		}
+		tl, catalogued := toolFor(b)
+		if !catalogued {
+			t.Errorf("the exploit-tier catalog names %s, which is neither catalogued nor recorded as unavailable", b)
+			continue
+		}
+		if _, audited := auditStatus(tl.Binary); !audited {
+			t.Errorf("the exploit-tier catalog names %s, whose audit is incomplete", b)
+		}
+		if !exploitToolPermitted(task, tl.Binary) {
+			t.Errorf("%s is in the catalog map but exploitToolPermitted refuses it, which means the key casing is wrong", tl.Binary)
+		}
+	}
 }
