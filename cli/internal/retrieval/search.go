@@ -147,6 +147,7 @@ func (c *Client) Search(ctx context.Context, query string, topK int, filter map[
 				Type:     payloadString(payload, "type"),
 				Text:     text,
 				CWEClass: payloadString(payload, "cwe_class"),
+				Origin:   payloadString(payload, "origin"),
 			},
 		}
 		texts[i] = text

@@ -117,7 +117,7 @@ func buildContext(chunks []retrieval.Result) string {
 	blocks := make([]evidence, 0, len(chunks))
 	for i, r := range chunks {
 		trust := "trusted_corpus"
-		if r.Payload.Source == webSource || r.Payload.Source == nvdSource {
+		if untrustedProvenance(r.Payload) {
 			trust = "unverified_external"
 		}
 		blocks = append(blocks, evidence{i + 1, trust, r.Payload.Source,
@@ -221,7 +221,7 @@ func dedupCitations(chunks []retrieval.Result) []citation {
 			Source:    r.Payload.Source,
 			Path:      r.Payload.Path,
 			Section:   r.Payload.Section,
-			Untrusted: r.Payload.Source == webSource || r.Payload.Source == nvdSource,
+			Untrusted: untrustedProvenance(r.Payload),
 		})
 	}
 	return cits
@@ -520,4 +520,15 @@ func timeoutOrErr(err error) error {
 		return errRequestTimeout
 	}
 	return err
+}
+
+// untrustedProvenance reports whether a retrieved chunk came from outside the
+// curated corpus, so the answer prompt labels it unverified_external and its
+// citation carries untrusted. Two things make a chunk external: the web and NVD
+// sources, which the fetchers name, and a provenance tag the indexer recorded on
+// content it fetched (`blk add <url>` sets origin "url"). An origin value this
+// code does not recognize counts as external, so a provenance tag added later
+// cannot default to trusted.
+func untrustedProvenance(p retrieval.Payload) bool {
+	return p.Source == webSource || p.Source == nvdSource || p.Origin != ""
 }

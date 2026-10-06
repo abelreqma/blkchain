@@ -12,6 +12,12 @@ type Payload struct {
 	Text    string `json:"text"`
 	// CWEClass is the indexer's concept tag, such as "sqli"; "" when absent.
 	CWEClass string `json:"cwe_class"`
+	// Origin is the indexer's provenance tag for content that did not come from
+	// the curated corpus: `blk add <url>` records "url" for fetched web content.
+	// It is absent on a corpus chunk, so it is read when present rather than
+	// required, and an unrecognized value is treated as external by the answer
+	// path rather than assumed trusted.
+	Origin string `json:"origin,omitempty"`
 }
 
 // Result is a single ranked retrieval result.

@@ -42,6 +42,10 @@ func assertKeys(t *testing.T, name string, v any, want []string) {
 // test tests/test_contract_binding.py). A rename on either side breaks its own
 // golden.
 func TestPayloadContractKeys(t *testing.T) {
+	// This golden pins the keys every payload carries. origin is omitempty
+	// because the indexer sets it only on content fetched from a URL, so it is
+	// absent here by design; that the client reads it when present is pinned by
+	// TestSearchReadsOptionalOriginProvenance.
 	assertKeys(t, "Payload", Payload{}, []string{
 		"source", "path", "section", "type", "text", "cwe_class",
 	})

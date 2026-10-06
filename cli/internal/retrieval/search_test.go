@@ -163,3 +163,56 @@ func TestUnreachableClassifiesOnlyTransportFailures(t *testing.T) {
 		})
 	}
 }
+
+// TestSearchReadsOptionalOriginProvenance pins that the client reads the
+// indexer's provenance tag off a Qdrant point. The tag is how `blk add <url>`
+// content is distinguishable: it lives under whatever local source label the
+// operator chose, so neither the source name nor the path marks it as fetched
+// from the web. It is optional, absent on every corpus chunk, so the always-
+// present key golden cannot cover it.
+func TestSearchReadsOptionalOriginProvenance(t *testing.T) {
+	points := []*qdrant.ScoredPoint{
+		{Id: qdrant.NewIDNum(1), Score: 0.9, Payload: map[string]*qdrant.Value{
+			"text": qdrant.NewValueString("corpus body"), "source": qdrant.NewValueString("vault")}},
+		{Id: qdrant.NewIDNum(2), Score: 0.8, Payload: map[string]*qdrant.Value{
+			"text": qdrant.NewValueString("fetched body"), "source": qdrant.NewValueString("vault"),
+			"origin": qdrant.NewValueString("url")}},
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gs := grpc.NewServer()
+	qdrant.RegisterPointsServer(gs, &fakeQdrant{points: points})
+	go gs.Serve(l)
+	t.Cleanup(gs.Stop)
+
+	embed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(embedResponse{Embeddings: [][]float32{{0.1, 0.2}}, Dim: 2})
+	}))
+	t.Cleanup(embed.Close)
+
+	cfg := ragconfig.Load()
+	cfg.QdrantGRPCURL = l.Addr().String()
+	cfg.EmbedServerURL = embed.URL
+	c, err := New(cfg, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SkipRerank = true
+
+	results, err := c.Search(context.Background(), "q", 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+	if results[0].Payload.Origin != "" {
+		t.Errorf("corpus chunk origin = %q, want empty", results[0].Payload.Origin)
+	}
+	if results[1].Payload.Origin != "url" {
+		t.Errorf("fetched chunk origin = %q, want \"url\"", results[1].Payload.Origin)
+	}
+}

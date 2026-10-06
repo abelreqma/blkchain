@@ -302,10 +302,15 @@ def _markdown_sections(text: str) -> list[tuple[str, str]]:
 
 def _read_text_capped(file_path: Path) -> str | None:
     """Read a text file into memory bounded by MAX_TEXT_FILE_BYTES, so a
-    pathologically large file cannot be fully materialized (PI3). Returns None on
-    a read error."""
+    pathologically large file cannot be fully materialized. Returns None on a
+    read error.
+
+    The cap is applied by the read itself, not by slicing afterwards:
+    Path.read_bytes() materializes the whole file before any slice runs, so a
+    multi-gigabyte file would consume that much memory regardless of the cap."""
     try:
-        raw = file_path.read_bytes()[: config.MAX_TEXT_FILE_BYTES]
+        with file_path.open("rb") as handle:
+            raw = handle.read(config.MAX_TEXT_FILE_BYTES)
     except OSError:
         return None
     return raw.decode("utf-8", errors="ignore")

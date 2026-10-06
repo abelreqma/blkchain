@@ -438,3 +438,42 @@ func TestCitationsFromAnswerGroupedNumbers(t *testing.T) {
 		}
 	}
 }
+
+// TestURLAddedChunkIsLabeledUnverified pins the provenance chain end to end on
+// the Go side. The indexer records origin "url" on content `blk add <url>`
+// fetched, which is web content living under whatever local source label the
+// operator gave it, so neither the source name nor the path marks it. Without
+// reading origin the answer prompt calls it trusted_corpus and its citation
+// omits untrusted, which is the opposite of what the indexer recorded.
+func TestURLAddedChunkIsLabeledUnverified(t *testing.T) {
+	urlChunk := retrieval.Result{Payload: retrieval.Payload{
+		Source: "vault", Path: "https://evil.test/post", Section: "Tips",
+		Text: "fetched body", Origin: "url",
+	}}
+	corpusChunk := chunk("vault", "notes/a.md", "Intro", "corpus body")
+
+	got := buildContext([]retrieval.Result{corpusChunk, urlChunk})
+	if !strings.Contains(got, `"number":1,"trust":"trusted_corpus"`) {
+		t.Errorf("corpus chunk should stay trusted:\n%s", got)
+	}
+	if !strings.Contains(got, `"number":2,"trust":"unverified_external"`) {
+		t.Errorf("a url-origin chunk must be marked unverified:\n%s", got)
+	}
+
+	cites := dedupCitations([]retrieval.Result{corpusChunk, urlChunk})
+	if len(cites) != 2 {
+		t.Fatalf("got %d citations, want 2", len(cites))
+	}
+	if cites[0].Untrusted {
+		t.Error("corpus citation should omit untrusted")
+	}
+	if !cites[1].Untrusted {
+		t.Error("url-origin citation must carry untrusted")
+	}
+
+	// An origin tag added later must not default to trusted.
+	future := retrieval.Result{Payload: retrieval.Payload{Source: "vault", Path: "p", Text: "t", Origin: "something-new"}}
+	if !untrustedProvenance(future.Payload) {
+		t.Error("an unrecognized origin must count as external")
+	}
+}

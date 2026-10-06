@@ -78,6 +78,22 @@ class ContentByteCapTest(unittest.TestCase):
         self.assertIn("STARTMARKER", joined)
         self.assertNotIn("ENDMARKER", joined)  # tail beyond the cap not read
 
+    def test_capped_read_never_materializes_the_whole_file(self):
+        """The cap must be applied by the read itself. Path.read_bytes() loads
+        the entire file before any slice runs, so a multi-gigabyte corpus file
+        would consume that much memory however small the cap is. Patching
+        read_bytes to fail pins that the implementation does not use it."""
+        def refuse(self):
+            raise AssertionError("read_bytes materializes the whole file")
+
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "big.txt"
+            f.write_text("A" * 5000)
+            with mock.patch.object(Path, "read_bytes", refuse):
+                with mock.patch.object(config, "MAX_TEXT_FILE_BYTES", 1000):
+                    text = ingest._read_text_capped(f)
+        self.assertEqual(len(text), 1000)
+
 
 class ExcludeMatchingTest(unittest.TestCase):
     def _names(self, root, exclude):
