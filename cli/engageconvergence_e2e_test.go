@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -131,7 +132,7 @@ func TestEngageConvergenceLocalLLM(t *testing.T) {
 		})
 	}
 	t.Run("repl-executor", func(t *testing.T) {
-		t.Setenv("BLKCHAIN_ENGAGE_MAX_ROUNDS", "5")
+		t.Setenv("BLKCHAIN_ENGAGE_MAX_ROUNDS", "2")
 		t.Setenv("BLKCHAIN_ENGAGE_MAX_CALLS", "64")
 		t.Setenv("BLKCHAIN_ENGAGE_NO_PROGRESS_ROUNDS", "3")
 		fixtureIP, fixtureName := startDockerHTTPFixture(t, "convergence", "convergence-fixture-ok")
@@ -141,7 +142,7 @@ func TestEngageConvergenceLocalLLM(t *testing.T) {
 			t.Fatal(err)
 		}
 		goal := "Create one web task for " + fixtureURL + ". Dispatch that task. Use only curl with --max-time 5 to fetch the HTTP response. Record exact response evidence, complete the task, and return a report. Do not scan ports or add follow-on tasks."
-		live := &convergenceLiveModel{model: base, forceTool: "run_command", forceOnce: true}
+		live := &convergenceLiveModel{model: base}
 		out, err := runReplEngage(ctx, wsDir, cwd, secgate.Auto, false, live, rc, cfg, modelPrefs{}, nil, nil, askuser.AutoAsker{}, nil, goal, nil)
 		if err != nil {
 			t.Fatalf("REPL: %v; report=%q", err, out)
@@ -168,7 +169,7 @@ func TestEngageConvergenceLocalLLM(t *testing.T) {
 			t.Fatal(readErr)
 		}
 		logs, logErr := exec.Command("docker", "logs", fixtureName).CombinedOutput()
-		if logErr != nil || !strings.Contains(string(logs), "GET /") || !captured || !strings.Contains(string(reportMD), "convergence-fixture-ok") || !strings.Contains(out, "Engagement paused: round cap") || strings.Contains(out, "Final synthesis unavailable") {
+		if logErr != nil || !slices.Contains(live.tools, "run_command") || !strings.Contains(string(logs), "GET /") || !captured || !strings.Contains(string(reportMD), "convergence-fixture-ok") || !strings.Contains(out, "Engagement paused: round cap") || strings.Contains(out, "Final synthesis unavailable") {
 			t.Fatalf("fixture logs=%q err=%v captured=%v stages=%v tools=%v offered=%v answers=%v report=%q", logs, logErr, captured, live.stages, live.tools, live.offered, live.answers, out)
 		}
 		t.Logf("REPL Docker fixture: %d HTTP requests; report:\n%s", strings.Count(string(logs), "GET /"), out)
