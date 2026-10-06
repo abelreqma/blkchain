@@ -294,3 +294,57 @@ func TestHostUtilitiesAreReadOnly(t *testing.T) {
 		allowed(t, c.binary+" "+join(c.args), ClassifyLocal(Command{Binary: c.binary, Args: c.args}))
 	}
 }
+
+// TestKubectlExecVerbsAreDenied keeps kubectl an enumeration and exploitation
+// client, not a shell. exec, run, attach and debug run a program in a
+// container; cp writes into one; port-forward and proxy open a tunnel whose far
+// end the scope check never sees.
+func TestKubectlExecVerbsAreDenied(t *testing.T) {
+	for _, args := range [][]string{
+		{"--server=https://192.0.2.1:6443", "exec", "pod", "--", "/bin/sh"},
+		{"exec", "-it", "pod", "--", "sh"},
+		{"run", "shell", "--image=alpine", "--", "sh"},
+		{"attach", "pod"},
+		{"debug", "node/worker", "--image=alpine"},
+		{"cp", "/work/x", "pod:/tmp/x"},
+		{"port-forward", "pod", "8080:80"},
+		{"proxy", "--port=8080"},
+		{"-n", "kube-system", "EXEC", "pod"},
+	} {
+		denied(t, "kubectl "+join(args), Classify(Command{Binary: "kubectl", Args: args}))
+	}
+	// Enumeration and the mutating verbs an armed task may be authorized to run.
+	for _, args := range [][]string{
+		{"--server=https://192.0.2.1:6443", "get", "pods", "-A"},
+		{"--server=https://192.0.2.1:6443", "auth", "can-i", "--list"},
+		{"--server=https://192.0.2.1:6443", "describe", "pod", "web"},
+		{"--server=https://192.0.2.1:6443", "get", "secrets", "-o", "json"},
+		{"--server=https://192.0.2.1:6443", "apply", "-f", "pod.yaml"},
+		{"version", "--client=true"},
+	} {
+		allowed(t, "kubectl "+join(args), Classify(Command{Binary: "kubectl", Args: args}))
+	}
+}
+
+// TestKubectlKubeconfigIsDenied closes the config-indirection path: a kubeconfig
+// sets the server, the credentials, and an exec credential plugin that runs a
+// binary of its choosing.
+func TestKubectlKubeconfigIsDenied(t *testing.T) {
+	for _, args := range [][]string{
+		{"--kubeconfig", "own.yaml", "get", "pods"},
+		{"--kubeconfig=/work/own.yaml", "get", "pods"},
+	} {
+		if _, bad := FileAccessViolation(Command{Binary: "kubectl", Args: args}); !bad {
+			t.Errorf("kubectl %v should be denied as config indirection", args)
+		}
+	}
+	// The certificate paths are bounded rather than denied.
+	if _, bad := FileAccessViolation(Command{Binary: "kubectl",
+		Args: []string{"--client-certificate", "/etc/k8s/admin.crt", "get", "pods"}}); !bad {
+		t.Error("kubectl --client-certificate outside the scratch directory should be refused")
+	}
+	if arg, bad := FileAccessViolation(Command{Binary: "kubectl",
+		Args: []string{"--client-certificate", "admin.crt", "get", "pods"}}); bad {
+		t.Errorf("kubectl --client-certificate in the scratch directory should pass, refused %q", arg)
+	}
+}

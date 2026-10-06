@@ -256,3 +256,47 @@ func TestRawSocketRouting(t *testing.T) {
 		}
 	}
 }
+
+// ambiguousToolNames are catalog binaries whose name is also an ordinary English
+// word in persona prose ("the file", "a host", "mount points"), so a substring
+// match on them proves nothing. Every other catalog name is a distinctive token.
+var ambiguousToolNames = map[string]bool{
+	"file": true, "host": true, "mount": true, "stat": true,
+	"id": true, "ps": true, "nm": true, "nc": true,
+	// "version strings as leads", not the binutils tool.
+	"strings": true,
+}
+
+// TestPromptToolMentionsAreCataloguedAndAudited is the strongest enforceable
+// direction of the wiring contract: wherever a persona prompt names a tool by a
+// distinctive token, that tool must be catalogued for that persona and its flag
+// surface must be audited. Without this a prompt can drift back into naming a
+// tool the gate refuses.
+func TestPromptToolMentionsAreCataloguedAndAudited(t *testing.T) {
+	prompts := map[string]string{containerPersona.Name: containerPersona.Prompt}
+	for name, d := range domains {
+		prompts[name] = d.Prompt
+	}
+	checked := 0
+	for persona, prompt := range prompts {
+		for _, tl := range toolCatalog {
+			if ambiguousToolNames[tl.Binary] || !strings.Contains(prompt, tl.Binary) {
+				continue
+			}
+			checked++
+			if !slices.Contains(tl.Personas, persona) {
+				t.Errorf("the %s prompt names %s, which the catalog does not list for that persona",
+					persona, tl.Binary)
+			}
+			if _, audited := auditStatus(tl.Binary); !audited {
+				note, _ := auditStatus(tl.Binary)
+				t.Errorf("the %s prompt names %s, whose audit is incomplete: %s",
+					persona, tl.Binary, note)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no prompt names any distinctive tool, so this test proves nothing")
+	}
+	t.Logf("checked %d prompt tool mentions", checked)
+}

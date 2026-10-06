@@ -38,6 +38,34 @@ var deniedBinaries = map[string]bool{
 	"osascript": true, "lldb": true, "dtrace": true,
 }
 
+// kubectlExecVerbs are the kubectl subcommands that run a program in a
+// container, attach to one, or open a tunnel. They re-introduce exactly what the
+// shell and exec-wrapper denials exist to prevent (kubectl exec -- /bin/sh), and
+// port-forward and proxy hide the real destination from the scope check the way
+// a proxy flag does. The mutating verbs are not here: state change in a cluster
+// is an authorized exploit action, governed by arming and the RoE.
+var kubectlExecVerbs = map[string]bool{
+	"exec": true, "run": true, "attach": true, "debug": true,
+	"cp": true, "port-forward": true, "proxy": true,
+}
+
+// kubectlExecVerb reports the first argument that is a denied kubectl verb. It
+// checks every non-flag token rather than trying to locate the subcommand,
+// because kubectl's global flags take values and getopt permutation means the
+// subcommand is not at a fixed position. Over-denial is the safe direction: a
+// resource genuinely named "exec" is not worth the bypass.
+func kubectlExecVerb(args []string) (string, bool) {
+	for _, a := range args {
+		if a == "" || a[0] == '-' {
+			continue
+		}
+		if kubectlExecVerbs[strings.ToLower(a)] {
+			return a, true
+		}
+	}
+	return "", false
+}
+
 // readOnlyForms denies the state-changing spelling of a host utility whose
 // read-only form the local persona needs. Each of these is harmless when it
 // only reports and changes the host when given an operand, and the local
@@ -553,6 +581,11 @@ const tcpdumpArgLetters = "cCFGijmMrsTVwWyZBQ"
 // This covers the default-allowlist binaries only. A binary an operator adds
 // with an `allow` line that has its own exec flags needs its own review.
 func execFlag(name string, args []string) (string, bool) {
+	if name == "kubectl" {
+		if v, bad := kubectlExecVerb(args); bad {
+			return v, true
+		}
+	}
 	for _, a := range args {
 		if name == "ip" {
 			if f, bad := ipExecArg(a); bad {

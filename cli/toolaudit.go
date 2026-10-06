@@ -57,6 +57,7 @@ var auditedBinaries = map[string]string{
 	"ps":         "secgate/toolgate_test.go: no flag surface of concern in the busybox build",
 	"netstat":    "secgate/toolgate_test.go: no flag surface of concern in the busybox build",
 	"lsof":       "secgate/toolgate_test.go: no flag surface of concern in the busybox build",
+	"kubectl":    "secgate/toolgate_test.go: execFlag denies the exec, run, attach, debug, cp, port-forward and proxy verbs over every non-flag token, denyFlags denies --kubeconfig because it can carry an exec credential plugin, fileaccess bounds the certificate and cache paths, and the server must be named as --server so the scope check reads it. Exploit tier, so it is never unattended",
 }
 
 // pendingAudits are catalog binaries that are present in the image but not yet
@@ -66,7 +67,6 @@ var pendingAudits = map[string]string{
 	"masscan": "needs a normalizing flag matcher: masscan lowercases its flag names and strips - and _, so --excludefile, --exclude-file and --EXCLUDEFILE are one flag and a literal denylist misses two of them. Until then its config and target-file flags (-c/--conf, --excludefile, -iL, --resume) are unbounded. Separately, the scope extractor denies a CIDR argument outright, so masscan's range form cannot be authorized at all and the tool has no advantage over nmap",
 	"kinit":   "the destination is a KDC resolved from the realm through DNS and krb5.conf, so the scope check cannot see it, and a principal of the form user@REALM makes the extractor scope-check the realm as if it were a host. Needs either a realm-aware extractor rule or the execution-location work, with the worker firewall as the enforcing layer meanwhile",
 	"aws":     "exploit tier, so never unattended; still needs --endpoint-url scope-checked, --cli-input-json/--cli-input-yaml denied as config indirection, and the mutating operations enumerated",
-	"kubectl": "exploit tier, so never unattended; still needs exec/run/attach/cp/port-forward/proxy/debug denied, --kubeconfig denied, and --server/-s scope-checked",
 	"socat":   "exploit tier, so never unattended; still needs an address-spec parser that permits only TCP, TCP4, TCP6, OPENSSL, UDP and STDIO, denies EXEC/SYSTEM/SHELL/PTY and OPEN/CREATE/GOPEN, extracts the host from each permitted spec, and fails closed on an unparsable spec",
 }
 

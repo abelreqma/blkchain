@@ -233,6 +233,7 @@ var toolCatalog = []tool{
 		Personas:  []string{"web", "cloud", "k8s", "ai-security"},
 		Probe:     []string{"--version"},
 		ProbeWant: "jq-1",
+		Note:      "a jq stage addresses no host, and the external profile denies a command with no verifiable target, so parsing a cloud or cluster response through jq works only in a local-scope engagement",
 	},
 
 	// Binary and host analysis. Every one of these reads a path rather than a

@@ -70,6 +70,8 @@ var writeFlags = map[string][]string{
 	// kinit writes a credential cache and reads a keytab; klist reads both.
 	"kinit": {"-c", "-t"},
 	"klist": {"-c", "-k"},
+	// kubectl reads the client certificate, key, and CA from these paths.
+	"kubectl": {"--client-certificate", "--client-key", "--certificate-authority", "--cache-dir"},
 }
 
 // dataFlags maps a binary base name to the flags whose value may carry an
@@ -102,6 +104,10 @@ var denyFlags = map[string][]string{
 	// bound would check the name and let the path through. The executor pipes
 	// JSON in as a pipeline stage, so neither flag is needed.
 	"jq": {"--rawfile", "--slurpfile"},
+	// kubectl --kubeconfig loads a file that sets the server, the credentials,
+	// and an exec credential plugin, which runs a binary of its choosing. The
+	// server must be named on the command line where the scope check sees it.
+	"kubectl": {"--kubeconfig"},
 	// ffuf -config loads options from a file; -request reads a raw request file
 	// whose Host header is the target, which the scope check never sees.
 	"ffuf": {"-config", "-request"},
