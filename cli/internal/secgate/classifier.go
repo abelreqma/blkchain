@@ -254,6 +254,9 @@ func classifyNonStructuralExternal(c Command) Decision {
 	if d, tripped := classifyRequired(c); tripped {
 		return d
 	}
+	if d, tripped := impacketViolation(baseName(strings.TrimSpace(c.Binary)), c.Args); tripped {
+		return d
+	}
 	name := strings.ToLower(baseName(strings.TrimSpace(c.Binary)))
 	if a, bad := readOnlyForms(name, c.Args); bad {
 		return Decision{

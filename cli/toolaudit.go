@@ -70,10 +70,11 @@ var pendingAudits = map[string]string{
 	"socat":   "exploit tier, so never unattended; still needs an address-spec parser that permits only TCP, TCP4, TCP6, OPENSSL, UDP and STDIO, denies EXEC/SYSTEM/SHELL/PTY and OPEN/CREATE/GOPEN, extracts the host from each permitted spec, and fails closed on an unparsable spec",
 }
 
-// impacketAudit is the audit every impacket entry point shares. Its target form
-// carries a credential, which must be stripped before the command signature
-// reaches the action transcript or the transcript leaks the password.
-const impacketAudit = "exploit tier, so never unattended; still needs the domain/user:pass@host target form parsed so the host is scope-checked and the credential segment is stripped from the recorded signature, -outputfile confined to scratch, and ntlmrelayx.py -c denied"
+// impacketAudit is the audit every impacket entry point shares. The credential
+// in its target operand is deliberately left intact, in the argv and in the
+// recorded command: these tools take it on the command line by design, and an
+// engagement transcript is expected to show exactly what ran.
+const impacketAudit = "secgate/impacket_test.go: impacketTargets parses the [domain/]user[:password]@host operand so the host reaches the scope check, takes the host after the LAST @ so a password containing @ cannot shift it, and discards the values that read as hosts but are not (a -hashes LM:NT pair parses as host:port, an -outputfile name parses as a hostname); an operand with no usable host fails closed. ntlmrelayx.py must name one -t target, and -tf is denied because it reads targets from a file the scope check never sees. fileaccess confines -outputfile to the scratch directory. Exploit tier, so never unattended"
 
 // auditStatus returns the recorded audit for a binary and whether it is
 // complete. An impacket entry point shares one audit note.
@@ -85,7 +86,7 @@ func auditStatus(binary string) (note string, audited bool) {
 		return note, false
 	}
 	if t, ok := toolFor(binary); ok && t.Package == "py3-impacket" {
-		return impacketAudit, false
+		return impacketAudit, true
 	}
 	return "", false
 }

@@ -38,8 +38,15 @@ var (
 // A trailing dot on a hostname is normalized away. A flag with no '=' value is
 // not a target.
 func ExtractTargets(c Command) ([]string, bool) {
+	name := baseName(strings.TrimSpace(c.Binary))
+	if impacketBinaries[name] {
+		// impacket's [domain/]user[:password]@host operand needs its own grammar:
+		// the generic token reader cuts at the first '/' and loses the host, and a
+		// -hashes LM:NT value reads as host:port.
+		return impacketTargets(c.Args)
+	}
 	e := &extractor{seen: map[string]bool{}, ok: true}
-	switch strings.ToLower(baseName(strings.TrimSpace(c.Binary))) {
+	switch strings.ToLower(name) {
 	case "smbclient", "rpcclient":
 		e.unc = true
 	case "dig":
