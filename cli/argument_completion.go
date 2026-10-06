@@ -49,6 +49,10 @@ func (m model) argumentSuggestions(value string) []paletteItem {
 		head += strings.Join(words[:position], " ") + " "
 	}
 	switch verb {
+	case "agent":
+		if position == 0 {
+			choices = answerAgentNames()
+		}
 	case "models":
 		if position == 0 {
 			choices = []string{"on", "off", "load", "unload"}
@@ -131,7 +135,11 @@ func (m model) argumentSuggestions(value string) []paletteItem {
 			continue
 		}
 		seen[choice] = true
-		out = append(out, paletteItem{name: strings.TrimPrefix(head, "/") + choice, label: choice, value: head + choice + " "})
+		label := choice
+		if verb == "agent" {
+			label = answerAgentLabel(choice)
+		}
+		out = append(out, paletteItem{name: strings.TrimPrefix(head, "/") + choice, label: label, value: head + choice + " "})
 		if len(out) == 100 {
 			break
 		}

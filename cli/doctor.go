@@ -54,7 +54,7 @@ func runDoctor(args []string) error {
 	if _, err := exec.LookPath(hermesBin); err == nil {
 		fmt.Printf("%s hermes CLI on PATH\n", check(true))
 	} else {
-		fmt.Printf("%s hermes CLI not on PATH %s\n", check(false), Meta.Render("(blk hermes / ask --agent unavailable)"))
+		fmt.Printf("%s hermes CLI not on PATH %s\n", check(false), Meta.Render("(blk hermes / ask --hermes unavailable)"))
 	}
 
 	// 4. Hermes MCP wiring: is the blkchain MCP server registered and enabled?

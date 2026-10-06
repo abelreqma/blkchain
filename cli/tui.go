@@ -589,14 +589,15 @@ type model struct {
 	keyPanel  bool
 	keyScroll int
 
-	// Agent mode. mode is "rag" (default) or "agent"; the agent
+	// Agent mode. mode is "agent" (default) or "rag"; the agent
 	// fields track the gateway session handle and the health/transport shown in
 	// the status line.
 	mode string
 	// persona is the domain key of the expert that answered the current/last rag
 	// turn (e.g. "ad"), set from a personaMsg; "" for the generic persona. The
 	// status ribbon shows it; it is cleared at the start of each new rag turn.
-	persona string
+	persona     string
+	answerAgent string
 	// engageMode and engageTranscript are the engagement settings shown by the
 	// ribbon and passed to the shared RoE session.
 	engageMode       secgate.Mode
@@ -662,7 +663,7 @@ func initialModel() model {
 		keys:             defaultKeys(),
 		history:          hist,
 		histIdx:          len(hist),
-		mode:             "rag",
+		mode:             "agent",
 		engageMode:       secgate.Auto,
 		engageTranscript: "important",
 		sess:             sess,
@@ -1961,8 +1962,18 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.engageTranscript = mode
 		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render("transcript: "+mode)))
 	case "agent":
-		m.mode = "agent"
-		return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
+		if strings.TrimSpace(arg) == "" {
+			return m, tea.Sequence(tea.Println(echo), tea.Println(m.answerAgentStatus()))
+		}
+		previousMode := m.mode
+		if err := m.selectAnswerAgent(arg); err != nil {
+			return m, tea.Println(styleErr(err))
+		}
+		cmd := tea.Sequence(tea.Println(echo), tea.Println(m.answerAgentStatus()))
+		if previousMode != m.mode {
+			cmd = tea.Batch(cmd, m.modeSwitchCmd())
+		}
+		return m, cmd
 	case "rag":
 		toggle, on, question := ragArg(arg)
 		switch {
@@ -2601,6 +2612,7 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 		streamed := false
 		p := loadPrefs()
 		full, cits, usedWeb, results, tokens, _, err := adaptiveAnswerFn(ctx, rc, cfg, question, askRoutes(p), force, AnswerOpts{
+			Agent:   m.answerAgent,
 			Model:   turnModel,
 			Preface: preface,
 			NoWeb:   !p.Web,
@@ -2657,6 +2669,7 @@ func (m model) generateCmd(ctx context.Context, question string, results []retri
 		}
 		streamed := false
 		full, cits, tokens, err := synthFromResultsFn(ctx, cfg, question, results, AnswerOpts{
+			Agent: m.answerAgent,
 			Model: turnModel,
 			Persona: func(domain string) {
 				if prog != nil {
@@ -3695,6 +3708,7 @@ func helpResponse(arg string, width int) string {
 		}
 		text := " " + H2.Render(usage) + "\n" + wrapIndent(c.desc, 3, width)
 		examples := map[string]string{
+			"agent":   "Hermes is the default. /agent NAME selects native answers; /agent auto selects native dynamic routing. Available: " + strings.Join(answerAgentNames(), ", ") + ". /mode switches back to Hermes; /hermes calls it for one turn.",
 			"context": "/context add PATH|URL; /context preview N; /context remove N; /context clear. Links are references, not fetched content.",
 			"queue":   "/queue list; /queue edit N; /queue remove N; /queue pause; /queue resume; /queue clear.",
 			"attach":  "/attach PATH or /attach URL prepares the next question. With no argument, the TUI opens a file picker.",

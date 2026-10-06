@@ -246,7 +246,7 @@ Playwright container and driver. Inspect `blk engage web help` for the available
 | Command | Purpose |
 | --- | --- |
 | `blk search --json <query>` | Return ranked local evidence without answer synthesis. |
-| `blk ask <question>` | Produce a cited answer from local evidence and optional permissioned web research. |
+| `blk ask <question>` | Produce a cited answer from local evidence and optional permissioned web research. `--agent <name>` selects the answer specialist. |
 | `blk add <path-or-url>` | Add a file, directory, or public URL to the local index. URL ingestion rejects unsafe destinations. |
 | `blk sources` | List indexed sources and chunk counts. |
 | `blk engage --roe ROE.md <goal>` | Start an RoE-gated assessment. |

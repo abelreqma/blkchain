@@ -79,6 +79,7 @@ type answerResponse struct {
 	// Model is the model blk requested for this answer. It is the id blk sent,
 	// not one the server reported back.
 	Model   string             `json:"model"`
+	Agent   string             `json:"agent,omitempty"`
 	Results []retrieval.Result `json:"results,omitempty"`
 	// Route is the retrieval decision for this answer: "skip", "rag", or "web".
 	Route           string         `json:"route,omitempty"`
@@ -262,6 +263,7 @@ func reorder(args []string, valueFlags map[string]bool) []string {
 
 // searchOpts holds the flags of `blk search`.
 type searchOpts struct {
+	agent   string
 	topK    int
 	json    bool
 	sources multiFlag
@@ -272,6 +274,7 @@ type searchOpts struct {
 // defineSearchFlags declares `blk search`'s flags. Placeholders are the
 // backquoted words, which the FLAGS help section shows after each flag name.
 func defineSearchFlags(fs *flag.FlagSet, o *searchOpts, defaultTopK int) {
+	fs.StringVar(&o.agent, "agent", "", "native answer specialist `NAME` (default auto)")
 	fs.IntVar(&o.topK, "top-k", 0, fmt.Sprintf("return `N` results (default %d)", defaultTopK))
 	fs.BoolVar(&o.json, "json", false, "print JSON instead of formatted text")
 	fs.Var(&o.sources, "source", "only results from source `NAME` (the last one wins)")
@@ -284,13 +287,17 @@ func runSearch(args []string) error {
 	cfg := loadConfig()
 	fs := newFlagSet("search")
 	defineSearchFlags(fs, &o, cfg.TopK)
-	valueFlags := map[string]bool{"top-k": true, "source": true, "type": true, "filter": true}
+	valueFlags := map[string]bool{"top-k": true, "source": true, "type": true, "filter": true, "agent": true}
 	if err := parseFlags(fs, reorder(args, valueFlags)); err != nil {
 		return err
 	}
 	topK, jsonOut, sources, typ, filters := &o.topK, &o.json, o.sources, o.typ, o.filters
 
 	query := strings.Join(fs.Args(), " ")
+	agent, err := parseAnswerAgent(o.agent)
+	if err != nil {
+		return usageErr("%s", err)
+	}
 	if query == "" {
 		return missingArg("search", "missing query", `search "SSRF to cloud metadata"`)
 	}
@@ -308,7 +315,7 @@ func runSearch(args []string) error {
 	if !*jsonOut {
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout())
 		defer cancel()
-		_, _, _, err := printGroundedText(ctx, rc, cfg, query, AnswerOpts{NoWeb: !loadPrefs().Web, SearchTopK: *topK, SearchFilter: filterMap}, rc.SkipRerank)
+		_, _, _, err := printGroundedText(ctx, rc, cfg, query, AnswerOpts{Agent: agent, NoWeb: !loadPrefs().Web, SearchTopK: *topK, SearchFilter: filterMap}, rc.SkipRerank)
 		return err
 	}
 	results, err := rc.Search(context.Background(), query, *topK, filterMap)
@@ -421,7 +428,8 @@ func newAskStream(w io.Writer, full *strings.Builder) func([]byte) {
 type askOpts struct {
 	json    bool
 	sources bool
-	agent   bool
+	agent   string
+	hermes  bool
 	rag     bool
 	web     bool
 	context multiFlag
@@ -435,7 +443,8 @@ func askRoutes(p modelPrefs) enabledRoutes {
 func defineAskFlags(fs *flag.FlagSet, o *askOpts) {
 	fs.BoolVar(&o.json, "json", false, "print the answer as JSON instead of formatted text")
 	fs.BoolVar(&o.sources, "sources", false, "also print the retrieved passages")
-	fs.BoolVar(&o.agent, "agent", false, "answer with the Hermes agent instead of the knowledge base alone")
+	fs.StringVar(&o.agent, "agent", "", "native answer specialist `NAME` (unset: Hermes; auto: native dynamic)")
+	fs.BoolVar(&o.hermes, "hermes", false, "answer with Hermes")
 	fs.BoolVar(&o.web, "web", false, "search the internet for this answer only")
 	fs.BoolVar(&o.rag, "rag", false, "force a grounded answer from the knowledge base, skipping adaptive routing")
 	fs.Var(&o.context, "context", "attach a file or HTTP(S) `URL` reference (repeatable)")
@@ -462,14 +471,32 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 	var o askOpts
 	fs := newFlagSet("ask")
 	defineAskFlags(fs, &o)
-	if err := parseFlags(fs, reorder(args, map[string]bool{"context": true})); err != nil {
+	if err := parseFlags(fs, reorder(args, map[string]bool{"context": true, "agent": true})); err != nil {
 		return "", err
 	}
-	jsonOut, showSources, agent := &o.json, &o.sources, &o.agent
-
+	jsonOut, showSources := &o.json, &o.sources
+	agent, err := parseAnswerAgent(o.agent)
+	if err != nil {
+		return "", usageErr("%s", err)
+	}
+	explicitAgent := false
+	fs.Visit(func(f *flag.Flag) { explicitAgent = explicitAgent || f.Name == "agent" })
+	if o.hermes && explicitAgent {
+		return "", usageErr("ask: --agent cannot be combined with --hermes")
+	}
+	if o.hermes && (o.rag || o.web) {
+		return "", usageErr("ask: --hermes cannot be combined with --rag or --web")
+	}
+	if o.web && o.rag {
+		return "", usageErr("ask: --web cannot be combined with --rag")
+	}
+	useHermes := o.hermes || (!explicitAgent && !o.rag && !o.web)
 	query := strings.Join(fs.Args(), " ")
 	if query == "" {
 		return "", missingArg("ask", "missing question", `ask "what is SSRF?"`)
+	}
+	if !explicitAgent && (o.json || o.sources) {
+		return "", usageErr("ask: --json and --sources need native routing; select --agent auto or a specialist")
 	}
 	if len(o.context) > 0 {
 		pending := model{}
@@ -481,13 +508,10 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		preface = strings.TrimSpace(preface + "\n\n" + pending.buildContextPreface())
 	}
 
-	if o.web && (o.agent || o.rag) {
-		return "", usageErr("ask: --web cannot be combined with --agent or --rag")
-	}
-
-	// --agent hands the question to the Hermes agent (which has the blkChain KB
-	// tools plus web/tool access), rather than the Go answer loop.
-	if *agent {
+	if useHermes {
+		if preface != "" {
+			query = preface + "\n\n" + query
+		}
 		return "", runHermes([]string{query})
 	}
 
@@ -517,6 +541,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		var full strings.Builder
 		p := loadPrefs()
 		_, cits, usedWeb, _, _, _, err := adaptiveAnswerFn(ctx, rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{
+			Agent:   agent,
 			Stream:  newAskStream(os.Stdout, &full),
 			Preface: preface,
 			NoWeb:   !p.Web,
@@ -547,7 +572,8 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 	// answer loop was asked to use.
 	model := resolveModel(cfg)
 	p := loadPrefs()
-	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(ctx, rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Model: model, NoWeb: !p.Web, WebOnly: o.web, History: history, Preface: preface})
+	actualAgent := "general"
+	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(ctx, rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Agent: agent, Model: model, NoWeb: !p.Web, WebOnly: o.web, History: history, Preface: preface, Persona: func(domain string) { actualAgent = answerAgentName(domain) }})
 	if errors.Is(err, ErrNoResults) {
 		return "", reportNoResults(os.Stderr, *jsonOut, model)
 	}
@@ -559,6 +585,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		Citations: cits,
 		UsedWeb:   usedWeb,
 		Model:     model,
+		Agent:     actualAgent,
 		Results:   results,
 		Route:     route,
 	}
@@ -903,6 +930,9 @@ func (m *multiFlag) Set(v string) error {
 
 func printGroundedText(ctx context.Context, rc searcher, cfg ragconfig.Config, question string, opts AnswerOpts, rerankOff bool) (string, []citation, []retrieval.Result, error) {
 	var full strings.Builder
+	if opts.Agent != "" && opts.Persona == nil {
+		opts.Persona = func(domain string) { fmt.Println(Meta.Render("answering as " + personaLabel(domain))) }
+	}
 	opts.Stream = newAskStream(os.Stdout, &full)
 	answer, citations, usedWeb, results, _, err := AnswerLoop(ctx, rc, cfg, question, opts)
 	if errors.Is(err, ErrNoResults) {

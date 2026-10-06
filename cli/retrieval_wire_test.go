@@ -248,7 +248,7 @@ func TestAskJSONGolden(t *testing.T) {
 	t.Setenv("OMLX_API_KEY", "")
 	t.Setenv("TAVILY_SETUP_TOKEN", "")
 	out := captureStdout(t, func() {
-		if err := runAsk([]string{"--json", "q"}); err != nil {
+		if err := runAsk([]string{"--agent", "auto", "--json", "q"}); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -277,6 +277,7 @@ func TestAskJSONGolden(t *testing.T) {
   ],
   "used_web": false,
   "model": "m",
+  "agent": "web",
   "results": [
     {
       "id": "1",
@@ -344,7 +345,7 @@ func TestAskJSONReportsModelAndUntrustedWebCitation(t *testing.T) {
 	t.Setenv("OMLX_API_KEY", "")
 	t.Setenv("TAVILY_SETUP_TOKEN", "")
 	out := captureStdout(t, func() {
-		if err := runAsk([]string{"--json", "q"}); err != nil {
+		if err := runAsk([]string{"--agent", "auto", "--json", "q"}); err != nil {
 			t.Fatal(err)
 		}
 	})

@@ -63,7 +63,7 @@ func replPrompt() string {
 // modes. It keeps the last search results so `open N` can open the N-th hit.
 func plainREPL() error {
 	var last []retrieval.Result
-	mode := "rag"
+	mode := "agent"
 	pm := model{cfg: loadConfig(), mode: mode, hist: histstore.OpenDefault(), engageMode: secgate.Auto, engageTranscript: "important", ta: textarea.New()}
 	pm.sess, _ = newSession()
 	pm.ambient, _ = loadInitContext()
@@ -265,8 +265,15 @@ func plainREPL() error {
 			}
 			fmt.Println(Meta.Render("mode: " + mode))
 		case "agent":
-			mode = "agent"
-			fmt.Println(Meta.Render("mode: agent"))
+			if strings.TrimSpace(rest) == "" {
+				fmt.Println(pm.answerAgentStatus())
+			} else if err := pm.selectAnswerAgent(rest); err != nil {
+				printErr(err)
+			} else {
+				mode = pm.mode
+				rc.agent = pm.answerAgent
+				fmt.Println(pm.answerAgentStatus())
+			}
 		case "rag":
 			if toggle, on, q := ragArg(rest); toggle {
 				p := loadPrefs()
@@ -282,7 +289,7 @@ func plainREPL() error {
 				fmt.Println(Meta.Render("mode: rag"))
 			}
 		case "web":
-			last = replWebSearch(rest, last)
+			last = replWebSearch(rest, last, rc.agent)
 		case "search", "s":
 			query := rest
 			if !strings.HasPrefix(cmd, "/") && strings.EqualFold(cmd, "search") {
@@ -384,6 +391,7 @@ func plainClarify(in *bufio.Scanner, out io.Writer, c Clarification) ClarifyResu
 // replClient is the plain REPL's one retrieval client, made on first use and
 // closed when the loop ends.
 type replClient struct {
+	agent   string
 	rc      *retrieval.Client
 	metrics *callMetrics
 	started time.Time
@@ -423,7 +431,7 @@ func replSearch(query string, prev []retrieval.Result, c *replClient, history []
 	ctx, cancel := context.WithTimeout(context.Background(), loadConfig().RequestTimeout())
 	defer cancel()
 	ctx = context.WithValue(ctx, metricsKey{}, c.metrics)
-	answer, citations, results, err := printGroundedText(ctx, rc, loadConfig(), query, AnswerOpts{NoWeb: !loadPrefs().Web, History: history, Preface: preface}, rc.SkipRerank)
+	answer, citations, results, err := printGroundedText(ctx, rc, loadConfig(), query, AnswerOpts{Agent: c.agent, NoWeb: !loadPrefs().Web, History: history, Preface: preface}, rc.SkipRerank)
 	if err != nil {
 		printErr(err)
 		return "", prev
@@ -485,6 +493,9 @@ func replGroups() []rowGroup {
 			{"/web [action]", replSpecDesc("web")},
 			{"/open <N|path>", replSpecDesc("open")},
 		}},
+		{groupModes, []helpRow{
+			{"/agent [auto|name]", replSlashDesc("agent")},
+		}},
 		{hgServices, []helpRow{
 			{"/up", replSpecDesc("up")},
 			{"/down", replSpecDesc("down")},
@@ -502,7 +513,6 @@ func replGroups() []rowGroup {
 			{"/safe", "approve engagement actions interactively"},
 			{"/auto", "run within the active RoE without prompts"},
 			{"/mode", replSlashDesc("mode")},
-			{"/agent", replSlashDesc("agent")},
 			{"/rag [on|off|question]", replSlashDesc("rag")},
 		}},
 		{hgSetup, []helpRow{

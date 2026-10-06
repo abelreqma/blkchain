@@ -9,7 +9,7 @@ Two independent layers:
    labels must match the same result. We report hit_rate@5, hit_rate@10 and MRR.
 
 2. ANSWER METRICS (best-effort, LLM-judged with the local oMLX model). Wraps
-   deepeval Faithfulness / AnswerRelevancy against `blk ask --json` output. If
+   deepeval Faithfulness / AnswerRelevancy against `blk ask --agent auto --json` output. If
    the local judge is unavailable or unreliable it is reported as
    judge_unavailable and the process still exits 0.
 
@@ -165,8 +165,8 @@ def blk_search(query: str, top_k: int, collection: str | None = None,
 
 
 def blk_answer(query: str, collection: str | None = None, timeout: float = _ANSWER_TIMEOUT) -> dict:
-    """`blk ask --json --rag`: {answer, citations, used_web, results}, fields normalized. Grounding forced for deterministic scoring."""
-    obj = _run_blk_json(["ask", "--json", "--rag", "--", query], timeout, collection)
+    """`blk ask --agent auto --json --rag`: normalized answer fields with forced grounding."""
+    obj = _run_blk_json(["ask", "--agent", "auto", "--json", "--rag", "--", query], timeout, collection)
     answer = obj.get("answer")
     return {
         "answer": answer if isinstance(answer, str) else "",

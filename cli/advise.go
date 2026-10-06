@@ -41,8 +41,12 @@ const adviseSystemPrompt = genericPersonaPreamble + "\n\n" + adviseMethodology
 // skill). It returns the final advice and a zero token count (the loop does not
 // report completion tokens).
 func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig.Config, cat *skillcat.Catalog, question string, opts AnswerOpts) (string, int, error) {
+	domain, err := answerAgentDomain(opts.Agent, "")
+	if err != nil {
+		return "", 0, err
+	}
 	if opts.Persona != nil {
-		opts.Persona("")
+		opts.Persona(domain)
 	}
 	reg := tooldef.NewRegistry()
 	for _, t := range []tooldef.Tool{
@@ -57,7 +61,8 @@ func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig
 	if strings.TrimSpace(opts.Preface) != "" {
 		human = "Context the user provided:\n" + opts.Preface + "\n\n" + question
 	}
-	msgs := messagesWithHistory(adviseSystemPrompt, opts.History, human)
+	prompt := personaFor(domain).preamble + "\n\n" + adviseMethodology
+	msgs := messagesWithHistory(prompt, opts.History, human)
 	caps := LoopCaps{MaxRounds: adviseMaxRounds, MaxCalls: adviseMaxCalls}
 	final, _, err := runToolLoop(ctx, m, reg, msgs, caps)
 	// The plain-text REPL and CLI paths render only what reaches opts.Stream, so

@@ -51,14 +51,15 @@ func commandSpecs() []cmdSpec {
 		{
 			name: "ask", args: "<question...>", group: hgAsk,
 			desc: "answer a question, with cited sources",
-			long: "Searches the knowledge base, checks that what it found is enough, and writes an answer that cites its sources. " +
-				"With web permission enabled, it can search the internet and marks those sources as untrusted. Use --web for a web-only answer when web is enabled. " +
-				"Web answers need only the LLM; local answers also need the retrieval services.",
+			long: "Uses Hermes by default; --agent NAME selects native answers, --rag forces local grounding, and --web requests a web-only answer. " +
+				"Native auto selects a specialist dynamically; available: " + strings.Join(answerAgentNames(), ", ") + ". " +
+				"--json and --sources require explicit --agent auto or a specialist name. " +
+				"Hermes is also available through blk hermes or --hermes.",
 			flags: func(fs *flag.FlagSet) { defineAskFlags(fs, &askOpts{}) },
 			examples: []string{
 				`blk ask "how do I chain SSRF to RCE?"`,
-				`blk ask --sources "what is HTTP request smuggling?"`,
-				`blk ask --json "what is IDOR?"`,
+				`blk ask --agent auto --json "what is IDOR?"`,
+				`blk ask --agent cloud "explain IAM"`,
 			},
 			run: runAsk,
 		},
@@ -992,7 +993,7 @@ func renderUsage(width int) string {
 	writeCols(&b, envRows, 3, nameW, total, renderWith(Cmd), Body)
 
 	b.WriteString("\n")
-	writeNote(&b, "Add --json to ask, search, or models for machine-readable output.", total, "--json")
+	writeNote(&b, "Native ask needs --agent auto with --json; search and models accept --json.", total, "--json")
 	writeNote(&b, fmt.Sprintf(`Run "blk help <command>" for its flags, or "blk help env" for all %d variables.`, envCount), total,
 		"blk help <command>", "blk help env")
 	return b.String()

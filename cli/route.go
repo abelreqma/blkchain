@@ -160,15 +160,16 @@ const directAnswerSystemPrompt = genericPersonaPreamble + directAnswerConstraint
 // retrieval. It is the skip route's handler. It mirrors AnswerLoop's streaming
 // and sampling so the ask path renders identically, minus the sources.
 func directAnswer(ctx context.Context, cfg ragconfig.Config, question string, opts AnswerOpts) (string, int, error) {
+	domain, err := answerAgentDomain(opts.Agent, "")
+	if err != nil {
+		return "", 0, err
+	}
 	l, err := newOMLX(cfg, opts.Model)
 	if err != nil {
 		return "", 0, err
 	}
-	// The skip path has no retrieval, so it is always the generalist persona;
-	// announce it so the "answering as" cue fires here too (empty domain ->
-	// personaLabel returns the generalist label).
 	if opts.Persona != nil {
-		opts.Persona("")
+		opts.Persona(domain)
 	}
 	human := question
 	if strings.TrimSpace(opts.Preface) != "" {
@@ -176,7 +177,8 @@ func directAnswer(ctx context.Context, cfg ragconfig.Config, question string, op
 	}
 	// Carry conversation memory on the skip path too: this is where
 	// conversational follow-ups ("the codeword", "an example of it") land.
-	msgs := messagesWithHistory(directAnswerSystemPrompt, opts.History, human)
+	prompt := personaFor(domain).preamble + directAnswerConstraints
+	msgs := messagesWithHistory(prompt, opts.History, human)
 	var full strings.Builder
 	stream := func(_ context.Context, chunk []byte) error {
 		if err := ctx.Err(); err != nil {
@@ -241,6 +243,9 @@ func skipGroundsInCorpus(ctx context.Context, l toolLoopModel, rc searcher, cfg 
 // it; the pure-arithmetic guard skip is never validated. route is "skip", "rag",
 // or "web" (web when the grounded answer used the web fallback).
 func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, question string, enabled enabledRoutes, force bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+	if _, err := parseAnswerAgent(opts.Agent); err != nil {
+		return "", nil, false, nil, 0, "", err
+	}
 	// Compress carried-back conversation memory once, before any dispatch, so a
 	// long session stays within budget by condensing older turns rather than
 	// dropping them. Shared by the CLI, REPL, and TUI (all reach here through

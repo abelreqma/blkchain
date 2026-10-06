@@ -157,7 +157,7 @@ func TestAskWebFlagUsesSavedPermission(t *testing.T) {
 	}
 	defer func() { adaptiveAnswerFn = original }()
 	var err error
-	captureStdout(t, func() { err = runAsk([]string{"--web", "--json", "query"}) })
+	captureStdout(t, func() { err = runAsk([]string{"--agent", "auto", "--web", "--json", "query"}) })
 	if err != nil || !loadPrefs().Web {
 		t.Fatalf("err %v prefs %+v", err, loadPrefs())
 	}

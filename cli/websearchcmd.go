@@ -135,7 +135,7 @@ func runWebSearch(args []string) error {
 	return nil
 }
 
-func replWebSearch(arg string, previous []retrieval.Result) []retrieval.Result {
+func replWebSearch(arg string, previous []retrieval.Result, agent ...string) []retrieval.Result {
 	args, err := webArguments(arg)
 	if err != nil {
 		printErr(err)
@@ -153,7 +153,11 @@ func replWebSearch(arg string, previous []retrieval.Result) []retrieval.Result {
 	ctx, cancel := context.WithTimeout(context.Background(), loadConfig().RequestTimeout())
 	defer cancel()
 	if !c.json {
-		_, _, results, err := printGroundedText(ctx, nil, loadConfig(), c.value, AnswerOpts{WebOnly: true, NoWeb: !loadPrefs().Web, SearchTopK: c.topK}, false)
+		choice := ""
+		if len(agent) > 0 {
+			choice = agent[0]
+		}
+		_, _, results, err := printGroundedText(ctx, nil, loadConfig(), c.value, AnswerOpts{Agent: choice, WebOnly: true, NoWeb: !loadPrefs().Web, SearchTopK: c.topK}, false)
 		if err != nil {
 			printErr(err)
 			return previous

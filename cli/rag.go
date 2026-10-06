@@ -152,9 +152,9 @@ func nextAction(g grade, hasWeb, looksCVE bool, results int) string {
 // never calls rc.Search; grounding comes from web only. When false (default),
 // AnswerLoop behavior is unchanged.
 type AnswerOpts struct {
-	Model, Preface string
-	Stream         func([]byte)
-	Stage          func(stage string)
+	Model, Preface, Agent string
+	Stream                func([]byte)
+	Stage                 func(stage string)
 	// Persona, when set, is called once with the chosen domain KEY (e.g. "ad")
 	// before the answer streams, so the UI can show the cue via personaLabel and
 	// a short status token. It is not called for the generic persona.
@@ -235,6 +235,9 @@ func retrievalQuery(history []priorTurn, question string) string {
 // the final, source-attributed answer, streamed from oMLX. See nextAction for
 // the loop control.
 func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question string, opts AnswerOpts) (answer string, cits []citation, usedWeb bool, results []retrieval.Result, tokens int, err error) {
+	if _, err := parseAnswerAgent(opts.Agent); err != nil {
+		return "", nil, false, nil, 0, err
+	}
 	stage := func(name string) {
 		if opts.Stage != nil {
 			opts.Stage(name)
@@ -398,7 +401,10 @@ func synthesize(ctx context.Context, l toolLoopModel, cfg ragconfig.Config, ques
 	// without a cue. All personas share answerConstraints, so grounding,
 	// citations, payload generation, and embedded-instruction handling are
 	// identical regardless of persona.
-	domain := domainFromResults(chunks)
+	domain, err := answerAgentDomain(opts.Agent, domainFromResults(chunks))
+	if err != nil {
+		return "", nil, 0, err
+	}
 	if opts.Persona != nil && personaLabel(domain) != "" {
 		opts.Persona(domain)
 	}
@@ -465,6 +471,9 @@ func synthesize(ctx context.Context, l toolLoopModel, cfg ragconfig.Config, ques
 // extraction, and untrusted-tag behavior). It never calls Search and never
 // grades.
 func SynthesizeFromResults(ctx context.Context, cfg ragconfig.Config, question string, results []retrieval.Result, opts AnswerOpts) (answer string, cits []citation, tokens int, err error) {
+	if _, err := parseAnswerAgent(opts.Agent); err != nil {
+		return "", nil, 0, err
+	}
 	l := opts.llm
 	if l == nil {
 		l, err = newOMLX(cfg, opts.Model)

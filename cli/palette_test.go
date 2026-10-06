@@ -321,15 +321,19 @@ func TestSlashHelpGroupsFollowVocabulary(t *testing.T) {
 	if strings.Join(titles, "|") != strings.Join(want, "|") {
 		t.Errorf("groups = %v, want %v", titles, want)
 	}
-	// /agent and /rag stay in the palette but are folded into /mode in help.
+	// /rag is a mode alias; /agent has its own specialist-selection row.
 	for _, g := range commandGroups() {
 		for _, c := range g.cmds {
-			if c.name == "agent" || c.name == "rag" {
+			if c.name == "rag" {
 				t.Errorf("/%s must not be a separate help row", c.name)
 			}
 		}
 	}
 	if !isExactCommand("agent") || !isExactCommand("rag") {
 		t.Error("/agent and /rag must still be commands")
+	}
+	agent, ok := slashCommand("agent")
+	if !ok || agent.group == groupHidden {
+		t.Fatal("native specialist selection is hidden from help")
 	}
 }

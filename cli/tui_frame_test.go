@@ -22,6 +22,7 @@ func frameModel(tb testing.TB) model {
 	tb.Setenv("OMLX_MODEL", "")
 	tb.Setenv("BLK_REDUCE_MOTION", "")
 	m := initialModel()
+	m.mode = "rag"
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	return nm.(model)
 }

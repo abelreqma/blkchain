@@ -29,6 +29,9 @@ func plainAsk(mode, query string, c *replClient, history []priorTurn, preface st
 		query = rest
 	}
 	if mode == "agent" && !force && !webOnly {
+		if preface != "" {
+			query = preface + "\n\n" + query
+		}
 		return "", runHermes([]string{query})
 	}
 	var rc *retrieval.Client
@@ -46,6 +49,7 @@ func plainAsk(mode, query string, c *replClient, history []priorTurn, preface st
 	if webOnly {
 		args = []string{"--web", query}
 	}
+	args = append([]string{"--agent", c.agent}, args...)
 	return askWithPreface(rc, history, args, preface, c.metrics)
 }
 

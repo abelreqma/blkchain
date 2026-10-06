@@ -40,7 +40,9 @@ func TestJSONAnswerReportsCallMetrics(t *testing.T) {
 	}
 	t.Cleanup(func() { webSearch = prior })
 	var err error
-	out := captureStdout(t, func() { _, err = askWithPreface(nil, nil, []string{"--web", "--json", "question"}, "") })
+	out := captureStdout(t, func() {
+		_, err = askWithPreface(nil, nil, []string{"--agent", "auto", "--web", "--json", "question"}, "")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

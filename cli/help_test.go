@@ -314,7 +314,7 @@ func TestUsageLayout(t *testing.T) {
 	for _, want := range []string{
 		"start the interactive session",
 		"   blk <command> [flags]  run one command",
-		"Add --json to ask, search, or models for machine-readable output.",
+		"Native ask needs --agent auto with --json; search and models accept --json.",
 		"flags go before or after the query",
 		`Run "blk help <command>" for its flags`,
 	} {
@@ -508,7 +508,7 @@ func TestUsageClosingLinesHighlightCommands(t *testing.T) {
 	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
 	out := renderUsage(80)
 	for _, want := range []string{
-		Meta.Render("Add ") + Flag.Render("--json") + Meta.Render(" to ask, search, or models for machine-readable output."),
+		Meta.Render("Native ask needs --agent auto with ") + Flag.Render("--json") + Meta.Render("; search and models accept ") + Flag.Render("--json") + Meta.Render("."),
 		Meta.Render(`Run "`) + styleWords("blk help <command>") + Meta.Render(`" for its flags, or "`) + styleWords("blk help env"),
 	} {
 		if !strings.Contains(out, want) {
@@ -1117,8 +1117,8 @@ func TestModeCommandsShareOneWording(t *testing.T) {
 	// is hardcoded in replGroups, not derived from the registry). The registry
 	// desc stays the single source and is pinned unchanged.
 	for _, tc := range []struct{ name, replRow, want string }{
-		{"mode", "/mode", "switch between knowledge-base answers and the Hermes agent (also /agent, /rag)"},
-		{"agent", "/agent", "use the Hermes agent for questions"},
+		{"mode", "/mode", "switch between native answers and Hermes (also /rag)"},
+		{"agent", "/agent [auto|name]", "choose the native answer specialist; auto selects dynamically"},
 		{"rag", "/rag [on|off|question]", "answer from the knowledge base"},
 	} {
 		if c, _ := slashCommand(tc.name); c.desc != tc.want {
@@ -1128,7 +1128,7 @@ func TestModeCommandsShareOneWording(t *testing.T) {
 			t.Errorf("the plain REPL /help lacks %s %q:\n%s", tc.replRow, tc.want, repl)
 		}
 	}
-	if block := collapse(helpBlock(200)); !strings.Contains(block, "/mode switch between knowledge-base answers") {
+	if block := collapse(helpBlock(200)); !strings.Contains(block, "/mode switch between native answers") {
 		t.Errorf("/help lacks the /mode row:\n%s", block)
 	}
 }

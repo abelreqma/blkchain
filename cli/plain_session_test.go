@@ -35,7 +35,7 @@ func TestPlainREPLCommandsAndContext(t *testing.T) {
 		return "saved answer", nil, false, nil, 2, "skip", nil
 	}
 	p := filepath.Join(t.TempDir(), "input")
-	if err := os.WriteFile(p, []byte("/unknown\n/model\n/engage\n/init\nhello\n/history\n/quit\n"), 0o600); err != nil {
+	if err := os.WriteFile(p, []byte("/agent auto\n/unknown\n/model\n/engage\n/init\nhello\n/history\n/quit\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	f, err := os.Open(p)
@@ -120,7 +120,7 @@ func TestPlainPendingContextIsUsedOnlyByNextQuestion(t *testing.T) {
 		return "answer", nil, false, nil, 1, "skip", nil
 	}
 	path := filepath.Join(t.TempDir(), "input")
-	if err := os.WriteFile(path, []byte("/attach https://example.test/reference\nfirst question\nsecond question\n/clear\n/quit\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("/agent auto\n/attach https://example.test/reference\nfirst question\nsecond question\n/clear\n/quit\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	f, err := os.Open(path)
@@ -165,7 +165,7 @@ func TestPlainUndoWithoutSQLitePreservesEarlierExchange(t *testing.T) {
 		return "fixture answer", nil, false, nil, 1, "skip", nil
 	}
 	input := filepath.Join(t.TempDir(), "input")
-	if err := os.WriteFile(input, []byte("first question\nsecond question\n/undo\nthird question\n/quit\n"), 0600); err != nil {
+	if err := os.WriteFile(input, []byte("/agent auto\nfirst question\nsecond question\n/undo\nthird question\n/quit\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	f, err := os.Open(input)

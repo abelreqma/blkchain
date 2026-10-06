@@ -98,7 +98,9 @@ func newKeyModel(t *testing.T) model {
 	t.Helper()
 	isolateUserDirs(t)
 	t.Setenv("BLK_REDUCE_MOTION", "")
-	return initialModel()
+	m := initialModel()
+	m.mode = "rag"
+	return m
 }
 
 // isolateUserDirs points every per-user location (config, data, home) at fresh
@@ -1720,14 +1722,14 @@ func TestHelpBlockLayout(t *testing.T) {
 	if !strings.Contains(lines[1], "<question>") {
 		t.Errorf("first row = %q, want the bare-question row", lines[1])
 	}
-	// /agent and /rag are folded into the /mode row.
+	// /agent selects specialists; /rag remains a mode alias.
 	for _, ln := range lines {
 		f := strings.Fields(ln)
-		if len(f) > 0 && (f[0] == "/agent" || f[0] == "/rag") {
-			t.Errorf("/agent and /rag must not be separate rows: %q", ln)
+		if len(f) > 0 && f[0] == "/rag" {
+			t.Errorf("/rag must not be a separate row: %q", ln)
 		}
-		if len(f) > 0 && f[0] == "/mode" && !strings.Contains(ln, "/agent") {
-			t.Errorf("the /mode row must name /agent and /rag: %q", ln)
+		if len(f) > 0 && f[0] == "/mode" && !strings.Contains(ln, "/rag") {
+			t.Errorf("the /mode row must name /rag: %q", ln)
 		}
 	}
 	// One description column.

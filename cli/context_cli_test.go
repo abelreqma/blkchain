@@ -31,7 +31,7 @@ func TestCLIContextUsesSharedFileAndURLPreparation(t *testing.T) {
 	}
 	var err error
 	captureStdout(t, func() {
-		_, err = askWith(nil, nil, []string{"--context", path, "--context", "https://example.test/reference", "hello"})
+		_, err = askWith(nil, nil, []string{"--agent", "auto", "--context", path, "--context", "https://example.test/reference", "hello"})
 	})
 	if err != nil || !called {
 		t.Fatalf("context flags failed: %v", err)
