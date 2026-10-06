@@ -96,10 +96,10 @@ func TestExternalAllowlistCarriesOnlyAuditedEnumTools(t *testing.T) {
 	al := secgate.NewAllowlist(externalEngageAllowlist()...)
 	for _, tl := range toolCatalog {
 		_, audited := auditStatus(tl.Binary)
-		want := tl.Tier == tierEnum && audited
+		want := tl.Tier == tierEnum && tl.Reach == reachExternal && audited
 		if got := al.Permits(tl.Binary); got != want {
-			t.Errorf("allowlist permits %s = %t, want %t (tier=%d audited=%t)",
-				tl.Binary, got, want, tl.Tier, audited)
+			t.Errorf("allowlist permits %s = %t, want %t (tier=%d reach=%d audited=%t)",
+				tl.Binary, got, want, tl.Tier, tl.Reach, audited)
 		}
 	}
 }
@@ -120,30 +120,69 @@ func TestExploitToolsNeverRunUnattended(t *testing.T) {
 	}
 }
 
-// TestLocalToolsStayOffTheExternalAllowlist pins the file-disclosure control:
-// host-introspection and analysis utilities run only in the LOCAL profile, which
-// confirms every command.
-func TestLocalToolsStayOffTheExternalAllowlist(t *testing.T) {
+// TestLocalReachToolsStayOffTheExternalAllowlist pins two controls at once. The
+// external profile denies a command with no verifiable target, so a tool with no
+// network destination could never run there anyway; and keeping read utilities
+// off the list closes the file-disclosure path, where an in-scope host operand
+// passes the scope check while a file operand is read.
+func TestLocalReachToolsStayOffTheExternalAllowlist(t *testing.T) {
 	al := secgate.NewAllowlist(externalEngageAllowlist()...)
-	local := localToolBinaries()
+	local := localReachBinaries()
 	if len(local) == 0 {
-		t.Fatal("the catalog declares no local-only tool, so this test proves nothing")
+		t.Fatal("the catalog declares no local-reach tool, so this test proves nothing")
 	}
 	for _, b := range local {
 		if al.Permits(b) {
-			t.Errorf("local-only %s must not be on the external allowlist", b)
+			t.Errorf("local-reach %s must not be on the external allowlist", b)
 		}
 	}
 }
 
-// TestPersonaPromptsAvoidUnavailableTools asserts no persona is told to run a
-// tool the image cannot run. Every name checked here is a distinctive token, so
-// a match is a real instruction rather than an English word.
-func TestPersonaPromptsAvoidUnavailableTools(t *testing.T) {
+// TestPersonaPromptsAvoidUnusableTools asserts no persona is told to run a tool
+// the image cannot run, or one that is present but must not be used. Every name
+// checked here is a distinctive token, so a match is a real instruction rather
+// than an English word.
+func TestPersonaPromptsAvoidUnusableTools(t *testing.T) {
 	for name, d := range domains {
 		for binary, reason := range unavailableTools {
 			if strings.Contains(d.Prompt, binary) {
-				t.Errorf("the %s prompt names %s, which is unavailable: %s", name, binary, reason)
+				t.Errorf("the %s prompt names %s, which the image does not ship: %s", name, binary, reason)
+			}
+		}
+		for binary, reason := range discouragedTools {
+			if strings.Contains(d.Prompt, binary) {
+				t.Errorf("the %s prompt names %s, which must not be used: %s", name, binary, reason)
+			}
+		}
+	}
+	// The container persona is not in the domains map; check it by hand.
+	for binary := range unavailableTools {
+		if strings.Contains(containerPersona.Prompt, binary) {
+			t.Errorf("the container prompt names %s, which the image does not ship", binary)
+		}
+	}
+	for binary := range discouragedTools {
+		if strings.Contains(containerPersona.Prompt, binary) {
+			t.Errorf("the container prompt names %s, which must not be used", binary)
+		}
+	}
+}
+
+// TestPersonaPromptsAvoidUnauditedTools asserts no persona is told to run a tool
+// whose flag surface is not audited yet. Such a tool is off the allowlist, so
+// naming it would produce a command the gate denies.
+func TestPersonaPromptsAvoidUnauditedTools(t *testing.T) {
+	for binary := range pendingAudits {
+		tl, ok := toolFor(binary)
+		if !ok || tl.Reach != reachExternal || tl.Tier != tierEnum {
+			continue // exploit-tier and local-reach tools are not allowlist-gated
+		}
+		for name, d := range domains {
+			for _, p := range tl.Personas {
+				if p == name && strings.Contains(d.Prompt, binary) {
+					t.Errorf("the %s prompt names %s, whose audit is incomplete: %s",
+						name, binary, pendingAudits[binary])
+				}
 			}
 		}
 	}

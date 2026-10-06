@@ -14,22 +14,33 @@ import "sort"
 type toolTier uint8
 
 const (
-	// tierEnum is a network or enumeration tool on the EXTERNAL-profile
-	// allowlist, eligible for unattended Auto execution when the operator's
+	// tierEnum is eligible for unattended Auto execution when the operator's
 	// allowed_binaries permits it.
 	tierEnum toolTier = iota
-	// tierLocal is a host-introspection or analysis tool that runs only in the
-	// LOCAL profile, which has no allowlist (ClassifyLocal governs) and confirms
-	// every command. It stays off the EXTERNAL allowlist on purpose: in external
-	// Auto, a read utility with an in-scope host operand and a file operand would
-	// disclose the file, because the scope check passes on the host operand and
-	// FileAccessViolation does not cover cat or grep. Keeping these off the
-	// external allowlist closes that disclosure with the smallest surface.
-	tierLocal
 	// tierExploit never runs unattended. It needs an armed task and per-action
 	// operator confirmation, which the exploit tier enforces for the exploit and
 	// post-ex phases.
 	tierExploit
+)
+
+// toolReach is which gate profile can run a tool, which follows from whether it
+// addresses a network destination. Authority (toolTier) and reach are separate
+// axes: gdb is exploit authority with local reach.
+type toolReach uint8
+
+const (
+	// reachExternal addresses a network destination the scope check can read, so
+	// the EXTERNAL profile can run it.
+	reachExternal toolReach = iota
+	// reachLocal has no network destination. The EXTERNAL profile denies any
+	// command with no verifiable target ("no verifiable target to check against
+	// the scope"), so these run only in the LOCAL profile, which has no allowlist
+	// (ClassifyLocal governs) and confirms every command. That is also the
+	// file-disclosure control: in external Auto a read utility with an in-scope
+	// host operand and a file operand would disclose the file, because the scope
+	// check passes on the host operand and FileAccessViolation does not cover cat
+	// or grep.
+	reachLocal
 )
 
 // rawNeed is whether a tool needs CAP_NET_RAW, which only the raw-socket worker
@@ -54,6 +65,7 @@ type tool struct {
 	// Personas are the domains whose prompt may name this tool.
 	Personas []string
 	Tier     toolTier
+	Reach    toolReach
 	Raw      rawNeed
 	// Probe is an argv that proves the binary exists and runs, and ProbeWant is a
 	// substring its combined output must contain. Exit status is not a signal:
@@ -184,7 +196,7 @@ var toolCatalog = []tool{
 		Note:      "the KDC is resolved from the realm through DNS and krb5.conf, so the destination is not visible to the scope extractor; the guard firewall is the enforcing layer",
 	},
 	{
-		Binary: "klist", Package: "krb5", Tier: tierEnum,
+		Binary: "klist", Package: "krb5", Tier: tierEnum, Reach: reachLocal,
 		Personas:  []string{"ad"},
 		Probe:     []string{"-V"},
 		ProbeWant: "Kerberos 5 version",
@@ -217,7 +229,7 @@ var toolCatalog = []tool{
 		ProbeWant: "OpenSSL 3",
 	},
 	{
-		Binary: "jq", Package: "jq", Tier: tierEnum,
+		Binary: "jq", Package: "jq", Tier: tierEnum, Reach: reachLocal,
 		Personas:  []string{"web", "cloud", "k8s", "ai-security"},
 		Probe:     []string{"--version"},
 		ProbeWant: "jq-1",
@@ -226,44 +238,37 @@ var toolCatalog = []tool{
 	// Binary and host analysis. Every one of these reads a path rather than a
 	// host, so the target-channel class does not apply.
 	{
-		Binary: "file", Package: "file", Tier: tierLocal,
+		Binary: "file", Package: "file", Tier: tierEnum, Reach: reachLocal,
 		Personas:  []string{"target-analysis", "exploit-dev", "local"},
 		Probe:     []string{"--version"},
 		ProbeWant: "file-5",
 	},
 	{
-		Binary: "strings", Package: "binutils", Tier: tierLocal,
+		Binary: "strings", Package: "binutils", Tier: tierEnum, Reach: reachLocal,
 		Personas:  []string{"target-analysis", "exploit-dev"},
 		Probe:     []string{"--version"},
 		ProbeWant: "GNU strings",
 	},
 	{
-		Binary: "nm", Package: "binutils", Tier: tierLocal,
+		Binary: "nm", Package: "binutils", Tier: tierEnum, Reach: reachLocal,
 		Personas:  []string{"target-analysis", "exploit-dev"},
 		Probe:     []string{"--version"},
 		ProbeWant: "GNU nm",
 	},
 	{
-		Binary: "objdump", Package: "binutils", Tier: tierLocal,
+		Binary: "objdump", Package: "binutils", Tier: tierEnum, Reach: reachLocal,
 		Personas:  []string{"target-analysis", "exploit-dev"},
 		Probe:     []string{"--version"},
 		ProbeWant: "GNU objdump",
 	},
 	{
-		Binary: "readelf", Package: "binutils", Tier: tierLocal,
+		Binary: "readelf", Package: "binutils", Tier: tierEnum, Reach: reachLocal,
 		Personas:  []string{"target-analysis", "exploit-dev"},
 		Probe:     []string{"--version"},
 		ProbeWant: "GNU readelf",
 	},
 	{
-		Binary: "ldd", Tier: tierLocal,
-		Personas:  []string{"target-analysis", "exploit-dev"},
-		Probe:     []string{},
-		ProbeWant: "musl libc",
-		Note:      "musl ldd is the dynamic loader, which may run code from the inspected file; readelf -d answers the same question without loading it",
-	},
-	{
-		Binary: "getcap", Package: "libcap-utils", Tier: tierLocal,
+		Binary: "getcap", Package: "libcap-utils", Tier: tierEnum, Reach: reachLocal,
 		Personas:  []string{"target-analysis", "local"},
 		Probe:     []string{},
 		ProbeWant: "usage: getcap",
@@ -271,18 +276,18 @@ var toolCatalog = []tool{
 
 	// Local post-access enumeration. The base image provides these; they read
 	// local state and name no host.
-	{Binary: "id", Tier: tierLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: "uid="},
-	{Binary: "whoami", Tier: tierLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: ""},
-	{Binary: "hostname", Tier: tierLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: ""},
-	{Binary: "uname", Tier: tierLocal, Personas: []string{"local"}, Probe: []string{"-a"}, ProbeWant: "Linux"},
-	{Binary: "stat", Tier: tierLocal, Personas: []string{"local", "target-analysis"}, Probe: []string{"/etc/hostname"}, ProbeWant: "File:"},
-	{Binary: "mount", Tier: tierLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: " on "},
-	{Binary: "ps", Tier: tierLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: "PID"},
-	{Binary: "netstat", Tier: tierLocal, Personas: []string{"local"}, Probe: []string{"-ln"}, ProbeWant: "Active"},
-	{Binary: "lsof", Tier: tierLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: ""},
-	{Binary: "crontab", Tier: tierLocal, Personas: []string{"local"}, Probe: []string{"-l"}, ProbeWant: ""},
+	{Binary: "id", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: "uid="},
+	{Binary: "whoami", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: ""},
+	{Binary: "hostname", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: ""},
+	{Binary: "uname", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{"-a"}, ProbeWant: "Linux"},
+	{Binary: "stat", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local", "target-analysis"}, Probe: []string{"/etc/hostname"}, ProbeWant: "File:"},
+	{Binary: "mount", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: " on "},
+	{Binary: "ps", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: "PID"},
+	{Binary: "netstat", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{"-ln"}, ProbeWant: "Active"},
+	{Binary: "lsof", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: ""},
+	{Binary: "crontab", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{"-l"}, ProbeWant: ""},
 	{
-		Binary: "sudo", Tier: tierLocal,
+		Binary: "sudo", Tier: tierEnum, Reach: reachLocal,
 		Personas:  []string{"local"},
 		Probe:     nil,
 		ProbeWant: "",
@@ -314,14 +319,14 @@ var toolCatalog = []tool{
 		Note:      "address specs carry code execution (EXEC, SYSTEM, SHELL) and file access (OPEN, CREATE, GOPEN), so only the TCP, TCP4, TCP6, OPENSSL, UDP and STDIO specs are permitted",
 	},
 	{
-		Binary: "gdb", Package: "gdb", Tier: tierExploit,
+		Binary: "gdb", Package: "gdb", Tier: tierExploit, Reach: reachLocal,
 		Personas:  []string{"exploit-dev"},
 		Probe:     []string{"--version"},
 		ProbeWant: "GNU gdb",
 		Note:      "static inspection only: -x, --command, -ex and -p run code or attach to a process and are denied",
 	},
 	{
-		Binary: "john", Package: "john", Tier: tierExploit,
+		Binary: "john", Package: "john", Tier: tierExploit, Reach: reachLocal,
 		Personas:  []string{"ad", "exploit-dev"},
 		Probe:     []string{"--list=build-info"},
 		ProbeWant: "Version: 1.9.0-jumbo",
@@ -406,16 +411,24 @@ var toolCatalog = []tool{
 	},
 }
 
-// unavailableTools are tools a persona prompt must not name, with the reason. A
-// gate audit for one of these stays in place: it costs nothing and protects an
-// operator who adds the binary through allowed_binaries.
+// unavailableTools are absent from the image, with the reason. A persona prompt
+// must not name one. A gate audit for one of these stays in place: it costs
+// nothing and protects an operator who adds the binary through
+// allowed_binaries.
 var unavailableTools = map[string]string{
 	"gobuster":    "no Alpine package on either architecture; ffuf covers directory, DNS and vhost fuzzing",
 	"nikto":       "no Alpine package on either architecture; curl plus the web collection path covers its checks",
 	"onesixtyone": "no Alpine package on either architecture; snmpwalk with an explicit community string covers SNMP enumeration",
 	"dnsrecon":    "the Alpine package imports the stamina module, which has no Alpine package, so the tool fails at startup; dig, host and nslookup cover DNS enumeration",
-	"wget":        "the base image provides only busybox wget, whose flag surface differs from the audited GNU build; curl covers retrieval",
 	"hashcat":     "needs an OpenCL runtime the image does not carry; john covers offline cracking",
+}
+
+// discouragedTools are present in the image but no persona may name them, with
+// the reason. They are not catalogued, so they are not allowlisted either; this
+// map exists so the reason is recorded and the prompt test can enforce it.
+var discouragedTools = map[string]string{
+	"ldd":  "musl ldd is the dynamic loader itself, so it can run code from the file being inspected, which is the opposite of what target analysis of a hostile binary needs; readelf -d lists the same dependencies without loading it",
+	"wget": "the base image provides only busybox wget, whose flag surface differs from the audited GNU build the gate's rules describe; curl covers retrieval",
 }
 
 // toolFor returns the catalog entry for a binary basename.
@@ -488,12 +501,13 @@ func enumToolBinaries() []string {
 	return out
 }
 
-// localToolBinaries returns the tierLocal binaries: host-introspection and
-// analysis tools the LOCAL profile runs under per-command confirmation.
-func localToolBinaries() []string {
+// localReachBinaries returns the binaries with no network destination:
+// host-introspection, analysis and offline tools the LOCAL profile runs under
+// per-command confirmation.
+func localReachBinaries() []string {
 	var out []string
 	for _, t := range toolCatalog {
-		if t.Tier == tierLocal {
+		if t.Reach == reachLocal {
 			out = append(out, t.Binary)
 		}
 	}

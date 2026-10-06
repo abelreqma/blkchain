@@ -38,6 +38,134 @@ var deniedBinaries = map[string]bool{
 	"osascript": true, "lldb": true, "dtrace": true,
 }
 
+// readOnlyForms denies the state-changing spelling of a host utility whose
+// read-only form the local persona needs. Each of these is harmless when it
+// only reports and changes the host when given an operand, and the local
+// profile has no binary allowlist, so the spelling is the only control. An
+// operator who lists one in local_unattended_binaries gets the listing
+// unattended and nothing else.
+func readOnlyForms(name string, args []string) (string, bool) {
+	switch name {
+	case "hostname":
+		// An operand sets the hostname; -f, -i, -s and -d only report.
+		for _, a := range args {
+			if a == "" || a[0] != '-' {
+				return a, true
+			}
+		}
+	case "mount":
+		// Any argument starts mounting something; the bare form lists mounts.
+		if len(args) > 0 {
+			return args[0], true
+		}
+	case "crontab":
+		// -l lists; -e edits, -r removes, and a file operand installs a new table.
+		if len(args) != 1 || args[0] != "-l" {
+			return join(args), true
+		}
+	}
+	return "", false
+}
+
+// join renders args for a denial reason.
+func join(args []string) string {
+	if len(args) == 0 {
+		return "(no argument)"
+	}
+	return strings.Join(args, " ")
+}
+
+// flagGroup is one way a required flag can be spelled: an exact token or
+// --flag=value form (exact), or a short letter inside a bundle or glued to its
+// value and a long name by unique prefix (letters, longs, takesArg), matched the
+// way enumFlagMatch matches a denial.
+type flagGroup struct {
+	exact    []string
+	letters  string
+	longs    []string
+	takesArg string
+}
+
+func (g flagGroup) satisfiedBy(args []string) bool {
+	if len(g.exact) > 0 && hasAnyFlag(args, g.exact...) {
+		return true
+	}
+	if g.letters == "" && len(g.longs) == 0 {
+		return false
+	}
+	for _, a := range args {
+		if enumFlagMatch(a, g.letters, g.longs, g.takesArg) {
+			return true
+		}
+	}
+	return false
+}
+
+// requiredFlags maps a binary to flag groups every invocation must carry. Each
+// group must be satisfied by at least one of its spellings. This is separate
+// from unboundedRules: those bound resource consumption, these close a specific
+// execution or disclosure path that the tool opens by default.
+var requiredFlags = map[string]struct {
+	groups     []flagGroup
+	reason     string
+	suggestion string
+}{
+	// gdb reads an init file from HOME on every start, and HOME is /work, the
+	// writable executor scratch. Without -nx a model that wrote /work/.gdbinit
+	// would have gdb run its commands, which include shell.
+	"gdb": {
+		groups:     []flagGroup{{exact: []string{"-n", "-nx", "--nx"}}},
+		reason:     "gdb without -nx runs the init file in HOME, which is the writable executor scratch directory",
+		suggestion: "add -nx so no init file is read, e.g. gdb -nx -batch -ex ... is still denied; use gdb -nx --batch with inspection options only",
+	},
+	// A capture with no packet count never returns, so it burns the whole command
+	// timeout and produces no evidence.
+	"tcpdump": {
+		groups:     []flagGroup{{letters: "c", takesArg: tcpdumpArgLetters}},
+		reason:     "tcpdump without a packet count never returns",
+		suggestion: "add a packet bound, e.g. -c 100",
+	},
+	// masscan's defaults are a full port sweep at its built-in rate, which is
+	// unbounded work against the target and ignores the engagement's own rate.
+	"masscan": {
+		groups: []flagGroup{
+			{letters: "p", longs: []string{"ports", "top-ports"}},
+			{longs: []string{"rate"}},
+		},
+		reason:     "masscan without a port bound and an explicit rate is unbounded work against the target",
+		suggestion: "add both, e.g. -p 80,443 --rate 100",
+	},
+}
+
+// classifyRequired denies a command missing any flag group its binary requires.
+func classifyRequired(c Command) (Decision, bool) {
+	req, ok := requiredFlags[strings.ToLower(baseName(strings.TrimSpace(c.Binary)))]
+	if !ok {
+		return Decision{}, false
+	}
+	for _, g := range req.groups {
+		if !g.satisfiedBy(c.Args) {
+			return Decision{Allowed: false, Reason: req.reason, Suggestion: req.suggestion}, true
+		}
+	}
+	return Decision{}, false
+}
+
+// sudoListOnly reports whether args is the sudoers listing for the current user
+// and nothing else. sudo is denied as an exec-wrapper, but -l runs no program
+// and takes no operand, and it is the one command that answers "what can this
+// user already escalate to". Every other spelling stays denied: an operand, an
+// extra flag, or a trailing argument is not a listing.
+func sudoListOnly(args []string) bool {
+	switch len(args) {
+	case 1:
+		return args[0] == "-l" || args[0] == "-ln" || args[0] == "-nl"
+	case 2:
+		return args[0] == "-n" && args[1] == "-l"
+	}
+	return false
+}
+
 // unboundedRules maps a binary to the flags that bound it and the suggestion
 // shown when none is present.
 var unboundedRules = map[string]struct {
@@ -60,7 +188,7 @@ func Classify(c Command) Decision {
 		return d
 	}
 	name := strings.ToLower(baseName(strings.TrimSpace(c.Binary)))
-	if deniedBinaries[name] {
+	if deniedBinaries[name] && !(name == "sudo" && sudoListOnly(c.Args)) {
 		return Decision{Allowed: false, Reason: name + " is a shell, interpreter, or exec-wrapper and is not permitted directly"}
 	}
 	if name != "" {
@@ -95,7 +223,17 @@ func classifyNonStructuralExternal(c Command) Decision {
 	if d, tripped := classifyUnbounded(c); tripped {
 		return d
 	}
+	if d, tripped := classifyRequired(c); tripped {
+		return d
+	}
 	name := strings.ToLower(baseName(strings.TrimSpace(c.Binary)))
+	if a, bad := readOnlyForms(name, c.Args); bad {
+		return Decision{
+			Allowed:    false,
+			Reason:     name + " " + a + " changes host state; only its read-only form is permitted",
+			Suggestion: "run " + name + " with no operand, or crontab -l",
+		}
+	}
 	if name == "dnsrecon" {
 		if a, bad := dnsreconGluedFlag(c.Args); bad {
 			return Decision{
@@ -178,11 +316,21 @@ func ClassifyLocal(c Command) Decision {
 		}
 		return Decision{Allowed: true}
 	}
-	if deniedBinaries[name] {
+	if deniedBinaries[name] && !(name == "sudo" && sudoListOnly(c.Args)) {
 		return Decision{Allowed: false, Reason: name + " is a shell, interpreter, or exec-wrapper and is not permitted directly"}
 	}
 	if flag, bad := execFlag(name, c.Args); bad {
 		return Decision{Allowed: false, Reason: name + " " + flag + " runs arbitrary code and is not permitted"}
+	}
+	if d, tripped := classifyRequired(c); tripped {
+		return d
+	}
+	if a, bad := readOnlyForms(name, c.Args); bad {
+		return Decision{
+			Allowed:    false,
+			Reason:     name + " " + a + " changes host state; only its read-only form is permitted",
+			Suggestion: "run " + name + " with no operand, or crontab -l",
+		}
 	}
 	return Decision{Allowed: true}
 }
@@ -359,6 +507,34 @@ func gluedShortFlag(args []string, exempt string) (string, bool) {
 // ncExecLong are the long options of nc/ncat that run a program or command.
 var ncExecLong = []string{"exec", "sh-exec", "lua-exec"}
 
+// longFlagDenied reports whether a dash-led argument names one of denied, or an
+// abbreviation of one at least min characters long. It accepts a single or
+// double dash and an =value suffix, because getopt_long_only tools (gdb,
+// binutils) take both spellings and any unique prefix. Matching errs toward
+// denial: a prefix that matches several denied names still denies.
+func longFlagDenied(a string, min int, denied ...string) bool {
+	if len(a) < 2 || a[0] != '-' {
+		return false
+	}
+	fname, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "=")
+	if fname == "" {
+		return false
+	}
+	for _, d := range denied {
+		if fname == d {
+			return true
+		}
+		if len(fname) >= min && strings.HasPrefix(d, fname) {
+			return true
+		}
+	}
+	return false
+}
+
+// tcpdumpArgLetters are the tcpdump short options that take a value, so the
+// rest of a bundle after one of them is that value rather than more flags.
+const tcpdumpArgLetters = "cCFGijmMrsTVwWyZBQ"
+
 // execFlag reports the first argument that is a code-execution flag of a
 // default-allowlist binary: nmap --script and its relatives (NSE runs arbitrary
 // Lua, including os.execute), nmap --datadir (loads the NSE core from a
@@ -421,6 +597,35 @@ func execFlag(name string, args []string) (string, bool) {
 		case "curl":
 			// A unix socket reaches local daemons (docker.sock) that run code.
 			if fname == "unix-socket" || fname == "abstract-unix-socket" {
+				return a, true
+			}
+		case "gdb":
+			// -ex and -x run gdb commands, which include `shell`, and -p attaches to
+			// a live process. --args and --write turn inspection into execution and
+			// patching. gdb takes one or two dashes and any unique prefix.
+			if longFlagDenied(a, 2, "x", "ex", "ix", "command", "eval-command",
+				"init-command", "init-eval-command", "p", "pid", "args", "write") {
+				return a, true
+			}
+		case "nm", "objdump", "readelf", "strings":
+			// --plugin loads a shared object into the tool, which is arbitrary code.
+			if longFlagDenied(a, 4, "plugin") {
+				return a, true
+			}
+		case "john":
+			// --external runs the compiled filter code of an external mode.
+			if longFlagDenied(a, 4, "external") {
+				return a, true
+			}
+		case "tcpdump":
+			// -z runs a command for each rotated capture file.
+			if enumFlagMatch(a, "z", nil, tcpdumpArgLetters) {
+				return a, true
+			}
+		case "openssl":
+			// -engine and -provider load a shared object into openssl. The
+			// subcommand spelling (openssl engine) carries no dash and is a listing.
+			if longFlagDenied(a, 4, "engine", "provider", "provider-path") {
 				return a, true
 			}
 		case "nc", "ncat", "netcat":

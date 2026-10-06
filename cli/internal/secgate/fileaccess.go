@@ -51,6 +51,25 @@ var writeFlags = map[string][]string{
 	"ffuf": {"-o", "-od", "-of", "-debug-log", "-w", "-cc", "-ck", "-scraperfile"},
 	// nikto: -o/-output and -Save write; -key and -RSAcert read certificate files.
 	"nikto": {"-o", "-output", "-Save", "-key", "-RSAcert"},
+	// tcpdump: -w writes the capture, -r reads one back, -F reads the filter
+	// expression from a file. -c is a packet count, not a path.
+	"tcpdump": {"-w", "-r", "-F"},
+	// sslscan: --xml writes the report; the certificate and key flags read files.
+	"sslscan": {"--xml", "--certs", "--pk", "--ca-certs"},
+	// jq: -f reads the filter program, and a parse error echoes the offending
+	// line, so an arbitrary path is a read primitive.
+	"jq": {"-f", "--from-file"},
+	// john: --pot and --session write, --wordlist and --loopback read a file
+	// whose lines become candidates.
+	"john": {"--pot", "--session", "--wordlist", "--loopback"},
+	// openssl: -out and -keyout write, and the input, certificate, and key flags
+	// read files.
+	"openssl": {"-out", "-keyout", "-in", "-cert", "-key", "-CAfile", "-CApath", "-writerand", "-rand"},
+	// file: -C compiles a magic file and -m loads one.
+	"file": {"-C", "--compile", "-m", "--magic-file"},
+	// kinit writes a credential cache and reads a keytab; klist reads both.
+	"kinit": {"-c", "-t"},
+	"klist": {"-c", "-k"},
 }
 
 // dataFlags maps a binary base name to the flags whose value may carry an
@@ -71,6 +90,18 @@ var dataFlags = map[string][]string{
 var denyFlags = map[string][]string{
 	"curl": {"-K", "--config"},
 	"wget": {"--config", "-e", "--execute", "--use-askpass"},
+	// john --config loads a configuration that can itself select an external
+	// mode, which is compiled code john runs.
+	"john": {"--config"},
+	// openssl -config loads a configuration file that sets any other option.
+	"openssl": {"-config"},
+	// file -f reads the list of paths to inspect from a file, so the paths never
+	// reach the argument layer.
+	"file": {"-f", "--files-from"},
+	// jq --rawfile and --slurpfile take a variable name and then a path, so the
+	// bound would check the name and let the path through. The executor pipes
+	// JSON in as a pipeline stage, so neither flag is needed.
+	"jq": {"--rawfile", "--slurpfile"},
 	// ffuf -config loads options from a file; -request reads a raw request file
 	// whose Host header is the target, which the scope check never sees.
 	"ffuf": {"-config", "-request"},
@@ -103,6 +134,16 @@ var shortArgLetters = map[string]string{
 	// gobuster (pflag): only letters that take a value in every mode. -c, -d,
 	// and -r are booleans in some modes, and leaving them out errs toward denial.
 	"gobuster": "opwtaHmPUuxXsbB",
+	// tcpdump (getopt): the value-taking letters, shared with the classifier so
+	// one bundle is parsed the same way by both layers.
+	"tcpdump": tcpdumpArgLetters,
+	// file (getopt): -m and -f take a value.
+	"file": "mf",
+	// kinit and klist (getopt): the value-taking letters.
+	"kinit": "clrpStk",
+	"klist": "cke",
+	// jq: -f takes the filter file.
+	"jq": "f",
 }
 
 // abbrevMin lists binaries whose long options accept unambiguous prefixes

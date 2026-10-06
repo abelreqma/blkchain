@@ -25,6 +25,7 @@ var auditedBinaries = map[string]string{
 	"host":       "secgate/dnsenum_test.go: no file, exec, or config flag; the target is positional and scope-checked",
 	"nslookup":   "secgate/dnsenum_test.go: no file, exec, or config flag; the target is positional and scope-checked",
 	"whois":      "secgate/dnsenum_test.go: the base image's busybox build has no file, exec, or config flag",
+	"traceroute": "secgate/toolgate_test.go: the busybox build has no file, exec, or config flag; the target is positional and -g names a gateway the extractor sees as its own argument",
 	"smbclient":  "secgate/smbenum_test.go: execFlag denies -c/--command, smbDeny denies -T/-A/-s/--option/--use-krb5-ccache/--machine-pass, fileaccess bounds -l/--log-basename, enumGluedHostFlag denies a glued -I/-L/-M/-B",
 	"rpcclient":  "secgate/smbenum_test.go: shares smbDeny with smbclient, execFlag denies -c/--command, enumGluedHostFlag denies a glued -I",
 	"nbtscan":    "secgate/smbenum_test.go: enumConfigDeny denies -f/--file, which reads targets from a file the scope check never sees",
@@ -32,44 +33,41 @@ var auditedBinaries = map[string]string{
 	"ldapsearch": "secgate/netenum_test.go: enumConfigDeny denies -y/-h/-t/-C, fileaccess bounds -f/-T, the target must be an -H URI the scope check can read",
 	"snmpwalk":   "secgate/netenum_test.go: enumConfigDeny denies -L/-M/-m with its value-taking letters accounted for",
 	"ffuf":       "secgate/httpenum_test.go: execFlag denies -input-cmd/-input-shell, denyFlags denies -config/-request, writeFlags bounds -o/-od/-of/-w/-debug-log, targetFlagSpecs scope-checks -u/-x/-replay-proxy",
+	"tcpdump":    "secgate/toolgate_test.go: execFlag denies -z in bundled form, requiredFlags demands a -c packet bound, fileaccess bounds -w/-r/-F, and a host in the capture filter is scope-checked",
+	"sslscan":    "secgate/toolgate_test.go: no exec or config flag, fileaccess bounds --xml/--certs/--pk/--ca-certs, the target is positional host:port",
+	"openssl":    "secgate/toolgate_test.go: execFlag denies -engine/-provider/-provider-path, denyFlags denies -config, fileaccess bounds -out/-keyout/-in and the certificate and key flags, the target comes from s_client -connect",
+	"jq":         "secgate/toolgate_test.go: fileaccess bounds -f/--from-file and denies the two-value --rawfile/--slurpfile whose path the bound would miss; no exec flag and no network destination",
+	"file":       "secgate/toolgate_test.go: denyFlags denies -f/--files-from, fileaccess bounds -C/-m; no exec flag and no network destination",
+	"strings":    "secgate/toolgate_test.go: execFlag denies --plugin; no write or config flag",
+	"nm":         "secgate/toolgate_test.go: execFlag denies --plugin in both dash forms and abbreviated; no write or config flag",
+	"objdump":    "secgate/toolgate_test.go: execFlag denies --plugin in both dash forms and abbreviated; no write or config flag",
+	"readelf":    "secgate/toolgate_test.go: execFlag denies --plugin; no write or config flag",
+	"gdb":        "secgate/toolgate_test.go: execFlag denies -x/-ex/-ix/--command/--eval-command/--init-command/-p/--args/--write, and requiredFlags demands -nx because gdb otherwise runs the init file in HOME, which is the writable executor scratch",
+	"john":       "secgate/toolgate_test.go: execFlag denies --external, denyFlags denies --config, fileaccess bounds --pot/--session/--wordlist/--loopback, unboundedRules requires --max-run-time or --max-candidates",
+	"klist":      "secgate/toolgate_test.go: fileaccess bounds -c/-k; no exec or config flag and no network destination",
+	"sudo":       "secgate/toolgate_test.go: sudoListOnly permits exactly -l, -n -l, -ln and -nl; every operand and every other flag stays denied, and sudo is not installed in the image",
+	"hostname":   "secgate/toolgate_test.go: readOnlyForms denies the operand that sets the hostname",
+	"mount":      "secgate/toolgate_test.go: readOnlyForms denies every argument, so only the bare listing runs",
+	"crontab":    "secgate/toolgate_test.go: readOnlyForms permits exactly -l, so -e, -r and a file operand are denied",
+	"getcap":     "secgate/toolgate_test.go: no exec, write, or config flag; it reads the named paths",
+	"id":         "secgate/toolgate_test.go: no flag surface of concern; it reports the current identity",
+	"whoami":     "secgate/toolgate_test.go: no flag surface of concern",
+	"uname":      "secgate/toolgate_test.go: no flag surface of concern",
+	"stat":       "secgate/toolgate_test.go: no exec, write, or config flag; it reads the named path",
+	"ps":         "secgate/toolgate_test.go: no flag surface of concern in the busybox build",
+	"netstat":    "secgate/toolgate_test.go: no flag surface of concern in the busybox build",
+	"lsof":       "secgate/toolgate_test.go: no flag surface of concern in the busybox build",
 }
 
 // pendingAudits are catalog binaries that are present in the image but not yet
-// on the EXTERNAL allowlist, with the flag surface each audit must cover before
-// it can be. A persona may name one of these only once it is audited, which
-// TestPersonaPromptsNameOnlyAllowedTools enforces.
+// on the EXTERNAL allowlist, with what each audit must still cover. A persona
+// may not name one, which TestPersonaPromptsAvoidUnauditedTools enforces.
 var pendingAudits = map[string]string{
-	"masscan":    "deny -c/--conf and --excludefile, which read options and targets from a file; bound -oX/-oJ/-oL/--output-filename; require a -p/--ports and --rate bound; extract the target from the positional range, --range, and --exclude",
-	"tcpdump":    "deny -z, which runs a command per rotated file; bound -w; bound -F and -r as data flags; require a -c packet bound",
-	"sslscan":    "bound --xml and --show-certificate output paths; extract the target from the positional host:port and --sni",
-	"openssl":    "deny -engine, which loads a shared object; bound -out/-keyout/-in; extract the target from s_client/s_time -connect and -proxy",
-	"jq":         "bound -f/--from-file as config indirection; bound --slurpfile/--rawfile as data flags; no target channel",
-	"socat":      "parse address specs: permit only TCP, TCP4, TCP6, OPENSSL, UDP and STDIO, deny EXEC/SYSTEM/SHELL/PTY and OPEN/CREATE/GOPEN, extract the host from each permitted spec, and fail closed on an unparsable spec",
-	"kinit":      "no file flag beyond -t/-k keytab, which must be bounded; the KDC destination is resolved from the realm and is not visible to the extractor, so the worker firewall is the enforcing layer",
-	"klist":      "bound -c/-k, which name a credential cache and a keytab; no target channel",
-	"traceroute": "extract the target from the positional host; bound -i/-s; no file or exec flag in the busybox build",
-	"file":       "deny -f/--files-from, which reads a list of paths the gate never sees; deny -C/-m, which compile and load a magic file; no target channel",
-	"strings":    "no exec, write, or config flag; reads the named file only",
-	"nm":         "deny --plugin, which loads a shared object; no write flag",
-	"objdump":    "deny --plugin, which loads a shared object; no write flag",
-	"readelf":    "no exec, write, or config flag; reads the named file only",
-	"ldd":        "musl ldd is the dynamic loader and may run code from the inspected file; decide whether to deny it outright in favour of readelf -d",
-	"getcap":     "no exec, write, or config flag; reads the named paths only",
-	"id":         "no flag surface of concern; reads local identity only",
-	"whoami":     "no flag surface of concern",
-	"hostname":   "deny the setting form, which takes a name operand and changes host state",
-	"uname":      "no flag surface of concern",
-	"stat":       "bound the dereference flags; reads the named path only",
-	"mount":      "deny every mounting form; only the no-operand listing is read-only",
-	"ps":         "no flag surface of concern in the busybox build",
-	"netstat":    "no flag surface of concern in the busybox build",
-	"lsof":       "no flag surface of concern in the busybox build",
-	"crontab":    "deny -e/-r and the file operand, which edit and remove crontabs; only -l is read-only",
-	"sudo":       "permit exactly the listing argv (-l, -n -l, -ln, -nl) and nothing else; every operand and every other flag stays denied",
-	"aws":        "exploit tier, so never unattended; still needs --endpoint-url scope-checked, --cli-input-json/--cli-input-yaml denied as config indirection, and the mutating operations enumerated",
-	"kubectl":    "exploit tier, so never unattended; still needs exec/run/attach/cp/port-forward/proxy/debug denied, --kubeconfig denied, and --server/-s scope-checked",
-	"gdb":        "exploit tier, so never unattended; still needs -x/--command/-ex/-p denied, which run code or attach to a process",
-	"john":       "exploit tier, so never unattended; still needs --external denied, which runs compiled filter code, and its session and pot paths bounded",
+	"masscan": "needs a normalizing flag matcher: masscan lowercases its flag names and strips - and _, so --excludefile, --exclude-file and --EXCLUDEFILE are one flag and a literal denylist misses two of them. Until then its config and target-file flags (-c/--conf, --excludefile, -iL, --resume) are unbounded. Separately, the scope extractor denies a CIDR argument outright, so masscan's range form cannot be authorized at all and the tool has no advantage over nmap",
+	"kinit":   "the destination is a KDC resolved from the realm through DNS and krb5.conf, so the scope check cannot see it, and a principal of the form user@REALM makes the extractor scope-check the realm as if it were a host. Needs either a realm-aware extractor rule or the execution-location work, with the worker firewall as the enforcing layer meanwhile",
+	"aws":     "exploit tier, so never unattended; still needs --endpoint-url scope-checked, --cli-input-json/--cli-input-yaml denied as config indirection, and the mutating operations enumerated",
+	"kubectl": "exploit tier, so never unattended; still needs exec/run/attach/cp/port-forward/proxy/debug denied, --kubeconfig denied, and --server/-s scope-checked",
+	"socat":   "exploit tier, so never unattended; still needs an address-spec parser that permits only TCP, TCP4, TCP6, OPENSSL, UDP and STDIO, denies EXEC/SYSTEM/SHELL/PTY and OPEN/CREATE/GOPEN, extracts the host from each permitted spec, and fails closed on an unparsable spec",
 }
 
 // impacketAudit is the audit every impacket entry point shares. Its target form
@@ -93,13 +91,16 @@ func auditStatus(binary string) (note string, audited bool) {
 }
 
 // externalEngageAllowlist is the EXTERNAL-profile allowlist: the catalog's
-// tierEnum binaries whose flag surface has been audited. A tierExploit binary is
-// never on it, so it cannot run unattended; it reaches execution only through
-// the armed, per-action-confirmed exploit tier.
+// tierEnum binaries that address a network destination and whose flag surface
+// has been audited. A tierExploit binary is never on it, so it cannot run
+// unattended; it reaches execution only through the armed,
+// per-action-confirmed exploit tier. A reachLocal binary is never on it either:
+// the external profile denies a command with no verifiable target, and keeping
+// read utilities off the list closes the file-disclosure path.
 func externalEngageAllowlist() []string {
 	var out []string
 	for _, t := range toolCatalog {
-		if t.Tier != tierEnum {
+		if t.Tier != tierEnum || t.Reach != reachExternal {
 			continue
 		}
 		if _, audited := auditStatus(t.Binary); audited {

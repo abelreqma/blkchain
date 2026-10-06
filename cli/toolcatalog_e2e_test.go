@@ -102,14 +102,22 @@ func TestCatalogToolsRunInTheImage(t *testing.T) {
 // binary quietly reappears in the lock.
 func TestUnavailableToolsAreAbsentFromTheImage(t *testing.T) {
 	image := requireRunnerImage(t)
-	for binary, reason := range unavailableTools {
-		if strings.Contains(reason, "busybox") {
-			continue // present, but the catalog records why no persona uses it
-		}
+	for binary := range unavailableTools {
 		t.Run(binary, func(t *testing.T) {
 			out := workerShell(t, image, generalWorkerUser, "none", nil, "command -v "+binary+" || true")
 			if strings.TrimSpace(out) != "" {
 				t.Fatalf("%s is recorded as unavailable but resolves to %s", binary, strings.TrimSpace(out))
+			}
+		})
+	}
+	// A discouraged tool is the opposite case: present, but no persona may name
+	// it. If one ever disappears from the image it belongs in unavailableTools
+	// instead, so the recorded reason stays true.
+	for binary := range discouragedTools {
+		t.Run("discouraged/"+binary, func(t *testing.T) {
+			out := workerShell(t, image, generalWorkerUser, "none", nil, "command -v "+binary+" || true")
+			if strings.TrimSpace(out) == "" {
+				t.Fatalf("%s is recorded as discouraged but is absent; move it to unavailableTools", binary)
 			}
 		})
 	}

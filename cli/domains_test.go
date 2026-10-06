@@ -101,7 +101,7 @@ func TestTargetAnalysisDomain(t *testing.T) {
 	if d.Name != "target-analysis" {
 		t.Fatalf("domainFor(\"target-analysis\").Name = %q", d.Name)
 	}
-	for _, want := range []string{"file", "ldd", "strings", "readelf", "getcap", "GTFOBins"} {
+	for _, want := range []string{"file", "readelf -d", "strings", "readelf", "getcap", "GTFOBins"} {
 		if !strings.Contains(d.Prompt, want) {
 			t.Errorf("target-analysis prompt missing %q", want)
 		}
@@ -110,6 +110,12 @@ func TestTargetAnalysisDomain(t *testing.T) {
 		if strings.Contains(d.Prompt, bad) {
 			t.Errorf("target-analysis prompt contains destructive guidance %q", bad)
 		}
+	}
+	// ldd is deliberately absent: musl ldd is the dynamic loader, so it can run
+	// code from the very binary this persona is inspecting. readelf -d lists the
+	// same dependencies without loading the file.
+	if strings.Contains(d.Prompt, "ldd") {
+		t.Error("target-analysis prompt names ldd, which loads the inspected file")
 	}
 }
 
