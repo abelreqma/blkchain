@@ -123,3 +123,17 @@ func addPromptName(names map[string]bool, name string) {
 		names[name] = true
 	}
 }
+
+// TestRunnerPromptStatesTheDNSConstraint pins a fact every persona needs. The
+// guard firewall drops 127.0.0.0/8, which includes Docker's embedded resolver,
+// so the runner has no DNS and only pre-resolved in-scope hostnames work. An
+// nmap scan without -n stalls on a reverse lookup until the command timeout,
+// burning an action for no result.
+func TestRunnerPromptStatesTheDNSConstraint(t *testing.T) {
+	prompt := effectiveEngagePrompt(&secgate.Gate{Policy: secgate.DefaultPolicy()}, "")
+	for _, want := range []string{"no DNS", "/etc/hosts", "-n to nmap"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the runner prompt does not state %q: %s", want, prompt)
+		}
+	}
+}

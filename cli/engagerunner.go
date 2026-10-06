@@ -28,6 +28,7 @@ type engageRunner struct {
 	mu           sync.Mutex
 	guard, image string
 	workers      map[string]string
+	rawWorkers   map[string]string
 	hosts        []string
 	slots        chan struct{}
 	closed       bool
@@ -36,9 +37,50 @@ type engageRunner struct {
 }
 
 func engageWorkerArgs(name, guard, image string, hosts []string) []string {
-	args := []string{"run", "-d", "--name", name, "--network", "container:" + guard, "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000", "--memory", "256m", "--cpus", "1", "--pids-limit", "64", "--ulimit", "nofile=256:256", "--ulimit", "fsize=67108864:67108864", "--tmpfs", "/work:rw,nosuid,nodev,size=128m,uid=1000,gid=1000", "--tmpfs", "/tmp:rw,nosuid,nodev,size=32m", "--env", "HOME=/work", "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "--entrypoint", "/bin/sh"}
+	return workerArgs(name, guard, image, hosts, false)
+}
+
+// engageRawWorkerArgs builds the raw-socket worker. It differs from the general
+// worker in exactly two ways: it runs as root and holds CAP_NET_RAW. Docker
+// exposes no ambient capability, and no-new-privileges blocks the
+// file-capability route, so an unprivileged process keeps an empty effective set
+// however the capability is added: masscan, tcpdump, and the nmap raw scan modes
+// need a root process or they fail with a permission error. Every other control
+// is unchanged: read-only rootfs, the rest of the capability set dropped,
+// no-new-privileges, the same memory, cpu, pid and file limits, and the guard's
+// network namespace, so the firewall still bounds every destination.
+func engageRawWorkerArgs(name, guard, image string, hosts []string) []string {
+	return workerArgs(name, guard, image, hosts, true)
+}
+
+func workerArgs(name, guard, image string, hosts []string, raw bool) []string {
+	// The raw worker runs as uid 0 but holds only NET_RAW, so it has no
+	// CAP_DAC_OVERRIDE and cannot write a scratch mount owned by another uid. Its
+	// /work must therefore be root-owned; it is still a private tmpfs per
+	// container.
+	user, work := "1000:1000", "/work:rw,nosuid,nodev,size=128m,uid=1000,gid=1000"
+	if raw {
+		user, work = "0:0", "/work:rw,nosuid,nodev,size=128m,uid=0,gid=0"
+	}
+	args := []string{"run", "-d", "--name", name, "--network", "container:" + guard, "--read-only", "--cap-drop", "ALL"}
+	if raw {
+		args = append(args, "--cap-add", "NET_RAW")
+	}
+	args = append(args, "--security-opt", "no-new-privileges", "--user", user, "--memory", "256m", "--cpus", "1", "--pids-limit", "64", "--ulimit", "nofile=256:256", "--ulimit", "fsize=67108864:67108864", "--tmpfs", work, "--tmpfs", "/tmp:rw,nosuid,nodev,size=32m", "--env", "HOME=/work", "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "--entrypoint", "/bin/sh")
 	args = append(args, image, "-c", "exec sleep 86400")
 	return args
+}
+
+// pipelineNeedsRawSocket reports whether any stage needs the raw-socket worker.
+// A pipeline runs in one worker, so one raw stage takes the whole pipeline
+// there. The decision reads the tool catalog and the argv only.
+func pipelineNeedsRawSocket(stages []pipelineStage) bool {
+	for _, s := range stages {
+		if rawSocketCommand(s.Binary, s.Args) {
+			return true
+		}
+	}
+	return false
 }
 
 func engageFirewall(in, out, protected []string, v6 bool) (string, error) {
@@ -153,7 +195,7 @@ func newEngageRunner(ctx context.Context, roe *RoE) (result *engageRunner, err e
 		return nil, errors.New("invalid runner image identity")
 	}
 	guardName := runnerName("blk-guard-")
-	r := &engageRunner{image: imageID, workers: map[string]string{}, slots: make(chan struct{}, p.Parallel)}
+	r := &engageRunner{image: imageID, workers: map[string]string{}, rawWorkers: map[string]string{}, slots: make(chan struct{}, p.Parallel)}
 	ok := false
 	defer func() {
 		if !ok {
@@ -266,29 +308,37 @@ func runnerCommandIPs(scope *secgate.Scope) []string {
 	return allowed
 }
 
-func (r *engageRunner) worker(ctx context.Context, dir string) (string, error) {
+// worker returns the container for an executor directory, creating it on first
+// use. raw selects the privileged raw-socket worker, which is created only when
+// a command actually needs the capability, so an enumeration command never runs
+// in it. Both pools share one cap.
+func (r *engageRunner) worker(ctx context.Context, dir string, raw bool) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return "", errors.New("runner stopped")
 	}
-	if id := r.workers[dir]; id != "" {
+	pool, name, args := r.workers, "blk-worker-", engageWorkerArgs
+	if raw {
+		pool, name, args = r.rawWorkers, "blk-rawworker-", engageRawWorkerArgs
+	}
+	if id := pool[dir]; id != "" {
 		return id, nil
 	}
-	if len(r.workers) >= 8 {
+	if len(r.workers)+len(r.rawWorkers) >= 8 {
 		return "", errors.New("runner worker cap reached")
 	}
-	id := runnerName("blk-worker-")
-	if _, err := runnerDocker(ctx, nil, engageWorkerArgs(id, r.guard, r.image, r.hosts)...); err != nil {
+	id := runnerName(name)
+	if _, err := runnerDocker(ctx, nil, args(id, r.guard, r.image, r.hosts)...); err != nil {
 		return "", err
 	}
-	r.workers[dir] = id
+	pool[dir] = id
 	if len(r.hosts) > 0 {
 		if _, err := runnerDocker(ctx, []byte(strings.Join(r.hosts, "\n")+"\n"), "exec", "-i", "--user", "0:0", id, "sh", "-c", "cat >> /etc/hosts"); err != nil {
 			if cleanupErr := r.removeContainer(ctx, id); cleanupErr != nil {
 				return "", errors.Join(err, fmt.Errorf("remove failed worker %s: %w", id, cleanupErr))
 			}
-			delete(r.workers, dir)
+			delete(pool, dir)
 			return "", err
 		}
 	}
@@ -303,20 +353,27 @@ func (r *engageRunner) removeContainer(ctx context.Context, id string) error {
 	return err
 }
 
+// Release removes both of a directory's workers. A directory that ran a raw
+// command holds a privileged container, so releasing only the general worker
+// would leave it running for the rest of the engagement.
 func (r *engageRunner) Release(dir string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	id := r.workers[dir]
-	if id == "" {
-		return nil
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := r.removeContainer(ctx, id); err != nil {
-		return fmt.Errorf("remove worker %s: %w", id, err)
+	var failures []error
+	for _, pool := range []map[string]string{r.workers, r.rawWorkers} {
+		id := pool[dir]
+		if id == "" {
+			continue
+		}
+		if err := r.removeContainer(ctx, id); err != nil {
+			failures = append(failures, fmt.Errorf("remove worker %s: %w", id, err))
+			continue
+		}
+		delete(pool, dir)
 	}
-	delete(r.workers, dir)
-	return nil
+	return errors.Join(failures...)
 }
 
 func (r *engageRunner) Close() error {
@@ -326,11 +383,13 @@ func (r *engageRunner) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	var failures []error
-	for dir, id := range r.workers {
-		if err := r.removeContainer(ctx, id); err != nil {
-			failures = append(failures, fmt.Errorf("remove worker %s: %w", id, err))
-		} else {
-			delete(r.workers, dir)
+	for _, pool := range []map[string]string{r.workers, r.rawWorkers} {
+		for dir, id := range pool {
+			if err := r.removeContainer(ctx, id); err != nil {
+				failures = append(failures, fmt.Errorf("remove worker %s: %w", id, err))
+			} else {
+				delete(pool, dir)
+			}
 		}
 	}
 	if r.guard != "" {
@@ -360,7 +419,7 @@ func (r *engageRunner) Run(ctx context.Context, stages []pipelineStage, dir stri
 		return runResult{Err: ctx.Err()}, nil
 	}
 	defer func() { <-r.slots }()
-	id, err := r.worker(ctx, dir)
+	id, err := r.worker(ctx, dir, pipelineNeedsRawSocket(stages))
 	if err != nil {
 		return runResult{Err: err}, nil
 	}

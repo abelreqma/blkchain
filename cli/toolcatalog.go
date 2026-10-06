@@ -74,7 +74,7 @@ var toolCatalog = []tool{
 		Personas:  []string{"recon", "web", "ad", "cloud", "k8s", "container", "ai-security"},
 		Probe:     []string{"--version"},
 		ProbeWant: "Nmap version",
-		Note:      "connect scanning runs unprivileged; -sS, -sA, -sF, -sX, -sN, -sO, -sU, -O and --traceroute need the raw-socket worker",
+		Note:      "connect scanning runs unprivileged; -sS, -sA, -sF, -sX, -sN, -sO, -sU, -O and --traceroute need the raw-socket worker. Always pass -n: the runner has no DNS, so a reverse lookup of the target stalls the scan until the command timeout",
 	},
 	{
 		Binary: "masscan", Package: "masscan", Tier: tierEnum, Raw: rawAlways,

@@ -16,7 +16,13 @@ import (
 	"time"
 )
 
-const executorRunnerImage = "blkchain-engage-runner@sha256:a7ba912cf2337e21c2cefada276d6567cfa7ec6fcc0ebbf3adabab828527bccb"
+// executorRunnerImage is the image the per-command sandbox runs. It is the same
+// content-addressed tag the isolated runner uses, whose name is a digest over
+// the embedded build inputs, so `blk engage setup` builds the one image both
+// execution paths need. A hardcoded image digest cannot serve here: a digest is
+// not reproducible across builds or architectures, so nothing would ever produce
+// it again and the sandbox would fail with "No such image" under --pull never.
+func executorRunnerImage() string { return defaultRunnerTag() }
 
 const executorFirewallScript = `set -eu
 iptables -P OUTPUT DROP
@@ -78,7 +84,7 @@ func newContainerCommand(ctx context.Context, binary string, args []string, scra
 	for _, host := range hosts {
 		dockerArgs = append(dockerArgs, "--add-host", host+":"+egress.Hosts[host])
 	}
-	dockerArgs = append(dockerArgs, executorRunnerImage, "/bin/sh", "-c", executorFirewallScript, "blk-init", workDir)
+	dockerArgs = append(dockerArgs, executorRunnerImage(), "/bin/sh", "-c", executorFirewallScript, "blk-init", workDir)
 	dockerArgs = append(dockerArgs, egress.IPs...)
 	limit := 300 * time.Second
 	if deadline, ok := ctx.Deadline(); ok {
@@ -141,7 +147,7 @@ func dockerReservedIPs(ctx context.Context, docker string) ([]net.IP, error) {
 	}
 	alias := exec.CommandContext(checkCtx, docker, "run", "--rm", "--pull", "never", "--network", "bridge",
 		"--read-only", "--user", "1000:1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-		"--memory", "64m", "--pids-limit", "16", executorRunnerImage,
+		"--memory", "64m", "--pids-limit", "16", executorRunnerImage(),
 		"/bin/sh", "-c", "getent ahostsv4 host.docker.internal || true")
 	alias.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
 	data, err = alias.Output()

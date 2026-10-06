@@ -147,5 +147,5 @@ func effectiveEngagePrompt(g *secgate.Gate, prompt string) string {
 		return prompt
 	}
 	return prompt + "\n\nOperator rules of engagement (code-enforced policy):\n" + g.Policy.Canonical +
-		"\nCommands run inside the isolated target runner, not on the operator workstation. Use its installed tools and /work for scratch files. Auto performs RoE-authorized actions without approval or arming prompts. Safe approves unapproved actions. Scope, caps, and denials apply in both modes.\n" + promptguard.UntrustedInputClause
+		"\nCommands run inside the isolated target runner, not on the operator workstation. Use its installed tools and /work for scratch files. The runner has no DNS: every in-scope hostname is pre-resolved in /etc/hosts, and any other lookup is dropped and stalls until the command timeout, so pass -n to nmap and address other tools by a scoped hostname or an IP. Auto performs RoE-authorized actions without approval or arming prompts. Safe approves unapproved actions. Scope, caps, and denials apply in both modes.\n" + promptguard.UntrustedInputClause
 }

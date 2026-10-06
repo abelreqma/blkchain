@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -119,5 +120,126 @@ func TestEngageRunnerLiveBoundary(t *testing.T) {
 	result, stages = runner.Run(ctx, []pipelineStage{{Binary: "python3", Args: []string{"-u", "-c", "import time; print('partial'); time.sleep(10)"}}}, "boundary", 65536, time.Second)
 	if !result.TimedOut || !strings.Contains(result.Output, "partial") || len(stages) != 1 {
 		t.Fatalf("timeout lost partial output: %+v", result)
+	}
+}
+
+func TestEngageRawWorkerAddsOnlyRawSocketCapability(t *testing.T) {
+	image := "sha256:" + strings.Repeat("a", 64)
+	raw := strings.Join(engageRawWorkerArgs("rawworker", "guard", image, nil), " ")
+	// Raw sockets need a root process: Docker exposes no ambient capability and
+	// no-new-privileges blocks the file-capability route, so an unprivileged
+	// process keeps an empty effective set however the capability is added.
+	for _, want := range []string{"--cap-add NET_RAW", "--user 0:0"} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("missing %q in %s", want, raw)
+		}
+	}
+	// Every other control is the general worker's.
+	for _, want := range []string{"--read-only", "--cap-drop ALL", "--security-opt no-new-privileges", "--network container:guard", "--pids-limit", "--memory", "--tmpfs"} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("missing %q in %s", want, raw)
+		}
+	}
+	for _, bad := range []string{"--privileged", "--volume", "--mount", "--network host", "NET_ADMIN", "SYS_ADMIN", "SYS_PTRACE", "CAP_SYS"} {
+		if strings.Contains(raw, bad) {
+			t.Fatalf("raw worker grants %q in %s", bad, raw)
+		}
+	}
+	// The general worker keeps its unprivileged identity and gains nothing.
+	general := strings.Join(engageWorkerArgs("worker", "guard", image, nil), " ")
+	if strings.Contains(general, "NET_RAW") {
+		t.Fatalf("general worker gained NET_RAW: %s", general)
+	}
+	if !strings.Contains(general, "--user 1000:1000") {
+		t.Fatalf("general worker is not unprivileged: %s", general)
+	}
+}
+
+func TestEngageRunnerReleasesAndClosesBothWorkerPools(t *testing.T) {
+	r := &engageRunner{
+		guard:      "guard",
+		workers:    map[string]string{"task": "worker", "other": "worker2"},
+		rawWorkers: map[string]string{"task": "rawworker", "other": "rawworker2"},
+	}
+	var removed []string
+	r.remove = func(_ context.Context, id string) error {
+		removed = append(removed, id)
+		return nil
+	}
+	if err := r.Release("task"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if r.workers["task"] != "" || r.rawWorkers["task"] != "" {
+		t.Fatalf("release left a worker behind: %+v", r)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if len(r.workers) != 0 || len(r.rawWorkers) != 0 || r.guard != "" {
+		t.Fatalf("close left containers behind: %+v", r)
+	}
+	for _, want := range []string{"worker", "rawworker", "worker2", "rawworker2", "guard"} {
+		if !slices.Contains(removed, want) {
+			t.Fatalf("%s was never removed, removed=%v", want, removed)
+		}
+	}
+}
+
+func TestEngageRunnerWorkerCapSpansBothPools(t *testing.T) {
+	r := &engageRunner{
+		guard:      "guard",
+		workers:    map[string]string{"a": "1", "b": "2", "c": "3", "d": "4"},
+		rawWorkers: map[string]string{"a": "5", "b": "6", "c": "7", "d": "8"},
+	}
+	// The cap check precedes any docker call, so a refused worker touches no daemon.
+	if _, err := r.worker(context.Background(), "new", false); err == nil || !strings.Contains(err.Error(), "cap reached") {
+		t.Fatalf("general worker ignored the shared cap: %v", err)
+	}
+	if _, err := r.worker(context.Background(), "new", true); err == nil || !strings.Contains(err.Error(), "cap reached") {
+		t.Fatalf("raw worker ignored the shared cap: %v", err)
+	}
+	// An existing directory still resolves without creating anything.
+	if id, err := r.worker(context.Background(), "a", true); err != nil || id != "5" {
+		t.Fatalf("existing raw worker not reused: %q %v", id, err)
+	}
+}
+
+func TestPipelineNeedsRawSocket(t *testing.T) {
+	raw := [][]pipelineStage{
+		{{Binary: "masscan", Args: []string{"-p80", "192.0.2.1"}}},
+		{{Binary: "nmap", Args: []string{"-sS", "-p", "80", "192.0.2.1"}}},
+		// One raw stage takes the whole pipeline to the raw worker.
+		{{Binary: "nmap", Args: []string{"-sU", "-p", "161", "192.0.2.1"}}, {Binary: "jq", Args: []string{"."}}},
+		{{Binary: "curl", Args: []string{"http://192.0.2.1/"}}, {Binary: "tcpdump", Args: []string{"-c", "1"}}},
+	}
+	for _, stages := range raw {
+		if !pipelineNeedsRawSocket(stages) {
+			t.Errorf("%+v should need the raw-socket worker", stages)
+		}
+	}
+	general := [][]pipelineStage{
+		nil,
+		{{Binary: "nmap", Args: []string{"-sT", "-p", "80", "192.0.2.1"}}},
+		{{Binary: "curl", Args: []string{"http://192.0.2.1/"}}, {Binary: "jq", Args: []string{"."}}},
+		{{Binary: "smbclient", Args: []string{"-L", "192.0.2.1"}}},
+		{{Binary: "sh", Args: []string{"-c", "masscan -p80 192.0.2.1"}}},
+	}
+	for _, stages := range general {
+		if pipelineNeedsRawSocket(stages) {
+			t.Errorf("%+v should stay in the general unprivileged worker", stages)
+		}
+	}
+}
+
+// TestBothExecutionPathsUseTheBuiltImage pins the two substrates to one image.
+// They drifted before: the per-command sandbox pinned a hardcoded digest that no
+// build produced, so it failed with "No such image" under --pull never.
+func TestBothExecutionPathsUseTheBuiltImage(t *testing.T) {
+	tag := defaultRunnerTag()
+	if executorRunnerImage() != tag {
+		t.Fatalf("sandbox image %q is not the built image %q", executorRunnerImage(), tag)
+	}
+	if !strings.HasPrefix(tag, "blkchain-engage-runner:") || len(tag) != len("blkchain-engage-runner:")+64 {
+		t.Fatalf("runner tag is not the content-addressed form: %q", tag)
 	}
 }

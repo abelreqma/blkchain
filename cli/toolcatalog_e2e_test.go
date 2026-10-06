@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // toolcatalog_e2e_test.go runs every catalog tool inside the pinned runner
@@ -166,5 +168,58 @@ func TestRawSocketToolsNeedTheRawWorker(t *testing.T) {
 				t.Fatalf("%s did not work in the raw-socket worker: %s", c.binary, terminalSafe(raw))
 			}
 		})
+	}
+}
+
+// TestRunnerRoutesRawScanToTheRawWorker is the whole-chain proof: a real
+// engageRunner, a real guard firewall, and an nmap SYN scan of an in-scope
+// fixture. The scan can only succeed in the privileged worker, and the general
+// worker must still be the one serving a connect scan.
+func TestRunnerRoutesRawScanToTheRawWorker(t *testing.T) {
+	image := requireRunnerImage(t)
+	_ = image
+	ip, _ := startDockerHTTPFixture(t, "rawscan", "raw-fixture")
+	roe, err := ParseRoE(strings.NewReader("# Rules of Engagement\n\n## Summary\nraw-socket routing test\n\n## Targets\n" +
+		ip + "\n\n## In Scope\n" + ip + "\n\n## Rate\n100/s\n"))
+	if err != nil {
+		t.Fatalf("parse RoE: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	runner, err := newEngageRunner(ctx, roe)
+	if err != nil {
+		t.Skipf("isolated runner unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := runner.Close(); err != nil {
+			t.Errorf("runner cleanup: %v", err)
+		}
+	})
+
+	syn := []pipelineStage{{Binary: "nmap", Args: []string{"-sS", "-Pn", "-n", "-p", "8080", ip}}}
+	if !pipelineNeedsRawSocket(syn) {
+		t.Fatal("a SYN scan must route to the raw-socket worker")
+	}
+	res, _ := runner.Run(ctx, syn, "rawtask", 1<<20, 2*time.Minute)
+	if !strings.Contains(res.Output, "8080/tcp open") {
+		t.Fatalf("SYN scan did not reach the fixture: %v %s", res.Err, terminalSafe(res.Output))
+	}
+	if len(runner.rawWorkers) != 1 {
+		t.Fatalf("SYN scan did not create a raw worker: %+v", runner.rawWorkers)
+	}
+	if len(runner.workers) != 0 {
+		t.Fatalf("SYN scan should not have created a general worker: %+v", runner.workers)
+	}
+
+	connect := []pipelineStage{{Binary: "nmap", Args: []string{"-sT", "-Pn", "-n", "-p", "8080", ip}}}
+	if pipelineNeedsRawSocket(connect) {
+		t.Fatal("a connect scan must stay in the general worker")
+	}
+	res, _ = runner.Run(ctx, connect, "generaltask", 1<<20, 2*time.Minute)
+	if !strings.Contains(res.Output, "8080/tcp open") {
+		t.Fatalf("connect scan did not reach the fixture: %v %s", res.Err, terminalSafe(res.Output))
+	}
+	if len(runner.workers) != 1 {
+		t.Fatalf("connect scan did not create a general worker: %+v", runner.workers)
 	}
 }
