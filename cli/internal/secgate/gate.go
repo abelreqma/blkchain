@@ -233,11 +233,17 @@ func (g *Gate) ConfirmCommand(ctx context.Context, c Command) Decision {
 // passed; the command is NOT yet confirmed and no "allow" is audited. It touches
 // only g.mu-protected state (the Episode budget and the audit log).
 func (g *Gate) checkLocked(c Command) Decision {
+	// 1. caps and circuit breaker. An RoE policy owns the engagement's budget and
+	// its own input, action, denial and scope layers; it ADDS to the structural
+	// command layers below rather than replacing them. A sealed policy authorizes
+	// targets and action classes, which is a different question from whether a
+	// command is a shell, an interpreter, a destructive action, or a binary the
+	// allowlist permits, so both run.
 	if g.Policy != nil {
-		return g.checkPolicyLocked(c)
-	}
-	// 1. caps and circuit breaker
-	if ok, reason := g.Episode.AllowCommand(); !ok {
+		if d := g.checkPolicyLocked(c); !d.Allowed {
+			return d
+		}
+	} else if ok, reason := g.Episode.AllowCommand(); !ok {
 		return g.deny("cap", c, reason, "")
 	}
 	// Config denylist: always respected, in both profiles, before the profile

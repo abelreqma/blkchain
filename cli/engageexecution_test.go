@@ -16,7 +16,9 @@ func TestRoEPipelineChecksEveryStageBeforeIsolatedExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := &secgate.Gate{Mode: secgate.Auto, Scope: roe.Scope, Policy: roe.Policy}
+	// buildEngageGate always sets an allowlist for a non-local scope, so the
+	// fixture does too; the policy path enforces it.
+	g := &secgate.Gate{Mode: secgate.Auto, Scope: roe.Scope, Allow: secgate.NewAllowlist("curl"), Policy: roe.Policy}
 	if err := g.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +41,7 @@ func TestRoEPipelineChecksEveryStageBeforeIsolatedExecution(t *testing.T) {
 	if err != nil || calls != 0 || !strings.Contains(denied, "out of scope") {
 		t.Fatalf("denied pipeline ran: calls=%d result=%q err=%v", calls, denied, err)
 	}
-	allowed, err := tool.Call(ctx, `{"pipeline":[{"binary":"curl","args":["http://10.20.0.5"]},{"binary":"cat"}]}`)
+	allowed, err := tool.Call(ctx, `{"pipeline":[{"binary":"curl","args":["http://10.20.0.5"]},{"binary":"curl","args":["http://10.20.0.5/second"]}]}`)
 	if err != nil || calls != 1 || !strings.Contains(allowed, "pipeline-ok") {
 		t.Fatalf("permitted pipeline failed: calls=%d result=%q err=%v", calls, allowed, err)
 	}

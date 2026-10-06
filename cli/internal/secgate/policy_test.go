@@ -17,7 +17,7 @@ func TestPolicyAutoNeverConfirms(t *testing.T) {
 	p.Allowed = []string{"local"}
 	calls := 0
 	g := &Gate{Mode: Auto, Scope: scope, Policy: p, Confirm: policyConfirmer{calls: &calls}}
-	decision := g.Authorize(context.Background(), Command{Binary: "id", Phase: PhaseExploit})
+	decision := g.Authorize(context.Background(), Command{Binary: "id", Phase: PhaseExploit, Armed: true})
 	if !decision.Allowed || calls != 0 {
 		t.Fatalf("auto decision=%+v confirmation calls=%d", decision, calls)
 	}
@@ -56,7 +56,7 @@ func TestPolicyPrivateScopeExclusionsAndRate(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := DefaultPolicy()
-	g := &Gate{Mode: Auto, Scope: scope, Policy: p}
+	g := &Gate{Mode: Auto, Scope: scope, Allow: NewAllowlist("curl", "wget", "id"), Policy: p}
 	if err := g.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestPolicyDNSChangeAndProtectedDestination(t *testing.T) {
 	old := lookupIPFn
 	lookupIPFn = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("10.20.0.6")}, nil }
 	t.Cleanup(func() { lookupIPFn = old })
-	g := &Gate{Mode: Auto, Scope: scope, Policy: DefaultPolicy()}
+	g := &Gate{Mode: Auto, Scope: scope, Allow: NewAllowlist("curl", "wget", "id"), Policy: DefaultPolicy()}
 	if err := g.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestPolicyWildcardCommandRequiresMatchingPinnedHostname(t *testing.T) {
 	if err := policy.Seal("", nil, scope); err != nil {
 		t.Fatal(err)
 	}
-	gate := &Gate{Mode: Auto, Scope: scope, Policy: policy}
+	gate := &Gate{Mode: Auto, Scope: scope, Allow: NewAllowlist("curl", "wget", "id"), Policy: policy}
 	if err := gate.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestPolicyCommandRedirectsFailClosedWithoutBlockingPlainFetch(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := &Gate{Mode: Auto, Scope: scope, Policy: DefaultPolicy()}
+	g := &Gate{Mode: Auto, Scope: scope, Allow: NewAllowlist("curl", "wget", "id"), Policy: DefaultPolicy()}
 	if err := g.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestPolicyActionCapSurvivesRestore(t *testing.T) {
 	}
 	p := DefaultPolicy()
 	p.MaxActions = 1
-	g := &Gate{Mode: Auto, Scope: scope, Policy: p}
+	g := &Gate{Mode: Auto, Scope: scope, Allow: NewAllowlist("curl", "wget", "id"), Policy: p}
 	if err := g.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestPolicyActionCapSurvivesRestore(t *testing.T) {
 	if d := g.Authorize(context.Background(), c); d.Allowed || !strings.Contains(d.Reason, "cap") {
 		t.Fatalf("action cap did not stop reuse: %+v", d)
 	}
-	resume := &Gate{Mode: Auto, Scope: scope, Policy: p}
+	resume := &Gate{Mode: Auto, Scope: scope, Allow: NewAllowlist("curl", "wget", "id"), Policy: p}
 	if err := resume.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestPolicyByteCapSurvivesRestore(t *testing.T) {
 	}
 	p := DefaultPolicy()
 	p.OutputBytes, p.TotalBytes = 8, 8
-	g := &Gate{Mode: Auto, Scope: scope, Policy: p}
+	g := &Gate{Mode: Auto, Scope: scope, Allow: NewAllowlist("curl", "wget", "id"), Policy: p}
 	if err := g.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestPolicyByteCapSurvivesRestore(t *testing.T) {
 	if err := g.ClaimPolicyBytes(1); err == nil {
 		t.Fatal("byte cap accepted an extra byte")
 	}
-	resume := &Gate{Mode: Auto, Scope: scope, Policy: p}
+	resume := &Gate{Mode: Auto, Scope: scope, Allow: NewAllowlist("curl", "wget", "id"), Policy: p}
 	if err := resume.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestPolicyHostnameOnlyScopeUsesBrokerForWebAndRequiresIPForCommands(t *test
 		if err := scope.PinNetwork([]string{"10.20.0.6"}, nil); err != nil {
 			t.Fatal(err)
 		}
-		gate := &Gate{Mode: Auto, Scope: scope, Policy: policy}
+		gate := &Gate{Mode: Auto, Scope: scope, Allow: NewAllowlist("curl", "wget", "id"), Policy: policy}
 		if err := gate.Start(); err != nil {
 			t.Fatal(err)
 		}

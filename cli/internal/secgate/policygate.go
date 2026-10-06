@@ -150,5 +150,7 @@ func (g *Gate) checkPolicyLocked(c Command) Decision {
 	if ip, bad := ScopeViolation(g.Scope, c); bad {
 		return g.deny("scope", c, "target out of scope: "+ip, "")
 	}
-	return g.rateAllowLocked(c)
+	// The rate window is consumed by the shared tail in checkLocked, after the
+	// structural layers, so only an otherwise-admissible command takes a slot.
+	return Decision{Allowed: true}
 }
