@@ -488,9 +488,11 @@ func replSlashDesc(name string) string {
 // its titles are its own: the command line's ENGAGE/INTEGRATIONS split does not
 // describe /safe, /auto or /undo.
 const (
-	replGroupAsk     = "ASK AND SEARCH"
-	replGroupAgent   = "AGENT (HERMES)"
-	replGroupSession = "SETUP"
+	replGroupAsk          = "ASK AND SEARCH"
+	replGroupEngage       = "ENGAGE"
+	replGroupModes        = "MODES"
+	replGroupIntegrations = "INTEGRATIONS"
+	replGroupSession      = "SESSION"
 )
 
 func replGroups() []rowGroup {
@@ -502,7 +504,16 @@ func replGroups() []rowGroup {
 			{"/web [action]", replSpecDesc("web")},
 			{"/open <N|path>", replSpecDesc("open")},
 		}},
-		{groupModes, []helpRow{
+		{replGroupEngage, []helpRow{
+			{"/engage [flags] <goal>", replSpecDesc("engage")},
+			{"/engage web <action>", "assess web targets within an engagement"},
+			{"/transcript <mode>", "show off, important, or full action output"},
+			{"/safe", "approve engagement actions interactively"},
+			{"/auto", "run within the active RoE without prompts"},
+		}},
+		{replGroupModes, []helpRow{
+			{"/mode", replSlashDesc("mode")},
+			{"/rag [on|off|question]", replSlashDesc("rag")},
 			{"/agent [auto|name]", replSlashDesc("agent")},
 		}},
 		{hgServices, []helpRow{
@@ -514,15 +525,8 @@ func replGroups() []rowGroup {
 			{"/logs [service]", replSpecDesc("logs")},
 			{"/models [verb <name>]", replSlashDesc("models")},
 		}},
-		{replGroupAgent, []helpRow{
+		{replGroupIntegrations, []helpRow{
 			{"/hermes <prompt>", replSpecDesc("hermes")},
-			{"/engage [flags] <goal>", replSpecDesc("engage")},
-			{"/engage web <action>", "assess web targets within an engagement"},
-			{"/transcript <mode>", "show off, important, or full action output"},
-			{"/safe", "approve engagement actions interactively"},
-			{"/auto", "run within the active RoE without prompts"},
-			{"/mode", replSlashDesc("mode")},
-			{"/rag [on|off|question]", replSlashDesc("rag")},
 		}},
 		{replGroupSession, []helpRow{
 			{"/attach <path|URL>", replSlashDesc("attach")},

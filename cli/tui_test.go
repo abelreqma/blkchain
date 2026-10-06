@@ -1775,7 +1775,7 @@ func TestHelpBlockLayout(t *testing.T) {
 	if last := lines[len(lines)-1]; strings.TrimSpace(last) != "Press ? for keyboard shortcuts." {
 		t.Errorf("last line = %q, want the shortcuts pointer", last)
 	}
-	for _, g := range []string{"ASK AND SEARCH", "MODES", "SESSION", "SERVICES", "AGENT (HERMES)", "SETUP"} {
+	for _, g := range []string{"ASK AND SEARCH", "ENGAGE", "MODES", "SESSION", "SERVICES", "INTEGRATIONS", "SETUP"} {
 		if !strings.Contains(out, g) {
 			t.Errorf("help lacks the %s section", g)
 		}

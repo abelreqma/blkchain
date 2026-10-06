@@ -35,20 +35,26 @@ type command struct {
 // the registry and the group ordering cannot drift. Groups that also exist on
 // the command line use the same names there (ux-vocabulary); Modes and Session
 // are specific to this screen. groupHidden marks a command that grouped help
-// leaves out because another row already covers it (/agent and /rag sit under
-// /mode); the palette still lists it.
+// leaves out because another row already covers it (/rag sits under /mode); the
+// palette still lists it.
+//
+// Ask and search leads, not Engage: on an interactive surface the first thing
+// the operator does is type a question, and the bare-question row heads that
+// section. Engage follows, holding the engagement commands that used to sit
+// under Modes beside the answer-routing switches.
 const (
-	groupAsk      = "Ask and search"
-	groupModes    = "Modes"
-	groupSession  = "Session"
-	groupServices = "Services"
-	groupAgent    = "Agent (Hermes)"
-	groupSetup    = "Setup"
-	groupHidden   = ""
+	groupAsk          = "Ask and search"
+	groupEngage       = "Engage"
+	groupModes        = "Modes"
+	groupSession      = "Session"
+	groupServices     = "Services"
+	groupIntegrations = "Integrations"
+	groupSetup        = "Setup"
+	groupHidden       = ""
 )
 
 // groupOrder is the order sections appear in grouped help.
-var groupOrder = []string{groupAsk, groupModes, groupSession, groupServices, groupAgent, groupSetup}
+var groupOrder = []string{groupAsk, groupEngage, groupModes, groupSession, groupServices, groupIntegrations, groupSetup}
 
 // slashCommands is the command registry shared by the palette, helpBlock, and
 // replHelp. It mirrors the verbs handled in submit/dispatchInput (tui.go). A
@@ -67,13 +73,13 @@ func slashCommands() []command {
 		{"open", "<N|path>", spec["open"], groupAsk},
 		{"generate", "[question]", "answer from the last search results, no new retrieval", groupAsk},
 		{"mode", "", "switch between native answers and Hermes (also /rag)", groupModes},
-		{"safe", "", "approve new RoE actions interactively", groupModes},
-		{"auto", "", "run RoE-authorized actions without prompts", groupModes},
-		{"transcript", "<mode>", "show off, important, or full action output", groupModes},
-		{"engage", "<goal|web>", "run a gated, multi-step engagement toward a goal", groupModes},
-		{"candidates", "", "list the engagement's exploit candidates and their source", groupModes},
-		{"evidence", "", "show the engagement's captured evidence (verified quotes)", groupModes},
-		{"kg", "[node <id>|type]", "query the engagement knowledge graph", groupModes},
+		{"engage", "<goal|web>", "run a gated, multi-step engagement toward a goal", groupEngage},
+		{"candidates", "", "list the engagement's exploit candidates and their source", groupEngage},
+		{"evidence", "", "show the engagement's captured evidence (verified quotes)", groupEngage},
+		{"kg", "[node <id>|type]", "query the engagement knowledge graph", groupEngage},
+		{"transcript", "<mode>", "show off, important, or full action output", groupEngage},
+		{"safe", "", "approve new RoE actions interactively", groupEngage},
+		{"auto", "", "run RoE-authorized actions without prompts", groupEngage},
 		{"agent", "[auto|name]", "choose the native answer specialist; auto selects dynamically", groupModes},
 		{"rag", "[on|off|question]", "answer from the knowledge base", groupHidden},
 		{"history", "[clear [n]]", "reopen a saved session; clear or clear [n] erases", groupSession},
@@ -96,7 +102,7 @@ func slashCommands() []command {
 		{"doctor", "", spec["doctor"], groupServices},
 		{"models", "[verb <name>]", "see all models; turn them on or off, load or unload", groupServices},
 		{"logs", "[service]", spec["logs"], groupServices},
-		{"hermes", "<prompt>", spec["hermes"], groupAgent},
+		{"hermes", "<prompt>", spec["hermes"], groupIntegrations},
 		{"help", "[command]", "show all commands, or one command in detail", groupSetup},
 		{"quit", "", "leave blk (also ctrl+d)", groupSetup},
 	}

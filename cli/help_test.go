@@ -962,7 +962,7 @@ func TestPlainREPLHelpAndBanner(t *testing.T) {
 	out := captureStdout(t, replHelp)
 	assertMaxWidth(t, "repl help", out, 80)
 	assertASCII(t, "repl help", out)
-	for _, title := range []string{"ASK AND SEARCH", "SERVICES", "AGENT (HERMES)"} {
+	for _, title := range []string{"ASK AND SEARCH", "ENGAGE", "MODES", "SERVICES", "INTEGRATIONS", "SESSION"} {
 		if !strings.Contains(out, title) {
 			t.Errorf("repl help lacks the %q group", title)
 		}
@@ -1190,8 +1190,8 @@ func TestSafeAutoCommandsInRegistryAndHelp(t *testing.T) {
 	if !ok {
 		t.Fatal("/safe is missing from slashCommands()")
 	}
-	if safe.group != groupModes {
-		t.Errorf("/safe group = %q, want %q", safe.group, groupModes)
+	if safe.group != groupEngage {
+		t.Errorf("/safe group = %q, want %q", safe.group, groupEngage)
 	}
 	if !strings.Contains(safe.desc, "approve") {
 		t.Errorf("/safe desc = %q; want it to mention approval", safe.desc)
@@ -1200,8 +1200,8 @@ func TestSafeAutoCommandsInRegistryAndHelp(t *testing.T) {
 	if !ok {
 		t.Fatal("/auto is missing from slashCommands()")
 	}
-	if auto.group != groupModes {
-		t.Errorf("/auto group = %q, want %q", auto.group, groupModes)
+	if auto.group != groupEngage {
+		t.Errorf("/auto group = %q, want %q", auto.group, groupEngage)
 	}
 	if auto.args != "" {
 		t.Errorf("/auto args = %q; want no override", auto.args)

@@ -317,7 +317,7 @@ func TestSlashHelpGroupsFollowVocabulary(t *testing.T) {
 	for _, g := range commandGroups() {
 		titles = append(titles, g.title)
 	}
-	want := []string{"Ask and search", "Modes", "Session", "Services", "Agent (Hermes)", "Setup"}
+	want := []string{"Ask and search", "Engage", "Modes", "Session", "Services", "Integrations", "Setup"}
 	if strings.Join(titles, "|") != strings.Join(want, "|") {
 		t.Errorf("groups = %v, want %v", titles, want)
 	}
