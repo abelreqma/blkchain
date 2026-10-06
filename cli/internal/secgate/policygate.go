@@ -132,10 +132,15 @@ func (g *Gate) checkPolicyLocked(c Command) Decision {
 	if _, bad := TargetSelfExecViolation(c, g.Scratch); bad {
 		return g.deny("target-self-exec", c, "an inspection task cannot execute its analysis target", "")
 	}
-	if targets, ok := ExtractTargets(c); ok {
+	if targets, nets, ok := ExtractTargetSet(c); ok {
 		for _, target := range targets {
 			if !g.Scope.InScope(target) {
 				return g.deny("scope", c, "target out of scope: "+target, "")
+			}
+		}
+		for _, n := range nets {
+			if !g.Scope.NetworkInScope(n) {
+				return g.deny("scope", c, "network out of scope: "+n.String(), "")
 			}
 		}
 	} else {

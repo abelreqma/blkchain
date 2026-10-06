@@ -38,12 +38,29 @@ var (
 // A trailing dot on a hostname is normalized away. A flag with no '=' value is
 // not a target.
 func ExtractTargets(c Command) ([]string, bool) {
+	hosts, nets, ok := ExtractTargetSet(c)
+	if len(nets) > 0 {
+		// A caller on this contract expects one host per target and cannot judge a
+		// whole network, so a network argument stays unverifiable for it. Only the
+		// layers that opted in through ExtractTargetSet decide a network.
+		return hosts, false
+	}
+	return hosts, ok
+}
+
+// ExtractTargetSet is ExtractTargets with networks separated out rather than
+// treated as unverifiable. hosts carries every single-host target and nets every
+// CIDR argument; ok has the same fail-closed meaning. A caller that uses this
+// must check nets with Scope.NetworkInScope, which authorizes a network only
+// when one in-scope CIDR covers all of it and nothing excluded overlaps it.
+func ExtractTargetSet(c Command) (hosts []string, nets []*net.IPNet, ok bool) {
 	name := baseName(strings.TrimSpace(c.Binary))
 	if impacketBinaries[name] {
 		// impacket's [domain/]user[:password]@host operand needs its own grammar:
 		// the generic token reader cuts at the first '/' and loses the host, and a
 		// -hashes LM:NT value reads as host:port.
-		return impacketTargets(c.Args)
+		h, good := impacketTargets(c.Args)
+		return h, nil, good
 	}
 	e := &extractor{seen: map[string]bool{}, ok: true}
 	switch strings.ToLower(name) {
@@ -57,12 +74,13 @@ func ExtractTargets(c Command) ([]string, bool) {
 	for _, a := range c.Args {
 		e.arg(a)
 	}
-	return e.out, e.ok
+	return e.out, e.nets, e.ok
 }
 
 type extractor struct {
 	seen map[string]bool
 	out  []string
+	nets []*net.IPNet
 	ok   bool
 	unc  bool // extract the host of a //host or \\host token (smbclient, rpcclient)
 	// skipNames drops positional tokens (not led by '-', '+', or '@') so a dig
@@ -89,6 +107,16 @@ func (e *extractor) add(h string) {
 	}
 	e.seen[h] = true
 	e.out = append(e.out, h)
+}
+
+// seenNet records a network and reports whether it was already recorded.
+func (e *extractor) seenNet(n *net.IPNet) bool {
+	key := "cidr:" + n.String()
+	if e.seen[key] {
+		return true
+	}
+	e.seen[key] = true
+	return false
 }
 
 func validHost(h string) bool {
@@ -207,8 +235,14 @@ func uncHost(t string) (string, bool) {
 // bare IP, or bare dotted hostname, and flags it unresolved when host-like but
 // not valid. localhost is always a target; packed-IP tokens are unresolved.
 func (e *extractor) host(t string) {
-	if _, _, err := net.ParseCIDR(t); err == nil {
-		e.ok = false // a whole network cannot be checked as one host
+	if _, n, err := net.ParseCIDR(t); err == nil {
+		// A whole network is recorded separately: it cannot be checked as one
+		// host, but it is a legitimate target when one in-scope CIDR covers it.
+		// The normalized network form is kept, so 10.0.0.5/24 is judged as
+		// 10.0.0.0/24, which is the range a scanner actually sweeps.
+		if !e.seenNet(n) {
+			e.nets = append(e.nets, n)
+		}
 		return
 	}
 	h := t

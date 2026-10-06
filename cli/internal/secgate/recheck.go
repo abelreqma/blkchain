@@ -40,7 +40,16 @@ func (g *Gate) recheck(c Command) Decision {
 			if ips == nil {
 				ips = g.Scope
 			}
-			targets, _ := ExtractTargets(c)
+			targets, nets, _ := ExtractTargetSet(c)
+			for _, n := range nets {
+				// A network target is re-checked against the same explicit IP scope
+				// as a host: the exec-time recheck is the layer that catches a scope
+				// that changed between authorization and execution.
+				if ips == nil || ips.Empty() || !ips.NetworkInScope(n) {
+					g.audit("deny:scope-recheck", Signature(c))
+					return Decision{Reason: "command destination needs an explicit in-scope IP or CIDR entry"}
+				}
+			}
 			for _, target := range targets {
 				if ips == nil || ips.Empty() {
 					g.audit("deny:scope-recheck", Signature(c))

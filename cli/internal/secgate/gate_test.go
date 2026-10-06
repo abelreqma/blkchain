@@ -235,14 +235,33 @@ func TestAutoDeniesNoTargetUnderScope(t *testing.T) {
 }
 
 func TestAutoDeniesUnverifiableTargetUnderScope(t *testing.T) {
-	// ExtractTargets returns ok=false for a CIDR arg (it cannot resolve a whole
-	// CIDR against InScope), so the gate must fail closed even though the CIDR is
-	// literally the scope. A bounded single-host command is required.
+	// A dashed range is unresolvable: it is neither one host nor a network the
+	// containment check can read, so the gate must fail closed even though every
+	// address it names happens to sit inside the scope.
 	g := &Gate{Mode: Auto, Scope: okScope(t), Allow: NewAllowlist("nmap")}
 	g.Start()
-	d := g.Authorize(context.Background(), Command{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.0/24"}})
+	d := g.Authorize(context.Background(), Command{Binary: "nmap", Args: []string{"-p", "80", "10.0.0.1-50"}})
 	if d.Allowed {
 		t.Error("a command with an unverifiable (ok=false) target must be denied under scope")
+	}
+}
+
+func TestAutoAcceptsNetworkWhollyInScope(t *testing.T) {
+	// A network the operator put in scope is a legitimate sweep target: the whole
+	// range is covered by one in-scope CIDR and nothing excluded overlaps it.
+	g := &Gate{Mode: Auto, Scope: okScope(t), Allow: NewAllowlist("nmap")}
+	g.Start()
+	for _, target := range []string{"10.0.0.0/24", "10.0.0.128/25", "10.0.0.7/32"} {
+		d := g.Authorize(context.Background(), Command{Binary: "nmap", Args: []string{"-p", "80", target}})
+		if !d.Allowed {
+			t.Errorf("nmap -p 80 %s should be allowed under a 10.0.0.0/24 scope: %s", target, d.Reason)
+		}
+	}
+	for _, target := range []string{"10.0.0.0/16", "10.1.0.0/24", "0.0.0.0/0"} {
+		d := g.Authorize(context.Background(), Command{Binary: "nmap", Args: []string{"-p", "80", target}})
+		if d.Allowed {
+			t.Errorf("nmap -p 80 %s reaches outside a 10.0.0.0/24 scope and must be denied", target)
+		}
 	}
 }
 

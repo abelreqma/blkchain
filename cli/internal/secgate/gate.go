@@ -290,13 +290,18 @@ func (g *Gate) checkLocked(c Command) Decision {
 		// A local command has no remote target to scope. A scope that also lists
 		// in-scope network targets still scopes a command that names one.
 		if !g.Scope.Empty() {
-			targets, ok := ExtractTargets(c)
+			targets, nets, ok := ExtractTargetSet(c)
 			if !ok {
 				return g.deny("scope", c, "command has an unverifiable target (cannot confirm it is in scope)", "")
 			}
 			for _, tgt := range targets {
 				if !g.Scope.InScope(tgt) {
 					return g.deny("scope", c, "target out of scope: "+tgt, "")
+				}
+			}
+			for _, n := range nets {
+				if !g.Scope.NetworkInScope(n) {
+					return g.deny("scope", c, "network out of scope: "+n.String(), "")
 				}
 			}
 		}
@@ -324,12 +329,15 @@ func (g *Gate) checkLocked(c Command) Decision {
 		case g.Mode == Auto && emptyScope && g.AutoScopeOverride:
 			// Logged no-scope override: fail closed on any network target (nothing
 			// can be confirmed in scope), permit only no-target recon.
-			targets, ok := ExtractTargets(c)
+			targets, nets, ok := ExtractTargetSet(c)
 			if !ok {
 				return g.deny("scope", c, "command has an unverifiable target (cannot confirm it is in scope)", "")
 			}
 			if len(targets) > 0 {
 				return g.deny("scope", c, "no scope defined; target cannot be confirmed in scope: "+targets[0], "")
+			}
+			if len(nets) > 0 {
+				return g.deny("scope", c, "no scope defined; network cannot be confirmed in scope: "+nets[0].String(), "")
 			}
 			// Backstop: a glued or bundled single-dash short flag (-h10.0.0.5,
 			// -sx10.0.0.5) can hide a host the extractor drops. Under a real scope
@@ -342,16 +350,21 @@ func (g *Gate) checkLocked(c Command) Decision {
 				return g.deny("scope", c, "no scope defined; a glued or bundled short flag may hide a target that cannot be confirmed in scope: "+a, "")
 			}
 		case g.Scope != nil:
-			targets, ok := ExtractTargets(c)
+			targets, nets, ok := ExtractTargetSet(c)
 			if !ok {
 				return g.deny("scope", c, "command has an unverifiable target (cannot confirm it is in scope)", "")
 			}
-			if len(targets) == 0 {
+			if len(targets) == 0 && len(nets) == 0 {
 				return g.deny("scope", c, "no verifiable target to check against the scope", "")
 			}
 			for _, tgt := range targets {
 				if !g.Scope.InScope(tgt) {
 					return g.deny("scope", c, "target out of scope: "+tgt, "")
+				}
+			}
+			for _, n := range nets {
+				if !g.Scope.NetworkInScope(n) {
+					return g.deny("scope", c, "network out of scope: "+n.String(), "")
 				}
 			}
 		}
