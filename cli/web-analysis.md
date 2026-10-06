@@ -11,8 +11,8 @@ blk engage web inspect domain.com --workspace ./assessment --view apis
 blk engage web inspect domains.txt --workspace ./assessment --view artifacts
 blk engage web inspect 192.0.2.1 --workspace ./assessment --view all
 blk engage web analyze --workspace ./assessment
-blk engage web import --workspace ./assessment --scope scope.txt --file traffic.har
-blk engage web archive domain.com --workspace ./assessment --scope scope.txt --auto
+blk engage web import --workspace ./assessment --roe ROE.md --file traffic.har
+blk engage web archive domain.com --workspace ./assessment --roe ROE.md
 blk engage web export --workspace ./assessment
 ```
 
@@ -53,14 +53,14 @@ An engagement Markdown file uses the existing RoE format:
 2/s
 ```
 
-Acquisition requires the engagement discovery scope. Supply `--scope`, `--roe`,
-an engagement Markdown target, or the project's `ROE.md`. The existing gate
-checks the hostname and resolved addresses; include authorized addresses or
-networks as well as hostnames. Authorized internal targets remain supported.
-The unattended allowlist in `.blkchain/config.yaml` governs `--auto`. Active
-interactions, writes, and outbound WebSocket messages additionally require an existing armed `--task`.
-The unattended policy label for WebSocket sends is `web-api:WEBSOCKET`;
-handshakes use `web-api:GET`.
+Collection, archive, replay, and import require the operator RoE. Supply
+`--roe`, an engagement Markdown target, or the project's `ROE.md`. The policy
+checks hostnames and pins resolved addresses. Authorized private targets work
+when the RoE includes them. Auto is the default. Active browser and API actions
+require `browser-write` or `api-write` in the RoE; outbound WebSocket messages
+use `api-write`, while handshakes use `api-read`. `--task` attributes actions
+and evidence to an existing engagement task. The legacy `--scope` flag applies
+only to read-only workspace views.
 
 # Collection and evidence
 
@@ -236,9 +236,9 @@ Shell metacharacters are quoted and control characters are rejected.
 
 ```sh
 blk engage web export --workspace ./assessment --operation OPERATION_ID
-blk engage web replay --workspace ./assessment --scope scope.txt \
+blk engage web replay --workspace ./assessment --roe ROE.md \
   --operation OPERATION_ID --values values.json --session sessions.json \
-  --role reader --task EXISTING_ARMED_TASK --auto
+  --role reader --task EXISTING_TASK --auto
 ```
 
 `values.json` maps parameter names to strings. Numeric, boolean, object, and array
@@ -248,9 +248,9 @@ Unsupported signatures and missing values remain gaps. Select an observed HTTP
 request with `--example N` to replay its original body bytes:
 
 ```sh
-blk engage web replay --workspace ./assessment --scope scope.txt \
+blk engage web replay --workspace ./assessment --roe ROE.md \
   --operation OPERATION_ID --example 1 --session sessions.json \
-  --role writer --task EXISTING_ARMED_TASK --auto
+  --role writer --task EXISTING_TASK --auto
 ```
 
 Example numbers refer to the operation's stored `examples` array, starting at 1.

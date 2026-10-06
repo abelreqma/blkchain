@@ -82,11 +82,15 @@ func (w *Workspace) AuditLine(actor, action, detail string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	if _, err := f.Write(append(b, '\n')); err != nil {
+		f.Close()
 		return err
 	}
-	return nil
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func auditFields(action string) (kind, outcome, reasonCode string) {

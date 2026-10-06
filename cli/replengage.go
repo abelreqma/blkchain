@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -16,24 +14,6 @@ import (
 	"blkchain/cli/internal/secgate"
 	"blkchain/cli/internal/skillcat"
 )
-
-// replengage.go is the gate-governed engage path reachable from the REPL. The
-// session autonomy mode (secgate.Safe/Auto, held on the tui model as engageMode)
-// and the auto-scope override (engageOverride) feed buildEngageGate, so a REPL
-// engagement is gated exactly like `blk engage`: unattended LOCAL requires RoE and config allowlists, the
-// unattended /auto bound falls back to HITL, and the RoE/override rules hold. The
-// three helpers below back the UI/UX session's /safe//auto commands and ribbon.
-
-// validateEngageMode mirrors the gate.Start precondition without building a gate:
-// /auto needs a usable scope (in-scope targets or a local directive) OR an
-// explicit override. Safe always validates. It lets the REPL surface a clear
-// message before an engagement starts.
-func validateEngageMode(mode secgate.Mode, override bool, scope *secgate.Scope) error {
-	if mode == secgate.Auto && (scope == nil || (scope.Empty() && !scope.Local())) && !override {
-		return errors.New("engage: /auto needs a scope (an ROE.md with in-scope targets) or an override")
-	}
-	return nil
-}
 
 // scopeDetected reports whether a scope source autodetects for cwd: an ROE.md in
 // cwd, or one remembered for cwd in the recall table. Best-effort and nil-safe (a
@@ -51,194 +31,23 @@ func scopeDetected(cwd string) bool {
 	return false
 }
 
-// unattendedBoundEmpty reports whether unattended /auto for cwd would fall back to
-// HITL because the .blkchain/config.yaml allowed_binaries bound permits nothing.
-// A missing or unreadable config is an empty bound (true). allowed_binaries: true
-// means everything is allowed unattended, so the bound is not empty (false).
-func unattendedBoundEmpty(cwd string) bool {
-	cfg, _, err := autodetectEngageConfig(cwd)
-	if err != nil || cfg == nil {
-		return true
-	}
-	if cfg.AllowedBinaries.All {
-		return false
-	}
-	return len(cfg.AllowedBinaries.List) == 0
-}
-
-// runReplEngage builds a gate from the session mode + override and runs the gated
-// orchestrator for goal. scope and config policy autodetect from cwd (ROE.md +
-// .blkchain/config.yaml); the engagement runs in wsDir (empty picks a fresh
-// timestamped workspace under the config dir). confirm is the TUI confirmer: in
-// a LOCAL engagement commands outside the RoE and config allowlists require confirmation.
-// progress is nil-safe and, when set, feeds a live view of the engagement store.
-// Every command the engagement issues passes the single secgate.Gate.
+// runReplEngage passes the TUI approval and transcript settings to the shared
+// RoE session. An existing run.json in wsDir selects resume.
 func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, override bool,
 	model toolLoopModel, rc searcher, cfg ragconfig.Config, prefs modelPrefs, cat *skillcat.Catalog,
 	confirm secgate.Confirmer, asker askuser.Asker, roeDB *sql.DB, goal string,
 	progress func(rev int64, snap engagement.Engagement)) (string, error) {
-
-	var err error
-	if wsDir == "" {
-		wsDir, err = engageWorkspaceDir("")
-		if err != nil {
-			return "", fmt.Errorf("engage: %w", err)
+	transcript, _ := ctx.Value(replTranscriptKey{}).(string)
+	onAction, _ := ctx.Value(replActionKey{}).(func(actionRecord))
+	o := engageOpts{workspace: wsDir, safe: mode == secgate.Safe, autoOverride: override, transcript: transcript}
+	if wsDir != "" {
+		if _, err := os.Stat(filepath.Join(wsDir, "run.json")); err == nil {
+			o.resume = wsDir
+		} else if !os.IsNotExist(err) {
+			return "", err
 		}
 	}
-	var checkpoint *engageCheckpoint
-	if _, statErr := os.Stat(filepath.Join(wsDir, "checkpoint.json")); statErr == nil {
-		loaded, loadErr := loadEngageCheckpoint(wsDir)
-		if loadErr != nil {
-			return "", fmt.Errorf("engage resume: %w", loadErr)
-		}
-		if goal != loaded.Goal {
-			return "", errors.New("engage resume: goal differs from saved engagement")
-		}
-		checkpoint = &loaded
-		cwd = loaded.ProjectDir
-		mode = secgate.Safe
-		if loaded.Auto {
-			mode = secgate.Auto
-		}
-		override = loaded.AutoOverride
-	} else if !os.IsNotExist(statErr) {
-		return "", fmt.Errorf("engage: checkpoint: %w", statErr)
-	}
-	var scope *secgate.Scope
-	var scopeDesc, roeUsed string
-	if checkpoint != nil {
-		scope, scopeDesc, roeUsed, err = checkpointScope(wsDir, *checkpoint)
-	} else {
-		scope, scopeDesc, roeUsed, err = resolveEngageScope(engageOpts{}, cwd, roeDB)
-	}
-	if err != nil {
-		return "", fmt.Errorf("engage: %w", err)
-	}
-	if err := validateEngageMode(mode, override, scope); err != nil {
-		return "", err
-	}
-	policy, err := resolveEngageConfigPolicy(engageOpts{autoOverride: override}, cwd)
-	if err != nil {
-		return "", fmt.Errorf("engage: %w", err)
-	}
-
-	ws, err := engagement.OpenWorkspace(wsDir)
-	if err != nil {
-		return "", fmt.Errorf("engage: cannot open workspace: %w", err)
-	}
-	defer ws.Close()
-	if checkpoint == nil {
-		kind, source := "none", ""
-		if roeUsed != "" {
-			kind, source = "roe", roeUsed
-		}
-		entry := engageCheckpoint{Goal: goal, ProjectDir: cwd, ScopeKind: kind, Auto: mode == secgate.Auto, AutoOverride: override}
-		if err := saveEngageCheckpoint(ws.Dir, entry, source); err != nil {
-			return "", fmt.Errorf("engage: checkpoint: %w", err)
-		}
-		if kind != "none" {
-			saved, loadErr := loadEngageCheckpoint(ws.Dir)
-			if loadErr != nil {
-				return "", fmt.Errorf("engage: checkpoint: %w", loadErr)
-			}
-			scope, scopeDesc, roeUsed, err = checkpointScope(ws.Dir, saved)
-			if err != nil {
-				return "", fmt.Errorf("engage: snapshotted scope: %w", err)
-			}
-		}
-	}
-	policy.AutoActions, err = checkpointAutoActions(ws.Dir)
-	if err != nil {
-		return "", fmt.Errorf("engage: autonomous actions: %w", err)
-	}
-	if scope != nil && scope.Local() && confirm == nil &&
-		(mode != secgate.Auto || !policy.AutoActions.hasLocalRule() || !policy.LocalUnattendedReady) {
-		return "", errors.New("engage: a local/post-access engagement needs interactive confirmation or RoE autonomous actions with local_unattended_binaries")
-	}
-	removeFindings := subscribeWebFindingOutput(ctx, ws.Store, os.Stdout)
-	defer removeFindings()
-
-	SetEngageEvidenceSource(ws.Store.EvidenceRowsFor)
-	defer SetEngageEvidenceSource(nil)
-	// Register this engagement's graph source for the REPL /kg view, bound to the
-	// already-open store, and clear it before the store closes.
-	SetEngageGraphSource(func(q engagement.GraphQuery) (kgView, error) { return engageGraphOnStore(ws.Store, q) })
-	defer SetEngageGraphSource(nil)
-
-	scratch, err := os.MkdirTemp("", "blkreplengage-")
-	if err != nil {
-		return "", fmt.Errorf("engage: cannot create scratch dir: %w", err)
-	}
-	defer os.RemoveAll(scratch)
-	runCtx, cancelRun := context.WithCancelCause(ctx)
-	defer cancelRun(nil)
-	telemetry := newEngageTelemetry(ws, cancelRun)
-	runCtx = withEngageTelemetry(runCtx, telemetry)
-
-	gate := buildEngageGate(ws, scope, mode, confirm, secgate.NewSessionApprovals(), scratch, policy, telemetry.gate)
-	if err := gate.Start(); err != nil {
-		return "", fmt.Errorf("engage: %w", err)
-	}
-	if asker == nil {
-		asker = askuser.AutoAsker{}
-	}
-	deps := buildEngageDeps(model, rc, cfg, prefs, ws.Store, gate, scratch, cat, asker, confirm, progress)
-	deps.ExploitTools = policy.ExploitTools
-	deps.AutoActions = policy.AutoActions
-	deps.MaxActions, deps.WallSeconds = policy.MaxActions, policy.WallSeconds
-	deps = applyArmReq(deps, replArmReq())
-	toolHelp, toolHelpClose := openToolHelpCache()
-	defer toolHelpClose()
-	deps.ToolHelp = toolHelp
-	modeStr := "safe"
-	if mode == secgate.Auto {
-		modeStr = "auto"
-	}
-	rw := newReportWriter(ws.Store, wsDir, goal, scopeDesc, modeStr)
-	if err := rw.RestoreFinal(); err != nil {
-		return "", fmt.Errorf("engage: prior report: %w", err)
-	}
-	if err := rw.Flush("in-progress"); err != nil {
-		return "", fmt.Errorf("engage: initial report: %w", err)
-	}
-	stopReport := rw.Start()
-	defer stopReport()
-	reportStatus := "complete"
-	deps.OnStop = func(string) {
-		reportStatus = "paused"
-		if state, ok := ctx.Value(engageStatusKey{}).(*engageRunStatus); ok {
-			state.paused = true
-		}
-	}
-	// Seed the engagement's initial vantage from scope; a seed error is
-	// logged, not fatal.
-	if serr := seedInitialVantage(ctx, ws.Store, scope); serr != nil {
-		fmt.Fprintf(os.Stderr, "engage: vantage seed failed: %v\n", serr)
-	}
-	final, err := runOrchestrator(runCtx, deps, goal)
-	stopReport()
-	if err != nil {
-		if cause := context.Cause(runCtx); cause != nil && cause != context.Canceled {
-			err = cause
-		}
-		status := "interrupted"
-		if err == errEngageDenialBurst {
-			status = "paused"
-			rw.SetFinal(err.Error())
-			deps.OnStop("denial burst")
-		}
-		if ferr := rw.Flush(status); ferr != nil {
-			fmt.Fprintf(os.Stderr, "report: final write failed: %v\n", ferr)
-		}
-		mdPath, jsonPath := reportPaths(wsDir)
-		return "Report: " + mdPath + "\n        " + jsonPath, err
-	}
-	rw.SetFinal(final)
-	if err := rw.Flush(reportStatus); err != nil {
-		return final, fmt.Errorf("engage: final report write failed: %w", err)
-	}
-	mdPath, jsonPath := reportPaths(wsDir)
-	return final + "\n\nReport: " + mdPath + "\n        " + jsonPath, nil
+	return runEngageSession(ctx, engageRunInput{Opts: o, Cwd: cwd, Goal: goal, Model: model, RC: rc, Cfg: cfg, Prefs: prefs, Catalog: cat, Confirm: confirm, Asker: asker, DB: roeDB, Progress: progress, OnAction: onAction, Views: true})
 }
 
 // applyArmReq sets the optional operator arm requester on deps: the REPL

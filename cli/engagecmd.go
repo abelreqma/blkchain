@@ -27,6 +27,10 @@ func loadEngageCatalog() (*skillcat.Catalog, error) {
 
 // engageOpts holds `blk engage`'s flags.
 type engageOpts struct {
+	roe          string
+	safe         bool
+	transcript   string
+	resume       string
 	scope        string
 	auto         bool
 	autoOverride bool
@@ -36,9 +40,11 @@ type engageOpts struct {
 
 // defineEngageFlags declares `blk engage`'s flags.
 func defineEngageFlags(fs *flag.FlagSet, o *engageOpts) {
-	fs.StringVar(&o.scope, "scope", "", "scope file: in-scope targets, `local`, and `allow <bin>` lines")
-	fs.BoolVar(&o.auto, "auto", false, "run RoE-authorized, allowlisted actions unattended; confirm other actions")
-	fs.BoolVar(&o.autoOverride, "auto-override", false, "allow --auto with no scope (logged to audit.jsonl); only no-target recon runs autonomously")
+	fs.StringVar(&o.roe, "roe", "", "operator ROE.md path")
+	fs.BoolVar(&o.safe, "safe", false, "enable interactive action approval")
+	fs.StringVar(&o.transcript, "transcript", "important", "action output: off, important, or full")
+	fs.StringVar(&o.resume, "resume", "", "continue an interrupted engagement workspace")
+	fs.BoolVar(&o.auto, "auto", false, "run RoE-authorized actions without prompts (default)")
 	fs.StringVar(&o.workspace, "workspace", "", "engagement workspace directory (default: a new one under the config dir)")
 	fs.StringVar(&o.model, "model", "", "chat model id (default: the resolved model)")
 }
@@ -50,249 +56,49 @@ func defineEngageFlags(fs *flag.FlagSet, o *engageOpts) {
 // the workspace), so a usage mistake is caught without qdrant, embed_server,
 // or the LLM server running.
 func runEngage(args []string) error {
-	if len(args) > 0 && args[0] == "web" {
-		return runWebAnalysis(args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case "web":
+			return runWebAnalysis(args[1:])
+		case "arm":
+			return runEngageArm(args[1:])
+		case "resume":
+			return runEngageResume(args[1:])
+		case "setup":
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			return setupEngageRunner(ctx)
+		case "stop":
+			return stopEngageWorkspace(args[1:])
+		case "migrate":
+			return migrateEngagePolicy(args[1:])
+		}
 	}
-	// `blk engage arm <task-id>` is the operator-only arm subcommand: it sets
-	// Armed on an exploit/post-ex task so it can run under the gate. It is a
-	// subcommand of engage, not a goal.
-	if len(args) > 0 && args[0] == "arm" {
-		return runEngageArm(args[1:])
-	}
-	if len(args) > 0 && args[0] == "resume" {
-		return runEngageResume(args[1:])
-	}
-
-	var o engageOpts
-	fs := newFlagSet("engage")
-	defineEngageFlags(fs, &o)
-	valueFlags := map[string]bool{"scope": true, "workspace": true, "model": true}
-	if err := parseFlags(fs, reorder(args, valueFlags)); err != nil {
+	o, goal, err := parseEngageArgs(args)
+	if err != nil {
 		return err
 	}
-
-	goal := strings.Join(fs.Args(), " ")
-	if strings.TrimSpace(goal) == "" {
-		return missingArg("engage", "missing goal", `engage --scope scope.txt "enumerate 10.0.0.5"`)
-	}
-	return runEngageWithOptions(o, goal, nil)
-}
-
-func runEngageWithOptions(o engageOpts, goal string, checkpoint *engageCheckpoint) error {
 	cwd, _ := os.Getwd()
-	if checkpoint != nil {
-		cwd = checkpoint.ProjectDir
-		if checkpoint.ScopeKind == "scope" {
-			o.scope = filepath.Join(o.workspace, "scope.txt")
-		}
-	}
-	// Shared memory store for RoE recall-by-directory (best-effort; nil degrades).
-	var roeDB *sql.DB
+	var db *sql.DB
 	if store := histstore.OpenDefault(); store != nil {
 		defer store.Close()
-		roeDB = store.DB()
+		db = store.DB()
 	}
-
-	var scope *secgate.Scope
-	var scopeDesc, roeUsed string
-	var err error
-	if checkpoint != nil {
-		scope, scopeDesc, roeUsed, err = checkpointScope(o.workspace, *checkpoint)
-	} else {
-		scope, scopeDesc, roeUsed, err = resolveEngageScope(o, cwd, roeDB)
-	}
-	if err != nil {
-		return fmt.Errorf("engage: %w", err)
-	}
-	policy, err := resolveEngageConfigPolicy(o, cwd)
-	if err != nil {
-		return fmt.Errorf("engage: %w", err)
-	}
-
-	mode := secgate.Safe
-	if o.auto {
-		mode = secgate.Auto
-	}
-
-	// No-RoE floor: --auto needs a scope OR an explicit logged override.
-	if mode == secgate.Auto && (scope == nil || (scope.Empty() && !scope.Local())) && !o.autoOverride {
-		return usageErr(`engage: --auto needs a scope (via --scope, or an ROE.md with "## In Scope") or --auto-override. Example: blk engage --auto --scope scope.txt "enumerate 10.0.0.5". See "blk help engage".`)
-	}
-
-	cat, err := loadEngageCatalog()
-	if err != nil {
-		return fmt.Errorf("engage: %w", err)
-	}
-	if len(cat.Errors()) > 0 {
-		fmt.Fprintf(os.Stderr, "skill catalog: %d skill(s) excluded\n", len(cat.Errors()))
-	}
-
-	cfg := loadConfig()
-	prefs := loadPrefs()
-
-	wsDir, err := engageWorkspaceDir(o.workspace)
-	if err != nil {
-		return fmt.Errorf("engage: %w", err)
-	}
-	ws, err := engagement.OpenWorkspace(wsDir)
-	if err != nil {
-		return fmt.Errorf("engage: cannot open workspace: %w", err)
-	}
-	defer ws.Close()
-	if checkpoint == nil {
-		kind, source := "none", ""
-		if roeUsed != "" {
-			kind, source = "roe", roeUsed
-		} else if o.scope != "" {
-			kind, source = "scope", o.scope
-		}
-		entry := engageCheckpoint{Goal: goal, ProjectDir: cwd, ScopeKind: kind, Auto: o.auto, AutoOverride: o.autoOverride}
-		if err := saveEngageCheckpoint(ws.Dir, entry, source); err != nil {
-			return fmt.Errorf("engage: checkpoint: %w", err)
-		}
-		if kind != "none" {
-			saved, loadErr := loadEngageCheckpoint(ws.Dir)
-			if loadErr != nil {
-				return fmt.Errorf("engage: checkpoint: %w", loadErr)
-			}
-			scope, scopeDesc, roeUsed, err = checkpointScope(ws.Dir, saved)
-			if err != nil {
-				return fmt.Errorf("engage: snapshotted scope: %w", err)
-			}
-		}
-	}
-	removeFindings := subscribeWebFindingOutput(context.Background(), ws.Store, os.Stdout)
-	defer removeFindings()
-
-	// When no RoE was found and no explicit scope was given, drop a pre-formatted
-	// ROE.md template into the workspace (idempotent; never overwrites).
-	if checkpoint == nil && roeUsed == "" && strings.TrimSpace(o.scope) == "" {
-		if _, werr := writeRoETemplate(ws.Dir); werr != nil {
-			fmt.Fprintf(os.Stderr, "engage: could not write ROE.md template: %v\n", werr)
-		}
-	}
-	policy.AutoActions, err = checkpointAutoActions(ws.Dir)
-	if err != nil {
-		return fmt.Errorf("engage: autonomous actions: %w", err)
-	}
-
-	tty := isTerminalFile(os.Stdin)
 	var confirm secgate.Confirmer
-	// The mmdflux viz session replaces this with its widget confirmer by assigning confirm here before the gate is built.
-	// A terminal confirmer is provided on any TTY: /safe confirms every command,
-	// /auto local confirms every command (the human is the positive control), and
-	// /auto external falls back to HITL for a binary not in allowed_binaries.
-	if tty {
-		confirm = newTerminalConfirmer(os.Stdin, os.Stdout)
-	}
-	if scope != nil && scope.Local() && confirm == nil &&
-		(mode != secgate.Auto || !policy.AutoActions.hasLocalRule() || !policy.LocalUnattendedReady) {
-		return fmt.Errorf("engage: local/post-access engagements require interactive confirmation or RoE autonomous actions with local_unattended_binaries")
-	}
-
-	// The scratch dir lives outside the workspace: run_command's cwd, so a
-	// relative ".." in a tool's file-writing flag cannot reach audit.jsonl,
-	// engagement.db, or evidence inside ws.Dir (see secgate.FileAccessViolation
-	// for the complementary path-policy check on the command args themselves).
-	scratch, err := os.MkdirTemp("", "blkengage-")
-	if err != nil {
-		return fmt.Errorf("engage: cannot create scratch dir: %w", err)
-	}
-	defer os.RemoveAll(scratch)
-	signalCtx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignal()
-	runCtx, cancelRun := context.WithCancelCause(signalCtx)
-	defer cancelRun(nil)
-	telemetry := newEngageTelemetry(ws, cancelRun)
-	runCtx = withEngageTelemetry(runCtx, telemetry)
-
-	gate := buildEngageGate(ws, scope, mode, confirm, secgate.NewSessionApprovals(), scratch, policy, telemetry.gate)
-	if err := gate.Start(); err != nil {
-		return fmt.Errorf("engage: %w", err)
-	}
-
 	var asker askuser.Asker = askuser.AutoAsker{}
-	if mode == secgate.Safe && tty {
+	if o.safe && isTerminalFile(os.Stdin) {
+		confirm = newTerminalConfirmer(os.Stdin, os.Stdout)
 		asker = newTerminalAsker(os.Stdin, os.Stdout)
 	}
-
-	model, err := newOMLX(cfg, o.model)
-	if err != nil {
-		return fmt.Errorf("engage: %w", err)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	renderer := newVizRenderer(newMmdfluxRunner())
+	prefs := loadPrefs()
+	final, err := runEngageSession(ctx, engageRunInput{Opts: o, Cwd: cwd, Goal: goal, Cfg: loadConfig(), Prefs: prefs, Confirm: confirm, Asker: asker, DB: db, Progress: makeEngageProgress(os.Stdout, renderer, prefs.Viz), Output: os.Stdout})
+	if final != "" {
+		fmt.Fprintln(os.Stdout, terminalSafe(final))
 	}
-	rc, err := newRetrievalClient(cfg)
-	if err != nil {
-		return fmt.Errorf("engage: %w", err)
-	}
-	defer rc.Close()
-
-	r := newVizRenderer(newMmdfluxRunner())
-	deps := buildEngageDeps(model, rc, cfg, prefs, ws.Store, gate, scratch, cat, asker, confirm, makeEngageProgress(os.Stdout, r, prefs.Viz))
-	deps.ExploitTools = policy.ExploitTools
-	deps.AutoActions = policy.AutoActions
-	deps.MaxActions, deps.WallSeconds = policy.MaxActions, policy.WallSeconds
-	toolHelp, toolHelpClose := openToolHelpCache()
-	defer toolHelpClose()
-	deps.ToolHelp = toolHelp
-
-	// Resumable engagement report: a projection of the store written to the
-	// workspace, refreshed on each commit and rebuilt from the store on resume.
-	modeStr := "safe"
-	if o.auto {
-		modeStr = "auto"
-	}
-	rw := newReportWriter(ws.Store, wsDir, goal, scopeDesc, modeStr)
-	if err := rw.RestoreFinal(); err != nil {
-		return fmt.Errorf("engage: prior report: %w", err)
-	}
-	if err := rw.Flush("in-progress"); err != nil {
-		fmt.Fprintf(os.Stderr, "report: initial write failed: %v\n", err)
-	}
-	stopReport := rw.Start()
-	defer stopReport()
-	reportStatus := "complete"
-	deps.OnStop = func(string) { reportStatus = "paused" }
-
-	// Seed the engagement's initial vantage from scope: an external
-	// engagement starts external-unauth (local/ad-cloud locked until a logged
-	// access-yielding exploit advances the vantage); a local scope starts with an
-	// internal foothold. A seed error is logged, not fatal.
-	if serr := seedInitialVantage(context.Background(), ws.Store, scope); serr != nil {
-		fmt.Fprintf(os.Stderr, "engage: vantage seed failed: %v\n", serr)
-	}
-
-	final, err := runOrchestrator(runCtx, deps, goal)
-	stopReport() // stop the live render loop before the terminal flush (idempotent)
-	if err != nil {
-		if cause := context.Cause(runCtx); cause != nil && cause != context.Canceled {
-			err = cause
-		}
-		status := "interrupted"
-		if err == errEngageDenialBurst {
-			status = "paused"
-			rw.SetFinal(err.Error())
-		}
-		if ferr := rw.Flush(status); ferr != nil {
-			fmt.Fprintf(os.Stderr, "report: final write failed: %v\n", ferr)
-		}
-		mdPath, jsonPath := reportPaths(wsDir)
-		fmt.Fprintf(os.Stderr, "Report: %s\n        %s\n", mdPath, jsonPath)
-		return fmt.Errorf("engage: %w", err)
-	}
-	rw.SetFinal(final)
-	if ferr := rw.Flush(reportStatus); ferr != nil {
-		fmt.Fprintln(os.Stdout, final)
-		return fmt.Errorf("engage: final report write failed: %w", ferr)
-	}
-	// Fold the finished report into the REPL's persistent memory so it surfaces in
-	// /history. Best-effort: a memory error never fails a completed engagement.
-	if ierr := ingestEngageRun(wsDir); ierr != nil {
-		fmt.Fprintf(os.Stderr, "history: could not record engagement: %v\n", ierr)
-	}
-	fmt.Fprintln(os.Stdout, final)
-	mdPath, jsonPath := reportPaths(wsDir)
-	fmt.Fprintf(os.Stdout, "\nReport: %s\n        %s\n", mdPath, jsonPath)
-	return nil
+	return err
 }
 
 // resolveEngageScope resolves the engagement scope from the flags and the

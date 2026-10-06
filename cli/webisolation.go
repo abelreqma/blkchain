@@ -112,10 +112,13 @@ func (b *webLimitedBuffer) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 func newWebBroker(g *secgate.Gate, armed webArmedFunc) *webacquire.Broker {
-	return &webacquire.Broker{Policy: webacquire.Policy{
+	policy := webacquire.Policy{
 		Authorize: func(ctx context.Context, r webacquire.Request) error {
 			if g == nil {
 				return errors.New("web request gate missing")
+			}
+			if g.Policy != nil && g.PolicyBytesRemaining() == 0 {
+				return g.ClaimPolicyBytes(1)
 			}
 			active := false
 			u, _ := webacquire.URL(r.URL)
@@ -134,7 +137,17 @@ func newWebBroker(g *secgate.Gate, armed webArmedFunc) *webacquire.Broker {
 				return errors.New("request denied: " + d.Reason)
 			}
 			return nil
-		}, IPAllowed: func(ip net.IP) bool { return g != nil && g.Scope != nil && g.Scope.InScope(ip.String()) }}}
+		}, IPAllowed: func(ip net.IP) bool { return g != nil && g.Scope != nil && g.Scope.InScope(ip.String()) }}
+	if g != nil && g.Policy != nil {
+		policy.MaxBodyBytes = g.Policy.OutputBytes
+		policy.MaxTotalBytes = g.Policy.TotalBytes
+		policy.MaxRequests = g.Policy.MaxCommands
+		if g.Policy.MaxActions < policy.MaxRequests {
+			policy.MaxRequests = g.Policy.MaxActions
+		}
+		policy.AccountBytes = g.ClaimPolicyBytes
+	}
+	return &webacquire.Broker{Policy: policy}
 }
 
 type webObservation struct {

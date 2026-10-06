@@ -56,6 +56,7 @@ func externalEngageAllowlist() []string {
 // posture (nil UnattendedAllow runs unattended /auto, no config
 // denylist, no interpreter PoC, no override).
 type gatePolicy struct {
+	RoE                  *RoE
 	DeniedBinaries       []string
 	UnattendedAllow      *secgate.Allowlist
 	LocalUnattendedAllow *secgate.Allowlist
@@ -96,6 +97,12 @@ func buildEngageGate(ws *engagement.Workspace, scope *secgate.Scope, mode secgat
 	// against. reportPaths and EvidenceDir are the code's own path builders.
 	protMD, protJSON := reportPaths(ws.Dir)
 	g := &secgate.Gate{
+		Policy: func() *secgate.Policy {
+			if policy.RoE != nil {
+				return policy.RoE.Policy
+			}
+			return nil
+		}(),
 		Mode:      mode,
 		Scope:     scope,
 		Allow:     allow,

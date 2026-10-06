@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/secgate"
 	"blkchain/cli/internal/webanalysis"
 )
 
@@ -25,12 +26,16 @@ type capturedWebDriver struct {
 	inner   webDriver
 	task    engagement.Task
 	capture webCapture
+	gate    *secgate.Gate
 	mu      sync.Mutex
 }
 
 func (d *capturedWebDriver) save(ctx context.Context, kind, rawURL, out string) (string, error) {
 	if d.capture.Store == nil {
 		return "", fmt.Errorf("web evidence store missing")
+	}
+	if d.gate != nil && d.gate.Policy != nil && len(out) > d.gate.Policy.OutputBytes {
+		return "", fmt.Errorf("web evidence exceeds the RoE output cap")
 	}
 	a, err := d.capture.Store.SaveWebArtifact(ctx, webanalysis.Artifact{TaskID: d.task.ID, Kind: kind, URL: rawURL, Role: d.task.ID, Complete: !strings.Contains(out, "...[truncated]")}, []byte(out))
 	if err != nil {

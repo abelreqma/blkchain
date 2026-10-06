@@ -98,10 +98,12 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 			return "", err
 		}
 		defer cleanup()
+		defer releaseEngageWorker(ctx, execDir)
 		// Stamp the task's engagement context so the gate tiers each run_command
 		// for its phase (exploit/post-ex require an armed task and force per-action
 		// confirmation). secgate mirrors engagement's Phase/Surface by string value.
 		cmdCtx := secgate.Command{
+			TaskID:  task.ID,
 			Phase:   secgate.Phase(string(task.Phase)),
 			Surface: secgate.Surface(string(task.Surface)),
 			Armed:   task.Armed,
@@ -130,7 +132,7 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 	if err != nil {
 		return "", err
 	}
-	human := genericTaskPrompt(proj, task)
+	human := effectiveEngagePrompt(e.d.Gate, genericTaskPrompt(proj, task))
 	msgs := []llms.MessageContent{
 		{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(dom.Prompt)}},
 		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(human)}},

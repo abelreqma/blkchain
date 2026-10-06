@@ -56,7 +56,14 @@ func webActionCommand(label, url string, active, armed bool) Command {
 	if active {
 		phase = PhaseExploit
 	}
-	return Command{Binary: label, Args: []string{url}, Phase: phase, Surface: SurfaceWeb, Armed: armed, AutonomousWeb: true}
+	operation := "browser-read"
+	if strings.HasPrefix(label, "web-api:") {
+		operation = "api-read"
+	}
+	if active {
+		operation = strings.TrimSuffix(operation, "read") + "write"
+	}
+	return Command{Operation: operation, Binary: label, Args: []string{url}, Phase: phase, Surface: SurfaceWeb, Armed: armed, AutonomousWeb: true}
 }
 
 // AuthorizeBrowser authorizes one browser action through the single gate.
@@ -91,6 +98,19 @@ func (g *Gate) authorizeWebAction(ctx context.Context, c Command) Decision {
 		d := g.deny("mode", c, "unknown mode", "")
 		g.mu.Unlock()
 		return d
+	}
+	if g.Policy != nil {
+		if d := g.checkPolicyLocked(c); !d.Allowed {
+			g.mu.Unlock()
+			return d
+		}
+		d := g.confirmTailLocked(ctx, c)
+		if !d.Allowed {
+			return d
+		}
+		fin := g.recheck(d.Command)
+		fin.Command = d.Command
+		return fin
 	}
 	if ok, reason := g.Episode.AllowCommand(); !ok {
 		d := g.deny("cap", c, reason, "")

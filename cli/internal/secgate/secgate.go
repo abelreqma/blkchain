@@ -8,8 +8,10 @@ package secgate
 // It is never a shell string; it is built without a shell so no metacharacter
 // is ever interpreted.
 type Command struct {
-	Binary string
-	Args   []string
+	Operation string
+	TaskID    string
+	Binary    string
+	Args      []string
 	// InternalProbe separates code-owned help checks in the audit; it does not change authorization.
 	InternalProbe bool
 

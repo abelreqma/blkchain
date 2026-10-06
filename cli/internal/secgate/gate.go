@@ -11,14 +11,18 @@ import (
 
 // Gate composes every security layer. It performs no execution.
 type Gate struct {
-	mu        sync.Mutex // serializes Authorize and Start: the Episode budget and Approvals are shared state
-	Mode      Mode
-	Scope     *Scope                      // may be nil in Safe; must be non-nil and non-empty in Auto
-	Allow     *Allowlist                  // nil permits nothing (fail closed)
-	Confirm   Confirmer                   // used in Safe; nil denies in Safe
-	Approvals *SessionApprovals           // nil remembers no repeats
-	Episode   *Episode                    // nil gets a default-caps episode
-	Audit     func(action, detail string) // nil is a no-op
+	Policy         *Policy
+	policyCount    int
+	policyBytes    int64
+	policyDeadline time.Time
+	mu             sync.Mutex // serializes Authorize and Start: the Episode budget and Approvals are shared state
+	Mode           Mode
+	Scope          *Scope                      // may be nil in Safe; must be non-nil and non-empty in Auto
+	Allow          *Allowlist                  // nil permits nothing (fail closed)
+	Confirm        Confirmer                   // used in Safe; nil denies in Safe
+	Approvals      *SessionApprovals           // nil remembers no repeats
+	Episode        *Episode                    // nil gets a default-caps episode
+	Audit          func(action, detail string) // nil is a no-op
 
 	Protected []string
 	Scratch   string
@@ -63,6 +67,19 @@ func (g *Gate) Start() error {
 	defer g.mu.Unlock()
 	if g.Mode != Safe && g.Mode != Auto {
 		return fmt.Errorf("secgate: unknown mode %d", int(g.Mode))
+	}
+	if g.Policy != nil {
+		if err := g.Policy.Validate(); err != nil {
+			return err
+		}
+		if g.Scope == nil || (g.Scope.Empty() && !g.Scope.Local()) {
+			return errors.New("ROE.md needs in-scope targets or an isolated local runner")
+		}
+		if g.Mode == Safe && g.Confirm == nil {
+			return errors.New("safe mode needs an interactive approval channel")
+		}
+		g.policyDeadline = time.Now().Add(time.Duration(g.Policy.WallSeconds) * time.Second)
+		return nil
 	}
 	if g.Mode == Auto {
 		if g.Scope == nil || (g.Scope.Empty() && !g.Scope.Local()) {
@@ -216,6 +233,9 @@ func (g *Gate) ConfirmCommand(ctx context.Context, c Command) Decision {
 // passed; the command is NOT yet confirmed and no "allow" is audited. It touches
 // only g.mu-protected state (the Episode budget and the audit log).
 func (g *Gate) checkLocked(c Command) Decision {
+	if g.Policy != nil {
+		return g.checkPolicyLocked(c)
+	}
 	// 1. caps and circuit breaker
 	if ok, reason := g.Episode.AllowCommand(); !ok {
 		return g.deny("cap", c, reason, "")
@@ -439,6 +459,9 @@ func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
 	// shared across tasks, so without this a prior recon-context approval of the
 	// same command line would suppress a later exploit-tier prompt.
 	needConfirm = needConfirm && (force || g.Approvals == nil || !g.Approvals.Approved(c))
+	if g.Policy != nil {
+		needConfirm = g.Mode == Safe && (g.Approvals == nil || !g.Approvals.Approved(g.policyApprovalCommand(c)))
+	}
 	if !needConfirm {
 		g.audit("allow", Signature(c))
 		g.mu.Unlock()
@@ -467,11 +490,13 @@ func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
 	// re-validates the substitute through the full deny pipeline before running it.
 	run := c
 	if edited != nil {
-		run = Command{Binary: edited.Binary, Args: edited.Args, Phase: c.Phase, Surface: c.Surface, Armed: c.Armed}
+		run = c
+		run.Binary = edited.Binary
+		run.Args = append([]string(nil), edited.Args...)
 	}
 	// Memoize only an un-edited approval; a one-off edit is not remembered.
 	if edited == nil && g.Approvals != nil {
-		g.Approvals.Remember(c)
+		g.Approvals.Remember(g.policyApprovalCommand(c))
 	}
 	g.audit("allow", Signature(run))
 	g.mu.Unlock()

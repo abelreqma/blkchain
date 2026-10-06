@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -33,6 +34,24 @@ func fixtureBroker(server *httptest.Server) *webacquire.Broker {
 		}
 		return nil
 	}}}
+}
+
+func TestRoEArtifactBodyCapBeforeStorage(t *testing.T) {
+	store := fixtureStore(t)
+	svc := New(store, &webacquire.Broker{Policy: webacquire.Policy{MaxBodyBytes: 8}}, nil)
+	_, err := svc.Accept(context.Background(), webanalysis.Artifact{Kind: "html", URL: "http://example.test/"}, []byte("123456789"), 0)
+	if !errors.Is(err, webacquire.ErrLimit) {
+		t.Fatalf("oversized artifact accepted: %v", err)
+	}
+	svc.AccountArtifactBytes = func(int) error { return webacquire.ErrLimit }
+	_, err = svc.Accept(context.Background(), webanalysis.Artifact{Kind: "html", URL: "http://example.test/"}, []byte("12345678"), 0)
+	if !errors.Is(err, webacquire.ErrLimit) {
+		t.Fatalf("aggregate artifact cap accepted input: %v", err)
+	}
+	snapshot, err := store.WebSnapshot(context.Background())
+	if err != nil || len(snapshot.Artifacts) != 0 {
+		t.Fatalf("oversized artifact persisted: %+v %v", snapshot.Artifacts, err)
+	}
 }
 func TestCompleteFixtureManifest(t *testing.T) {
 	routes := map[string]string{

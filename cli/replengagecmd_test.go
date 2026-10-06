@@ -103,20 +103,20 @@ func TestEngageDispatchStartsTurn(t *testing.T) {
 // the deps without error.
 func TestBuildReplEngageRun(t *testing.T) {
 	m := engageReadyModel(t)
-	m.engageMode, m.engageOverride = secgate.Auto, true
+	m.engageMode = secgate.Auto
 
 	run, err := m.buildReplEngageRun("assess the host")
 	if err != nil {
 		t.Fatalf("buildReplEngageRun: %v", err)
 	}
-	if run.goal != "assess the host" || run.mode != secgate.Auto || !run.override {
+	if run.goal != "assess the host" || run.mode != secgate.Auto || run.override {
 		t.Fatalf("run = {goal:%q mode:%v override:%v}", run.goal, run.mode, run.override)
 	}
 	if run.cwd == "" {
 		t.Fatalf("run.cwd should be set")
 	}
-	if _, ok := run.confirm.(widgetConfirmer); !ok {
-		t.Fatalf("run.confirm should be the widget confirmer, got %T", run.confirm)
+	if run.confirm != nil {
+		t.Fatalf("auto must not construct a confirmer, got %T", run.confirm)
 	}
 }
 
@@ -167,8 +167,12 @@ func TestTUIResumeDisplaysCheckpointMode(t *testing.T) {
 	if err := os.WriteFile(roe, []byte("## In Scope\n192.0.2.1\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	c := engageCheckpoint{Goal: "inspect 192.0.2.1", ProjectDir: project, ScopeKind: "roe", Auto: true}
-	if err := saveEngageCheckpoint(ws, c, roe); err != nil {
+	parsed, err := ParseRoE(strings.NewReader("## In Scope\n192.0.2.1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := engageRunMetadata{Goal: "inspect 192.0.2.1", ProjectDir: project, RoE: roe, Mode: "auto", Status: "interrupted", PolicyHash: parsed.Policy.Hash, Started: time.Now().UTC().Format(time.RFC3339Nano)}
+	if err := writeEngageMetadata(ws, c); err != nil {
 		t.Fatal(err)
 	}
 	m := engageReadyModel(t)

@@ -16,23 +16,6 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
-func TestValidateEngageModeAutoNeedsScopeOrOverride(t *testing.T) {
-	if err := validateEngageMode(secgate.Auto, false, nil); err == nil {
-		t.Errorf("auto + no scope + no override: want error")
-	}
-	if err := validateEngageMode(secgate.Auto, true, nil); err != nil {
-		t.Errorf("auto + override: want nil, got %v", err)
-	}
-	if err := validateEngageMode(secgate.Safe, false, nil); err != nil {
-		t.Errorf("safe: want nil, got %v", err)
-	}
-	// Auto with a real in-scope scope validates.
-	scope, _ := secgate.ParseScope(strings.NewReader("10.0.0.0/24\n"))
-	if err := validateEngageMode(secgate.Auto, false, scope); err != nil {
-		t.Errorf("auto + scope: want nil, got %v", err)
-	}
-}
-
 // A-REPL: the gate the REPL builds from the session mode actually governs
 // execution - not a cosmetic indicator, and not the ungated Hermes path. Safe
 // with no confirmer fails closed; Auto in scope allows a recon command.
@@ -77,36 +60,17 @@ func TestScopeDetected(t *testing.T) {
 	}
 }
 
-func TestUnattendedBoundEmpty(t *testing.T) {
-	// No config -> empty bound -> HITL fallback (true).
-	empty := t.TempDir()
-	if !unattendedBoundEmpty(empty) {
-		t.Errorf("no config: unattendedBoundEmpty = false, want true")
-	}
-	// Config with a non-empty allowed_binaries list -> not empty (false).
-	withList := t.TempDir()
-	cfgDir := filepath.Join(withList, ".blkchain")
-	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte("allowed_binaries:\n  - nmap\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if unattendedBoundEmpty(withList) {
-		t.Errorf("config with allowed_binaries list: unattendedBoundEmpty = true, want false")
-	}
-}
-
 // Smoke: runReplEngage assembles the gated run and completes. The scripted model
 // returns a final answer with no tool calls, so this exercises scope resolve ->
 // buildEngageGate -> gate.Start -> runOrchestrator end to end in Safe mode.
 func TestRunReplEngageSmoke(t *testing.T) {
+	stubEngageRunner(t)
 	workspace := t.TempDir()
 	model := &scriptModel{resps: []*llms.ContentResponse{finalResp("engagement complete")}}
 	final, err := runReplEngage(
 		context.Background(),
-		workspace,   // wsDir (hermetic)
-		t.TempDir(), // cwd with no ROE.md -> scope nil, Safe is fine
+		workspace, // wsDir (hermetic)
+		testEngageRoE(t),
 		secgate.Safe, false,
 		model, nil, ragconfig.Config{TopK: 5}, modelPrefs{}, nil,
 		&countingConfirmer{ok: true}, askuser.AutoAsker{}, nil, "enumerate the lab", nil,
@@ -117,7 +81,7 @@ func TestRunReplEngageSmoke(t *testing.T) {
 	if !strings.Contains(final, "engagement complete") {
 		t.Errorf("final = %q, want the model's answer", final)
 	}
-	for _, name := range []string{"report.md", "report.json"} {
+	for _, name := range []string{"report.md", "report.json", "actions.jsonl"} {
 		if _, err := os.Stat(filepath.Join(workspace, name)); err != nil {
 			t.Fatalf("REPL report %s missing: %v", name, err)
 		}
@@ -126,9 +90,10 @@ func TestRunReplEngageSmoke(t *testing.T) {
 }
 
 func TestRunReplEngagePersistsFinalAssessment(t *testing.T) {
+	stubEngageRunner(t)
 	wsDir := t.TempDir()
 	model := &scriptModel{resps: []*llms.ContentResponse{finalResp("observed HTTP response")}}
-	final, err := runReplEngage(context.Background(), wsDir, t.TempDir(), secgate.Safe, false,
+	final, err := runReplEngage(context.Background(), wsDir, testEngageRoE(t), secgate.Safe, false,
 		model, nil, ragconfig.Config{TopK: 5}, modelPrefs{}, nil,
 		&countingConfirmer{ok: true}, askuser.AutoAsker{}, nil, "inspect the lab", nil)
 	if err != nil {
@@ -153,7 +118,8 @@ func TestRunReplEngagePersistsFinalAssessment(t *testing.T) {
 }
 
 func TestRunReplEngageRetainsPriorAssessmentOnRetryFailure(t *testing.T) {
-	wsDir, cwd := t.TempDir(), t.TempDir()
+	stubEngageRunner(t)
+	wsDir, cwd := t.TempDir(), testEngageRoE(t)
 	args := func(model toolLoopModel) (string, error) {
 		return runReplEngage(context.Background(), wsDir, cwd, secgate.Safe, false,
 			model, nil, ragconfig.Config{TopK: 5}, modelPrefs{}, nil,
@@ -181,6 +147,7 @@ func TestRunReplEngageRetainsPriorAssessmentOnRetryFailure(t *testing.T) {
 }
 
 func TestRunReplEngageResumesSavedScopeAndOpenTask(t *testing.T) {
+	stubEngageRunner(t)
 	wsDir, cwd := t.TempDir(), t.TempDir()
 	roePath := filepath.Join(cwd, "ROE.md")
 	if err := os.WriteFile(roePath, []byte("## In Scope\n192.0.2.1\n"), 0600); err != nil {
@@ -211,6 +178,12 @@ func TestRunReplEngageResumesSavedScopeAndOpenTask(t *testing.T) {
 	if err := os.WriteFile(roePath, []byte("## In Scope\n198.51.100.2\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := run(&scriptModel{resps: []*llms.ContentResponse{finalResp("must not run")}}); err == nil || !strings.Contains(err.Error(), "policy differs") {
+		t.Fatalf("changed RoE was accepted: %v", err)
+	}
+	if err := os.WriteFile(roePath, []byte("## In Scope\n192.0.2.1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	final, err := run(&scriptModel{resps: []*llms.ContentResponse{finalResp("continued")}})
 	if err != nil || !strings.Contains(final, "continued") {
 		t.Fatalf("final=%q err=%v", final, err)
@@ -226,7 +199,7 @@ func TestRunReplEngageResumesSavedScopeAndOpenTask(t *testing.T) {
 	if snap, err := ws.Store.Snapshot(context.Background()); err != nil || snap.Vantage != vantage {
 		t.Fatalf("resumed vantage=%q err=%v", snap.Vantage, err)
 	}
-	saved, err := os.ReadFile(filepath.Join(wsDir, "ROE.md"))
+	saved, err := os.ReadFile(filepath.Join(wsDir, "policy.json"))
 	if err != nil || !strings.Contains(string(saved), "192.0.2.1") || strings.Contains(string(saved), "198.51.100.2") {
 		t.Fatalf("saved RoE=%q err=%v", saved, err)
 	}
@@ -246,8 +219,9 @@ func (m reportWriteFailureModel) GenerateContent(_ context.Context, _ []llms.Mes
 }
 
 func TestRunReplEngagePreservesFinalOnReportWriteFailure(t *testing.T) {
+	stubEngageRunner(t)
 	wsDir := t.TempDir()
-	final, err := runReplEngage(context.Background(), wsDir, t.TempDir(), secgate.Safe, false,
+	final, err := runReplEngage(context.Background(), wsDir, testEngageRoE(t), secgate.Safe, false,
 		reportWriteFailureModel{workspace: wsDir}, nil, ragconfig.Config{TopK: 5}, modelPrefs{}, nil,
 		&countingConfirmer{ok: true}, askuser.AutoAsker{}, nil, "inspect the lab", nil)
 	if err == nil || !strings.Contains(err.Error(), "final report write failed") || final != "validated finding" || strings.Contains(final, "Report:") {

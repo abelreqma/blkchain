@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -25,10 +27,12 @@ func runEngageResume(args []string) error {
 			return err
 		}
 	}
-	checkpoint, err := loadEngageCheckpoint(workspace)
-	if err != nil {
-		return fmt.Errorf("engage resume: %w", err)
+	if _, err := os.Stat(filepath.Join(workspace, "run.json")); err != nil {
+		return fmt.Errorf("engage resume: a RoE policy checkpoint is required: %w", err)
 	}
-	o := engageOpts{workspace: workspace, model: model, auto: checkpoint.Auto, autoOverride: checkpoint.AutoOverride}
-	return runEngageWithOptions(o, checkpoint.Goal, &checkpoint)
+	resume := []string{"--resume", workspace}
+	if model != "" {
+		resume = append(resume, "--model", model)
+	}
+	return runEngage(resume)
 }

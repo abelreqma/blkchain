@@ -38,23 +38,29 @@ type frontier struct {
 	MapLine, MapColumn                        int
 }
 type Service struct {
-	Archive          *Archive
-	Store            *engagement.Store
-	Broker           *webacquire.Broker
-	Parse            Parser
-	DiscoveryAllowed func(string) bool
-	mu               sync.Mutex
-	pending          []frontier
-	seen             map[string]bool
-	coverage         webanalysis.Coverage
-	task             string
+	Archive              *Archive
+	Store                *engagement.Store
+	Broker               *webacquire.Broker
+	Parse                Parser
+	DiscoveryAllowed     func(string) bool
+	MaxArtifactBytes     int
+	AccountArtifactBytes func(int) error
+	mu                   sync.Mutex
+	pending              []frontier
+	seen                 map[string]bool
+	coverage             webanalysis.Coverage
+	task                 string
 }
 
 func New(st *engagement.Store, b *webacquire.Broker, p Parser) *Service {
 	if p == nil {
 		p = webanalysis.Analyze
 	}
-	return &Service{Store: st, Broker: b, Parse: p, seen: map[string]bool{}}
+	limit := 0
+	if b != nil {
+		limit = b.Policy.MaxBodyBytes
+	}
+	return &Service{Store: st, Broker: b, Parse: p, seen: map[string]bool{}, MaxArtifactBytes: limit}
 }
 func (s *Service) enqueue(ctx context.Context, f frontier) {
 	if f.Parent != "" {
@@ -239,6 +245,14 @@ func (s *Service) Collect(ctx context.Context, targets []string, o Options) (web
 	return s.coverage, ctx.Err()
 }
 func (s *Service) Accept(ctx context.Context, a webanalysis.Artifact, body []byte, depth int) (webanalysis.Artifact, error) {
+	if s.MaxArtifactBytes > 0 && len(body) > s.MaxArtifactBytes {
+		return a, webacquire.ErrLimit
+	}
+	if s.AccountArtifactBytes != nil {
+		if err := s.AccountArtifactBytes(len(body)); err != nil {
+			return a, err
+		}
+	}
 	a.TaskID = s.task
 	stored, err := s.Store.SaveWebArtifact(ctx, a, body)
 	if err != nil {

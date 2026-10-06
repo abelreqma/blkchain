@@ -69,7 +69,7 @@ func webToolsForTask(gate *secgate.Gate, task engagement.Task, captures ...webCa
 				return nil
 			}
 		}
-		driver = &capturedWebDriver{inner: driver, task: task, capture: c}
+		driver = &capturedWebDriver{inner: driver, task: task, capture: c, gate: gate}
 	}
 	tools := []tooldef.Tool{
 		newWebBrowserTool(gate, armed, driver),

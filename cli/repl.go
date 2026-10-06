@@ -13,7 +13,17 @@ import (
 
 	"blkchain/cli/internal/histstore"
 	"blkchain/cli/internal/retrieval"
+	"blkchain/cli/internal/secgate"
 )
+
+var runPlainEngage func([]string) error
+
+func invokePlainEngage(args []string) error {
+	if runPlainEngage != nil {
+		return runPlainEngage(args)
+	}
+	return runEngage(args)
+}
 
 // runREPL is the entry point for bare `blk` and `blk repl`/`chat`. On a real
 // interactive terminal it runs the Bubble Tea TUI (tui.go); otherwise (piped
@@ -52,7 +62,7 @@ func replPrompt() string {
 func plainREPL() error {
 	var last []retrieval.Result
 	mode := "rag"
-	pm := model{cfg: loadConfig(), mode: mode, hist: histstore.OpenDefault()}
+	pm := model{cfg: loadConfig(), mode: mode, hist: histstore.OpenDefault(), engageMode: secgate.Auto, engageTranscript: "important"}
 	pm.sess, _ = newSession()
 	pm.ambient, _ = loadInitContext()
 	if pm.hist != nil {
@@ -153,10 +163,24 @@ func plainREPL() error {
 			} else {
 				printErr(copyToClipboard(pm.lastAnswer))
 			}
+		case "transcript":
+			selected := strings.ToLower(strings.TrimSpace(rest))
+			if !validTranscriptMode(selected) {
+				printErr(fmt.Errorf("transcript: use off, important, or full"))
+				break
+			}
+			pm.engageTranscript = selected
+			fmt.Println(Meta.Render("transcript: " + selected))
+		case "safe":
+			pm.engageMode = secgate.Safe
+			fmt.Println(Meta.Render("engagement mode: safe"))
+		case "auto":
+			pm.engageMode = secgate.Auto
+			fmt.Println(Meta.Render("engagement mode: auto"))
 		case "engage":
 			parts := strings.Fields(rest)
 			if len(parts) > 0 && parts[0] == "web" {
-				printErr(replWeb(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(rest), "web"))))
+				printErr(replWeb(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(rest), "web")), pm.engageMode, pm.engageTranscript))
 				break
 			}
 			if strings.HasPrefix(rest, "resume /") || strings.HasPrefix(rest, "resume --workspace /") || strings.HasPrefix(rest, "resume \"") || strings.HasPrefix(rest, "resume --workspace \"") {
@@ -164,7 +188,12 @@ func plainREPL() error {
 				path = strings.TrimPrefix(path, "--workspace ")
 				printErr(runEngage([]string{"resume", strings.Trim(path, `"`)}))
 			} else {
-				printErr(runEngage(strings.Fields(rest)))
+				args := []string{"--transcript", pm.engageTranscript}
+				if pm.engageMode == secgate.Safe {
+					args = append(args, "--safe")
+				}
+				args = append(args, strings.Fields(rest)...)
+				printErr(invokePlainEngage(args))
 			}
 		case "history":
 			var err error
@@ -428,6 +457,9 @@ func replGroups() []rowGroup {
 			{"/hermes <prompt>", replSpecDesc("hermes")},
 			{"/engage [flags] <goal>", replSpecDesc("engage")},
 			{"/engage web <action>", "assess web targets within an engagement"},
+			{"/transcript <mode>", "show off, important, or full action output"},
+			{"/safe", "approve engagement actions interactively"},
+			{"/auto", "run within the active RoE without prompts"},
 			{"/mode", replSlashDesc("mode")},
 			{"/agent", replSlashDesc("agent")},
 			{"/rag [on|off|question]", replSlashDesc("rag")},

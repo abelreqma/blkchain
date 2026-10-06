@@ -16,18 +16,25 @@ import (
 
 // Model is the assembled, render-ready view of an engagement.
 type Model struct {
-	Final       string                          `json:"final,omitempty"`
-	Web         *webanalysis.Snapshot           `json:"web,omitempty"`
-	Goal        string                          `json:"goal"`
-	Scope       string                          `json:"scope"`
-	Mode        string                          `json:"mode"`
-	Workspace   string                          `json:"workspace"`
-	Status      string                          `json:"status"` // complete | in-progress | interrupted | paused
-	GeneratedAt string                          `json:"generated_at"`
-	Engagement  engagement.Engagement           `json:"engagement"`
-	Evidence    map[string][]string             `json:"evidence"` // task id -> evidence quotes
-	Receipts    map[string][]engagement.Receipt `json:"receipts"` // task id -> skill receipts
-	Transitions []engagement.Transition         `json:"transitions"`
+	Final          string                          `json:"final,omitempty"`
+	Web            *webanalysis.Snapshot           `json:"web,omitempty"`
+	Goal           string                          `json:"goal"`
+	Scope          string                          `json:"scope"`
+	Mode           string                          `json:"mode"`
+	Workspace      string                          `json:"workspace"`
+	Status         string                          `json:"status"` // complete | in-progress | interrupted | paused
+	GeneratedAt    string                          `json:"generated_at"`
+	Engagement     engagement.Engagement           `json:"engagement"`
+	Evidence       map[string][]string             `json:"evidence"` // task id -> evidence quotes
+	Receipts       map[string][]engagement.Receipt `json:"receipts"` // task id -> skill receipts
+	Transitions    []engagement.Transition         `json:"transitions"`
+	Denials        []Denial                        `json:"denials,omitempty"`
+	DenialsOmitted int                             `json:"denials_omitted,omitempty"`
+}
+
+type Denial struct {
+	Action string `json:"action"`
+	Detail string `json:"detail"`
 }
 
 // RenderJSON emits the model as indented JSON.
@@ -82,6 +89,16 @@ func RenderMarkdown(m Model) string {
 		fmt.Fprintf(&b, " %s=%d", safeMarkdownLine(k), byKind[k])
 	}
 	b.WriteString("\n\n")
+	if len(m.Denials) > 0 || m.DenialsOmitted > 0 {
+		b.WriteString("## Policy denials\n\n")
+		for _, denial := range m.Denials {
+			fmt.Fprintf(&b, "- %s: %s\n", safeMarkdownLine(denial.Action), safeMarkdownLine(denial.Detail))
+		}
+		if m.DenialsOmitted > 0 {
+			fmt.Fprintf(&b, "- %d additional denial(s) remain in the audit log.\n", m.DenialsOmitted)
+		}
+		b.WriteString("\n")
+	}
 
 	// Findings: done tasks with their evidence and skill receipts.
 	b.WriteString("## Findings\n\n")

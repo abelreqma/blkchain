@@ -10,10 +10,12 @@ import (
 
 	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/promptguard"
+	"blkchain/cli/internal/secgate"
 )
 
 func TestUntrustedInputPromptFloor(t *testing.T) {
 	guarded := map[string]string{
+		"effectiveEngagePrompt":          effectiveEngagePrompt(&secgate.Gate{Policy: secgate.DefaultPolicy()}, ""),
 		"answerConstraints":              answerConstraints,
 		"adviseMethodology":              adviseMethodology,
 		"adviseSystemPrompt":             adviseSystemPrompt,

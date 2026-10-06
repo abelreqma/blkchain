@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/ragconfig"
@@ -22,18 +24,17 @@ func TestParseEngageInput(t *testing.T) {
 		wantErr string // substring; "" means success
 		confirm string // expected normalized confirm on success
 	}{
-		{"ok default confirm", mcpEngageIn{Goal: "enum 10.0.0.5", Scope: "10.0.0.5\n"}, "", "elicit"},
-		{"ok explicit auto", mcpEngageIn{Goal: "g", Scope: "10.0.0.5\n", Confirm: "auto"}, "", "auto"},
-		{"ok explicit elicit", mcpEngageIn{Goal: "g", Scope: "local\n", Confirm: "elicit"}, "", "elicit"},
-		{"ok local default elicit", mcpEngageIn{Goal: "g", Scope: "local\n"}, "", "elicit"},
-		{"local auto rejected", mcpEngageIn{Goal: "g", Scope: "local\n", Confirm: "auto"}, `requires confirm="elicit"`, ""},
-		{"missing goal", mcpEngageIn{Goal: "  ", Scope: "10.0.0.5\n"}, "goal is required", ""},
-		{"missing scope", mcpEngageIn{Goal: "g", Scope: "   "}, "scope is required", ""},
-		{"empty parsed scope", mcpEngageIn{Goal: "g", Scope: "# only a comment\n"}, "no in-scope targets", ""},
-		{"allow-only scope is empty", mcpEngageIn{Goal: "g", Scope: "allow nmap\n"}, "no in-scope targets", ""},
-		{"exclusion-only scope is empty", mcpEngageIn{Goal: "g", Scope: "!8.8.8.8\n"}, "no in-scope targets", ""},
-		{"bad confirm", mcpEngageIn{Goal: "g", Scope: "10.0.0.5\n", Confirm: "yes"}, `confirm must be`, ""},
-		{"bad confirm case", mcpEngageIn{Goal: "g", Scope: "10.0.0.5\n", Confirm: "Auto"}, `confirm must be`, ""},
+		{"ok default confirm", mcpEngageIn{Goal: "enum 10.0.0.5", RoE: "## In Scope\n10.0.0.5\n"}, "", "auto"},
+		{"ok explicit auto", mcpEngageIn{Goal: "g", RoE: "## In Scope\n10.0.0.5\n", Confirm: "auto"}, "", "auto"},
+		{"ok explicit elicit", mcpEngageIn{Goal: "g", RoE: "## In Scope\nlocal\n## Allowed Actions\nlocal\n", Confirm: "elicit"}, "", "elicit"},
+		{"ok local auto", mcpEngageIn{Goal: "g", RoE: "## In Scope\nlocal\n## Allowed Actions\nlocal\n"}, "", "auto"},
+		{"missing goal", mcpEngageIn{Goal: "  ", RoE: "## In Scope\n10.0.0.5\n"}, "goal is required", ""},
+		{"missing roe", mcpEngageIn{Goal: "g", RoE: "   "}, "roe is required", ""},
+		{"empty parsed roe", mcpEngageIn{Goal: "g", RoE: "# only a comment\n"}, "no in-scope targets", ""},
+		{"retired scope", mcpEngageIn{Goal: "g", Scope: "10.0.0.5\n"}, "scope is retired", ""},
+		{"exclusion-only roe", mcpEngageIn{Goal: "g", RoE: "## Out of Scope\n8.8.8.8\n"}, "no in-scope targets", ""},
+		{"bad confirm", mcpEngageIn{Goal: "g", RoE: "## In Scope\n10.0.0.5\n", Confirm: "yes"}, `confirm must be`, ""},
+		{"bad confirm case", mcpEngageIn{Goal: "g", RoE: "## In Scope\n10.0.0.5\n", Confirm: "Auto"}, `confirm must be`, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -172,6 +173,14 @@ func probeRun(ranFlag *bool) func(context.Context, engageDeps, string) (string, 
 
 func engageRoundTrip(t *testing.T, protocolVersion, elicitAction string, withHandler bool, in map[string]any) (map[string]any, bool, int, bool) {
 	t.Helper()
+	stubEngageRunner(t)
+	if roe, ok := in["roe"].(string); ok && strings.TrimSpace(roe) != "" {
+		path := filepath.Join(t.TempDir(), "ROE.md")
+		if err := os.WriteFile(path, []byte(roe), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BLKCHAIN_MCP_ROE_PATH", path)
+	}
 	ran := false
 	svc := engageService{
 		cfg:      ragconfig.Config{},
@@ -220,7 +229,7 @@ func engageRoundTrip(t *testing.T, protocolVersion, elicitAction string, withHan
 
 func TestEngageRoundTripMissingScope(t *testing.T) {
 	_, isErr, _, ran := engageRoundTrip(t, "2025-11-25", "accept", true,
-		map[string]any{"goal": "g", "scope": "   ", "confirm": "auto"})
+		map[string]any{"goal": "g", "roe": "   ", "confirm": "auto"})
 	if !isErr {
 		t.Error("empty scope must be a tool error")
 	}
@@ -231,7 +240,7 @@ func TestEngageRoundTripMissingScope(t *testing.T) {
 
 func TestEngageRoundTripElicitNoCapability(t *testing.T) {
 	_, isErr, _, ran := engageRoundTrip(t, "2025-11-25", "accept", false,
-		map[string]any{"goal": "g", "scope": "10.0.0.5\n", "confirm": "elicit"})
+		map[string]any{"goal": "g", "roe": "## In Scope\n10.0.0.5\n", "confirm": "elicit"})
 	if !isErr {
 		t.Error("confirm=elicit without client capability must be a fail-closed error")
 	}
@@ -242,7 +251,7 @@ func TestEngageRoundTripElicitNoCapability(t *testing.T) {
 
 func TestEngageRoundTripElicitAcceptAllows(t *testing.T) {
 	out, isErr, elicited, ran := engageRoundTrip(t, "2025-11-25", "accept", true,
-		map[string]any{"goal": "g", "scope": "10.0.0.5\n", "confirm": "elicit"})
+		map[string]any{"goal": "g", "roe": "## In Scope\n10.0.0.5\n", "confirm": "elicit"})
 	if isErr {
 		t.Fatalf("unexpected tool error: %v", out)
 	}
@@ -256,7 +265,7 @@ func TestEngageRoundTripElicitAcceptAllows(t *testing.T) {
 
 func TestEngageRoundTripElicitDeclineDenies(t *testing.T) {
 	out, isErr, elicited, _ := engageRoundTrip(t, "2025-11-25", "decline", true,
-		map[string]any{"goal": "g", "scope": "10.0.0.5\n", "confirm": "elicit"})
+		map[string]any{"goal": "g", "roe": "## In Scope\n10.0.0.5\n", "confirm": "elicit"})
 	if isErr {
 		t.Fatalf("unexpected tool error: %v", out)
 	}
@@ -267,7 +276,7 @@ func TestEngageRoundTripElicitDeclineDenies(t *testing.T) {
 
 func TestEngageRoundTripAutoNoElicit(t *testing.T) {
 	out, isErr, elicited, ran := engageRoundTrip(t, "2025-11-25", "accept", true,
-		map[string]any{"goal": "g", "scope": "10.0.0.5\n", "confirm": "auto"})
+		map[string]any{"goal": "g", "roe": "## In Scope\n10.0.0.5\n", "confirm": "auto"})
 	if isErr {
 		t.Fatalf("unexpected tool error: %v", out)
 	}
@@ -276,23 +285,17 @@ func TestEngageRoundTripAutoNoElicit(t *testing.T) {
 	}
 }
 
-// TestEngageMCPLocalGuardsArtifacts: a local engagement over MCP builds a gate
-// whose Protected paths are populated, so SensitivePathViolation guards the
-// engagement's own artifacts. It asserts Protected is non-empty and that the
-// MCP-constructed gate denies reading audit.jsonl (a protected path).
-func TestEngageMCPLocalGuardsArtifacts(t *testing.T) {
-	var protectedLen int
-	var catDenied bool
+func TestEngageMCPLocalUsesIsolatedRunner(t *testing.T) {
+	stubEngageRunner(t)
+	trusted := filepath.Join(t.TempDir(), "ROE.md")
+	if err := os.WriteFile(trusted, []byte("## In Scope\nlocal\n## Allowed Actions\nlocal\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BLKCHAIN_MCP_ROE_PATH", trusted)
+	var isolated bool
 	captureRun := func(ctx context.Context, d engageDeps, _ string) (string, error) {
-		protectedLen = len(d.Gate.Protected)
-		var auditPath string
-		for _, p := range d.Gate.Protected {
-			if strings.HasSuffix(p, "audit.jsonl") {
-				auditPath = p
-			}
-		}
-		dec := d.Gate.Authorize(ctx, secgate.Command{Binary: "cat", Args: []string{auditPath}})
-		catDenied = !dec.Allowed
+		r := runtimeFor(ctx)
+		isolated = r != nil && r.runner != nil && d.Gate.Policy != nil && d.Gate.Policy.Allows("local")
 		return "done", nil
 	}
 	svc := engageService{
@@ -324,18 +327,15 @@ func TestEngageMCPLocalGuardsArtifacts(t *testing.T) {
 	defer cs.Close()
 
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "engage",
-		Arguments: map[string]any{"goal": "g", "scope": "local\n", "confirm": "elicit"}})
+		Arguments: map[string]any{"goal": "g", "roe": "## In Scope\nlocal\n## Allowed Actions\nlocal\n", "confirm": "elicit"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.IsError {
 		t.Fatalf("unexpected tool error: %v", res.StructuredContent)
 	}
-	if protectedLen == 0 {
-		t.Error("MCP local gate must populate Protected (SensitivePathViolation guard)")
-	}
-	if !catDenied {
-		t.Error("MCP local gate must deny reading a protected path (audit.jsonl)")
+	if !isolated {
+		t.Error("MCP local route did not enter the shared RoE runner path")
 	}
 }
 
@@ -344,7 +344,7 @@ func TestEngageMCPLocalGuardsArtifacts(t *testing.T) {
 // there (SEP-2322), so the call errors before any run or elicitation.
 func TestEngageRoundTripElicitNewProtocolDenies(t *testing.T) {
 	_, isErr, elicited, ran := engageRoundTrip(t, "2026-07-28", "accept", true,
-		map[string]any{"goal": "g", "scope": "10.0.0.5\n", "confirm": "elicit"})
+		map[string]any{"goal": "g", "roe": "## In Scope\n10.0.0.5\n", "confirm": "elicit"})
 	if !isErr {
 		t.Error("confirm=elicit on protocol >= 2026-07-28 must be a fail-closed error")
 	}
@@ -353,5 +353,85 @@ func TestEngageRoundTripElicitNewProtocolDenies(t *testing.T) {
 	}
 	if elicited != 0 {
 		t.Errorf("elicited = %d, want 0", elicited)
+	}
+}
+
+func TestEngageMCPDispatchPersistsPolicyEvidenceTranscriptAndReport(t *testing.T) {
+	trusted := filepath.Join(t.TempDir(), "ROE.md")
+	if err := os.WriteFile(trusted, []byte("## In Scope\n10.0.0.5\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BLKCHAIN_MCP_ROE_PATH", trusted)
+	previous := newEngageRunnerForRun
+	newEngageRunnerForRun = func(context.Context, *RoE) (*engageRunner, error) {
+		return &engageRunner{workers: map[string]string{}, runFn: func(context.Context, []pipelineStage, string, int, time.Duration) (runResult, []isolatedStageResult) {
+			return runResult{Output: "fixture evidence"}, []isolatedStageResult{{Stdout: "fixture evidence"}}
+		}}, nil
+	}
+	t.Cleanup(func() { newEngageRunnerForRun = previous })
+	svc := engageService{cfg: ragconfig.Config{}, run: func(ctx context.Context, d engageDeps, _ string) (string, error) {
+		if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{ID: "t1", Surface: engagement.SurfaceNetwork, Status: engagement.StatusTodo}}}); err != nil {
+			return "", err
+		}
+		tool := newRunCommandTool(d.Gate, 65536, time.Second, t.TempDir(), func() string { return "t1" }, func(id, out string) {
+			_, _ = d.Store.RecordEvidence(id, out)
+		})
+		result, err := tool.Call(ctx, `{"binary":"curl","args":["http://10.0.0.5"]}`)
+		if err != nil || !strings.Contains(result, "fixture evidence") {
+			return "", fmt.Errorf("command result=%q err=%v", result, err)
+		}
+		return "engagement complete", nil
+	}}
+	srv := mcp.NewServer(&mcp.Implementation{Name: "blkchain-test", Version: "0"}, nil)
+	registerEngageTool(srv, svc)
+	ctx := context.Background()
+	st, ct := mcp.NewInMemoryTransports()
+	ss, err := srv.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "engage", Arguments: map[string]any{"goal": "inspect the lab", "roe": "## In Scope\n10.0.0.5\n"}})
+	if err != nil || res.IsError {
+		t.Fatalf("MCP dispatch failed: %v %+v", err, res)
+	}
+	out, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("MCP result type %T", res.StructuredContent)
+	}
+	workspace, ok := out["workspace"].(string)
+	if !ok || workspace == "" || out["policy_hash"] == "" || out["final"] != "engagement complete" {
+		t.Fatalf("MCP result missing run identity: %+v", out)
+	}
+	for _, name := range []string{"policy.json", "run.json", "audit.jsonl", "actions.jsonl", "report.json"} {
+		data, err := os.ReadFile(filepath.Join(workspace, name))
+		if err != nil {
+			t.Fatalf("%s missing: %v", name, err)
+		}
+		if name == "actions.jsonl" && !strings.Contains(string(data), "fixture evidence") || name == "report.json" && !strings.Contains(string(data), "fixture evidence") {
+			t.Fatalf("%s lost evidence: %q", name, data)
+		}
+	}
+}
+
+func TestEngageMCPRejectsUnapprovedInlineRoE(t *testing.T) {
+	trusted := filepath.Join(t.TempDir(), "ROE.md")
+	if err := os.WriteFile(trusted, []byte("## In Scope\n10.0.0.5\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BLKCHAIN_MCP_ROE_PATH", trusted)
+	modelBuilt := false
+	svc := engageService{newModel: func(ragconfig.Config, string) (toolLoopModel, error) {
+		modelBuilt = true
+		return nil, nil
+	}}
+	_, err := svc.handle(context.Background(), nil, mcpEngageIn{Goal: "inspect", RoE: "## In Scope\n8.8.8.8\n", Confirm: "auto"})
+	if err == nil || !strings.Contains(err.Error(), "differs from the operator-approved policy") || modelBuilt {
+		t.Fatalf("unapproved RoE reached execution: %v modelBuilt=%t", err, modelBuilt)
 	}
 }

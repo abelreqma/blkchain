@@ -57,10 +57,6 @@ func runTUI() error {
 	m := initialModel()
 	p := tea.NewProgram(&m)
 	m.prog = p
-	// Wire the operator arm gate so a REPL engagement's at-exploit arm prompt
-	// (runExploitPhase -> ArmRequester) reads over a released terminal, like the
-	// confirm, so the keypress is reliable in any terminal during an engagement.
-	SetReplArmRequester(releaseArmRequester{prog: p})
 	llmWarn = func(line string) { p.Send(tea.Println(line)()) }
 	_, err := p.Run()
 	if m.rc != nil {
@@ -568,23 +564,16 @@ type model struct {
 	// turn (e.g. "ad"), set from a personaMsg; "" for the generic persona. The
 	// status ribbon shows it; it is cleared at the start of each new rag turn.
 	persona string
-	// engageMode is the session autonomy mode (secgate.Safe default, or Auto) that a
-	// gate-governed REPL engagement (replengage.go runReplEngage) feeds into
-	// buildEngageGate; engageOverride is the auto-scope override (/auto override). The
-	// /safe//auto commands set these; the ribbon and the /engage dispatch read them.
-	engageMode     secgate.Mode
-	engageOverride bool
-	// engageHITL is true when /auto for the current directory would fall back to
-	// per-command confirmation because the unattended allowed_binaries bound is
-	// empty (unattendedBoundEmpty at /auto time). The ribbon shows it as the
-	// "auto (hitl)" marker. It is set by /auto and cleared by /safe.
-	engageHITL   bool
-	agentSession string // cached hermes gateway session id (conversation handle)
-	agentModel   string // display model id, discovered from events / model options
-	agentXport   string // last-used transport: "gateway" | "subprocess"
-	agentGwOK    bool   // gateway /health reachable+authorized
-	agentBinOK   bool   // hermes CLI on PATH (subprocess fallback possible)
-	agentChecked bool
+	// engageMode and engageTranscript are the engagement settings shown by the
+	// ribbon and passed to the shared RoE session.
+	engageMode       secgate.Mode
+	engageTranscript string
+	agentSession     string // cached hermes gateway session id (conversation handle)
+	agentModel       string // display model id, discovered from events / model options
+	agentXport       string // last-used transport: "gateway" | "subprocess"
+	agentGwOK        bool   // gateway /health reachable+authorized
+	agentBinOK       bool   // hermes CLI on PATH (subprocess fallback possible)
+	agentChecked     bool
 }
 
 func initialModel() model {
@@ -634,25 +623,26 @@ func initialModel() model {
 	hp.Styles.Ellipsis = Meta
 
 	return model{
-		ta:         ta,
-		sp:         sp,
-		help:       hp,
-		keys:       defaultKeys(),
-		history:    hist,
-		histIdx:    len(hist),
-		mode:       "rag",
-		engageMode: secgate.Safe, // explicit: Safe is the zero value, but spell out the security default
-		sess:       sess,
-		hist:       histDB,
-		sessTitle:  title,
-		reasoning:  "medium",
-		ambient:    ambient,
-		prefs:      loadPrefs(),
-		cfg:        cfg,
-		rc:         rc,
-		liveCache:  &liveCache{},
-		rcErr:      rcErr,
-		viz:        newVizRenderer(newMmdfluxRunner()),
+		ta:               ta,
+		sp:               sp,
+		help:             hp,
+		keys:             defaultKeys(),
+		history:          hist,
+		histIdx:          len(hist),
+		mode:             "rag",
+		engageMode:       secgate.Auto,
+		engageTranscript: "important",
+		sess:             sess,
+		hist:             histDB,
+		sessTitle:        title,
+		reasoning:        "medium",
+		ambient:          ambient,
+		prefs:            loadPrefs(),
+		cfg:              cfg,
+		rc:               rc,
+		liveCache:        &liveCache{},
+		rcErr:            rcErr,
+		viz:              newVizRenderer(newMmdfluxRunner()),
 
 		reduceMotion: reduceMotion(),
 	}
@@ -1008,8 +998,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.workingVerb = ""
 		elapsed := time.Since(m.turnStart)
 		if msg.err != nil {
-			if errors.Is(msg.err, context.Canceled) {
-				return m, m.finish(tea.Println("   " + Meta.Render("engagement stopped") + "\n" + msg.final))
+			if errors.Is(msg.err, context.Canceled) && !strings.Contains(msg.err.Error(), "write failed") {
+				if strings.Contains(msg.final, "Report:") {
+					return m, m.finish(tea.Println(formatEngagePaused(msg.final, elapsed, m.renderWidth())))
+				}
+				return m, m.finish(tea.Println("   " + Meta.Render("engagement stopped")))
 			}
 			if msg.paused {
 				return m, m.finish(tea.Println(formatEngagePaused(msg.err.Error()+"\n\n"+msg.final, elapsed, m.renderWidth())))
@@ -1020,6 +1013,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.finish(tea.Println(formatEngagePaused(msg.final, elapsed, m.renderWidth())))
 		}
 		return m, m.finish(tea.Println(formatEngageDone(msg.final, elapsed, m.renderWidth())))
+
+	case engageActionMsg:
+		return m, tea.Println(msg.text)
 
 	case webAnswerMsg:
 		m.lastQuery, m.lastResults, m.pendingQ = msg.query, msg.results, msg.query
@@ -1585,11 +1581,20 @@ func (m model) dispatchEngageAt(goal, wsDir, projectDir string) (tea.Model, tea.
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	run.ctx = ctx
-	run.confirm = releaseConfirmer{prog: m.prog, stop: cancel}
+	if m.engageMode == secgate.Safe {
+		run.confirm = releaseConfirmer{prog: m.prog, stop: cancel}
+	}
 	stub := newStubEngagement("engagement")
 	m.engagement = stub
 	m.noticedCandidates = map[string]bool{}
 	run.stub = stub
+	if m.prog != nil {
+		prog := m.prog
+		mode := run.transcript
+		run.onAction = func(rec actionRecord) {
+			prog.Send(engageActionMsg{text: renderActionRecord(rec, mode)})
+		}
+	}
 	if m.engageMode == secgate.Safe {
 		// Mid-run clarifications read over a released terminal, like the confirm,
 		// so follow-up questions work in any terminal during a long engagement.
@@ -1847,15 +1852,21 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
 	case "safe":
 		m.engageMode = secgate.Safe
-		m.engageOverride = false
-		m.engageHITL = false
-		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render("safe: every command is confirmed before it runs")))
+		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render("safe: new actions need operator approval")))
 	case "auto":
+		if strings.TrimSpace(arg) != "" {
+			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("auto: use /auto without arguments"))))
+		}
 		m.engageMode = secgate.Auto
-		m.engageOverride = strings.EqualFold(strings.TrimSpace(arg), "override")
 		cwd, _ := os.Getwd()
-		m.engageHITL = unattendedBoundEmpty(cwd)
-		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render(autoModeNote(m.engageOverride, scopeDetected(cwd)))))
+		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render(autoModeNote(scopeDetected(cwd)))))
+	case "transcript":
+		mode := strings.ToLower(strings.TrimSpace(arg))
+		if !validTranscriptMode(mode) {
+			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("transcript: use off, important, or full"))))
+		}
+		m.engageTranscript = mode
+		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render("transcript: "+mode)))
 	case "agent":
 		m.mode = "agent"
 		return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
@@ -2092,15 +2103,15 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 					return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
 				}
 			}
-			checkpoint, err := loadEngageCheckpoint(workspace)
+			var checkpoint engageRunMetadata
+			err := readEngageMetadata(filepath.Join(workspace, "run.json"), &checkpoint)
 			if err != nil {
 				return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
 			}
-			m.engageMode = secgate.Safe
-			if checkpoint.Auto {
-				m.engageMode = secgate.Auto
+			m.engageMode = secgate.Auto
+			if checkpoint.Mode == "safe" {
+				m.engageMode = secgate.Safe
 			}
-			m.engageOverride = checkpoint.AutoOverride
 			nm, cmd := m.dispatchEngageAt(checkpoint.Goal, workspace, checkpoint.ProjectDir)
 			return nm, tea.Batch(tea.Println(echo), cmd)
 		}
@@ -2108,7 +2119,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		// run the guided intake (domain, target, interactivity) at idle, where key
 		// input is reliable, to shape the goal before any run.
 		goal := strings.TrimSpace(arg)
-		if goalHasTarget(goal) {
+		if m.engageMode == secgate.Auto || goalHasTarget(goal) {
 			nm, cmd := m.dispatchEngage(goal)
 			return nm, tea.Batch(tea.Println(echo), cmd)
 		}
@@ -3063,7 +3074,7 @@ func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, mode
 		// shown, right after the mode, so the operator can never lose sight of
 		// whether an engagement would run commands without confirming. Safe is sage
 		// text on the neutral fill; Auto is a tan fill (active/caution).
-		engSeg := plSegment{Text: engageModeSeg(m.engageMode, m.engageOverride, m.engageHITL), FG: wSageFg, BG: wSegBg}
+		engSeg := plSegment{Text: engageModeSeg(m.engageMode), FG: wSageFg, BG: wSegBg}
 		if m.engageMode == secgate.Auto {
 			engSeg.FG, engSeg.BG = wTanFg, wTanBg
 		}
@@ -3119,7 +3130,7 @@ func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, mode
 			state = "down"
 		}
 		first := fmt.Sprintf(" %s %s %s", dot, mode, state)
-		second := " " + engageModeSeg(m.engageMode, m.engageOverride, m.engageHITL)
+		second := " " + engageModeSeg(m.engageMode)
 		if room := w - lipgloss.Width(second) - 2; room >= 4 && modelID != "" {
 			second += " " + ellipsize(modelID, room)
 		}
@@ -3215,37 +3226,20 @@ func modeNote(mode string) string {
 	return "   " + Meta.Render("mode: rag (retrieve then stream a cited answer)")
 }
 
-// engageModeSeg is the autonomy-mode label for the status ribbon: "safe" (every
-// command confirmed), or "auto" with an "(hitl)" marker when the unattended bound
-// is empty (so every command still confirms) and an "override" marker when the
-// scope override is on. It is a safety indicator; override and hitl apply only in
-// Auto.
-func engageModeSeg(mode secgate.Mode, override, hitl bool) string {
+// engageModeSeg is the RoE approval mode shown by the status ribbon.
+func engageModeSeg(mode secgate.Mode) string {
 	if mode != secgate.Auto {
 		return "safe"
 	}
-	label := "auto"
-	if hitl {
-		label = "auto (hitl)"
-	}
-	if override {
-		label += " override"
-	}
-	return label
+	return "auto"
 }
 
-// autoModeNote is the one-line confirmation printed after /auto: it warns when
-// bounded autonomy has no scope and no override, and notes when the scope
-// override is on. LOCAL unattended actions need both RoE and binary allowlists.
-func autoModeNote(override, scopeDetected bool) string {
-	switch {
-	case override:
-		return "auto: no-scope override logged; LOCAL needs an RoE rule and binary allowlist"
-	case !scopeDetected:
-		return "auto: no scope detected - add ROE.md or use /auto override before engaging"
-	default:
-		return "auto: scoped; LOCAL needs an RoE rule and binary allowlist or confirmation"
+// autoModeNote reports whether an operator RoE is available for Auto.
+func autoModeNote(scopeDetected bool) string {
+	if !scopeDetected {
+		return "auto: add ROE.md before engaging"
 	}
+	return "auto: RoE-authorized actions run without prompts"
 }
 
 // formatAgentAnswer glamour-renders an agent turn's answer with a muted timing

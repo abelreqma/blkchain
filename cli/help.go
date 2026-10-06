@@ -229,9 +229,9 @@ func commandSpecs() []cmdSpec {
 		{
 			name: "mcp", group: hgAgent,
 			desc: "serve the knowledge base to Hermes over MCP (stdio)",
-			long: "Runs the knowledge base as an MCP server on standard input and output, with two tools: kb_search and kb_answer. " +
-				"Hermes or another MCP client starts it for you, so you do not normally run it by hand. " +
-				"It needs qdrant and embed_server running, and kb_answer also needs the LLM server.",
+			long: "Runs the local MCP server with kb_search, kb_answer, route_skill, engage, and kg. " +
+				"Engagement calls require an operator-owned RoE file named by BLKCHAIN_MCP_ROE_PATH, and the inline roe must match it. " +
+				"Start qdrant and embed_server for retrieval, and the LLM and isolated runner for engagement.",
 			examples: []string{"blk mcp", "blk doctor"},
 			run:      runMCP,
 		},
@@ -253,15 +253,14 @@ func commandSpecs() []cmdSpec {
 		{
 			name: "engage", args: "<goal...>", group: hgAgent,
 			desc: "run a gated, multi-step engagement against a goal",
-			long: "Runs a bounded, gated engagement: the orchestrator plans tasks and hands each to a domain-specialized executor, which can run allowlisted commands against in-scope targets; blk engage web runs bounded web assessment in a workspace. " +
-				"In /safe, every command needs your confirmation; --auto uses ROE.md or --scope and runs authorized, allowlisted actions without prompting. " +
-				`A scope file lists in-scope targets (hostnames, IPs, or CIDRs), the line "local" to permit commands with no network target, and "allow <binary>" lines to extend the allowlist; a hostname target also needs its resolved IP or CIDR listed, since the gate re-checks the resolved address at run time. ` +
-				"ROE.md Autonomous Actions entries such as 'exploit/network 192.0.2.1' permit that action class on an exact in-scope host; LOCAL unattended commands also require local_unattended_binaries in .blkchain/config.yaml; every command still passes the gate, and decisions, plan, and evidence are recorded in the workspace.",
+			long: "Runs an engagement under one operator policy that sets target scope, actions, caps, and an isolated runner. " +
+				"Auto runs permitted actions without per-action approval; --safe asks for interactive approval. " +
+				"The workspace records policy, evidence, transcripts, and reports, and --resume continues interrupted work under the same policy.",
 			flags: func(fs *flag.FlagSet) { defineEngageFlags(fs, &engageOpts{}) },
 			examples: []string{
-				`blk engage --scope scope.txt "enumerate 10.0.0.5 and report open ports"`,
-				`blk engage --auto --scope scope.txt "run recon against the scope"`,
-				`blk engage resume --workspace ~/engagements/acme`,
+				`blk engage --roe ROE.md "enumerate 10.0.0.5 and report open ports"`,
+				`blk engage --safe --roe ROE.md "assess the lab"`,
+				`blk engage --resume ~/engagements/acme`,
 			},
 			run: runEngage,
 		},
@@ -337,10 +336,10 @@ func engageWebSpec() cmdSpec {
 	return cmdSpec{
 		name: "engage web", args: "<collect|analyze|inspect|import|archive|export|replay> [targets...]",
 		desc:  "assess web targets within an engagement",
-		long:  "Runs bounded web collection and analysis in an engagement workspace. Acquisition uses the engagement scope and gate.",
+		long:  "Runs bounded web collection, replay, and analysis in an engagement workspace. Collection, replay, and import use the operator RoE policy; inspect and export read saved evidence. The web broker checks DNS addresses and redirects against scope.",
 		flags: func(fs *flag.FlagSet) { defineWebFlags(fs, &webOpts{}) },
 		examples: []string{
-			"blk engage web collect example.com --scope scope.txt --workspace ./assessment",
+			"blk engage web collect example.com --roe ROE.md --workspace ./assessment",
 			"blk engage web inspect --workspace ./assessment --view apis",
 		},
 	}

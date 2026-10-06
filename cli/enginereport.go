@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -124,6 +126,10 @@ func (w *reportWriter) buildModel(status string) (engreport.Model, error) {
 	if err != nil {
 		return engreport.Model{}, err
 	}
+	denials, omitted, err := readAuditDenials(filepath.Join(w.wsDir, "audit.jsonl"))
+	if err != nil {
+		return engreport.Model{}, err
+	}
 	receipts := map[string][]engagement.Receipt{}
 	for _, t := range snap.Tasks {
 		rc, err := w.st.ReceiptsFor(t.ID)
@@ -135,19 +141,61 @@ func (w *reportWriter) buildModel(status string) (engreport.Model, error) {
 		}
 	}
 	return engreport.Model{
-		Web:         &web,
-		Goal:        w.goal,
-		Scope:       w.scope,
-		Mode:        w.mode,
-		Workspace:   w.wsDir,
-		Status:      status,
-		Final:       w.final,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		Engagement:  snap,
-		Evidence:    ev,
-		Receipts:    receipts,
-		Transitions: trans,
+		Web:            &web,
+		Goal:           w.goal,
+		Scope:          w.scope,
+		Mode:           w.mode,
+		Workspace:      w.wsDir,
+		Status:         status,
+		Final:          w.final,
+		GeneratedAt:    time.Now().UTC().Format(time.RFC3339),
+		Engagement:     snap,
+		Evidence:       ev,
+		Receipts:       receipts,
+		Transitions:    trans,
+		Denials:        denials,
+		DenialsOmitted: omitted,
 	}, nil
+}
+
+func readAuditDenials(path string) ([]engreport.Denial, int, error) {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if errors.Is(err, syscall.ENOENT) {
+		return nil, 0, nil
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, 0, errors.New("report: audit log must be a regular file")
+	}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4096), 256<<10)
+	var denials []engreport.Denial
+	omitted := 0
+	for scanner.Scan() {
+		var record struct {
+			Actor, Action, Detail string
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			return nil, 0, fmt.Errorf("report: invalid audit record: %w", err)
+		}
+		if record.Actor != "secgate" || !strings.HasPrefix(record.Action, "deny:") && !strings.HasPrefix(record.Action, "probe-deny:") {
+			continue
+		}
+		if len(denials) < 100 {
+			denials = append(denials, engreport.Denial{Action: record.Action, Detail: capRunes(redactEngageText(record.Detail), 512)})
+		} else {
+			omitted++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, 0, err
+	}
+	return denials, omitted, nil
 }
 
 // Flush synchronously regenerates and atomically writes both report files with

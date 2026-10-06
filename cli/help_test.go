@@ -1177,10 +1177,7 @@ func TestEnvHelpListsTheSamplingVariables(t *testing.T) {
 	}
 }
 
-// /safe and /auto are TUI-only autonomy-mode commands: they live in the Modes
-// group, carry a dispatch case, and appear in the palette and the TUI /help.
-// They are not in the plain REPL's curated help (it has no engage flow). /auto
-// advertises its override argument.
+// /safe and /auto appear in both terminal interfaces without an override.
 func TestSafeAutoCommandsInRegistryAndHelp(t *testing.T) {
 	noColor(t)
 	safe, ok := slashCommand("safe")
@@ -1190,8 +1187,8 @@ func TestSafeAutoCommandsInRegistryAndHelp(t *testing.T) {
 	if safe.group != groupModes {
 		t.Errorf("/safe group = %q, want %q", safe.group, groupModes)
 	}
-	if !strings.Contains(safe.desc, "confirm") {
-		t.Errorf("/safe desc = %q; want it to mention confirming", safe.desc)
+	if !strings.Contains(safe.desc, "approve") {
+		t.Errorf("/safe desc = %q; want it to mention approval", safe.desc)
 	}
 	auto, ok := slashCommand("auto")
 	if !ok {
@@ -1200,11 +1197,11 @@ func TestSafeAutoCommandsInRegistryAndHelp(t *testing.T) {
 	if auto.group != groupModes {
 		t.Errorf("/auto group = %q, want %q", auto.group, groupModes)
 	}
-	if !strings.Contains(auto.args, "override") {
-		t.Errorf("/auto args = %q; want it to advertise override", auto.args)
+	if auto.args != "" {
+		t.Errorf("/auto args = %q; want no override", auto.args)
 	}
-	if !strings.Contains(auto.desc, "scope") {
-		t.Errorf("/auto desc = %q; want it to mention scope", auto.desc)
+	if !strings.Contains(auto.desc, "RoE") {
+		t.Errorf("/auto desc = %q; want it to mention RoE", auto.desc)
 	}
 
 	block := collapse(helpBlock(200))
@@ -1217,6 +1214,12 @@ func TestSafeAutoCommandsInRegistryAndHelp(t *testing.T) {
 		}
 		if items := filterCommands(slashCommands(), c.name); len(items) == 0 || items[0].name != c.name {
 			t.Errorf("the palette does not surface /%s", c.name)
+		}
+	}
+	plain := captureStdout(t, replHelp)
+	for _, command := range []string{"/safe", "/auto", "/transcript"} {
+		if !strings.Contains(plain, command) {
+			t.Errorf("plain REPL help lacks %s", command)
 		}
 	}
 }

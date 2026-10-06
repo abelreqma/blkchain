@@ -13,10 +13,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// mcp.go is blkChain's MCP stdio server (`blk mcp`). It exposes three tools,
-// kb_search, kb_answer, and route_skill, over the official
-// modelcontextprotocol/go-sdk, using the in-process retrieval.Client and
-// AnswerLoop plus the read-only skill catalog.
+// mcp.go is blkChain's MCP stdio server (`blk mcp`). It exposes retrieval,
+// answer, skill routing, engagement, and knowledge graph tools over the
+// modelcontextprotocol/go-sdk.
 
 // mcpSearchIn is kb_search's tool input. TopK is a pointer so "not provided"
 // (nil) is distinguishable from an explicit 0.
@@ -56,7 +55,7 @@ func runMCP(_ []string) error {
 	return s.Run(context.Background(), &mcp.StdioTransport{MaxLineLength: 1 << 20})
 }
 
-// newMCPServer builds the blkchain MCP server and registers all three tools.
+// newMCPServer builds the blkchain MCP server and registers its tools.
 // runMCP and the round-trip test both use it, so the test covers the real
 // registration.
 func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Catalog) *mcp.Server {

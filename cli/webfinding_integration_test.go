@@ -173,19 +173,13 @@ func TestCredentialFindingFromRealCLIAndParserWorker(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("fixture binary build failed: %s %v", output, err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, ".blkchain"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, ".blkchain", "config.yaml"), []byte("allowed_binaries:\n  - web-api:GET\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	scopeFile := filepath.Join(root, "scope.txt")
-	if err := os.WriteFile(scopeFile, []byte("127.0.0.1\n"), 0600); err != nil {
+	roeFile := filepath.Join(root, "ROE.md")
+	if err := os.WriteFile(roeFile, []byte("## In Scope\n127.0.0.1\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	for _, asJSON := range []bool{false, true} {
 		workspace := filepath.Join(root, fmt.Sprintf("workspace-%t", asJSON))
-		args := []string{"engage", "web", "collect", server.URL + "/app.js", "--workspace", workspace, "--scope", scopeFile, "--auto", "--no-rdns"}
+		args := []string{"engage", "web", "collect", server.URL + "/app.js", "--workspace", workspace, "--roe", roeFile, "--auto", "--no-rdns"}
 		if asJSON {
 			args = append(args, "--json")
 		}

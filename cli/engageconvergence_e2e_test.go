@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,10 +19,16 @@ import (
 )
 
 type convergenceLiveModel struct {
+	mu        sync.Mutex
 	model     toolLoopModel
 	forceTool string
+	forceOnce bool
+	forced    bool
 	stages    []string
 	models    []string
+	tools     []string
+	offered   []string
+	answers   []string
 }
 
 func (m *convergenceLiveModel) GenerateContent(ctx context.Context, msgs []llms.MessageContent, opts ...llms.CallOption) (*llms.ContentResponse, error) {
@@ -30,12 +37,43 @@ func (m *convergenceLiveModel) GenerateContent(ctx context.Context, msgs []llms.
 		opt(&settings)
 	}
 	stage, _ := ctx.Value(stageKey{}).(string)
+	m.mu.Lock()
 	m.stages = append(m.stages, stage)
 	m.models = append(m.models, settings.Model)
-	if len(settings.Tools) > 0 && m.forceTool != "" {
+	m.mu.Unlock()
+	available := false
+	var offered []string
+	for _, tool := range settings.Tools {
+		if tool.Function != nil {
+			offered = append(offered, tool.Function.Name)
+		}
+		if tool.Function != nil && tool.Function.Name == m.forceTool {
+			available = true
+			break
+		}
+	}
+	m.mu.Lock()
+	m.offered = append(m.offered, strings.Join(offered, ","))
+	force := available && (!m.forceOnce || !m.forced)
+	if force {
+		m.forced = true
+	}
+	m.mu.Unlock()
+	if force {
 		opts = append(opts, llms.WithToolChoice(llms.ToolChoice{Type: "function", Function: &llms.FunctionReference{Name: m.forceTool}}))
 	}
-	return m.model.GenerateContent(ctx, msgs, opts...)
+	response, err := m.model.GenerateContent(ctx, msgs, opts...)
+	if response != nil && len(response.Choices) > 0 && response.Choices[0] != nil {
+		m.mu.Lock()
+		m.answers = append(m.answers, capRunes(response.Choices[0].Content, 250))
+		for _, call := range response.Choices[0].ToolCalls {
+			if call.FunctionCall != nil {
+				m.tools = append(m.tools, call.FunctionCall.Name)
+			}
+		}
+		m.mu.Unlock()
+	}
+	return response, err
 }
 
 func TestEngageConvergenceLocalLLM(t *testing.T) {
@@ -93,7 +131,7 @@ func TestEngageConvergenceLocalLLM(t *testing.T) {
 		})
 	}
 	t.Run("repl-executor", func(t *testing.T) {
-		t.Setenv("BLKCHAIN_ENGAGE_MAX_ROUNDS", "2")
+		t.Setenv("BLKCHAIN_ENGAGE_MAX_ROUNDS", "5")
 		t.Setenv("BLKCHAIN_ENGAGE_MAX_CALLS", "64")
 		t.Setenv("BLKCHAIN_ENGAGE_NO_PROGRESS_ROUNDS", "3")
 		fixtureIP, fixtureName := startDockerHTTPFixture(t, "convergence", "convergence-fixture-ok")
@@ -102,14 +140,9 @@ func TestEngageConvergenceLocalLLM(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(cwd, "ROE.md"), []byte("## In Scope\n"+fixtureIP+"\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Mkdir(filepath.Join(cwd, ".blkchain"), 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(cwd, ".blkchain", "config.yaml"), []byte("allowed_binaries:\n  - curl\n"), 0600); err != nil {
-			t.Fatal(err)
-		}
 		goal := "Create one web task for " + fixtureURL + ". Dispatch that task. Use only curl with --max-time 5 to fetch the HTTP response. Record exact response evidence, complete the task, and return a report. Do not scan ports or add follow-on tasks."
-		out, err := runReplEngage(ctx, wsDir, cwd, secgate.Auto, false, base, rc, cfg, modelPrefs{}, nil, nil, askuser.AutoAsker{}, nil, goal, nil)
+		live := &convergenceLiveModel{model: base, forceTool: "run_command", forceOnce: true}
+		out, err := runReplEngage(ctx, wsDir, cwd, secgate.Auto, false, live, rc, cfg, modelPrefs{}, nil, nil, askuser.AutoAsker{}, nil, goal, nil)
 		if err != nil {
 			t.Fatalf("REPL: %v; report=%q", err, out)
 		}
@@ -136,7 +169,7 @@ func TestEngageConvergenceLocalLLM(t *testing.T) {
 		}
 		logs, logErr := exec.Command("docker", "logs", fixtureName).CombinedOutput()
 		if logErr != nil || !strings.Contains(string(logs), "GET /") || !captured || !strings.Contains(string(reportMD), "convergence-fixture-ok") || !strings.Contains(out, "Engagement paused: round cap") || strings.Contains(out, "Final synthesis unavailable") {
-			t.Fatalf("fixture logs=%q err=%v captured=%v report=%q", logs, logErr, captured, out)
+			t.Fatalf("fixture logs=%q err=%v captured=%v stages=%v tools=%v offered=%v answers=%v report=%q", logs, logErr, captured, live.stages, live.tools, live.offered, live.answers, out)
 		}
 		t.Logf("REPL Docker fixture: %d HTTP requests; report:\n%s", strings.Count(string(logs), "GET /"), out)
 	})
@@ -144,16 +177,20 @@ func TestEngageConvergenceLocalLLM(t *testing.T) {
 		t.Setenv("BLKCHAIN_ENGAGE_MAX_ROUNDS", "1")
 		t.Setenv("BLKCHAIN_ENGAGE_MAX_CALLS", "20")
 		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-		binary, err := filepath.Abs("blk")
-		if err != nil {
-			t.Fatal(err)
+		binary := os.Getenv("BLK_BIN")
+		if binary == "" {
+			var err error
+			binary, err = filepath.Abs("blk")
+			if err != nil {
+				t.Fatal(err)
+			}
 		}
 		cwd, wsDir := t.TempDir(), t.TempDir()
-		scope := filepath.Join(cwd, "scope.txt")
-		if err := os.WriteFile(scope, []byte("192.0.2.1\n"), 0600); err != nil {
+		roe := filepath.Join(cwd, "ROE.md")
+		if err := os.WriteFile(roe, []byte("## In Scope\n192.0.2.1\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		command := exec.CommandContext(ctx, binary, "engage", "--auto", "--scope", scope, "--workspace", wsDir, "--model", modelID,
+		command := exec.CommandContext(ctx, binary, "engage", "--auto", "--roe", roe, "--workspace", wsDir, "--model", modelID,
 			"Create one web inspection task for 192.0.2.1. Create the task first. Do not dispatch it or claim findings.")
 		command.Dir = cwd
 		output, err := command.CombinedOutput()

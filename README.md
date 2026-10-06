@@ -179,9 +179,9 @@ blk health
 **Hermes:** the MCP server is `blk mcp`. Register it under `mcp_servers.blkchain` in your Hermes
 config with `blk` as the command and `mcp` as its argument; the agent then calls `kb_search` /
 `kb_answer` as tools. An older entry that runs `python -m blkchain.mcp_server` must be changed to
-run `blk mcp`, because that Python module no longer exists. `blk mcp` also exposes `route_skill`, a
-read-only skill playbook lookup by domain. No Hermes config change is needed; the tool appears on the
-next connect.
+run `blk mcp`, because that Python module no longer exists. The server also exposes
+`route_skill`, `engage`, and `kg`. Set `BLKCHAIN_MCP_ROE_PATH` to an operator-owned RoE file
+before calling `engage`; the inline policy must match it.
 
 ## Terminal client (`blk`)
 `blk` is the Go terminal client for the stack and the single implementation of search, ask, health,
@@ -202,14 +202,15 @@ Common commands (run `blk help` for the full list):
 | `blk search <query>` | synthesized, cited answer; `--json` returns raw ranked chunks; supports `--top-k`, `--source`, `--type`, `--filter`, `--json` |
 | `blk add <path>` | index your own file, directory, or URL into the live KB |
 | `blk sources` | list each indexed source with its chunk count, largest first, and the total; `--json` prints `{collection, total_chunks, sources: [{source, chunks}]}` |
-| `blk web <verb> [targets]` | collect, analyze, inspect, import, archive, export, or replay JavaScript/API evidence; also `blk engage web` and `/web`; [usage and limits](cli/web-analysis.md) |
+| `blk web <action>` | control or search the optional web research provider |
+| `blk engage web <verb> [targets]` | collect, analyze, inspect, import, archive, export, or replay JavaScript/API evidence under the RoE; [usage and limits](cli/web-analysis.md) |
 | `blk repl` | interactive REPL (bare `blk` too) for repeated search/ask |
 | `blk up / down / status` | start, stop, or check the local services (Qdrant and `embed_server`) |
 | `blk health` | check Qdrant, `embed_server`, and the LLM; `--json` prints `{ok, qdrant, embed_server, llm}`; exits 0 when all are up, 1 when any is down |
 
 | `blk doctor` | diagnose the whole stack, including Hermes MCP wiring |
 | `blk models` | readiness and live performance of the chat, embed, and rerank models |
-| `blk mcp` | native Go MCP stdio server exposing `kb_search` / `kb_answer` / `route_skill` |
+| `blk mcp` | native Go MCP stdio server exposing retrieval, answer, skill, engagement, and knowledge graph tools |
 | `blk open <path>` | open a source file in `$PAGER` or `$EDITOR`; opens at the cited section when your pager is less (`--section`, or `/open N` in the TUI) |
 | `blk logs [service]` | tail a service log (`embed_server`) |
 JSON answers include `llm_calls` with the stage, requested model, elapsed milliseconds,
@@ -242,41 +243,44 @@ Unicode output renders emoji shortcodes such as `:thumbsup:` outside code blocks
 status ribbon uses standard Nerd Font icons. Terminals without that font use Unicode or ASCII
 fallbacks with `BLKCHAIN_POWERLINE=0` or `NO_COLOR=1`, respectively.
 
-The plain REPL supports `/history` to list saved sessions and `/history <number>` to reopen one,
-`/editor` to prepare a multiline draft, `/init` to reload project context, `/copy`, and `/clear`.
-`/engage [flags] <goal>` uses the same gated entry as `blk engage`. Unknown slash commands show
-an error; commands that require a picker identify the interactive TUI requirement.
-CLI and interactive engagements save `report.md` and `report.json` in their workspace. The final
-assessment is included in both files, and the Markdown report shows evidence from unfinished
-tasks. A capped or stalled TUI run displays a paused marker and the report paths.
-Each new engagement also saves `checkpoint.json` and a private copy of its `ROE.md` or scope file.
-`blk engage resume --workspace <dir>` and `/engage resume <dir>` reopen its goal, open tasks,
-evidence, and vantage under that saved scope. Omit the directory to select the latest engagement.
-The project's `.blkchain/config.yaml` remains the source for general options on resume. Ctrl+C
-or SIGTERM cancels an active CLI run and writes an interrupted report.
-The workspace `audit.jsonl` records typed model decisions, tool calls, gate verdicts, and
-command execution attempts. Eight gate denials within one minute halt the engagement and leave a paused
-report with the reason and report paths. An audit write failure stops the run.
-Target-facing IPv4 commands with a verifiable, in-scope remote address run in a pinned Docker
-runner. Its network namespace admits only the command's resolved destination IPs, and its tool
-process drops all capabilities after the firewall is installed. The runner receives a read-only
-copy of task scratch inputs and a 64 MiB temporary work filesystem; files it creates are not
-persisted after the command. Capture stdout or stderr for evidence. Loopback, link-local,
-operator-host interfaces, Docker host gateways, broadcast, and IPv6 destinations fail closed.
-Commands with no extracted network target run under the macOS file and network sandbox; local
-host execution on other operating systems fails closed. The pinned runner image must already
-exist locally and includes a limited tool set; an unavailable tool reports a command error.
+The plain REPL supports `/history`, `/editor`, `/init`, `/copy`, and `/clear`. Both
+terminal interfaces support `/engage <goal>`, `/auto`, `/safe`, and
+`/transcript off|important|full`. Auto is the default: code runs actions permitted
+by the operator's `ROE.md` without per-action prompts. Safe asks for approval
+through an interactive terminal. `blk engage --roe ROE.md "assess the lab"` uses
+the same session path; `blk engage web collect ... --roe ROE.md` applies the RoE
+to standalone web collection and replay.
 
-An engagement `ROE.md` can authorize specific unattended action classes with `## Autonomous Actions`.
-Each entry is `phase/surface host`, for example `exploit/network 192.0.2.1` or
-`recon/local local`. The host must be an exact in-scope host; `local` requires an `In Scope`
-entry of `local`. A rule covers that action class on the host, not other hosts. Exploit and
-post-ex tasks auto-arm only when a stored basis task has evidence. Every proposed command
-still passes the gate, scope, denylists, and rate limit. The project's
-`.blkchain/config.yaml` sets reusable binary bounds: `allowed_binaries` for external Auto
-and `local_unattended_binaries` for LOCAL. LOCAL runs without a confirmer only when both a
-matching RoE rule and a listed local binary permit the command. Commands outside that pair
-still need a confirmer.
+`ROE.md` defines in-scope and excluded targets, allowed and denied actions,
+denied commands, rate and resource caps, and the runner. Run `blk engage setup`
+to build the isolated runner image before an engagement. Commands run as a
+non-root user in a read-only container with bounded CPU, memory, processes,
+output, time, and temporary storage. The network guard pins permitted DNS
+addresses, applies exclusions first, and blocks operator-host destinations.
+Command output and web broker bytes share the RoE total-byte counter across
+resume; captured web artifacts also obey the per-action output cap.
+Authorized private targets remain available when the RoE permits them. The
+browser uses an isolated container and the web broker checks each request and
+redirect against scope. The command gate blocks curl redirect flags and wget;
+use the browser or API path when redirects are needed. Command egress requires
+an explicit in-scope IP or CIDR entry. A hostname-only RoE can use the browser
+or API broker, which checks the hostname on every request.
+
+A workspace saves `run.json`, `policy.json`, `audit.jsonl`, `actions.jsonl`,
+exact captured evidence, and Markdown and JSON reports. Terminal action output
+is bounded and redacted; the private action record preserves captured bytes
+within the RoE caps. Denials, coverage gaps, unfinished tasks, and paused or
+interrupted status remain in reports. `blk engage stop --workspace PATH` cancels
+a running session. `blk engage --resume PATH` or `/engage resume PATH` requires
+the original RoE policy hash and retains the deadline, usage, evidence, and
+action sequence. `blk engage migrate` previews the proposed policy; `--write`
+creates a new file without replacing an existing operator RoE. Migrated
+allowed actions start empty until the operator grants them.
+
+The MCP `engage` tool requires `BLKCHAIN_MCP_ROE_PATH` to name an operator-owned
+RoE file. Its inline `roe` argument must resolve to the same policy hash; a
+caller cannot grant itself a different scope or action set. The tool returns
+the saved workspace, policy hash, report, and transcript paths.
 
 **Models panel.** In the interactive session, `/models` lists every model: the chat models the LLM
 server serves, the embedder, the reranker, and web search. Keys: up/down move, space turns the

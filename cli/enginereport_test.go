@@ -4,6 +4,7 @@ import (
 	"blkchain/cli/internal/webanalysis"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,27 @@ import (
 	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/engreport"
 )
+
+func TestReportDenialsAreBoundedAndVisible(t *testing.T) {
+	ws, err := engagement.OpenWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	for i := 0; i < 150; i++ {
+		if err := ws.AuditLine("secgate", "deny:scope", fmt.Sprintf("attempt %d :: out of scope", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	denials, omitted, err := readAuditDenials(filepath.Join(ws.Dir, "audit.jsonl"))
+	if err != nil || len(denials) != 100 || omitted != 50 {
+		t.Fatalf("denials=%d omitted=%d err=%v", len(denials), omitted, err)
+	}
+	markdown := engreport.RenderMarkdown(engreport.Model{Denials: denials, DenialsOmitted: omitted})
+	if !strings.Contains(markdown, "## Policy denials") || !strings.Contains(markdown, "50 additional denial") {
+		t.Fatalf("denials missing from report: %q", markdown)
+	}
+}
 
 func TestReportPaths(t *testing.T) {
 	md, js := reportPaths("/ws")

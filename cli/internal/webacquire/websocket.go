@@ -159,14 +159,21 @@ func (b *Broker) OpenWebSocket(ctx context.Context, raw string, headers http.Hea
 	}
 	if err != nil {
 		if resp != nil && resp.Body != nil {
-			out.Body, _ = io.ReadAll(io.LimitReader(resp.Body, MaxBody))
+			out.Body, _ = io.ReadAll(io.LimitReader(resp.Body, int64(b.bodyLimit())))
 			_ = resp.Body.Close()
+			if accountErr := b.account(len(out.Body)); accountErr != nil {
+				return nil, out, accountErr
+			}
 		}
 		out.Gap = "WebSocket handshake failed or denied"
 		return nil, out, errors.New(out.Gap)
 	}
 	counted.headers.Store(true)
-	conn.SetReadLimit(MaxWSMessage)
+	messageLimit := MaxWSMessage
+	if b.bodyLimit() < messageLimit {
+		messageLimit = b.bodyLimit()
+	}
+	conn.SetReadLimit(int64(messageLimit))
 	out.Complete = true
 	s := &WebSocket{Conn: conn, broker: b, request: r}
 	s.stop = context.AfterFunc(ctx, func() { _ = conn.Close() })
@@ -174,7 +181,11 @@ func (b *Broker) OpenWebSocket(ctx context.Context, raw string, headers http.Hea
 }
 
 func (s *WebSocket) Send(ctx context.Context, kind int, data []byte) error {
-	if len(data) > MaxWSMessage || s.count.Add(1) > MaxWSMessages {
+	messageLimit := MaxWSMessage
+	if s.broker.bodyLimit() < messageLimit {
+		messageLimit = s.broker.bodyLimit()
+	}
+	if len(data) > messageLimit || s.count.Add(1) > MaxWSMessages {
 		return ErrLimit
 	}
 	if kind != websocket.TextMessage && kind != websocket.BinaryMessage {

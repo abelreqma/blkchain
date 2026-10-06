@@ -146,6 +146,10 @@ type ScopeSpec struct {
 func BuildScope(spec ScopeSpec) (*Scope, error) {
 	s := &Scope{local: spec.Local}
 	for _, e := range spec.In {
+		if strings.EqualFold(strings.TrimSpace(e), "local") {
+			s.local = true
+			continue
+		}
 		if strings.TrimSpace(e) == "" {
 			continue
 		}

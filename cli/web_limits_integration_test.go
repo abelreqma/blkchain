@@ -43,8 +43,8 @@ func TestExactReplayThroughSharedWebCommand(t *testing.T) {
 	}))
 	defer server.Close()
 	dir := t.TempDir()
-	scopeFile := filepath.Join(dir, "scope.txt")
-	if err := os.WriteFile(scopeFile, []byte("127.0.0.1\n"), 0600); err != nil {
+	roeFile := filepath.Join(dir, "ROE.md")
+	if err := os.WriteFile(roeFile, []byte("## In Scope\n127.0.0.1\n## Allowed Actions\napi-read\napi-write\nbrowser-read\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("BLK_FIXTURE_REPLAY_AUTH", "Bearer refreshed-fixture")
@@ -75,7 +75,7 @@ func TestExactReplayThroughSharedWebCommand(t *testing.T) {
 	}
 	ws.Close()
 	for i, id := range ids {
-		args := []string{"replay", "--workspace", dir, "--scope", scopeFile, "--operation", id, "--example", "1", "--session", sessions, "--task", "replay-task", "--no-rdns", "--json"}
+		args := []string{"replay", "--workspace", dir, "--roe", roeFile, "--operation", id, "--example", "1", "--session", sessions, "--task", "replay-task", "--no-rdns", "--json"}
 		if i%2 == 1 {
 			var command strings.Builder
 			for _, arg := range args {
@@ -112,11 +112,11 @@ func TestExactReplayThroughSharedWebCommand(t *testing.T) {
 
 func TestUnavailableRolePersistsCoverageGap(t *testing.T) {
 	dir := t.TempDir()
-	scopeFile := filepath.Join(dir, "scope.txt")
-	if err := os.WriteFile(scopeFile, []byte("127.0.0.1\n"), 0600); err != nil {
+	roeFile := filepath.Join(dir, "ROE.md")
+	if err := os.WriteFile(roeFile, []byte("## In Scope\n127.0.0.1\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := webExecute(context.Background(), []string{"collect", "http://127.0.0.1", "--workspace", dir, "--scope", scopeFile, "--role", "admin", "--no-rdns"}, secgate.Safe, webOKConfirmer{}, false, 90)
+	_, err := webExecute(context.Background(), []string{"collect", "http://127.0.0.1", "--workspace", dir, "--roe", roeFile, "--role", "admin", "--no-rdns"}, secgate.Safe, webOKConfirmer{}, false, 90)
 	if err == nil {
 		t.Fatal("unsupplied role accepted")
 	}
@@ -135,6 +135,10 @@ func TestUnavailableRolePersistsCoverageGap(t *testing.T) {
 	}
 	if len(snap.Coverage) != 1 || snap.Coverage[0].Role != "admin" || snap.Coverage[0].State != "blocked" || len(snap.Artifacts) != 0 {
 		t.Fatal("role gap lost", snap)
+	}
+	report, err := os.ReadFile(filepath.Join(dir, "report.md"))
+	if err != nil || !strings.Contains(string(report), "admin") || !strings.Contains(string(report), "Requested role has no supplied session") {
+		t.Fatalf("coverage gap missing from interrupted report: %q %v", report, err)
 	}
 }
 

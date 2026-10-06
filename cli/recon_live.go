@@ -31,10 +31,12 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 		return "", err
 	}
 	defer cleanup()
+	defer releaseEngageWorker(ctx, execDir)
 
 	// Stamp the task's engagement context so the gate tiers every run_command
 	// (recon is auto-tier; the structural denials and scope always apply).
 	cmdCtx := secgate.Command{
+		TaskID:  task.ID,
 		Phase:   secgate.Phase(string(task.Phase)),
 		Surface: secgate.Surface(string(task.Surface)),
 		Armed:   task.Armed,
@@ -85,7 +87,7 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 			return tierOutcome{}, err
 		}
 		msgs := []llms.MessageContent{
-			{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(dom.Prompt)}},
+			{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(effectiveEngagePrompt(e.d.Gate, dom.Prompt))}},
 			{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(reconTierPrompt(task, asset, tier, sel))}},
 		}
 		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8}); err != nil {

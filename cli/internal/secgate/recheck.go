@@ -1,5 +1,7 @@
 package secgate
 
+import "net"
+
 // recheck runs the exec-time rechecks that cannot be decided from the command
 // structure alone: an already-resolved out-of-scope literal (ScopeViolation), a
 // hostname that resolves out of scope (ResolveScopeViolation, does DNS), and a
@@ -31,6 +33,40 @@ func (g *Gate) recheck(c Command) Decision {
 			}
 			return Decision{Allowed: false, Reason: "could not resolve " + host + " to verify it is in scope"}
 		}
+	}
+	if g.Policy != nil {
+		if c.Surface != SurfaceWeb {
+			ips := g.Policy.CommandIPs
+			if ips == nil {
+				ips = g.Scope
+			}
+			targets, _ := ExtractTargets(c)
+			for _, target := range targets {
+				if ips == nil || ips.Empty() {
+					g.audit("deny:scope-recheck", Signature(c))
+					return Decision{Reason: "command destination needs an explicit in-scope IP or CIDR entry"}
+				}
+				if ip := net.ParseIP(target); ip != nil {
+					if !ips.InScope(ip.String()) {
+						g.audit("deny:scope-recheck", Signature(c))
+						return Decision{Reason: "command destination needs an explicit in-scope IP or CIDR entry"}
+					}
+					continue
+				}
+				resolved, err := lookupIPFn(target)
+				if err != nil || len(resolved) == 0 {
+					g.audit("deny:resolve", Signature(c))
+					return Decision{Reason: "command destination could not be resolved into the explicit IP scope"}
+				}
+				for _, ip := range resolved {
+					if !ips.InScope(ip.String()) {
+						g.audit("deny:scope-recheck", Signature(c))
+						return Decision{Reason: "command destination needs an explicit in-scope IP or CIDR entry"}
+					}
+				}
+			}
+		}
+		return Decision{Allowed: true}
 	}
 	if arg, bad := FileAccessViolation(c); bad {
 		g.audit(denialAction(c, "fileaccess"), Signature(c))

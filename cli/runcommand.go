@@ -90,6 +90,7 @@ var execPipeline = realExecPipeline
 func authorizeCommand(ctx context.Context, g *secgate.Gate, cmd secgate.Command) (secgate.Command, string) {
 	d := g.Authorize(ctx, cmd)
 	if !d.Allowed {
+		recordEngageDenial(ctx, cmd, d.Reason)
 		return secgate.Command{}, denyMessage(d)
 	}
 	run := d.Command
@@ -106,6 +107,7 @@ func authorizeCommand(ctx context.Context, g *secgate.Gate, cmd secgate.Command)
 // confirmation.
 func checkCommand(ctx context.Context, g *secgate.Gate, cmd secgate.Command) string {
 	if d := g.Check(ctx, cmd); !d.Allowed {
+		recordEngageDenial(ctx, cmd, d.Reason)
 		return denyMessage(d)
 	}
 	return ""
@@ -152,7 +154,7 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 				if !hasBinary {
 					return "run_command: invalid arguments: binary is required", nil
 				}
-				cmd := secgate.Command{Binary: a.Binary, Args: a.Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed, Kind: cmdCtx.Kind, Target: cmdCtx.Target}
+				cmd := secgate.Command{TaskID: activeTask(), Binary: a.Binary, Args: a.Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed, Kind: cmdCtx.Kind, Target: cmdCtx.Target}
 				// Help-grounding runs before the gate: a command using a flag or
 				// subcommand absent from the tool's real interface is rejected and
 				// re-grounded (never executed). An advisory note (grounding could
@@ -173,14 +175,14 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 				if g.Audit != nil {
 					g.Audit("exec", secgate.Signature(run))
 				}
-				res := execRunner(ctx, run.Binary, run.Args, workDir, capBytes, timeout)
-				if res.TimedOut {
-					return "run_command: the command timed out and was terminated after " + timeout.String(), nil
-				}
+				res := runAuthorized(ctx, g, run.Binary, run.Args, workDir, capBytes, timeout, activeTask())
 				if capture != nil {
 					capture(activeTask(), res.Output)
 				}
 				var b strings.Builder
+				if res.TimedOut {
+					fmt.Fprintf(&b, "run_command: the command timed out and was terminated after %s\n", timeout)
+				}
 				if oc.Msg != "" {
 					fmt.Fprintf(&b, "(grounding: %s)\n", oc.Msg)
 				}
@@ -213,7 +215,7 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 			cmds := make([]secgate.Command, len(a.Pipeline))
 			stageStrs := make([]string, len(a.Pipeline))
 			for i := range a.Pipeline {
-				cmds[i] = secgate.Command{Binary: a.Pipeline[i].Binary, Args: a.Pipeline[i].Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed, Kind: cmdCtx.Kind, Target: cmdCtx.Target}
+				cmds[i] = secgate.Command{TaskID: activeTask(), Binary: a.Pipeline[i].Binary, Args: a.Pipeline[i].Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed, Kind: cmdCtx.Kind, Target: cmdCtx.Target}
 				stageStrs[i] = strings.Join(append([]string{cmds[i].Binary}, cmds[i].Args...), " ")
 			}
 			// Ground every stage BEFORE confirming or running any: a grounded-reject
@@ -252,14 +254,14 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 				}
 				g.Audit("exec", strings.Join(sigs, " | "))
 			}
-			res := execPipeline(ctx, a.Pipeline, workDir, capBytes, timeout)
-			if res.TimedOut {
-				return "run_command: the pipeline timed out and was terminated after " + timeout.String(), nil
-			}
+			res := runAuthorizedPipeline(ctx, g, a.Pipeline, workDir, capBytes, timeout, activeTask())
 			if capture != nil {
 				capture(activeTask(), res.Output)
 			}
 			var b strings.Builder
+			if res.TimedOut {
+				fmt.Fprintf(&b, "run_command: the pipeline timed out and was terminated after %s\n", timeout)
+			}
 			for _, note := range groundNotes {
 				fmt.Fprintf(&b, "(grounding: %s)\n", note)
 			}

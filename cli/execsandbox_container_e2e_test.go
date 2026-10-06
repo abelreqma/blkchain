@@ -31,7 +31,7 @@ func startDockerHTTPFixture(t *testing.T, suffix, body string) (string, string) 
 	cmd := exec.Command("docker", "run", "-d", "--rm", "--pull", "never", "--network", "bridge", "--name", name,
 		"--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "--user", "1000:1000", "--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges", "--memory", "128m", "--pids-limit", "64",
-		executorRunnerImage, "/usr/bin/python3", "-u", "-c", dockerHTTPFixture, body)
+		defaultRunnerTag(), "/usr/bin/python3", "-u", "-c", dockerHTTPFixture, body)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("fixture %s: %v %s", suffix, err, output)
 	}

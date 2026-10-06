@@ -6,11 +6,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"blkchain/cli/internal/engagement"
@@ -24,7 +26,9 @@ var webPlaceholder = regexp.MustCompile(`\{([^{}]+)\}`)
 
 type webOpts struct {
 	workspace, scope, roe, file, role, session, view, task, operation, values, resume string
+	transcript                                                                        string
 	asJSON, auto, browser, headed, noRDNS                                             bool
+	safe                                                                              bool
 	depth, states, example                                                            int
 	assistSeconds                                                                     int
 	interactions                                                                      webStringFlags
@@ -41,8 +45,9 @@ func (s *webStringFlags) Set(v string) error {
 }
 func defineWebFlags(fs *flag.FlagSet, o *webOpts) {
 	fs.StringVar(&o.workspace, "workspace", "", "engagement workspace (default: latest)")
-	fs.StringVar(&o.scope, "scope", "", "line-based engagement scope file")
-	fs.StringVar(&o.roe, "roe", "", "engagement Markdown scope file")
+	fs.StringVar(&o.scope, "scope", "", "legacy scope filter for read-only workspace views")
+	fs.StringVar(&o.roe, "roe", "", "operator ROE.md for collection, replay, and import")
+	fs.StringVar(&o.transcript, "transcript", "important", "action output: off, important, or full")
 	fs.StringVar(&o.file, "file", "", "target list or HAR input")
 	fs.StringVar(&o.role, "role", "", "supplied session role (default: all supplied roles)")
 	fs.StringVar(&o.session, "session", "", "isolated role sessions with environment references")
@@ -53,7 +58,8 @@ func defineWebFlags(fs *flag.FlagSet, o *webOpts) {
 	fs.IntVar(&o.example, "example", 0, "stored HTTP example number for exact body replay")
 	fs.StringVar(&o.resume, "resume", "", "archive resume key")
 	fs.BoolVar(&o.asJSON, "json", false, "emit structured JSON with exact operation records")
-	fs.BoolVar(&o.auto, "auto", false, "apply existing unattended engagement policy")
+	fs.BoolVar(&o.auto, "auto", false, "run RoE-authorized web actions without prompts (default)")
+	fs.BoolVar(&o.safe, "safe", false, "approve RoE-authorized web actions interactively")
 	fs.BoolVar(&o.browser, "browser", false, "collect runtime scripts with the isolated browser")
 	fs.BoolVar(&o.headed, "headed", false, "use an operator-provisioned isolated headed browser")
 	fs.BoolVar(&o.noRDNS, "no-rdns", false, "skip IP reverse-DNS discovery")
@@ -65,17 +71,13 @@ func defineWebFlags(fs *flag.FlagSet, o *webOpts) {
 func runWebAnalysis(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	var confirm secgate.Confirmer
-	if isTerminalFile(os.Stdin) {
-		confirm = newTerminalConfirmer(os.Stdin, os.Stdout)
-	}
-	out, e := webExecute(ctx, args, secgate.Safe, confirm, false, 100)
+	out, e := webExecute(ctx, args, secgate.Auto, nil, false, 100)
 	if out != "" {
 		fmt.Fprint(os.Stdout, out)
 	}
 	return e
 }
-func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm secgate.Confirmer, interactive bool, width int) (string, error) {
+func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm secgate.Confirmer, interactive bool, width int) (output string, runErr error) {
 	if len(args) > 0 && args[0] == "help" {
 		var b strings.Builder
 		printCommandHelp(&b, engageWebSpec())
@@ -101,11 +103,17 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 	var o webOpts
 	defineWebFlags(fs, &o)
 	valueFlags := map[string]bool{}
-	for _, k := range []string{"workspace", "scope", "roe", "file", "role", "session", "view", "task", "operation", "values", "depth", "states", "interaction", "resume", "assist-seconds", "example"} {
+	for _, k := range []string{"workspace", "scope", "roe", "transcript", "file", "role", "session", "view", "task", "operation", "values", "depth", "states", "interaction", "resume", "assist-seconds", "example"} {
 		valueFlags[k] = true
 	}
 	if e := parseFlags(fs, reorder(args, valueFlags)); e != nil {
 		return "", e
+	}
+	if o.safe && o.auto {
+		return "", usageErr("web: choose --safe or --auto")
+	}
+	if !validTranscriptMode(o.transcript) {
+		return "", usageErr("web: transcript must be off, important, or full")
 	}
 	views := map[string]bool{"summary": true, "apis": true, "artifacts": true, "functions": true, "features": true, "findings": true, "coverage": true, "exports": true, "all": true}
 	if o.example < 0 || o.example > 20 || o.example > 0 && o.values != "" || !views[o.view] || o.depth < 1 || o.depth > 8 || o.states < 1 || o.states > 100 || o.assistSeconds < 0 || o.assistSeconds > 120 || o.assistSeconds > 0 && !o.headed {
@@ -126,6 +134,7 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 		}
 	}
 	network := command == "collect" || command == "archive" || command == "replay"
+	policyRelevant := network || command == "import"
 	if !network {
 		if _, e = os.Stat(filepath.Join(o.workspace, "engagement.db")); e != nil {
 			return "", errors.New("web: engagement database not found")
@@ -142,7 +151,26 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 	}
 	cwd, _ := os.Getwd()
 	scope := targets.Scope
-	if o.roe != "" {
+	var roe *RoE
+	var roePath string
+	if policyRelevant {
+		if o.scope != "" {
+			return "", usageErr("web: --scope is retired for engagement actions; use --roe ROE.md")
+		}
+		if o.roe == "" {
+			for _, input := range inputs {
+				if strings.HasSuffix(strings.ToLower(input), ".md") {
+					o.roe = input
+					break
+				}
+			}
+		}
+		roe, roePath, e = loadEngageRoE(engageOpts{roe: o.roe}, cwd, nil)
+		if e != nil {
+			return "", e
+		}
+		scope = roe.Scope
+	} else if o.roe != "" {
 		data, e := webReadFile(o.roe, 1<<20)
 		if e != nil {
 			return "", e
@@ -159,7 +187,7 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 			}
 		}
 	}
-	if scope == nil || o.scope != "" {
+	if !policyRelevant && (scope == nil || o.scope != "") {
 		scope, _, _, e = resolveEngageScope(engageOpts{scope: o.scope}, cwd, nil)
 		if e != nil {
 			return "", e
@@ -171,13 +199,221 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 	if o.auto {
 		mode = secgate.Auto
 	}
-	policy, e := resolveEngageConfigPolicy(engageOpts{}, cwd)
-	if e != nil {
-		return "", e
+	if o.safe {
+		mode = secgate.Safe
 	}
-	gate := buildEngageGate(ws, scope, mode, confirm, secgate.NewSessionApprovals(), "", policy, func(a, d string) { _ = ws.AuditLine("secgate", a, webanalysis.RedactText(d)) })
+	if mode == secgate.Safe && confirm == nil && isTerminalFile(os.Stdin) && !interactive {
+		confirm = newTerminalConfirmer(os.Stdin, os.Stdout)
+	}
+	if !network && (scope == nil || scope.Empty()) {
+		mode = secgate.Safe
+	}
+	policy := gatePolicy{RoE: roe}
+	if !policyRelevant {
+		policy, e = resolveEngageConfigPolicy(engageOpts{}, cwd)
+		if e != nil {
+			return "", e
+		}
+	}
+	var trace *actionTranscript
+	var webMetadata engageRunMetadata
+	var webDeadline time.Time
+	webExisting := false
+	webIncomplete := false
+	var actionView strings.Builder
+	var auditMu sync.Mutex
+	var auditErr error
+	ctx, stopWeb := context.WithCancel(ctx)
+	defer stopWeb()
+	if policyRelevant {
+		lease, err := acquireEngageLock(ws.Dir)
+		if err != nil {
+			return "", err
+		}
+		defer lease.Close()
+		runPath := filepath.Join(ws.Dir, "run.json")
+		if _, err := os.Lstat(runPath); err == nil {
+			webExisting = true
+			if err := readEngageMetadata(runPath, &webMetadata); err != nil {
+				return "", err
+			}
+			if webMetadata.PolicyHash != roe.Policy.Hash {
+				return "", errors.New("web: ROE.md differs from the workspace policy")
+			}
+			if webMetadata.Mode == "safe" {
+				mode = secgate.Safe
+			}
+		} else if os.IsNotExist(err) {
+			webMetadata = engageRunMetadata{Goal: "web " + command, Mode: mode.String(), ProjectDir: cwd, RoE: roePath, PolicyHash: roe.Policy.Hash, Started: time.Now().UTC().Format(time.RFC3339Nano)}
+		} else {
+			return "", err
+		}
+		started, err := time.Parse(time.RFC3339Nano, webMetadata.Started)
+		if err != nil {
+			return "", errors.New("web: invalid engagement start time")
+		}
+		webDeadline = started.Add(time.Duration(roe.Policy.WallSeconds) * time.Second)
+		if !time.Now().Before(webDeadline) {
+			return "", errors.New("web: engagement deadline has expired")
+		}
+		var deadlineCancel context.CancelFunc
+		ctx, deadlineCancel = context.WithDeadline(ctx, webDeadline)
+		defer deadlineCancel()
+		if mode == secgate.Safe && confirm == nil && isTerminalFile(os.Stdin) && !interactive {
+			confirm = newTerminalConfirmer(os.Stdin, os.Stdout)
+		}
+		in, out, _, err := runnerScope(ctx, scope)
+		if err != nil {
+			return "", err
+		}
+		declared, _ := scope.Entries()
+		exact := map[string]bool{}
+		for _, entry := range declared {
+			if ip := net.ParseIP(entry); ip != nil {
+				exact[ip.String()] = true
+			}
+		}
+		for _, address := range operatorAddresses() {
+			if !exact[address] {
+				out = append(out, address)
+			}
+		}
+		if err := scope.PinNetwork(in, out); err != nil {
+			return "", err
+		}
+		policyPath := filepath.Join(ws.Dir, "policy.json")
+		if _, err := os.Stat(policyPath); err == nil {
+			if err := verifyEngagePolicy(policyPath, roe.Policy.Canonical); err != nil {
+				return "", err
+			}
+		} else if os.IsNotExist(err) {
+			if webExisting {
+				return "", errors.New("web: saved policy is missing from the workspace")
+			}
+			file, err := os.OpenFile(policyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+			if err != nil {
+				return "", err
+			}
+			_, writeErr := file.WriteString(roe.Policy.Canonical)
+			closeErr := file.Close()
+			if writeErr != nil {
+				return "", writeErr
+			}
+			if closeErr != nil {
+				return "", closeErr
+			}
+		} else {
+			return "", err
+		}
+		trace = newActionTranscript(ws.Dir, o.transcript, "web-broker", roe.Policy.MaxActions, roe.Policy.TotalBytes, &lockedWriter{w: &actionView})
+		trace.otherRunner = roe.Policy.RunnerID
+		if _, err := os.Stat(trace.path); err == nil {
+			if err := trace.restore(); err != nil {
+				return "", err
+			}
+			if webMetadata.CommandAttempts < trace.actions || webMetadata.ByteUsage < int64(trace.used) {
+				return "", errors.New("web: checkpoint usage is less than recorded actions")
+			}
+		} else if os.IsNotExist(err) {
+			if webExisting {
+				return "", errors.New("web: action transcript is missing from the workspace")
+			}
+			file, err := os.OpenFile(trace.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+			if err != nil {
+				return "", err
+			}
+			if err := file.Close(); err != nil {
+				return "", err
+			}
+		} else {
+			return "", err
+		}
+	}
+	gate := buildEngageGate(ws, scope, mode, confirm, secgate.NewSessionApprovals(), "", policy, func(a, d string) {
+		if err := ws.AuditLine("secgate", a, webanalysis.RedactText(d)); err != nil {
+			auditMu.Lock()
+			auditErr = errors.Join(auditErr, fmt.Errorf("web audit write failed: %w", err))
+			auditMu.Unlock()
+			stopWeb()
+		}
+		if trace != nil {
+			var traceErr error
+			if a == "allow" {
+				id, _, err := trace.begin("", "web-policy", d, 1)
+				if err == nil {
+					traceErr = trace.record(actionRecord{ID: id, Kind: "web-policy", Command: d, Status: "complete", Reason: a})
+				} else {
+					traceErr = err
+				}
+			} else {
+				traceErr = trace.record(actionRecord{Kind: "web-policy", Command: d, Status: "denied", Reason: a})
+			}
+			if traceErr != nil {
+				auditMu.Lock()
+				auditErr = errors.Join(auditErr, fmt.Errorf("web transcript write failed: %w", traceErr))
+				auditMu.Unlock()
+				stopWeb()
+			}
+		}
+	})
 	if e = gate.Start(); e != nil {
 		return "", e
+	}
+	if policyRelevant {
+		if err := gate.RestorePolicyUsage(webMetadata.CommandAttempts, webDeadline, webMetadata.ByteUsage); err != nil {
+			return "", err
+		}
+		writer := newReportWriter(ws.Store, ws.Dir, webMetadata.Goal, webMetadata.RoE, mode.String())
+		if err := writer.RestoreFinal(); err != nil {
+			return "", err
+		}
+		if err := os.Remove(filepath.Join(ws.Dir, "STOP")); err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+		webMetadata.Status = "in-progress"
+		if err := writeEngageMetadata(ws.Dir, webMetadata); err != nil {
+			return "", err
+		}
+		if err := writer.Flush("in-progress"); err != nil {
+			return "", err
+		}
+		defer func() {
+			auditMu.Lock()
+			runErr = errors.Join(runErr, auditErr)
+			auditMu.Unlock()
+			status := "complete"
+			if runErr != nil {
+				status = "interrupted"
+			} else if webIncomplete {
+				status = "paused"
+			}
+			if _, err := os.Stat(filepath.Join(ws.Dir, "STOP")); err == nil {
+				status = "stopped"
+			}
+			if snapshot, err := ws.Store.Snapshot(context.Background()); err == nil && status == "complete" {
+				for _, task := range snapshot.Tasks {
+					if task.Status == engagement.StatusTodo || task.Status == engagement.StatusActive || task.Status == engagement.StatusBlocked {
+						status = "paused"
+						break
+					}
+				}
+			}
+			webMetadata.Status = status
+			webMetadata.CommandAttempts = gate.PolicyUsage()
+			webMetadata.ByteUsage = gate.PolicyByteUsage()
+			if err := writeEngageMetadata(ws.Dir, webMetadata); err != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("web checkpoint write failed: %w", err))
+			}
+			if err := writer.Flush(status); err != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("web report write failed: %w", err))
+			}
+			if !o.asJSON {
+				md, js := reportPaths(ws.Dir)
+				output = actionView.String() + output + "\nReport: " + md + "\n        " + js + "\nTranscript: " + trace.path + "\n"
+			}
+		}()
+		stopReport := watchEngageStop(ctx, ws.Dir, stopWeb)
+		defer stopReport()
 	}
 	armed := func() bool { return false }
 	if o.task != "" {
@@ -200,6 +436,9 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 	defer cancel()
 	svc := webcollect.New(ws.Store, newWebBroker(gate, armed), webParseWorker)
+	if command == "import" && gate.Policy != nil {
+		svc.AccountArtifactBytes = gate.ClaimPolicyBytes
+	}
 	svc.DiscoveryAllowed = webRedirectOK(gate)
 	svc.SetTask(o.task)
 	for _, g := range targets.Gaps {
@@ -272,9 +511,20 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 			for _, g := range targets.Gaps {
 				collector.Gap(g.Stage, g.URL, g.Reason)
 			}
-			_, e = collector.Collect(ctx, targets.URLs, opt)
-			if e != nil {
-				return "", e
+			coverage, collectErr := collector.Collect(ctx, targets.URLs, opt)
+			if collectErr != nil {
+				return "", collectErr
+			}
+			for _, gap := range coverage.Gaps {
+				if gap.Stage != "fetch" && gap.Stage != "storage" && gap.Stage != "scope" {
+					continue
+				}
+				webIncomplete = true
+				for _, target := range targets.URLs {
+					if gap.URL == target {
+						return "", errors.New("web: target request was denied or incomplete; see report coverage and audit")
+					}
+				}
 			}
 		}
 		if !found {
@@ -349,7 +599,7 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 		b, e := json.MarshalIndent(webanalysis.Display(snap), "", "  ")
 		return string(b) + "\n", e
 	}
-	output := webView(snap, o.view, interactive, width)
+	output = webView(snap, o.view, interactive, width)
 	if command == "export" {
 		output += "Export directory: " + webanalysis.SafeText(filepath.Join(ws.EvidenceDir(), "web", "exports")) + "\n"
 	}

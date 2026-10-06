@@ -26,9 +26,13 @@ func TestEngageResumeLocalLLM(t *testing.T) {
 	if err := os.WriteFile(roePath, []byte("## In Scope\n192.0.2.1\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	binary, err := filepath.Abs("blk")
-	if err != nil {
-		t.Fatal(err)
+	binary := os.Getenv("BLK_BIN")
+	if binary == "" {
+		var err error
+		binary, err = filepath.Abs("blk")
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("BLKCHAIN_ENGAGE_MAX_ROUNDS", "1")
 	t.Setenv("BLKCHAIN_COLLECTION", "blkchain_dwq")
@@ -51,9 +55,10 @@ func TestEngageResumeLocalLLM(t *testing.T) {
 	if !strings.Contains(first, "Engagement paused:") {
 		t.Fatalf("first report=%q", first)
 	}
-	audit, err := os.ReadFile(filepath.Join(wsDir, "audit.jsonl"))
-	if err != nil || !strings.Contains(string(audit), `"action":"model-tools"`) || !strings.Contains(string(audit), `"action":"tool-call"`) || !strings.Contains(string(audit), `"kind":"decision"`) {
-		t.Fatalf("missing structured model telemetry: %v %q", err, audit)
+	for _, name := range []string{"run.json", "policy.json", "actions.jsonl", "report.json"} {
+		if _, err := os.Stat(filepath.Join(wsDir, name)); err != nil {
+			t.Fatalf("%s missing: %v", name, err)
+		}
 	}
 	ws, err := engagement.OpenWorkspace(wsDir)
 	if err != nil {
@@ -67,7 +72,15 @@ func TestEngageResumeLocalLLM(t *testing.T) {
 	if err := os.WriteFile(roePath, []byte("## In Scope\n198.51.100.2\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("BLKCHAIN_ENGAGE_MAX_ACTIONS", "1")
+	blocked := exec.CommandContext(ctx, binary, "engage", "resume", "--workspace", wsDir)
+	blocked.Dir = project
+	blockedOutput, blockedErr := blocked.CombinedOutput()
+	if blockedErr == nil || !strings.Contains(string(blockedOutput), "policy differs") {
+		t.Fatalf("changed RoE resumed: %v %s", blockedErr, blockedOutput)
+	}
+	if err := os.WriteFile(roePath, []byte("## In Scope\n192.0.2.1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	second := run("engage", "resume", "--workspace", wsDir)
 	if !strings.Contains(second, "Report:") {
 		t.Fatalf("resume report=%q", second)
@@ -81,7 +94,7 @@ func TestEngageResumeLocalLLM(t *testing.T) {
 	if err != nil || len(snap.Tasks) != 1 || snap.Tasks[0].ID != "t1" {
 		t.Fatalf("resumed tasks=%+v err=%v", snap.Tasks, err)
 	}
-	saved, err := os.ReadFile(filepath.Join(wsDir, "ROE.md"))
+	saved, err := os.ReadFile(filepath.Join(wsDir, "policy.json"))
 	if err != nil || !strings.Contains(string(saved), "192.0.2.1") || strings.Contains(string(saved), "198.51.100.2") {
 		t.Fatalf("saved RoE=%q err=%v", saved, err)
 	}
@@ -107,9 +120,13 @@ func TestEngageExternalStopFlushesReport(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(project, "ROE.md"), []byte("## In Scope\n192.0.2.1\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	binary, err := filepath.Abs("blk")
-	if err != nil {
-		t.Fatal(err)
+	binary := os.Getenv("BLK_BIN")
+	if binary == "" {
+		var err error
+		binary, err = filepath.Abs("blk")
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

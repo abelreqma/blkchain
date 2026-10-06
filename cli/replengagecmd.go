@@ -38,33 +38,39 @@ type engageStatusKey struct{}
 
 type engageRunStatus struct{ paused bool }
 
+type engageActionMsg struct{ text string }
+type replTranscriptKey struct{}
+type replActionKey struct{}
+
 // replEngageRun is the fully-built input to one gated REPL engagement. The deps
 // (model, rc, cat, roeDB, confirm, cfg, prefs, mode, override, cwd, goal) are
 // built on the UI goroutine by buildReplEngageRun; ctx, asker, and stub are set
 // by the dispatch once the turn's context exists.
 type replEngageRun struct {
-	ctx      context.Context
-	wsDir    string
-	goal     string
-	mode     secgate.Mode
-	override bool
-	cwd      string
-	model    toolLoopModel
-	rc       searcher
-	cfg      ragconfig.Config
-	prefs    modelPrefs
-	cat      *skillcat.Catalog
-	confirm  secgate.Confirmer
-	asker    askuser.Asker
-	roeDB    *sql.DB
-	stub     *stubEngagement
-	finding  func([]byte) error
+	ctx        context.Context
+	wsDir      string
+	goal       string
+	mode       secgate.Mode
+	override   bool
+	cwd        string
+	model      toolLoopModel
+	rc         searcher
+	cfg        ragconfig.Config
+	prefs      modelPrefs
+	cat        *skillcat.Catalog
+	confirm    secgate.Confirmer
+	asker      askuser.Asker
+	roeDB      *sql.DB
+	stub       *stubEngagement
+	finding    func([]byte) error
+	transcript string
+	onAction   func(actionRecord)
 }
 
 // buildReplEngageRun assembles the engage dependencies from the session, failing
 // before a turn starts (like blk engage) when the model, retrieval client, or
-// skill catalog cannot be built. ctx, asker, and stub are filled in by the
-// dispatch. confirm is the widget EditConfirmer; a nil program fails closed.
+// skill catalog cannot be built. The dispatch supplies a confirmer only in
+// Safe mode.
 func (m model) buildReplEngageRun(goal string) (replEngageRun, error) {
 	model, err := newOMLX(m.cfg, m.activeModel())
 	if err != nil {
@@ -88,18 +94,18 @@ func (m model) buildReplEngageRun(goal string) (replEngageRun, error) {
 		finding = func(data []byte) error { m.prog.Send(webFindingMsg{Data: string(data)}); return nil }
 	}
 	return replEngageRun{
-		finding:  finding,
-		goal:     goal,
-		mode:     m.engageMode,
-		override: m.engageOverride,
-		cwd:      cwd,
-		model:    model,
-		rc:       rc,
-		cfg:      m.cfg,
-		prefs:    m.prefs,
-		cat:      cat,
-		confirm:  widgetConfirmer{prog: m.prog},
-		roeDB:    roeDB,
+		finding:    finding,
+		goal:       goal,
+		mode:       m.engageMode,
+		override:   false,
+		cwd:        cwd,
+		model:      model,
+		rc:         rc,
+		cfg:        m.cfg,
+		prefs:      m.prefs,
+		cat:        cat,
+		transcript: m.engageTranscript,
+		roeDB:      roeDB,
 	}, nil
 }
 
@@ -118,9 +124,11 @@ func engageCmd(r replEngageRun) tea.Cmd {
 		if r.finding != nil {
 			ctx = context.WithValue(ctx, webFindingSinkKey{}, r.finding)
 		}
+		ctx = context.WithValue(ctx, replTranscriptKey{}, r.transcript)
+		ctx = context.WithValue(ctx, replActionKey{}, r.onAction)
 		final, err := runReplEngageFn(ctx, r.wsDir, r.cwd, r.mode, r.override, r.model, r.rc,
 			r.cfg, r.prefs, r.cat, r.confirm, r.asker, r.roeDB, r.goal, progress)
-		return engageDoneMsg{final: final, err: err, paused: status.paused}
+		return engageDoneMsg{final: final, err: err, paused: status.paused || strings.HasPrefix(final, "Engagement paused:")}
 	}
 }
 

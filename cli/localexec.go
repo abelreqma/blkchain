@@ -109,7 +109,9 @@ func (e localExecutor) localRunTargetAnalysis(ctx context.Context, task engageme
 			return "", err
 		}
 		defer cleanup()
+		defer releaseEngageWorker(ctx, execDir)
 		cmdCtx := secgate.Command{
+			TaskID:  task.ID,
 			Phase:   secgate.Phase(string(task.Phase)),
 			Surface: secgate.Surface(string(task.Surface)),
 			Armed:   task.Armed,
@@ -143,7 +145,7 @@ func (e localExecutor) localRunTargetAnalysis(ctx context.Context, task engageme
 		return "", err
 	}
 	msgs := []llms.MessageContent{
-		{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(dom.Prompt)}},
+		{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(effectiveEngagePrompt(e.d.Gate, dom.Prompt))}},
 		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(localTargetAnalysisPrompt(proj, task))}},
 	}
 	final, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 6, MaxCalls: 12})
@@ -240,10 +242,7 @@ func localNewTargetAnalysisRunCommand(g *secgate.Gate, task engagement.Task, sto
 			if g != nil && g.Audit != nil {
 				g.Audit("exec", secgate.Signature(run))
 			}
-			res := execRunner(ctx, run.Binary, run.Args, workDir, capBytes, timeout)
-			if res.TimedOut {
-				return "run_command: the command timed out and was terminated after " + timeout.String(), nil
-			}
+			res := runAuthorized(ctx, g, run.Binary, run.Args, workDir, capBytes, timeout, task.ID)
 			if capture != nil {
 				capture(activeTask(), res.Output)
 			}
@@ -251,6 +250,9 @@ func localNewTargetAnalysisRunCommand(g *secgate.Gate, task engagement.Task, sto
 				_, _ = store.RecordEvidence(task.ID, res.Output)
 			}
 			var b strings.Builder
+			if res.TimedOut {
+				fmt.Fprintf(&b, "run_command: the command timed out and was terminated after %s\n", timeout)
+			}
 			if oc.Msg != "" {
 				fmt.Fprintf(&b, "(grounding: %s)\n", oc.Msg)
 			}

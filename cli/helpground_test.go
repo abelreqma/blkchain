@@ -2,11 +2,32 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"blkchain/cli/internal/secgate"
 )
+
+func TestPolicyHelpGroundingUsesRunnerImageIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tool")
+	if err := os.WriteFile(path, []byte("first"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	g := &secgate.Gate{Policy: secgate.DefaultPolicy()}
+	hg := newTaskGrounder(&stubCache{data: map[string]toolInterface{}}, g, t.TempDir(), secgate.Command{})
+	before := hg.ResolveVersion(path)
+	if before != defaultRunnerTag() {
+		t.Fatalf("policy help cache used host identity: %q", before)
+	}
+	if err := os.WriteFile(path, []byte("second"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if after := hg.ResolveVersion(path); after != before {
+		t.Fatalf("host file content changed runner identity: %q to %q", before, after)
+	}
+}
 
 func TestIsHelpSideEffectMatchesBaseName(t *testing.T) {
 	helpSideEffectBinaries["dangertool"] = true

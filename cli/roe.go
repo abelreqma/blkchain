@@ -70,6 +70,7 @@ type RoE struct {
 	Targets     []string
 	Scope       *secgate.Scope
 	AutoActions *autoActionPolicy
+	Policy      *secgate.Policy
 }
 
 // ParseRoE reads an ROE.md. Recognized level-2+ sections are Summary, Targets,
@@ -80,6 +81,17 @@ type RoE struct {
 // the gate. A level-1 heading is treated as a document title (ignored). An empty
 // file yields an RoE with an empty scope (the no-RoE floor applies downstream).
 func ParseRoE(r io.Reader) (*RoE, error) {
+	data, err := io.ReadAll(io.LimitReader(r, (256<<10)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > 256<<10 {
+		return nil, fmt.Errorf("ROE.md exceeds 256 KiB")
+	}
+	r = strings.NewReader(string(data))
+	policy := secgate.DefaultPolicy()
+	seen := map[string]bool{}
+	keys := map[string]bool{}
 	var summary []string
 	var spec secgate.ScopeSpec
 	var autoEntries []string
@@ -113,6 +125,13 @@ func ParseRoE(r io.Reader) (*RoE, error) {
 			if !isKnownSection(key) {
 				return nil, fmt.Errorf("ROE.md: unrecognized section heading %q (expected: Summary, Targets, In Scope, Out of Scope, Rate, Autonomous Actions)", h)
 			}
+			if seen[key] {
+				return nil, fmt.Errorf("ROE.md: duplicate section %q", h)
+			}
+			seen[key] = true
+			if key == "allowed actions" {
+				policy.Allowed = nil
+			}
 			section = key
 			continue
 		}
@@ -134,8 +153,26 @@ func ParseRoE(r io.Reader) (*RoE, error) {
 		case "out of scope":
 			spec.Out = append(spec.Out, entry)
 		case "rate":
-			if spec.Rate == "" { // first entry wins
-				spec.Rate = entry
+			if spec.Rate != "" {
+				return nil, fmt.Errorf("ROE.md: duplicate rate")
+			}
+			spec.Rate = entry
+		case "allowed actions", "denied actions":
+			if !secgate.KnownAction(entry) {
+				return nil, fmt.Errorf("ROE.md: unknown action %q", entry)
+			}
+			if section == "allowed actions" {
+				policy.Allowed = append(policy.Allowed, entry)
+			} else {
+				policy.Denied = append(policy.Denied, entry)
+			}
+		case "denied commands":
+			if err := addRoEDenial(policy, entry); err != nil {
+				return nil, err
+			}
+		case "resource caps", "runner":
+			if err := setRoEValue(policy, section, entry, keys); err != nil {
+				return nil, err
 			}
 		case "autonomous actions":
 			autoEntries = append(autoEntries, entry)
@@ -152,11 +189,15 @@ func ParseRoE(r io.Reader) (*RoE, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := policy.Seal(strings.Join(summary, "\n"), spec.Targets, scope); err != nil {
+		return nil, fmt.Errorf("ROE.md: %w", err)
+	}
 	return &RoE{
 		Summary:     strings.Join(summary, "\n"),
 		Targets:     spec.Targets,
 		Scope:       scope,
 		AutoActions: autoActions,
+		Policy:      policy,
 	}, nil
 }
 
@@ -178,7 +219,7 @@ func headingText(line string) (text string, level int, ok bool) {
 // ROE.md sections.
 func isKnownSection(key string) bool {
 	switch key {
-	case "summary", "targets", "in scope", "out of scope", "rate", "autonomous actions":
+	case "summary", "targets", "in scope", "out of scope", "rate", "autonomous actions", "allowed actions", "denied actions", "denied commands", "resource caps", "runner":
 		return true
 	}
 	return false

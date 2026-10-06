@@ -88,13 +88,14 @@ func newTaskGrounder(cache toolHelpCache, g *secgate.Gate, workDir string, cmdCt
 			// authorizeCommand now returns the authorized (possibly operator-edited)
 			// command; a help read is not edited in practice, so run the form as
 			// authorized and ignore any substitution.
-			if _, msg := authorizeCommand(ctx, g, hc); msg != "" {
+			authorized, msg := authorizeCommand(ctx, g, hc)
+			if msg != "" {
 				continue // this help form was gate-denied; try the next
 			}
 			if g.Audit != nil {
 				g.Audit("exec", secgate.Signature(hc))
 			}
-			res := execRunner(ctx, binary, form, workDir, helpCaptureCapBytes, helpCaptureTimeout)
+			res := runAuthorized(ctx, g, authorized.Binary, authorized.Args, workDir, helpCaptureCapBytes, helpCaptureTimeout, cmdCtx.TaskID)
 			if res.TimedOut {
 				continue
 			}
@@ -104,10 +105,18 @@ func newTaskGrounder(cache toolHelpCache, g *secgate.Gate, workDir string, cmdCt
 		}
 		return "", false
 	}
+	version := resolveBinVersion
+	if g.Policy != nil {
+		image := g.Policy.RunnerImage
+		if image == "" {
+			image = defaultRunnerTag()
+		}
+		version = func(string) string { return image }
+	}
 	return &helpGrounder{
 		Cache:          cache,
 		Capture:        capture,
-		ResolveVersion: resolveBinVersion,
+		ResolveVersion: version,
 		Parse:          parseToolHelp,
 	}
 }

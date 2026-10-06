@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -84,5 +85,23 @@ func TestDiscardedTransfersConsumeAggregateBudget(t *testing.T) {
 	}
 	if _, e := b.Fetch(context.Background(), Request{URL: server.URL}); e == nil {
 		t.Fatal("discarded transfer did not exhaust budget")
+	}
+}
+
+func TestPolicySpecificWebBodyAndRequestCaps(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("123456789"))
+	}))
+	defer server.Close()
+	broker := fixtureBroker()
+	broker.Policy.MaxBodyBytes = 8
+	broker.Policy.MaxTotalBytes = 8
+	if _, err := broker.Fetch(context.Background(), Request{Method: "POST", URL: server.URL, Body: []byte("123456789")}); err == nil || requests.Load() != 0 {
+		t.Fatalf("oversized request reached target: requests=%d err=%v", requests.Load(), err)
+	}
+	if response, err := broker.Fetch(context.Background(), Request{URL: server.URL}); err == nil || response.Complete || requests.Load() != 1 {
+		t.Fatalf("oversized response accepted: %+v requests=%d err=%v", response, requests.Load(), err)
 	}
 }

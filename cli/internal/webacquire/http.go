@@ -37,9 +37,13 @@ type Response struct {
 	Gap      string      `json:"gap,omitempty"`
 }
 type Policy struct {
-	Authorize func(context.Context, Request) error
-	IPAllowed func(net.IP) bool
-	Resolve   func(context.Context, string) ([]net.IP, error)
+	Authorize     func(context.Context, Request) error
+	IPAllowed     func(net.IP) bool
+	Resolve       func(context.Context, string) ([]net.IP, error)
+	MaxBodyBytes  int
+	MaxTotalBytes int
+	MaxRequests   int
+	AccountBytes  func(int) error
 }
 type Broker struct {
 	Policy                     Policy
@@ -48,11 +52,34 @@ type Broker struct {
 }
 
 func (b *Broker) Usage() (int, int) { b.mu.Lock(); defer b.mu.Unlock(); return b.requests, b.bytes }
+func (b *Broker) bodyLimit() int {
+	if n := b.Policy.MaxBodyBytes; n > 0 && n < MaxBody {
+		return n
+	}
+	return MaxBody
+}
+func (b *Broker) totalLimit() int {
+	if n := b.Policy.MaxTotalBytes; n > 0 && n < MaxTotal {
+		return n
+	}
+	return MaxTotal
+}
+func (b *Broker) requestLimit() int {
+	if n := b.Policy.MaxRequests; n > 0 && n < MaxRequests {
+		return n
+	}
+	return MaxRequests
+}
 func (b *Broker) claim(n int) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.requests >= MaxRequests || b.bytes >= MaxTotal || b.wireBytes+n > MaxTotal {
+	if b.requests >= b.requestLimit() || b.bytes >= b.totalLimit() || b.wireBytes+n > b.totalLimit() {
 		return ErrLimit
+	}
+	if n > 0 && b.Policy.AccountBytes != nil {
+		if err := b.Policy.AccountBytes(n); err != nil {
+			return err
+		}
 	}
 	b.requests++
 	b.wireBytes += n
@@ -61,8 +88,13 @@ func (b *Broker) claim(n int) error {
 func (b *Broker) account(n int) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.bytes+n > MaxTotal {
+	if b.bytes+n > b.totalLimit() {
 		return ErrLimit
+	}
+	if b.Policy.AccountBytes != nil {
+		if err := b.Policy.AccountBytes(n); err != nil {
+			return err
+		}
 	}
 	b.bytes += n
 	return nil
@@ -76,7 +108,7 @@ type wireReader struct {
 func (b *Broker) reserveWire(n int) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if remaining := MaxTotal - b.wireBytes; n > remaining {
+	if remaining := b.totalLimit() - b.wireBytes; n > remaining {
 		n = remaining
 	}
 	b.wireBytes += n
@@ -134,7 +166,11 @@ func (b *Broker) Fetch(ctx context.Context, r Request) (Response, error) {
 		r.Method = "GET"
 	}
 	r.Method = strings.ToUpper(r.Method)
-	if len(r.Body) > 1<<20 {
+	requestLimit := 1 << 20
+	if b.bodyLimit() < requestLimit {
+		requestLimit = b.bodyLimit()
+	}
+	if len(r.Body) > requestLimit {
 		return Response{}, ErrLimit
 	}
 	origin := r.URL
@@ -184,7 +220,11 @@ func (b *Broker) Once(ctx context.Context, r Request) (Response, error) {
 		r.Method = "GET"
 	}
 	r.Method = strings.ToUpper(r.Method)
-	if len(r.Body) > 1<<20 || len(r.Headers) > 100 {
+	requestLimit := 1 << 20
+	if b.bodyLimit() < requestLimit {
+		requestLimit = b.bodyLimit()
+	}
+	if len(r.Body) > requestLimit || len(r.Headers) > 100 {
 		return out, ErrLimit
 	}
 	if err := validateHeaders(r.Headers); err != nil {
@@ -253,12 +293,13 @@ func (b *Broker) Once(ctx context.Context, r Request) (Response, error) {
 	defer resp.Body.Close()
 	out.Status = resp.StatusCode
 	out.Headers = resp.Header.Clone()
-	wire, err := io.ReadAll(io.LimitReader(wireReader{broker: b, reader: resp.Body}, MaxBody+1))
+	bodyLimit := b.bodyLimit()
+	wire, err := io.ReadAll(io.LimitReader(wireReader{broker: b, reader: resp.Body}, int64(bodyLimit)+1))
 	if err != nil {
 		out.Gap = "transfer interrupted"
 		return out, err
 	}
-	if len(wire) > MaxBody {
+	if len(wire) > bodyLimit {
 		out.Gap = "compressed transfer exceeds limit"
 		return out, ErrLimit
 	}
@@ -271,7 +312,7 @@ func (b *Broker) Once(ctx context.Context, r Request) (Response, error) {
 			out.Gap = "invalid gzip response"
 			return out, e
 		}
-		data, err = io.ReadAll(io.LimitReader(z, MaxBody+1))
+		data, err = io.ReadAll(io.LimitReader(z, int64(bodyLimit)+1))
 		_ = z.Close()
 		if err != nil {
 			out.Gap = "decompression failed"
@@ -281,7 +322,7 @@ func (b *Broker) Once(ctx context.Context, r Request) (Response, error) {
 		out.Gap = "unsupported content encoding"
 		return out, errors.New(out.Gap)
 	}
-	if len(data) > MaxBody {
+	if len(data) > bodyLimit {
 		out.Gap = "decompressed body exceeds limit"
 		return out, ErrLimit
 	}

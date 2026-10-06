@@ -83,13 +83,14 @@ func (m *graphProbeModel) GenerateContent(_ context.Context, _ []llms.MessageCon
 // the PRODUCTION runReplEngage path: live during the run and cleared after.
 // Dropping the SetEngageGraphSource registration in replengage.go fails this.
 func TestRunReplEngageRegistersGraphSource(t *testing.T) {
+	stubEngageRunner(t)
 	SetEngageGraphSource(nil)
 	t.Cleanup(func() { SetEngageGraphSource(nil) })
 	m := &graphProbeModel{}
 	if _, err := runReplEngage(
 		context.Background(),
 		t.TempDir(),
-		t.TempDir(),
+		testEngageRoE(t),
 		secgate.Safe, false,
 		m, nil, ragconfig.Config{TopK: 5}, modelPrefs{}, nil,
 		&countingConfirmer{ok: true}, askuser.AutoAsker{}, nil, "enumerate the lab", nil,
