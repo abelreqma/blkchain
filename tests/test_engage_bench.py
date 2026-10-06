@@ -10,6 +10,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,7 +30,7 @@ from blkchain.eval.engage_bench import (
     TargetScore,
     aggregate_runs,
     build_report,
-    build_scope_text,
+    build_roe_text,
     canon_host,
     class_match,
     extract_detections,
@@ -84,12 +85,12 @@ class IsLabHostTest(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertTrue(is_lab_host(value))
 
-    def test_is_lab_host_rejects_public_ip(self):
-        # IP literals, empty, char-invalid, and numeric-looking non-IPs are all
+    def test_is_lab_host_rejects_non_lab_identifier(self):
+        # Public IPs, invalid identifiers, and the local scope directive are
         # refused with no DNS resolution.
         for value in [
             "8.8.8.8", "1.1.1.1", "93.184.216.34", "", "not a host",
-            "256.256.256.256",
+            "256.256.256.256", "local", "LOCAL.",
         ]:
             with self.subTest(value=value):
                 self.assertFalse(is_lab_host(value))
@@ -297,8 +298,8 @@ class LoadLabConfigTest(_TempConfigMixin, unittest.TestCase):
         self.assertEqual(config.targets[1].expected_services, ())
 
 
-class BuildScopeTextTest(unittest.TestCase):
-    def test_build_scope_text_network_only(self):
+class BuildRoETextTest(unittest.TestCase):
+    def test_build_roe_text_network_only(self):
         config = LabConfig(
             recon_goal="g",
             targets=(
@@ -307,20 +308,34 @@ class BuildScopeTextTest(unittest.TestCase):
             ),
             out_of_scope=("203.0.113.9",),
         )
-        text = build_scope_text(config)
-        self.assertIn("10.0.0.5", text)
-        self.assertIn("192.0.2.10", text)
-        self.assertIn("!203.0.113.9", text)
+        text = build_roe_text(config)
+        self.assertEqual(
+            text,
+            "## In Scope\n10.0.0.5\n192.0.2.10\n\n"
+            "## Out of Scope\n203.0.113.9\n",
+        )
         lines = text.splitlines()
         # The local keyword must never appear as a standalone scope line.
         self.assertNotIn("local", lines)
 
-    def test_build_scope_text_refuses_non_lab_host(self):
+    def test_build_roe_text_refuses_non_lab_host(self):
         # Defense in depth: a LabConfig built directly with a public host is
         # refused at scope-build time.
-        config = LabConfig(recon_goal="g", targets=(LabTarget(host="8.8.8.8"),))
-        with self.assertRaises(LabConfigError):
-            build_scope_text(config)
+        for host in ("8.8.8.8", "local"):
+            with self.subTest(host=host):
+                config = LabConfig(recon_goal="g", targets=(LabTarget(host=host),))
+                with self.assertRaises(LabConfigError):
+                    build_roe_text(config)
+
+    def test_build_roe_text_refuses_out_of_scope_injection(self):
+        for host in ("x.test\n## In Scope\n8.8.8.8", "local"):
+            with self.subTest(host=host):
+                config = LabConfig(
+                    recon_goal="g", targets=(LabTarget(host="10.0.0.5"),),
+                    out_of_scope=(host,),
+                )
+                with self.assertRaises(LabConfigError):
+                    build_roe_text(config)
 
 
 class ExampleTemplateTest(unittest.TestCase):
@@ -455,12 +470,44 @@ class RunEngageTest(_TempDirMixin, unittest.TestCase):
         self._run(workspace=ws, exec_fn=_capture)
         argv = seen["argv"]
         self.assertEqual(argv[0], "/usr/bin/blk")
-        self.assertEqual(argv[1:4], ["engage", "--auto", "--scope"])
-        self.assertIn("--workspace", argv)
+        self.assertEqual(argv[1:4], ["engage", "--auto", "--roe"])
+        self.assertEqual(argv[4], str(ws / "ROE.md"))
+        self.assertEqual(argv[5:7], ["--workspace", str(ws)])
+        self.assertEqual((ws / "ROE.md").read_text(encoding="utf-8"),
+                         "## In Scope\n10.0.0.5\n")
+        self.assertFalse((ws / "scope.txt").exists())
         self.assertNotIn("local", argv)
         self.assertNotIn("arm", argv)
         # goal words appended verbatim after the workspace.
         self.assertEqual(argv[-2:], ["enumerate", "services"])
+
+    @unittest.skipUnless(os.environ.get("BLK_BIN"), "BLK_BIN required")
+    def test_run_engage_cli_contract(self):
+        root = self._tmpdir()
+        ws = root / "engagement"
+        ws.mkdir()
+        (ws / "sentinel").write_text("block runner startup", encoding="utf-8")
+        binary = str(Path(os.environ["BLK_BIN"]).resolve())
+
+        def _cli(argv, timeout):
+            env = dict(os.environ, XDG_CONFIG_HOME=str(root))
+            result = subprocess.run(
+                argv, cwd=root, env=env, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=min(timeout, 15), check=False,
+            )
+            return result.returncode, result.stdout, result.stderr
+
+        with mock.patch.object(engage_bench, "find_blk", lambda: binary):
+            with self.assertRaises(BlkError) as ctx:
+                config = LabConfig(
+                    recon_goal="enumerate services",
+                    targets=(LabTarget(host="10.0.0.5"),),
+                    out_of_scope=("10.0.0.9",),
+                )
+                run_engage(config, config.targets[0],
+                           workspace=str(ws), exec_fn=_cli)
+        self.assertIn("workspace is not empty", str(ctx.exception))
 
     def test_run_engage_oversize_report(self):
         ws = self._tmpdir()
@@ -516,6 +563,14 @@ class RunEngageTest(_TempDirMixin, unittest.TestCase):
         (ws / "report.json").write_text(json.dumps(report), encoding="utf-8")
         self._run(workspace=ws, exec_fn=lambda argv, timeout: (0, b"", b""))
         self.assertTrue(ws.exists())
+
+    def test_run_engage_does_not_replace_operator_roe(self):
+        ws = self._tmpdir()
+        path = ws / "ROE.md"
+        path.write_text("operator policy\n", encoding="utf-8")
+        with self.assertRaises(FileExistsError):
+            self._run(workspace=ws, exec_fn=lambda argv, timeout: self.fail("ran blk"))
+        self.assertEqual(path.read_text(encoding="utf-8"), "operator policy\n")
 
 
 class ParseTargetTest(unittest.TestCase):
@@ -1044,7 +1099,7 @@ class NoLeakTest(unittest.TestCase):
                 ),
             ),
         )
-        scope_text = build_scope_text(config)
+        scope_text = build_roe_text(config)
         goal = config.recon_goal
         for token in ("leak-asset-token", "SuperSecretProduct9000", "zzzsecretclass"):
             self.assertNotIn(token, scope_text)

@@ -2,7 +2,7 @@
 
 This module is complete and stdlib-only. It provides: the lab-config
 loader/validator (`load_lab_config`), the strict lab-host guard (`is_lab_host`),
-the network-only scope builder (`build_scope_text`), the bounded `blk engage`
+the network-only RoE builder (`build_roe_text`), the bounded `blk engage`
 subprocess client (`find_blk`, `run_engage`), the defensive report extractor
 (`parse_target`, `extract_detections`, `extract_recon`), the grounded detection scorer
 (`class_match`, `score_target`, `score_batch`, `aggregate_runs`), and the CLI
@@ -12,14 +12,14 @@ Scope and safety:
   - RECON + DETECTION SCORING ONLY. This harness never arms a task, never
     confirms a command, and never runs an exploit. It measures discovery and
     detection, not weaponization.
-  - The scope passed to `blk engage` is NETWORK-only: bare host/IP/CIDR lines
-    and `!` exclusions. The `local` scope keyword is never emitted (it forces
-    local HITL and strays to post-access).
+  - The RoE passed to `blk engage` is NETWORK-only: host/IP/CIDR entries in
+    In Scope and Out of Scope sections. The `local` scope keyword is never
+    emitted (it forces local HITL and strays to post-access).
   - The harness REFUSES to run without an explicit operator-supplied lab
     config, and NEVER targets a non-lab host. `is_lab_host` is the SOLE control
     for the lab-only guarantee: `blk engage` allows in-scope public hosts, as
     real engagements do, so nothing downstream backstops a public host in the
-    scope file. If this guard lets a public host through, it reaches the target.
+    RoE file. If this guard lets a public host through, it reaches the target.
 
 A lab host is accepted iff it is a non-flipping identifier:
   (a) a private/reserved/loopback/link-local/CGNAT/documentation IP or CIDR
@@ -28,6 +28,7 @@ A lab host is accepted iff it is a non-flipping identifier:
   (b) a hostname that passes the `[A-Za-z0-9.-]` char-set check AND whose final
       label is a reserved suffix (RFC6761 test/example/invalid/localhost,
       RFC6762 local, ICANN private-use internal) or is bare `localhost`.
+      Bare `local` is refused because `blk engage` uses it for local host scope.
 
 EVERY other hostname is REFUSED, including a privately-resolvable non-reserved
 name (e.g. box.corp, internal-box.corp). `.lab` is refused too: it is a
@@ -76,7 +77,7 @@ _RESERVED_SUFFIXES = {"test", "example", "invalid", "localhost", "local", "inter
 # A hostname may contain only DNS label characters. Anything else (whitespace,
 # newline, slash, control chars) is an injection attempt and is refused BEFORE
 # the reserved-suffix/resolve logic, so the value that is validated is exactly
-# the value `build_scope_text` later emits (no validate-normalized/emit-raw gap).
+# the value `build_roe_text` later emits (no validate-normalized/emit-raw gap).
 _HOSTNAME_RE = re.compile(r"[A-Za-z0-9.-]+")
 # An out_of_scope entry is one bare token: a host/IP/CIDR, so the allowed set
 # additionally includes `:` and `/`. It is NOT lab-host-validated for lab-ness,
@@ -180,6 +181,7 @@ def is_lab_host(value) -> bool:
     by its embedded v4, 6to4/Teredo refused), or a hostname that passes the
     `[A-Za-z0-9.-]` char-set check whose final label is a reserved suffix
     (test/example/invalid/localhost/local/internal) or is bare `localhost`.
+    Bare `local` is refused because the CLI interprets it as local host scope.
     EVERY other hostname is refused, including a privately-resolvable
     non-reserved name and any `.lab` name. No DNS resolution happens, so there is
     no validation-time vs run-time DNS window.
@@ -196,6 +198,8 @@ def is_lab_host(value) -> bool:
     if not _HOSTNAME_RE.fullmatch(v):
         return False
     host = v.lower()
+    if host == "local":
+        return False
     label = host.rsplit(".", 1)[-1] if "." in host else host
     return host == "localhost" or label in _RESERVED_SUFFIXES
 
@@ -280,7 +284,7 @@ def _parse_target(raw, index: int) -> LabTarget:
         f"target host is not a lab host: {host!r}",
     )
     # Store the stripped host so the validated value equals the value
-    # build_scope_text emits (no validate-stripped/emit-raw gap).
+    # build_roe_text emits (no validate-stripped/emit-raw gap).
     host = host.strip()
 
     expected_assets_raw = raw.get("expected_assets", [])
@@ -402,18 +406,22 @@ def load_lab_config(path) -> LabConfig:
     )
 
 
-def build_scope_text(config: LabConfig) -> str:
-    """Build the NETWORK-only scope file text for `blk engage`.
+def build_roe_text(config: LabConfig) -> str:
+    """Build the NETWORK-only ROE.md text for `blk engage`.
 
-    In-scope lines are bare hosts; out-of-scope lines are prefixed with `!`.
     The `local` keyword is never emitted. Defense in depth: re-assert every
     in-scope host is a lab host before writing it.
     """
-    lines = [t.host for t in config.targets]
-    lines += [f"!{h}" for h in config.out_of_scope]
     for t in config.targets:
         if not is_lab_host(t.host):
             raise LabConfigError(f"refusing to scope non-lab host: {t.host!r}")
+    for host in config.out_of_scope:
+        if (not isinstance(host, str) or not _SCOPE_TOKEN_RE.fullmatch(host)
+                or host.lower() == "local"):
+            raise LabConfigError(f"invalid out-of-scope host: {host!r}")
+    lines = ["## In Scope", *(t.host for t in config.targets)]
+    if config.out_of_scope:
+        lines += ["", "## Out of Scope", *config.out_of_scope]
     return "\n".join(lines) + "\n"
 
 
@@ -581,9 +589,9 @@ def run_engage(
     parsed report.json dict.
 
     RECON + DETECTION ONLY: the argv is
-    `[blk, engage, --auto, --scope <file>, --workspace <dir>, *goal.split()]`.
-    It never emits the `local` scope keyword and never passes `arm`. The scope
-    file is network-only (build_scope_text over a single-target config, keeping
+    `[blk, engage, --auto, --roe <file>, --workspace <dir>, *goal.split()]`.
+    It never emits the `local` scope keyword and never passes `arm`. The RoE
+    file is network-only (build_roe_text over a single-target config, keeping
     out_of_scope exclusions). Raises BlkError on a non-zero exit, a timeout, an
     oversize stdout, or a missing/invalid/oversize report.json.
 
@@ -599,13 +607,15 @@ def run_engage(
             targets=(target,),
             out_of_scope=config.out_of_scope,
         )
-        scope_path = Path(ws) / "scope.txt"
-        scope_path.write_text(build_scope_text(single), encoding="utf-8")
+        roe_text = build_roe_text(single)
+        roe_path = Path(ws) / "ROE.md"
+        with roe_path.open("x", encoding="utf-8") as roe_file:
+            roe_file.write(roe_text)
 
         goal = config.recon_goal
         argv = [
             binary, "engage", "--auto",
-            "--scope", str(scope_path),
+            "--roe", str(roe_path),
             "--workspace", str(ws),
             *goal.split(),
         ]
