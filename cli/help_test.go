@@ -26,7 +26,7 @@ import (
 // usage, per-command help, and shell completion must use these lines verbatim.
 var wordingDescs = map[string]string{
 	"ask":        "answer a question, with cited sources",
-	"search":     "search the evidence and produce a cited answer",
+	"search":     "search the knowledge base and cite what it finds",
 	"web":        "search the web and synthesize cited answers",
 	"sources":    "list indexed sources, with chunk counts",
 	"open":       "open a cited source in your pager or editor",
@@ -41,7 +41,7 @@ var wordingDescs = map[string]string{
 	"hermes":     "run one Hermes agent turn with the knowledge base",
 	"gateway":    "set up and start the Hermes gateway for agent mode",
 	"mcp":        "serve the knowledge base to Hermes over MCP (stdio)",
-	"engage":     "run a gated, multi-step engagement against a goal",
+	"engage":     "plan and run a gated, multi-step assessment",
 	"kg":         "query the engagement knowledge graph",
 	"analyze":    "generate schema-validated JSON from the LLM",
 	"install":    "put blk on your PATH (run once, from the project)",
@@ -51,13 +51,14 @@ var wordingDescs = map[string]string{
 }
 
 var wordingGroups = [][]string{
+	{"engage", "kg"},
 	{"ask", "search", "web", "sources", "open", "add"},
 	{"up", "down", "status", "health", "doctor", "models", "logs"},
-	{"hermes", "gateway", "mcp", "engage", "kg", "analyze"},
+	{"hermes", "gateway", "mcp", "analyze"},
 	{"install", "completion", "version", "help"},
 }
 
-var wordingGroupTitles = []string{"ASK AND SEARCH", "SERVICES", "AGENT (HERMES)", "SETUP"}
+var wordingGroupTitles = []string{"ENGAGE", "KNOWLEDGE BASE", "SERVICES", "INTEGRATIONS", "SETUP"}
 
 var wordingEnv = []string{
 	"BLKCHAIN_ROOT", "BLKCHAIN_COLLECTION", "BLKCHAIN_TIMEOUT_SECONDS", "QDRANT_GRPC_URL",
@@ -366,7 +367,7 @@ func TestUsageLayout(t *testing.T) {
 	}
 	// A wrapped description (the ask row at 60 columns) continues under the
 	// description column, which does not depend on the width.
-	lines := strings.Split(section(renderUsage(60), "ASK AND SEARCH", ""), "\n")
+	lines := strings.Split(section(renderUsage(60), "KNOWLEDGE BASE", ""), "\n")
 	wrapped := false
 	for i, ln := range lines {
 		if strings.HasPrefix(ln, "   ask ") && i+1 < len(lines) {
@@ -381,7 +382,8 @@ func TestUsageLayout(t *testing.T) {
 		t.Error("the ask row no longer wraps at 60 columns; pick another wrapped row")
 	}
 
-	// Examples: three or four prompted lines covering start-up, ask, and search with a flag.
+	// Examples: three or four prompted lines covering the engagement harness
+	// (with a flag), a knowledge-base question, and start-up.
 	var cmds []string
 	for _, ln := range strings.Split(section(out, "EXAMPLES", "ENVIRONMENT"), "\n") {
 		if strings.HasPrefix(ln, "   $ blk ") {
@@ -392,7 +394,7 @@ func TestUsageLayout(t *testing.T) {
 		t.Errorf("usage has %d prompted examples, want all of %v", len(cmds), usageExamples)
 	}
 	joined := strings.Join(cmds, "\n")
-	for _, want := range []string{"blk ask ", "blk search ", "--top-k", "blk up"} {
+	for _, want := range []string{"blk engage ", "--roe", "blk ask ", "blk up"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("examples lack %q:\n%s", want, joined)
 		}
@@ -437,10 +439,14 @@ func section(s, start, end string) string {
 	return rest
 }
 
-func TestUsageIsAtMost51Lines(t *testing.T) {
+// The cap keeps the page scannable in one pass. It rose from 51 to 53 when
+// ENGAGE became its own group: the five groups cost two lines, and the three
+// cheaper sources of room are each bounded by a test above (three to four
+// examples, four to five short-list variables, and two verbatim closing lines).
+func TestUsageIsAtMost53Lines(t *testing.T) {
 	out := renderUsage(80)
-	if n := strings.Count(out, "\n"); n > 51 {
-		t.Errorf("usage is %d lines at 80 columns, want at most 51:\n%s", n, out)
+	if n := strings.Count(out, "\n"); n > 53 {
+		t.Errorf("usage is %d lines at 80 columns, want at most 53:\n%s", n, out)
 	}
 }
 

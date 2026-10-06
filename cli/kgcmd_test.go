@@ -25,8 +25,8 @@ func TestKgCommandRegistered(t *testing.T) {
 	if reflect.ValueOf(c.run).Pointer() != reflect.ValueOf(runKg).Pointer() {
 		t.Fatal("kg command run is not runKg")
 	}
-	if c.group != hgAgent {
-		t.Fatalf("kg group = %q, want %q", c.group, hgAgent)
+	if c.group != hgEngage {
+		t.Fatalf("kg group = %q, want %q", c.group, hgEngage)
 	}
 }
 

@@ -484,9 +484,18 @@ func replSlashDesc(name string) string {
 // replGroups lists the commands the plain REPL supports, in the same groups and
 // with the same descriptions as the usage and the TUI. Lines that exist only in
 // the REPL (bare text, /help, /quit) have their own wording.
+// The REPL groups its slash commands by what the operator does in a session, so
+// its titles are its own: the command line's ENGAGE/INTEGRATIONS split does not
+// describe /safe, /auto or /undo.
+const (
+	replGroupAsk     = "ASK AND SEARCH"
+	replGroupAgent   = "AGENT (HERMES)"
+	replGroupSession = "SETUP"
+)
+
 func replGroups() []rowGroup {
 	return []rowGroup{
-		{hgAsk, []helpRow{
+		{replGroupAsk, []helpRow{
 			{"<question>", "type a question with no command to ask it"},
 			{"/ask <q>", replSpecDesc("ask")},
 			{"/search <q>", replSpecDesc("search")},
@@ -505,7 +514,7 @@ func replGroups() []rowGroup {
 			{"/logs [service]", replSpecDesc("logs")},
 			{"/models [verb <name>]", replSlashDesc("models")},
 		}},
-		{hgAgent, []helpRow{
+		{replGroupAgent, []helpRow{
 			{"/hermes <prompt>", replSpecDesc("hermes")},
 			{"/engage [flags] <goal>", replSpecDesc("engage")},
 			{"/engage web <action>", "assess web targets within an engagement"},
@@ -515,7 +524,7 @@ func replGroups() []rowGroup {
 			{"/mode", replSlashDesc("mode")},
 			{"/rag [on|off|question]", replSlashDesc("rag")},
 		}},
-		{hgSetup, []helpRow{
+		{replGroupSession, []helpRow{
 			{"/attach <path|URL>", replSlashDesc("attach")},
 			{"/context [action]", replSlashDesc("context")},
 			{"/queue [action]", replSlashDesc("queue")},

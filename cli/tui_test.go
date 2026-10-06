@@ -1760,7 +1760,7 @@ func TestHelpBlockLayout(t *testing.T) {
 	for _, want := range []string{
 		"reopen a saved session; clear or clear [n] erases",
 		"answer a question, with cited sources",
-		"search the evidence and produce a cited answer",
+		"search the knowledge base and cite what it finds",
 		"start the local services",
 		"stop the local services",
 		"show whether each local service is running",

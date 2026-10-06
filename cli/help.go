@@ -17,15 +17,20 @@ import (
 // that gives help and usage mistakes exit code 2. Dispatch in main.go goes
 // through the registry, so a command cannot exist without a help entry.
 
-// Command groups, in the order the usage lists them.
+// Command groups, in the order the usage lists them. ENGAGE leads because the
+// engagement harness is the product; the knowledge base supplies it. These
+// titles belong to the command line alone: the REPL groups its slash commands
+// differently (repl.go) and the palette differently again (palette.go), because
+// the same word covers a different set on each surface.
 const (
-	hgAsk      = "ASK AND SEARCH"
-	hgServices = "SERVICES"
-	hgAgent    = "AGENT (HERMES)"
-	hgSetup    = "SETUP"
+	hgEngage       = "ENGAGE"
+	hgKnowledge    = "KNOWLEDGE BASE"
+	hgServices     = "SERVICES"
+	hgIntegrations = "INTEGRATIONS"
+	hgSetup        = "SETUP"
 )
 
-var helpGroups = []string{hgAsk, hgServices, hgAgent, hgSetup}
+var helpGroups = []string{hgEngage, hgKnowledge, hgServices, hgIntegrations, hgSetup}
 
 // cmdSpec describes one command. desc is the shared one-line wording used by
 // the usage, per-command help, shell completion, and the plain REPL. A spec
@@ -49,7 +54,7 @@ type cmdSpec struct {
 func commandSpecs() []cmdSpec {
 	return []cmdSpec{
 		{
-			name: "ask", args: "<question...>", group: hgAsk,
+			name: "ask", args: "<question...>", group: hgKnowledge,
 			desc: "answer a question, with cited sources",
 			long: "Uses Hermes by default; --agent NAME selects native answers, --rag forces local grounding, and --web requests a web-only answer. " +
 				"Native auto selects a specialist dynamically; available: " + strings.Join(answerAgentNames(), ", ") + ". " +
@@ -64,8 +69,8 @@ func commandSpecs() []cmdSpec {
 			run: runAsk,
 		},
 		{
-			name: "search", args: "<query...>", group: hgAsk,
-			desc: "search the evidence and produce a cited answer",
+			name: "search", args: "<query...>", group: hgKnowledge,
+			desc: "search the knowledge base and cite what it finds",
 			long: "Retrieves relevant passages, checks whether they answer your query, and synthesizes a cited explanation. " +
 				"With web enabled, the model can request additional internet evidence before answering. " +
 				"Text output needs the local retrieval services and LLM; --json returns raw retrieval results for scripts and evaluations without using the LLM.",
@@ -78,7 +83,7 @@ func commandSpecs() []cmdSpec {
 			run: runSearch,
 		},
 		{
-			name: "web", args: "[action...]", group: hgAsk,
+			name: "web", args: "[action...]", group: hgKnowledge,
 			desc: "search the web and synthesize cited answers",
 			long: "Controls internet search permission with on, off, status, and provider; search produces a cited answer when enabled. " +
 				"Providers are auto, duckduckgo, and tavily, with Tavily credentials read from TAVILY_API_KEY or TAVILY_SETUP_TOKEN.",
@@ -87,7 +92,7 @@ func commandSpecs() []cmdSpec {
 			run:      runWeb,
 		},
 		{
-			name: "sources", group: hgAsk,
+			name: "sources", group: hgKnowledge,
 			desc: "list indexed sources, with chunk counts",
 			long: "Lists each source in the knowledge base with how many chunks it holds, largest first, and the total. " +
 				"Use it to confirm what blk add indexed, or to find the names that blk search --source accepts. " +
@@ -98,7 +103,7 @@ func commandSpecs() []cmdSpec {
 			run:      runSources,
 		},
 		{
-			name: "open", args: "<path>", group: hgAsk,
+			name: "open", args: "<path>", group: hgKnowledge,
 			desc: "open a cited source in your pager or editor",
 			long: "Opens a source that a search or answer cited, in your pager (less unless PAGER is set) or, with --edit, in your editor (EDITOR, then VISUAL, then vi). " +
 				"A relative path is looked up from the current folder first, then from the project folder, so a path printed by blk search works as printed. " +
@@ -113,7 +118,7 @@ func commandSpecs() []cmdSpec {
 			run: runOpen,
 		},
 		{
-			name: "add", args: "<path|url>", group: hgAsk,
+			name: "add", args: "<path|url>", group: hgKnowledge,
 			desc: "add your own files, folders, or a web page",
 			long: "Adds a file, a folder, or a web page to the knowledge base so that ask and search can use it. " +
 				"Adding the same content again only updates what changed. " +
@@ -204,7 +209,7 @@ func commandSpecs() []cmdSpec {
 			run: runLogs,
 		},
 		{
-			name: "hermes", args: "<prompt...>", group: hgAgent,
+			name: "hermes", args: "<prompt...>", group: hgIntegrations,
 			desc: "run one Hermes agent turn with the knowledge base",
 			long: "Runs one turn of the Hermes agent with your prompt and prints its reply. " +
 				"Hermes has the knowledge-base tools (search and answer) plus its own tools, so it suits multi-step tasks. " +
@@ -217,7 +222,7 @@ func commandSpecs() []cmdSpec {
 			run: runHermes,
 		},
 		{
-			name: "gateway", group: hgAgent,
+			name: "gateway", group: hgIntegrations,
 			desc: "set up and start the Hermes gateway for agent mode",
 			long: "Prepares Hermes for agent mode and starts its gateway. " +
 				"It writes API_SERVER_ENABLED and API_SERVER_KEY into ~/.hermes/.env, using your LLM server key (OMLX_API_KEY or OMLX_API), and keeps a backup when a value changes. " +
@@ -228,7 +233,7 @@ func commandSpecs() []cmdSpec {
 			run:      runGateway,
 		},
 		{
-			name: "mcp", group: hgAgent,
+			name: "mcp", group: hgIntegrations,
 			desc: "serve the knowledge base to Hermes over MCP (stdio)",
 			long: "Runs the local MCP server with kb_search, kb_answer, route_skill, engage, and kg. " +
 				"Engagement calls require an operator-owned RoE file named by BLKCHAIN_MCP_ROE_PATH, and the inline roe must match it. " +
@@ -237,7 +242,7 @@ func commandSpecs() []cmdSpec {
 			run:      runMCP,
 		},
 		{
-			name: "analyze", args: "[text...]", group: hgAgent,
+			name: "analyze", args: "[text...]", group: hgIntegrations,
 			desc: "generate schema-validated JSON from the LLM",
 			long: "Sends your subject to the LLM and returns one JSON object matching a chosen offensive-security schema, validated and retried until it conforms. " +
 				"Choose the shape with --schema: target-profile, attack-plan, finding, ioc, or binary-assessment. " +
@@ -252,8 +257,8 @@ func commandSpecs() []cmdSpec {
 			run: runAnalyze,
 		},
 		{
-			name: "engage", args: "<goal...>", group: hgAgent,
-			desc: "run a gated, multi-step engagement against a goal",
+			name: "engage", args: "<goal...>", group: hgEngage,
+			desc: "plan and run a gated, multi-step assessment",
 			long: "Runs an engagement under one operator policy that sets target scope, actions, caps, and an isolated runner. " +
 				"Auto runs permitted actions without per-action approval; --safe asks for interactive approval. " +
 				"The workspace records policy, evidence, transcripts, and reports, and --resume continues interrupted work under the same policy.",
@@ -266,7 +271,7 @@ func commandSpecs() []cmdSpec {
 			run: runEngage,
 		},
 		{
-			name: "kg", group: hgAgent,
+			name: "kg", group: hgEngage,
 			desc: "query the engagement knowledge graph",
 			long: "Queries the engagement knowledge graph: a read-only, in-process projection of the engagement store that correlates tasks, assets, and evidence as nodes and edges. " +
 				"With --node it shows one node's neighborhood; with --type it filters to task, asset, or evidence; with neither it prints the whole graph. " +
@@ -878,14 +883,14 @@ func printCommandHelp(w io.Writer, c cmdSpec) {
 
 // usageTagline follows the README's own description of blkChain: local RAG
 // over offensive-security knowledge. It stays under 45 characters.
-const usageTagline = "local RAG over offensive-security knowledge"
+const usageTagline = "gated offensive-security engagement harness"
 
 // usageExamples are the top-level EXAMPLES: starting and checking the
 // services, ask, and search with a flag after the query.
 var usageExamples = []string{
-	"blk up && blk doctor",
+	`blk engage --roe ROE.md "map the staging web app"`,
 	`blk ask "how do I chain SSRF to RCE?"`,
-	`blk search "SSRF to cloud metadata" --top-k 10`,
+	"blk up && blk doctor",
 }
 
 // usageEnvShort names the variables the top-level ENVIRONMENT shows; blk help
