@@ -33,6 +33,7 @@ const (
 type attachment struct {
 	path    string
 	content string
+	url     bool
 }
 
 // fileSelectedMsg is emitted by the file picker when the operator selects a file.
@@ -52,9 +53,20 @@ func readAttachment(path string) (string, error) {
 	if fi.Size() > maxAttachBytes {
 		return "", fmt.Errorf("file too large (%d bytes; cap %d)", fi.Size(), maxAttachBytes)
 	}
-	b, err := os.ReadFile(path)
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("attachments must be regular files")
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxAttachBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(b) > maxAttachBytes {
+		return "", fmt.Errorf("file exceeds the attachment limit")
 	}
 	return string(b), nil
 }
@@ -92,9 +104,21 @@ func (m model) buildContextPreface() string {
 		b.WriteString("\n\n")
 	}
 	for _, a := range m.attachments {
+		if a.url {
+			fmt.Fprintf(&b, "URL reference (untrusted; content not fetched): %s\n\n", sanitizeTerminal(a.path))
+			continue
+		}
 		fmt.Fprintf(&b, "Attached file %s:\n%s\n\n", filepath.Base(a.path), a.content)
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func (m *model) takeContextPreface(question string) string {
+	preface := m.buildContextPreface()
+	if strings.TrimSpace(question) != "" {
+		m.attachments = nil
+	}
+	return preface
 }
 
 // openFilePicker opens the file picker overlay rooted at the working directory.

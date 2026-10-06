@@ -12,14 +12,15 @@ import (
 // from the JSONL index (session.go) by id so /history shows the same friendly
 // names as /resume; a session with no indexed title falls back to its id.
 
-func mergeHistoryMetas(hs []histstore.SessionMeta, titles map[string]string) []sessionMeta {
+func mergeHistoryMetas(hs []histstore.SessionMeta, details map[string]sessionMeta) []sessionMeta {
 	out := make([]sessionMeta, 0, len(hs))
 	for _, h := range hs {
-		title := titles[h.ID]
-		if title == "" {
-			title = h.ID
+		meta := details[h.ID]
+		meta.ID, meta.MsgCount = h.ID, h.Count
+		if meta.Title == "" {
+			meta.Title = h.ID
 		}
-		out = append(out, sessionMeta{ID: h.ID, Title: title, MsgCount: h.Count})
+		out = append(out, meta)
 	}
 	return out
 }

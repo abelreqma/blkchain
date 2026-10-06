@@ -10,8 +10,8 @@ import (
 )
 
 // palette.go is the slash-command autocomplete palette: a small
-// custom panel that floats ABOVE the input while the draft is a slash command in
-// progress ("/foo" with no space yet). It is intentionally NOT a bubbles/list so
+// custom panel that floats ABOVE the input while completing a command or argument.
+// It is intentionally NOT a bubbles/list so
 // it can anchor above the input rather than replace it. The matching and filter
 // logic is pure so it can be unit tested.
 
@@ -79,7 +79,9 @@ func slashCommands() []command {
 		{"history", "[clear [n]]", "reopen a saved session; clear or clear [n] erases", groupSession},
 		{"model", "", "pick the model and reasoning level (also ctrl+p)", groupSession},
 		{"title", "<name>", "rename the current session", groupSession},
-		{"attach", "", "attach a file to your next question (also @)", groupSession},
+		{"attach", "[path|URL]", "attach a file or URL reference to your next question (also @)", groupSession},
+		{"context", "[action]", "review or remove pending files and URL references", groupSession},
+		{"queue", "[action]", "review, edit, pause, or remove queued questions", groupSession},
 		{"editor", "", "write your question in $EDITOR (also ctrl+g)", groupSession},
 		{"init", "", "load ./.blk/context.md as context for this session", groupSession},
 		{"cost", "", "show the tokens and time of the last answer", groupSession},
@@ -145,10 +147,12 @@ func isExactCommand(name string) bool {
 // paletteItem is one filtered row: the command plus the byte positions in its
 // name that matched the query (for bolding).
 type paletteItem struct {
-	name string
-	args string
-	desc string
-	pos  []int
+	name  string
+	value string
+	label string
+	args  string
+	desc  string
+	pos   []int
 }
 
 // palette is the transient autocomplete state. open drives whether the panel
@@ -238,13 +242,10 @@ func filterCommands(cmds []command, query string) []paletteItem {
 	return items
 }
 
-// refreshPalette recomputes the palette from the current draft. The palette is
-// active only for a single-line slash command still being typed ("/foo" with no
-// space). Any space (args mode), a newline, a non-slash draft, or an Esc dismissal
-// closes it.
+// refreshPalette completes single-line slash commands and validated local arguments.
 func (m model) refreshPalette() model {
 	val := strings.TrimLeft(m.ta.Value(), " ")
-	active := m.overlay == nil && strings.HasPrefix(val, "/") && !strings.ContainsAny(val, " \t\n")
+	active := m.overlay == nil && strings.HasPrefix(val, "/") && !strings.ContainsAny(val, "\t\n")
 	if !active {
 		m.pal.open = false
 		m.pal.hidden = false
@@ -255,6 +256,9 @@ func (m model) refreshPalette() model {
 	}
 	query := strings.TrimPrefix(val, "/")
 	items := filterCommands(slashCommands(), query)
+	if strings.Contains(val, " ") {
+		items = m.argumentSuggestions(val)
+	}
 	m.pal.items = items
 	m.pal.query = query
 	m.pal.open = len(items) > 0
@@ -272,8 +276,13 @@ func (m model) completeSelected() model {
 		return m
 	}
 	it := m.pal.items[m.pal.selected]
-	m.setDraft("/" + it.name + " ")
+	if it.value != "" {
+		m.setDraft(it.value)
+	} else {
+		m.setDraft("/" + it.name + " ")
+	}
 	m.ta.CursorEnd()
+	m.pal = palette{}
 	return m.refreshPalette()
 }
 
@@ -303,7 +312,8 @@ func (m model) paletteKey(msg tea.KeyMsg) (model, tea.Cmd, bool) {
 		return m, nil, true
 	case "enter":
 		name := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(m.ta.Value()), "/"))
-		if isExactCommand(name) {
+		it := m.pal.items[m.pal.selected]
+		if isExactCommand(name) || (it.value != "" && strings.TrimSpace(m.ta.Value()) == strings.TrimSpace(it.value)) {
 			m.pal.open = false
 			m.pal.hidden = false
 			tm, cmd := m.submit()
@@ -386,9 +396,12 @@ func paletteMoreLine(more, width int) string {
 // paletteNameWidth is the display width of a row's name column: "/name" plus the
 // argument hint when there is one.
 func paletteNameWidth(it paletteItem) int {
-	w := 1 + len(it.name)
+	if it.label != "" {
+		return lipgloss.Width(it.label)
+	}
+	w := 1 + lipgloss.Width(it.name)
 	if it.args != "" {
-		w += 1 + len(it.args)
+		w += 1 + lipgloss.Width(it.args)
 	}
 	return w
 }
@@ -407,6 +420,9 @@ func paletteRow(it paletteItem, selected bool, nameW, width int) string {
 		base = Key
 	}
 	name := "/" + boldMatch(it.name, it.pos, base)
+	if it.label != "" {
+		name = base.Render(ellipsize(it.label, max(width-2, 1)))
+	}
 	if it.args != "" {
 		name += " " + Meta.Render(it.args)
 	}

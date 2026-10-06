@@ -243,8 +243,37 @@ Unicode output renders emoji shortcodes such as `:thumbsup:` outside code blocks
 status ribbon uses standard Nerd Font icons. Terminals without that font use Unicode or ASCII
 fallbacks with `BLKCHAIN_POWERLINE=0` or `NO_COLOR=1`, respectively.
 
-The plain REPL supports `/history`, `/editor`, `/init`, `/copy`, and `/clear`. Both
-terminal interfaces support `/engage <goal>`, `/auto`, `/safe`, and
+The plain REPL supports `/history` to list saved sessions and `/history <number>` to reopen one,
+`/editor` to prepare a multiline draft, `/init` to reload project context, `/copy`, and `/clear`.
+`/clear` starts a new conversation and preserves saved history. `/undo` removes the last completed
+exchange from replay and the memory sent to subsequent native answers. `/help <command>` also
+describes interactive-only commands.
+Undo rejects inconsistent saved transcript and memory stores without changing either; `/clear`
+starts a fresh session while preserving those records.
+
+In the TUI, Tab completes slash commands and supported arguments, model names, source numbers, and file paths.
+Completion only fills the draft. It does not submit a question, load a model, or fetch a URL.
+The history picker supports `/` title filtering and a last-question preview.
+
+Use `/attach <path|URL>` or `/context add <path|URL>` to prepare the next question. `/context` opens
+the review panel; Enter previews an item and `d` removes it. The plain REPL provides the same
+actions as `/context list`, `/context preview N`, `/context remove N`, and `/context clear`.
+HTTP(S) links are detected in drafts with a URL pattern and validated with the URL parser.
+They remain references; their contents are not fetched. URL credentials are rejected. Pending
+context is capped at 16 items and 128 KiB, with 64 KiB per attached file. In the CLI, repeat
+`--context` to add files or links: `blk ask --context notes.txt --context https://example.org/notes "compare these notes"`.
+
+`/queue` pauses pending questions and opens their review panel while the active turn continues.
+Enter moves the selected question into the draft; `d` removes it and `r` resumes the queue.
+Explicit forms are `/queue list`, `/queue edit N`, `/queue remove N`, `/queue pause`, `/queue resume`,
+and `/queue clear`. The queue is capped at 16 questions and 256 KiB. An error or cancellation
+preserves queued questions and pauses automatic submission until `/queue resume`.
+`/open` with no argument opens a source picker; `p` previews bounded text and Enter uses the
+existing viewer. Web sources remain URL references. `/copy` copies the last answer.
+
+Unknown slash commands show an error; commands that require a picker identify the interactive TUI requirement.
+
+Both terminal interfaces support `/engage <goal>`, `/auto`, `/safe`, and
 `/transcript off|important|full`. Auto is the default: code runs actions permitted
 by the operator's `ROE.md` without per-action prompts. Safe asks for approval
 through an interactive terminal. `blk engage --roe ROE.md "assess the lab"` uses

@@ -18,7 +18,7 @@ func TestMergeHistoryMetasUsesTitlesAndPreservesOrder(t *testing.T) {
 		{ID: "s2", Count: 1},
 		{ID: "s1", Count: 3},
 	}
-	titles := map[string]string{"s1": "first session"}
+	titles := map[string]sessionMeta{"s1": {Title: "first session"}}
 
 	got := mergeHistoryMetas(hs, titles)
 

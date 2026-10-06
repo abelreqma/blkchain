@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +25,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
@@ -133,9 +133,24 @@ func (m model) footerKeys() footerKeyMap {
 			if ov.confirm {
 				return footerKeyMap{short: []key.Binding{hint("y", "confirm delete"), hint("ctrl+d", "quit"), hint("any other key", "cancel")}, drop: confirmDrop}
 			}
-			return footerKeyMap{short: []key.Binding{hint("1-9", "open"), hint("up/down", "move"), hint("enter", "open"), hint("d then y", "delete"), closeKey}}
+			if ov.list.FilterState() == list.Filtering {
+				return footerKeyMap{short: []key.Binding{hint("type", "filter"), hint("enter", "apply"), hint("esc", "back")}}
+			}
+			return footerKeyMap{short: []key.Binding{hint("1-9/enter", "open"), hint("up/down", "move"), hint("/", "filter"), hint("d then y", "delete"), closeKey}}
 		case modelPicker:
 			return footerKeyMap{short: []key.Binding{hint("up/down", "choose"), hint("tab/left/right", "switch column"), hint("enter", "apply"), closeKey}}
+		case contextPicker:
+			if ov.preview {
+				return footerKeyMap{short: []key.Binding{hint("esc", "back")}}
+			}
+			return footerKeyMap{short: []key.Binding{hint("up/down", "move"), hint("enter", "preview"), hint("d", "remove"), hint("esc", "close")}, drop: []int{0, 2, 3, 1}}
+		case queuePicker:
+			return footerKeyMap{short: []key.Binding{hint("up/down", "move"), hint("enter", "edit"), hint("d", "remove"), hint("r", "resume"), hint("esc", "close")}, drop: []int{0, 2, 3, 4, 1}}
+		case sourcePicker:
+			if ov.preview != "" {
+				return footerKeyMap{short: []key.Binding{hint("esc", "back")}}
+			}
+			return footerKeyMap{short: []key.Binding{hint("up/down", "move"), hint("p", "preview"), hint("enter", "open"), hint("esc", "close")}, drop: []int{0, 1, 3, 2}}
 		case clarifyPicker:
 			if ov.typing {
 				return footerKeyMap{short: []key.Binding{hint("enter", "submit"), hint("esc", "back")}}
@@ -160,7 +175,20 @@ func (m model) footerKeys() footerKeyMap {
 	case m.rsearch.open:
 		return footerKeyMap{short: []key.Binding{hint("type", "search"), hint("ctrl+r", "next"), hint("enter", "accept"), hint("esc/ctrl+c", "cancel")}}
 	case m.pal.open:
-		return footerKeyMap{short: []key.Binding{hint("up/down", "move"), hint("tab", "complete"), hint("enter", "run"), closeKey}}
+		enter := "complete"
+		name := strings.TrimPrefix(strings.TrimSpace(m.ta.Value()), "/")
+		if isExactCommand(strings.ToLower(name)) {
+			enter = "run"
+		} else if m.pal.selected >= 0 && m.pal.selected < len(m.pal.items) {
+			value := m.pal.items[m.pal.selected].value
+			if value != "" && strings.TrimSpace(value) == strings.TrimSpace(m.ta.Value()) {
+				enter = "run"
+				if m.working && isQueuedTurn(m.ta.Value()) {
+					enter = "queue"
+				}
+			}
+		}
+		return footerKeyMap{short: []key.Binding{hint("up/down", "move"), hint("tab", "complete"), hint("enter", enter), closeKey}}
 	case m.working:
 		short := []key.Binding{m.keys.QueueSubmit, m.keys.CancelTurn}
 		if len(m.queue) > 0 {
@@ -173,6 +201,9 @@ func (m model) footerKeys() footerKeyMap {
 			short = append(short, hint(m.keys.HistPrev.Help().Key+"/"+m.keys.HistNext.Help().Key, "scroll"))
 		}
 		return footerKeyMap{short: short}
+	}
+	if strings.HasPrefix(strings.TrimSpace(m.ta.Value()), "/") {
+		return footerKeyMap{short: []key.Binding{hint("enter", "run command"), m.keys.Help, m.keys.Quit}}
 	}
 	// Idle: ctrl+j newline goes first, then enter ask, then ? keys, which
 	// opens the full key list, and ctrl+d quit last.
@@ -461,17 +492,19 @@ type model struct {
 	// Ctrl-C double-press; rsearch is the Ctrl-R reverse history search;
 	// attachments are @file contents to inject into the next prompt; ambient is the
 	// /init .blk/context.md context; lastCost is the last turn's usage for /cost.
-	pal          palette
-	queue        []string
-	lastCtrlC    time.Time
-	quitArmed    string // "turn" or "draft" after one ctrl+d, awaiting the confirming press
-	reduceMotion bool   // BLK_REDUCE_MOTION: static working line, no animated spinner
-	tickGen      int    // generation of the current turn's once-per-second ticker
-	rsearch      reverseSearch
-	attachments  []attachment
-	ambient      string
-	lastCost     turnCost
-	lastCostSet  bool
+	pal              palette
+	completionModels []string
+	queue            []string
+	queuePaused      bool
+	lastCtrlC        time.Time
+	quitArmed        string // "turn" or "draft" after one ctrl+d, awaiting the confirming press
+	reduceMotion     bool   // BLK_REDUCE_MOTION: static working line, no animated spinner
+	tickGen          int    // generation of the current turn's once-per-second ticker
+	rsearch          reverseSearch
+	attachments      []attachment
+	ambient          string
+	lastCost         turnCost
+	lastCostSet      bool
 
 	// Session persistence. sess is the current transcript
 	// handle (nil if persistence is unavailable); sessTitle mirrors its title for
@@ -578,7 +611,7 @@ type model struct {
 
 func initialModel() model {
 	ta := textarea.New()
-	ta.Placeholder = randomPlaceholder()
+	ta.Placeholder = inputPlaceholder()
 	ta.Prompt = Glyph(GlyphPrompt) + " "
 	ta.CharLimit = inputCharLimit
 	ta.MaxHeight = 0
@@ -657,7 +690,7 @@ func (m model) Init() tea.Cmd {
 		start = append(start, tea.Println("   "+Meta.Render("loaded .blk/context.md")))
 	}
 	start = append(start, m.healthCmd())
-	return tea.Batch(textarea.Blink, tea.Sequence(start...), resolveModelCmd)
+	return tea.Batch(textarea.Blink, tea.Sequence(start...), resolveModelCmd, completionModelsCmd)
 }
 
 // modelResolvedMsg carries the model a rag turn uses when none is picked.
@@ -688,6 +721,7 @@ func resolveModelCmd() tea.Msg {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.pauseQueueAfterMessage(msg)
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -772,6 +806,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Esc cancels a running turn like ctrl+c, but never arms the ctrl+c
 			// double-press quit.
 			if m.working {
+				m.queuePaused = true
 				if m.cancel != nil {
 					m.cancel()
 				}
@@ -1168,6 +1203,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case modelResolvedMsg:
 		return m.resolveModel(string(msg)), nil
+	case completionModelsMsg:
+		m.completionModels = append([]string(nil), msg...)
+		return m.refreshPalette(), nil
 
 	case modelsDataMsg:
 		// A list that loads before the model was resolved resolves it now, so
@@ -1334,20 +1372,69 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err != nil {
 			return m, tea.Println(styleErr(fmt.Errorf("attach: %w", err)))
 		}
-		m.attachments = append(m.attachments, attachment{path: msg.path, content: content})
+		if err := m.appendPending(attachment{path: msg.path, content: content}); err != nil {
+			return m, tea.Println(styleErr(err))
+		}
 		chip := " " + OK.Render(Glyph(GlyphOK)) + " " + Meta.Render("attached "+sanitizeTerminal(filepath.Base(msg.path)))
 		return m, tea.Println(chip)
+	case contextChangedMsg:
+		switch msg.kind {
+		case "pending":
+			for i, a := range m.attachments {
+				if a.path == msg.path {
+					m.attachments = append(m.attachments[:i:i], m.attachments[i+1:]...)
+					break
+				}
+			}
+		case "project":
+			m.ambient = ""
+		case "draft":
+			m.setDraft(strings.ReplaceAll(m.ta.Value(), msg.path, ""))
+		}
+		if p, ok := m.overlay.(contextPicker); ok {
+			p.m = m
+			p.m.overlay = nil
+			p.selected = min(p.selected, max(len(p.rows())-1, 0))
+			m.overlay = p
+		}
+		return m, nil
+	case queueChangedMsg:
+		text, err := m.queueAction(msg.action)
+		if err != nil {
+			return m, tea.Println(styleErr(err))
+		}
+		if strings.HasPrefix(msg.action, "edit ") || msg.action == "resume" {
+			m.overlay = nil
+		} else {
+			m.overlay = queuePicker{items: append([]string(nil), m.queue...)}
+		}
+		cmd := tea.Println(text)
+		if !m.queuePaused && !m.working && len(m.queue) > 0 {
+			cmd = tea.Batch(cmd, func() tea.Msg { return dequeueMsg{} })
+		}
+		return m, cmd
+	case sourceSelectedMsg:
+		m.overlay = nil
+		selected := m
+		selected.openTargets = []openTarget{msg.target}
+		return m, selected.openCmd("1")
 
 	case editorDoneMsg:
 		return m.applyEditorResult(msg)
 
 	case dequeueMsg:
-		if m.working || len(m.queue) == 0 {
+		if m.working || m.queuePaused || len(m.queue) == 0 {
 			return m, nil
 		}
 		next := m.queue[0]
 		m.queue = m.queue[1:]
-		return m.dispatchInput(next)
+		nm, cmd := m.dispatchInput(next)
+		m = nm.(model)
+		if !m.working {
+			m.queue = append([]string{next}, m.queue...)
+			m.queuePaused = true
+		}
+		return m, cmd
 	}
 
 	if m.overlay != nil {
@@ -1394,7 +1481,7 @@ func (m *model) markLLMDown() {
 // without finish, so a Ctrl-C or a failed turn never auto-submits the next
 // queued prompt; the queue is left intact either way.
 func (m model) finish(cmd tea.Cmd) tea.Cmd {
-	if len(m.queue) == 0 {
+	if len(m.queue) == 0 || m.queuePaused {
 		return cmd
 	}
 	return tea.Batch(cmd, func() tea.Msg { return dequeueMsg{} })
@@ -1418,6 +1505,7 @@ func (m model) handleCancel() (tea.Model, tea.Cmd) {
 	case ccQuit:
 		return m, tea.Quit
 	case ccCancel:
+		m.queuePaused = true
 		if m.cancel != nil {
 			m.cancel()
 		}
@@ -1668,6 +1756,9 @@ func (m model) applyModel(modelID, reasoning string) (tea.Model, tea.Cmd) {
 // openSessionInto loads a saved session's transcript, replays it into scrollback
 // (styled like live turns), and makes it the current session.
 func (m model) openSessionInto(id string) (tea.Model, tea.Cmd) {
+	if m.working {
+		return m, tea.Println(styleErr(fmt.Errorf("cancel the current turn before switching sessions")))
+	}
 	recs, err := loadMessages(id)
 	if err != nil {
 		return m, tea.Println(styleErr(fmt.Errorf("resume: %w", err)))
@@ -1700,6 +1791,9 @@ func (m model) openSessionInto(id string) (tea.Model, tea.Cmd) {
 // to the langchaingo memory for a session that never wrote JSONL, such as an
 // ingested engage run.
 func (m model) openHistorySessionInto(id string) (tea.Model, tea.Cmd) {
+	if m.working {
+		return m, tea.Println(styleErr(fmt.Errorf("cancel the current turn before switching sessions")))
+	}
 	if sessionExists(id) {
 		return m.openSessionInto(id)
 	}
@@ -1764,6 +1858,12 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	if q == "" {
 		return m, nil
 	}
+	queued := m.working && isQueuedTurn(q)
+	if queued {
+		if err := m.enqueueQuestion(q); err != nil {
+			return m, tea.Println(styleErr(err))
+		}
+	}
 	m.ta.Reset()
 	m.draftTruncated, m.draftTop, m.draftVertical = false, 0, false
 	m.ta.SetHeight(1)
@@ -1779,14 +1879,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	// Queue-while-busy: while a turn runs, a plain question (or a
 	// turn-starting slash command) is queued FIFO instead of erroring; other slash
 	// commands run immediately (mode switch, pickers, /help, /clear, ...).
-	verb, arg := parseInput(q)
-	turn := isTurnVerb(verb)
-	if verb == "web" {
-		c, err := parseWebCommand(strings.Fields(arg))
-		turn = err == nil && c.action == "search"
-	}
-	if m.working && turn {
-		m.queue = append(m.queue, q)
+	if queued {
 		note := "   " + Meta.Render(fmt.Sprintf("%s queued (%d in queue)", Glyph(GlyphBullet), len(m.queue)))
 		return m, tea.Println(note)
 	}
@@ -1882,7 +1975,9 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			// input (dequeueMsg replays it through dispatchInput). Otherwise set
 			// the one-shot and run it as an ask.
 			if m.working {
-				m.queue = append(m.queue, q)
+				if err := m.enqueueQuestion(q); err != nil {
+					return m, tea.Println(styleErr(err))
+				}
 				return m, tea.Println("   " + Meta.Render(fmt.Sprintf("%s queued (%d in queue)", Glyph(GlyphBullet), len(m.queue))))
 			}
 			m.forceRag = true
@@ -1913,16 +2008,16 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		if err != nil {
 			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("history: %w", err))))
 		}
-		titles := map[string]string{}
+		titles := map[string]sessionMeta{}
 		if metas, err := listSessions(); err == nil {
 			for _, meta := range metas {
-				titles[meta.ID] = meta.Title
+				titles[meta.ID] = meta
 			}
 		}
 		hp := newHistoryPicker(mergeHistoryMetas(hs, titles), m.sessID(), m.width)
 		hp.store = m.hist
 		hp.titles = titles
-		m.overlay = hp
+		m.overlay = hp.refreshPreview()
 		return m, tea.Println(echo)
 	case "model":
 		return m, tea.Batch(tea.Println(echo), m.openModelPickerCmd())
@@ -1949,7 +2044,40 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		_ = savePrefs(m.prefs)
 		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render(vizNote(on))))
 	case "attach":
+		if strings.TrimSpace(arg) != "" {
+			if err := m.addPendingContext(arg); err != nil {
+				return m, tea.Println(styleErr(err))
+			}
+			return m, tea.Println(Meta.Render(m.contextText()))
+		}
 		return m.openFilePickerEcho(echo)
+	case "context":
+		if strings.TrimSpace(arg) == "" {
+			m.pal = palette{}
+			m.overlay = contextPicker{m: m}
+			return m, tea.Println(echo)
+		}
+		text, err := m.contextAction(arg)
+		if err != nil {
+			return m, tea.Println(styleErr(err))
+		}
+		return m, tea.Println(text)
+	case "queue":
+		if strings.TrimSpace(arg) == "" {
+			m.queuePaused = true
+			m.pal = palette{}
+			m.overlay = queuePicker{items: append([]string(nil), m.queue...)}
+			return m, tea.Println(echo)
+		}
+		text, err := m.queueAction(arg)
+		if err != nil {
+			return m, tea.Println(styleErr(err))
+		}
+		cmd := tea.Println(text)
+		if !m.queuePaused && !m.working && len(m.queue) > 0 {
+			cmd = tea.Batch(cmd, func() tea.Msg { return dequeueMsg{} })
+		}
+		return m, cmd
 	case "editor":
 		return m, tea.Sequence(tea.Println(echo), m.editorCmd())
 	case "init":
@@ -1963,6 +2091,11 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 	case "title":
 		return m.retitle(echo, arg)
 	case "open":
+		if strings.TrimSpace(arg) == "" {
+			m.pal = palette{}
+			m.overlay = sourcePicker{items: append([]openTarget(nil), m.openTargets...)}
+			return m, tea.Println(echo)
+		}
 		return m, tea.Sequence(tea.Println(echo), m.openCmd(arg))
 	case "hermes":
 		if strings.TrimSpace(arg) == "" {
@@ -2261,6 +2394,9 @@ func (m model) inputView(w, budget int) string {
 	}
 	if n := m.limitNotice(); n != "" && left >= 1 {
 		return draft + "\n" + n
+	}
+	if summary := m.contextSummary(); summary != "" && left >= 1 {
+		return summary + "\n" + draft
 	}
 	return draft
 }
@@ -2762,26 +2898,20 @@ func ensureFirst(models []string, current string) []string {
 // undo appends a tombstone to the session (so replay skips the last exchange) and
 // notes that already-committed scrollback lines can't be unprinted.
 func (m model) undo(echo string) (tea.Model, tea.Cmd) {
-	if m.sess == nil {
-		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render("undo: no active session")))
-	}
-	if err := m.sess.appendTurn(turnRecord{Role: roleTombstone, Mode: m.mode}); err != nil {
+	if err := m.undoConversation(); err != nil {
 		return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("undo: %w", err))))
 	}
-	m.lastAnswer = ""
-	m.openTargets = nil
 	note := "   " + Meta.Render(Glyph(GlyphArrow)+" undid the last turn (dropped from this session; printed lines remain in scrollback)")
 	return m, tea.Sequence(tea.Println(echo), tea.Println(note))
 }
 
-// clearScrollback resets the model's notion of the transcript and prints a
-// separator + muted note. It can't unprint committed tea.Println lines (they are
-// real terminal scrollback); this is the documented limitation.
+// clearScrollback starts a fresh conversation and preserves terminal scrollback.
 func (m model) clearScrollback(echo string) (tea.Model, tea.Cmd) {
-	m.lastAnswer = ""
-	m.openTargets = nil
+	if err := m.resetConversation(); err != nil {
+		return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("clear: %w", err))))
+	}
 	sep := " " + RuleS.Render(strings.Repeat(barRune(), clamp(m.renderWidth(), 20, 60)))
-	note := "   " + Meta.Render("cleared (lines above stay in the terminal's own scrollback)")
+	note := "   " + Meta.Render("started a fresh session (earlier output stays in scrollback)")
 	return m, tea.Sequence(tea.Println(echo), tea.Println(sep), tea.Println(note))
 }
 
@@ -3173,7 +3303,14 @@ func (m model) queuedIndicator() string {
 		return ""
 	}
 	if plCurrentTier() != plASCII {
-		return fmt.Sprintf("\U0001f4e5 %d queued", n)
+		label := fmt.Sprintf("\U0001f4e5 %d queued", n)
+		if m.queuePaused {
+			label += " (paused)"
+		}
+		return label
+	}
+	if m.queuePaused {
+		return fmt.Sprintf("(%d queued, paused)", n)
 	}
 	return fmt.Sprintf("(%d queued)", n)
 }
@@ -3551,6 +3688,24 @@ func helpResponse(arg string, width int) string {
 	if c, ok := lookupCommand(name); ok {
 		return strings.TrimRight(renderCommandHelp(c, width), "\n")
 	}
+	if c, ok := slashCommand(strings.TrimPrefix(strings.ToLower(name), "/")); ok {
+		usage := "/" + c.name
+		if c.args != "" {
+			usage += " " + c.args
+		}
+		text := " " + H2.Render(usage) + "\n" + wrapIndent(c.desc, 3, width)
+		examples := map[string]string{
+			"context": "/context add PATH|URL; /context preview N; /context remove N; /context clear. Links are references, not fetched content.",
+			"queue":   "/queue list; /queue edit N; /queue remove N; /queue pause; /queue resume; /queue clear.",
+			"attach":  "/attach PATH or /attach URL prepares the next question. With no argument, the TUI opens a file picker.",
+			"history": "/history reopens a conversation. In the picker, / filters titles. /history clear N removes one saved conversation.",
+			"model":   "/model chooses the model and reasoning for this session. /models manages saved visibility and retrieval settings.",
+		}
+		if detail := examples[c.name]; detail != "" {
+			text += "\n\n" + wrapIndent(detail, 3, width)
+		}
+		return text
+	}
 	return styleErr(unknownCommand(name))
 }
 
@@ -3880,12 +4035,6 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
-var placeholders = []string{
-	"Ask the knowledge base  (Enter to ask, ctrl+j newline, /help)",
-	"What do you want to know?  (/search to find chunks, /help)",
-	"Type a question, or /help for commands",
-}
-
-func randomPlaceholder() string {
-	return placeholders[rand.Intn(len(placeholders))]
+func inputPlaceholder() string {
+	return "Ask a question or /help"
 }

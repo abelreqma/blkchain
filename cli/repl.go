@@ -14,6 +14,8 @@ import (
 	"blkchain/cli/internal/histstore"
 	"blkchain/cli/internal/retrieval"
 	"blkchain/cli/internal/secgate"
+
+	"github.com/charmbracelet/bubbles/textarea"
 )
 
 var runPlainEngage func([]string) error
@@ -62,7 +64,7 @@ func replPrompt() string {
 func plainREPL() error {
 	var last []retrieval.Result
 	mode := "rag"
-	pm := model{cfg: loadConfig(), mode: mode, hist: histstore.OpenDefault(), engageMode: secgate.Auto, engageTranscript: "important"}
+	pm := model{cfg: loadConfig(), mode: mode, hist: histstore.OpenDefault(), engageMode: secgate.Auto, engageTranscript: "important", ta: textarea.New()}
 	pm.sess, _ = newSession()
 	pm.ambient, _ = loadInitContext()
 	if pm.hist != nil {
@@ -132,7 +134,11 @@ func plainREPL() error {
 		case "cost":
 			fmt.Println(pm.costLine())
 		case "help", "?":
-			replHelp()
+			if strings.TrimSpace(rest) == "" {
+				replHelp()
+			} else {
+				fmt.Println(helpResponse(rest, terminalWidth()))
+			}
 		case "health":
 			printErr(runHealth(nil))
 		case "up", "down", "status":
@@ -177,6 +183,28 @@ func plainREPL() error {
 		case "auto":
 			pm.engageMode = secgate.Auto
 			fmt.Println(Meta.Render("engagement mode: auto"))
+		case "attach":
+			if strings.TrimSpace(rest) == "" {
+				printErr(fmt.Errorf("attach: provide a file path or HTTP(S) URL"))
+			} else if err := pm.addPendingContext(rest); err != nil {
+				printErr(err)
+			} else {
+				fmt.Println(pm.contextText())
+			}
+		case "context":
+			text, err := pm.contextAction(rest)
+			if err != nil {
+				printErr(err)
+			} else {
+				fmt.Println(text)
+			}
+		case "queue":
+			text, err := pm.queueAction(rest)
+			if err != nil {
+				printErr(err)
+			} else {
+				fmt.Println(text)
+			}
 		case "engage":
 			parts := strings.Fields(rest)
 			if len(parts) > 0 && parts[0] == "web" {
@@ -211,11 +239,24 @@ func plainREPL() error {
 				fmt.Println(Meta.Render("no .blk/context.md in this directory"))
 			}
 		case "clear":
-			draft, convo, last = "", nil, nil
-			pm.lastAnswer, pm.attachments = "", nil
-			pm.lastCostSet = false
-			pm.sess, _ = newSession()
-			fmt.Println(Meta.Render("started a fresh session"))
+			if err := pm.resetConversation(); err != nil {
+				printErr(err)
+			} else {
+				draft, convo, last = "", nil, nil
+				fmt.Println(Meta.Render("started a fresh session"))
+			}
+		case "undo":
+			if err := pm.undoConversation(); err != nil {
+				printErr(err)
+			} else {
+				if pm.hist != nil {
+					convo = pm.conversationHistory()
+				} else {
+					convo = convo[:max(len(convo)-2, 0)]
+				}
+				last = nil
+				fmt.Println(Meta.Render("undid the last question and answer"))
+			}
 		case "mode":
 			if mode == "agent" {
 				mode = "rag"
@@ -233,7 +274,7 @@ func plainREPL() error {
 				_ = savePrefs(p)
 				fmt.Println(Meta.Render("rag " + boolOnOff(on)))
 			} else if q != "" {
-				ans, err := plainAsk(mode, q, &rc, convo, pm.buildContextPreface(), true)
+				ans, err := plainAsk(mode, q, &rc, convo, pm.takeContextPreface(q), true)
 				printErr(err)
 				recordConvo(q, ans)
 			} else {
@@ -245,16 +286,16 @@ func plainREPL() error {
 		case "search", "s":
 			query := rest
 			if !strings.HasPrefix(cmd, "/") && strings.EqualFold(cmd, "search") {
-				ans, err := plainAsk(mode, line, &rc, convo, pm.buildContextPreface(), false)
+				ans, err := plainAsk(mode, line, &rc, convo, pm.takeContextPreface(line), false)
 				printErr(err)
 				recordConvo(line, ans)
 				break
 			}
-			ans, results := replSearch(query, last, &rc, convo, pm.buildContextPreface())
+			ans, results := replSearch(query, last, &rc, convo, pm.takeContextPreface(query))
 			last = results
 			recordConvo(query, ans)
 		case "ask", "a":
-			ans, err := plainAsk(mode, rest, &rc, convo, pm.buildContextPreface(), false)
+			ans, err := plainAsk(mode, rest, &rc, convo, pm.takeContextPreface(rest), false)
 			printErr(err)
 			recordConvo(rest, ans)
 		case "hermes":
@@ -268,7 +309,7 @@ func plainREPL() error {
 			}
 			// Bare input with no recognized verb is an ask (matches the TUI); in
 			// agent mode it runs the hermes agent instead.
-			ans, err := plainAsk(mode, line, &rc, convo, pm.buildContextPreface(), false)
+			ans, err := plainAsk(mode, line, &rc, convo, pm.takeContextPreface(line), false)
 			printErr(err)
 			recordConvo(line, ans)
 		}
@@ -465,6 +506,10 @@ func replGroups() []rowGroup {
 			{"/rag [on|off|question]", replSlashDesc("rag")},
 		}},
 		{hgSetup, []helpRow{
+			{"/attach <path|URL>", replSlashDesc("attach")},
+			{"/context [action]", replSlashDesc("context")},
+			{"/queue [action]", replSlashDesc("queue")},
+			{"/undo", replSlashDesc("undo")},
 			{"/cost", replSlashDesc("cost")},
 			{"/history [n|clear [n]]", replSlashDesc("history")},
 			{"/editor", replSlashDesc("editor")},

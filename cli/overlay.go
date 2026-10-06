@@ -82,6 +82,8 @@ func newCompactList(items []list.Item, width, height int, render func(bool, list
 	l.SetShowHelp(false)
 	l.SetShowPagination(false)
 	l.SetShowFilter(false)
+	l.Styles.FilterPrompt, l.Styles.FilterCursor = Meta, Prompt
+	l.FilterInput.PromptStyle, l.FilterInput.TextStyle = Meta, Body
 	l.SetFilteringEnabled(false)
 	l.DisableQuitKeybindings()
 	return l
@@ -208,8 +210,9 @@ type historyPicker struct {
 	// reload re-queries it, so the picker stays consistent with how /history lists
 	// and with /history clear. When store is nil the picker falls back to the JSONL
 	// session store (used by rendering/layout tests that need no live store).
-	store  *histstore.Store
-	titles map[string]string
+	store   *histstore.Store
+	titles  map[string]sessionMeta
+	preview string
 }
 
 // newHistoryPicker builds the picker from the given session list, selecting the
@@ -220,6 +223,8 @@ func newHistoryPicker(metas []sessionMeta, currentID string, width int) historyP
 	w := clamp(width-6, 30, 72)
 	h := clamp(len(items), 1, 9)
 	l := newCompactList(items, w, h, historyRow)
+	l.SetFilteringEnabled(true)
+	l.SetShowFilter(false)
 	for i, m := range metas {
 		if m.ID == currentID {
 			l.Select(i)
@@ -263,9 +268,14 @@ func (p historyPicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 	if !ok {
 		var cmd tea.Cmd
 		p.list, cmd = p.list.Update(msg)
-		return p, cmd
+		return p.refreshPreview(), cmd
 	}
 	s := km.String()
+	if p.list.FilterState() == list.Filtering {
+		var cmd tea.Cmd
+		p.list, cmd = p.list.Update(msg)
+		return p.refreshPreview(), cmd
+	}
 
 	if p.confirm {
 		if s == "y" || s == "Y" {
@@ -277,7 +287,7 @@ func (p historyPicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 				}
 			}
 			p.confirm = false
-			return p.reload(), nil
+			return p.reload()
 		}
 		p.confirm = false // any other key cancels the delete
 		return p, nil
@@ -299,22 +309,25 @@ func (p historyPicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 		return p, nil
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		n := int(s[0] - '0')
-		if n >= 1 && n <= len(p.metas) {
-			id := p.metas[n-1].ID
-			return p, func() tea.Msg { return historySelectedMsg{id: id} }
+		for _, item := range p.list.VisibleItems() {
+			r := item.(historyItem)
+			if r.num == n {
+				id := r.meta.ID
+				return p, func() tea.Msg { return historySelectedMsg{id: id} }
+			}
 		}
 		return p, nil
 	}
 
 	var cmd tea.Cmd
 	p.list, cmd = p.list.Update(msg)
-	return p, cmd
+	return p.refreshPreview(), cmd
 }
 
 // reload rebuilds the picker after a delete, re-querying the same source the
 // picker was opened from: the langchaingo store for /history, or the JSONL
 // session list as a fallback when no store is attached.
-func (p historyPicker) reload() historyPicker {
+func (p historyPicker) reload() (historyPicker, tea.Cmd) {
 	var metas []sessionMeta
 	if p.store != nil {
 		hs, _ := p.store.Sessions(context.Background())
@@ -323,8 +336,16 @@ func (p historyPicker) reload() historyPicker {
 		metas, _ = listSessions()
 	}
 	p.metas = metas
-	p.list.SetItems(historyItems(metas))
+	cmd := p.list.SetItems(historyItems(metas))
 	p.list.SetHeight(clamp(len(metas), 1, 9))
+	return p.refreshPreview(), cmd
+}
+
+func (p historyPicker) refreshPreview() historyPicker {
+	p.preview = ""
+	if item, ok := p.list.SelectedItem().(historyItem); ok && p.store != nil {
+		p.preview, _ = p.store.LastQuestion(context.Background(), item.meta.ID)
+	}
 	return p
 }
 
@@ -335,12 +356,23 @@ func (p historyPicker) View(width, height int) string {
 		if len(p.metas) == 0 {
 			return Meta.Render("no saved sessions yet")
 		}
-		p.list.SetSize(w, rows)
-		return p.list.View()
+		previewRows := 0
+		if p.preview != "" && rows >= 4 {
+			previewRows = 1
+		}
+		p.list.SetShowFilter(p.list.FilterState() != list.Unfiltered)
+		p.list.SetSize(w, max(rows-previewRows, 1))
+		view := p.list.View()
+		lines := strings.Split(view, "\n")
+		view = strings.Join(lines[:min(len(lines), max(rows-previewRows, 1))], "\n")
+		if previewRows > 0 {
+			view += "\n" + Meta.Render(ellipsize("Last question: "+oneLine(sanitizeTerminal(p.preview)), w))
+		}
+		return view
 	}
 	return overlayBox(overlaySpec{
 		title: p.title,
-		wantW: 72, wantRows: clamp(len(p.metas), 1, 9), body: body,
+		wantW: 72, wantRows: clamp(len(p.metas)+3, 3, 12), body: body,
 	}, width, height)
 }
 

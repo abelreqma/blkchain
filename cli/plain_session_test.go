@@ -105,3 +105,91 @@ func TestPlainEditorRetainsEditableDraftAndRemovesFile(t *testing.T) {
 		t.Fatalf("editor left private drafts: %v, %v", files, err)
 	}
 }
+
+func TestPlainPendingContextIsUsedOnlyByNextQuestion(t *testing.T) {
+	useDeadServices(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	old := adaptiveAnswerFn
+	defer func() { adaptiveAnswerFn = old }()
+	var prefaces []string
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		prefaces = append(prefaces, opts.Preface)
+		opts.Stream([]byte("answer"))
+		return "answer", nil, false, nil, 1, "skip", nil
+	}
+	path := filepath.Join(t.TempDir(), "input")
+	if err := os.WriteFile(path, []byte("/attach https://example.test/reference\nfirst question\nsecond question\n/clear\n/quit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	previous := os.Stdin
+	os.Stdin = f
+	defer func() { os.Stdin = previous }()
+	captureStdout(t, func() {
+		if err := plainREPL(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if len(prefaces) != 2 || !strings.Contains(prefaces[0], "URL reference") || prefaces[1] != "" {
+		t.Fatalf("pending context was not one-shot: %v", prefaces)
+	}
+}
+
+func TestPlainUndoWithoutSQLitePreservesEarlierExchange(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	t.Chdir(t.TempDir())
+	dbPath, err := histstore.DBPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dbPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if store := histstore.OpenDefault(); store != nil {
+		store.Close()
+		t.Fatal("fixture unexpectedly opened SQLite")
+	}
+	previousAnswer := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = previousAnswer })
+	var histories [][]priorTurn
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		histories = append(histories, append([]priorTurn(nil), opts.History...))
+		opts.Stream([]byte("fixture answer"))
+		return "fixture answer", nil, false, nil, 1, "skip", nil
+	}
+	input := filepath.Join(t.TempDir(), "input")
+	if err := os.WriteFile(input, []byte("first question\nsecond question\n/undo\nthird question\n/quit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	previousInput := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() { os.Stdin = previousInput })
+	captureStdout(t, func() {
+		if err := plainREPL(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if len(histories) != 3 || len(histories[2]) != 2 || histories[2][0].Content != "first question" {
+		t.Fatalf("undo discarded earlier memory without SQLite: %+v", histories)
+	}
+	metas, err := listSessions()
+	if err != nil || len(metas) != 1 {
+		t.Fatalf("saved sessions: %v, %v", metas, err)
+	}
+	replay, err := loadMessages(metas[0].ID)
+	if err != nil || len(replay) != 4 || replay[0].Content != "first question" || replay[2].Content != "third question" {
+		t.Fatalf("replay differs from surviving memory: %v, %v", replay, err)
+	}
+}

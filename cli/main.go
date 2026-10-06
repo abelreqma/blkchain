@@ -424,6 +424,7 @@ type askOpts struct {
 	agent   bool
 	rag     bool
 	web     bool
+	context multiFlag
 }
 
 // askRoutes builds the router's enabled-route set from the saved model prefs.
@@ -437,6 +438,7 @@ func defineAskFlags(fs *flag.FlagSet, o *askOpts) {
 	fs.BoolVar(&o.agent, "agent", false, "answer with the Hermes agent instead of the knowledge base alone")
 	fs.BoolVar(&o.web, "web", false, "search the internet for this answer only")
 	fs.BoolVar(&o.rag, "rag", false, "force a grounded answer from the knowledge base, skipping adaptive routing")
+	fs.Var(&o.context, "context", "attach a file or HTTP(S) `URL` reference (repeatable)")
 }
 
 func runAsk(args []string) error {
@@ -460,7 +462,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 	var o askOpts
 	fs := newFlagSet("ask")
 	defineAskFlags(fs, &o)
-	if err := parseFlags(fs, reorder(args, nil)); err != nil {
+	if err := parseFlags(fs, reorder(args, map[string]bool{"context": true})); err != nil {
 		return "", err
 	}
 	jsonOut, showSources, agent := &o.json, &o.sources, &o.agent
@@ -468,6 +470,15 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 	query := strings.Join(fs.Args(), " ")
 	if query == "" {
 		return "", missingArg("ask", "missing question", `ask "what is SSRF?"`)
+	}
+	if len(o.context) > 0 {
+		pending := model{}
+		for _, value := range o.context {
+			if err := pending.addPendingContext(value); err != nil {
+				return "", fmt.Errorf("context: %w", err)
+			}
+		}
+		preface = strings.TrimSpace(preface + "\n\n" + pending.buildContextPreface())
 	}
 
 	if o.web && (o.agent || o.rag) {

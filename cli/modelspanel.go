@@ -709,8 +709,18 @@ func (p modelsPanel) View(width, height int) string {
 		out := lines[start:min(start+listRows, len(lines))]
 		if n > 1 {
 			note := oneLine(sanitizeTerminal(p.note))
-			if hidden := len(lines) - len(out); note == "" && hidden > 0 {
-				note = fmt.Sprintf("+%d more lines, up/down to scroll", hidden)
+			if note == "" {
+				if hidden := len(lines) - len(out); hidden > 0 {
+					note = fmt.Sprintf("+%d more lines, up/down to scroll", hidden)
+				} else {
+					note = "Saved setting: all blk commands and MCP clients"
+					if rows[p.sel].kind == rowChat {
+						note = "Use: this session. Visibility and loading: shared."
+					}
+					if rows[p.sel].kind == rowEmbedder {
+						note = "Embedder: always available to local retrieval."
+					}
+				}
 			}
 			if p.noteErr {
 				mark := Glyph(GlyphErr) + " "

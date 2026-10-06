@@ -96,9 +96,9 @@ func plainHistory(m *model, arg string, before []priorTurn) ([]priorTurn, error)
 	}
 	if len(fields) == 0 {
 		metas, _ := listSessions()
-		titles := make(map[string]string, len(metas))
+		titles := make(map[string]sessionMeta, len(metas))
 		for _, s := range metas {
-			titles[s.ID] = s.Title
+			titles[s.ID] = s
 		}
 		for i, h := range mergeHistoryMetas(hs, titles) {
 			fmt.Printf("%d) %s (%d messages)\n", i+1, sanitizeTerminal(h.Title), h.MsgCount)
