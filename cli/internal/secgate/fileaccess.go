@@ -72,6 +72,9 @@ var writeFlags = map[string][]string{
 	"klist": {"-c", "-k"},
 	// kubectl reads the client certificate, key, and CA from these paths.
 	"kubectl": {"--client-certificate", "--client-key", "--certificate-authority", "--cache-dir"},
+	// aws writes through --outfile and reads a CA bundle; its cli-input flags are
+	// denied outright because they supply every other parameter from a file.
+	"aws": {"--outfile", "--ca-bundle"},
 }
 
 // dataFlags maps a binary base name to the flags whose value may carry an
@@ -100,6 +103,9 @@ var denyFlags = map[string][]string{
 	// file -f reads the list of paths to inspect from a file, so the paths never
 	// reach the argument layer.
 	"file": {"-f", "--files-from"},
+	// aws --cli-input-json and --cli-input-yaml supply every parameter of the
+	// operation from a file, including the endpoint the scope check reads.
+	"aws": {"--cli-input-json", "--cli-input-yaml"},
 	// jq --rawfile and --slurpfile take a variable name and then a path, so the
 	// bound would check the name and let the path through. The executor pipes
 	// JSON in as a pipeline stage, so neither flag is needed.
