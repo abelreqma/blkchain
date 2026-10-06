@@ -15,42 +15,6 @@ import (
 // (mcpengage.go). It is the one and only place the Protected-paths recipe and
 // the allowlist-by-profile split are built, so the two callers cannot drift.
 
-// externalEngageAllowlist is the EXTERNAL-profile allowlist: network and
-// enumeration tools only. It deliberately excludes host-introspection/read
-// utilities (id, whoami, uname, hostname, ps, ls, cat, head, tail, grep, stat,
-// getcap, ss, netstat, ip, ifconfig). In external /auto, a read utility with an
-// in-scope host operand and a file operand would otherwise disclose the file:
-// the scope check passes on the host operand, and FileAccessViolation does not
-// cover cat/grep. Keeping them off the external allowlist closes that
-// disclosure with the smallest surface. They remain usable in the LOCAL
-// profile, which has no allowlist (ClassifyLocal governs) and requires
-// per-command human confirmation for every command.
-//
-// Shells, wrappers, and interpreters (sudo, env, bash, sh, python, find,
-// xargs) stay excluded here too: secgate's classifier denies them outright
-// regardless of the allowlist, so listing them would only be misleading. An
-// operator who needs one of those tools runs it by hand, outside run_command.
-func externalEngageAllowlist() []string {
-	return []string{
-		"nmap", "curl", "wget", "dig", "whois", "nc", "ncat",
-		// DNS enumeration. Each has a flag audit in secgate (see
-		// secgate/dnsenum_test.go); host and nslookup have no file, exec, or
-		// config flag, dnsrecon's file flags are bounded in FileAccessViolation.
-		"host", "nslookup", "dnsrecon",
-		// SMB, RPC, NetBIOS, and NFS enumeration. Audited in
-		// secgate/smbenum_test.go: -c/--command, config and credential files, and
-		// nbtscan -f are denied, log paths are bounded, glued host flags are
-		// denied, and a UNC host is scope-checked.
-		"smbclient", "rpcclient", "nbtscan", "showmount",
-		// LDAP, SNMP, and HTTP discovery. Audited in secgate/netenum_test.go and
-		// secgate/httpenum_test.go: exec and plugin flags, config and credential
-		// files, and file-of-targets flags are denied, output and wordlist paths
-		// are bounded, glued target flags are denied, and every target flag value
-		// must resolve to a host the scope check can see.
-		"ldapsearch", "snmpwalk", "onesixtyone", "gobuster", "ffuf", "nikto",
-	}
-}
-
 // gatePolicy carries the .blkchain/config.yaml gate policy and the
 // auto-scope override into buildEngageGate. A zero gatePolicy is the default
 // posture (nil UnattendedAllow runs unattended /auto, no config

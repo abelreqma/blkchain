@@ -52,16 +52,30 @@ func TestDefaultAllowlistIncludesAuditedSMBEnumTools(t *testing.T) {
 
 func TestDefaultAllowlistIncludesAuditedLDAPSNMPHTTPEnumTools(t *testing.T) {
 	al := secgate.NewAllowlist(externalEngageAllowlist()...)
-	for _, b := range []string{"ldapsearch", "snmpwalk", "onesixtyone", "gobuster", "ffuf", "nikto"} {
+	for _, b := range []string{"ldapsearch", "snmpwalk", "ffuf"} {
 		if !al.Permits(b) {
 			t.Errorf("%s should be in the default allowlist", b)
 		}
 	}
 }
 
+// TestDefaultAllowlistExcludesUnavailableTools pins the other half of the
+// contract: a binary the image does not ship must not be allowlisted, so no
+// persona is told to run a command that cannot execute. onesixtyone, gobuster
+// and nikto have no Alpine package, and dnsrecon's package is unusable; their
+// secgate audits stay in place for an operator who adds the binary.
+func TestDefaultAllowlistExcludesUnavailableTools(t *testing.T) {
+	al := secgate.NewAllowlist(externalEngageAllowlist()...)
+	for b := range unavailableTools {
+		if al.Permits(b) {
+			t.Errorf("%s is unavailable (%s) and must not be allowlisted", b, unavailableTools[b])
+		}
+	}
+}
+
 func TestDefaultAllowlistIncludesAuditedDNSEnumTools(t *testing.T) {
 	al := secgate.NewAllowlist(externalEngageAllowlist()...)
-	for _, b := range []string{"host", "nslookup", "dnsrecon"} {
+	for _, b := range []string{"host", "nslookup"} {
 		if !al.Permits(b) {
 			t.Errorf("%s should be in the default allowlist", b)
 		}
