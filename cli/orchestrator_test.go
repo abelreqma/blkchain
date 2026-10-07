@@ -113,13 +113,13 @@ func TestRunOrchestratorPlansThenDispatches(t *testing.T) {
 	// dispatch_agent using the SAME model instance, so queue executor turns
 	// after the dispatch call.
 	model := &scriptModel{resps: []*llms.ContentResponse{
-		toolCallResp("c1", "plan_add", `{"id":"t1","kind":"recon","target":"10.0.0.5","objective":"enumerate"}`),
+		toolCallResp("c1", "plan_add", `{"id":"t1","kind":"recon","target":"10.0.0.5","objective":"enumerate","done_when":"an open service is listed"}`),
 		toolCallResp("c2", "dispatch_agent", `{"task_id":"t1"}`),
 		// executor turn (runs within dispatch_agent): record evidence, then finish.
 		toolCallResp("c2e", "record_evidence", `{"task_id":"t1","quote":"22/tcp open ssh"}`),
 		finalResp("executor: found ssh on 22"),
 		// back in the orchestrator:
-		toolCallResp("c3", "plan_complete", `{"id":"t1"}`),
+		toolCallResp("c3", "plan_complete", `{"id":"t1","basis":"the quote lists 22/tcp open","evidence_ids":[1]}`),
 		finalResp("engagement step done"),
 	}}
 	d.Model = model
@@ -318,9 +318,9 @@ func TestOrchestratorRejectsFabricatedEvidenceWithRuns(t *testing.T) {
 	// The orchestrator invents a quote no executor captured, then tries to
 	// complete the task. Both must fail.
 	d.Model = &scriptModel{resps: []*llms.ContentResponse{
-		toolCallResp("c1", "plan_add", `{"id":"t1","kind":"recon","target":"10.0.0.5","objective":"enumerate"}`),
+		toolCallResp("c1", "plan_add", `{"id":"t1","kind":"recon","target":"10.0.0.5","objective":"enumerate","done_when":"an open service is listed"}`),
 		toolCallResp("c2", "record_evidence", `{"task_id":"t1","quote":"made up ssh banner"}`),
-		toolCallResp("c3", "plan_complete", `{"id":"t1"}`),
+		toolCallResp("c3", "plan_complete", `{"id":"t1","basis":"the banner names ssh","evidence_ids":[1]}`),
 		finalResp("stopped"),
 	}}
 	if _, err := runOrchestrator(context.Background(), d, "assess 10.0.0.5"); err != nil {

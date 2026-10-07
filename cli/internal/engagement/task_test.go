@@ -42,7 +42,8 @@ func TestTaskGetRoundTrip(t *testing.T) {
 		Objective: "map the surface", DoneWhen: "endpoints listed",
 		Status:    StatusActive,
 		DependsOn: []string{"a", "b"}, BasisIDs: []string{"c"},
-		CreatedRev: 1, UpdatedRev: 2,
+		CompletionEvidenceIDs: []string{},
+		CreatedRev:            1, UpdatedRev: 2,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("GetTask = %+v, want %+v", got, want)

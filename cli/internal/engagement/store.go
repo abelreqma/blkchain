@@ -98,7 +98,9 @@ CREATE TABLE IF NOT EXISTS task (
 	coverage_gap INTEGER,
 	code_candidate INTEGER,
 	citation TEXT,
-	advisory TEXT
+	advisory TEXT,
+	completion_basis TEXT,
+	completion_evidence TEXT
 );
 CREATE TABLE IF NOT EXISTS meta (
 	k TEXT PRIMARY KEY,
@@ -246,6 +248,11 @@ func addMissingTaskColumns(tx *sql.Tx) error {
 		{"code_candidate", "INTEGER"},
 		{"citation", "TEXT"},
 		{"advisory", "TEXT"}, // D' follow-up: display-only prior-episode recall hint, additive.
+		// The completer's stated basis for a done task and the evidence row ids it
+		// cited. Written only by the completion path; empty on tasks completed
+		// before the columns existed.
+		{"completion_basis", "TEXT"},
+		{"completion_evidence", "TEXT"},
 	}
 	for _, col := range cols {
 		if existing[col.name] {

@@ -208,10 +208,24 @@ type Task struct {
 	// steer detection, arming, or targeting. Empty when there is no prior-episode
 	// hint. A writer (the D' correlation path) sets it; the plumbing here only
 	// persists and surfaces it.
-	Advisory   string
-	CreatedRev int64
-	UpdatedRev int64
+	Advisory string
+	// CompletionBasis is the completer's stated reason the recorded evidence
+	// meets DoneWhen, and CompletionEvidenceIDs are the evidence row ids it
+	// cited. The completion path is their only writer: a Task upsert can
+	// neither set nor clear them. The basis is the completer's assertion, so it
+	// is display-only and read by no gate, classifier, selector, or correlation
+	// edge; only the cited id list is code-checked, as ids that resolve to
+	// evidence rows of that task. Both are empty on a task completed without a
+	// stated basis.
+	CompletionBasis       string
+	CompletionEvidenceIDs []string
+	CreatedRev            int64
+	UpdatedRev            int64
 }
+
+// CompletionBasisCap is the maximum number of characters (runes) of a stated
+// completion basis kept on a task.
+const CompletionBasisCap = 2000
 
 // ErrNotFound is returned when a task id does not exist.
 var ErrNotFound = errors.New("engagement: task not found")
@@ -274,13 +288,14 @@ func (s *Store) GetTask(id string) (Task, error) {
 		phase, surface, capVal     sql.NullString
 		cit                        sql.NullString
 		advisory                   sql.NullString
+		basis, citedEv             sql.NullString
 		armed                      sql.NullInt64
 		coverageGap, codeCandidate sql.NullInt64
 	)
 	err := s.db.QueryRow(
-		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, code_candidate, citation, advisory
+		`SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, code_candidate, citation, advisory, completion_basis, completion_evidence
 		 FROM task WHERE id = ?`, id).
-		Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed, &coverageGap, &codeCandidate, &cit, &advisory)
+		Scan(&t.ID, &t.Kind, &t.Target, &t.Objective, &t.DoneWhen, &status, &deps, &bas, &t.CreatedRev, &t.UpdatedRev, &phase, &surface, &capVal, &armed, &coverageGap, &codeCandidate, &cit, &advisory, &basis, &citedEv)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNotFound
 	}
@@ -295,6 +310,10 @@ func (s *Store) GetTask(id string) (Task, error) {
 	t.CoverageGap = coverageGap.Int64 != 0
 	t.CodeCandidate = codeCandidate.Int64 != 0
 	t.Advisory = advisory.String
+	t.CompletionBasis = basis.String
+	if t.CompletionEvidenceIDs, err = unmarshalStrings(citedEv.String); err != nil {
+		return Task{}, err
+	}
 	if t.DependsOn, err = unmarshalStrings(deps.String); err != nil {
 		return Task{}, err
 	}

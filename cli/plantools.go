@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"blkchain/cli/internal/engagement"
@@ -26,7 +27,9 @@ type planTaskArgs struct {
 }
 
 type planCompleteArgs struct {
-	ID string `json:"id" desc:"id of the task to mark done"`
+	ID          string  `json:"id" desc:"id of the task to mark done"`
+	Basis       string  `json:"basis" desc:"how the cited evidence meets the task's done_when condition"`
+	EvidenceIDs []int64 `json:"evidence_ids" desc:"the record_evidence ids of the quotes that establish done_when"`
 }
 
 type recordEvidenceArgs struct {
@@ -183,9 +186,14 @@ func newPlanUpdateTool(st *engagement.Store) tooldef.Tool {
 		})
 }
 
+// newPlanCompleteTool builds plan_complete. Recorded evidence alone does not
+// show that a task met its success condition, so completion also requires a
+// stated done_when, a basis relating the evidence to it, and the evidence ids
+// that basis cites. Code checks that each cited id is a real evidence row of
+// that task; the basis itself is the caller's assertion and is stored as such.
 func newPlanCompleteTool(st *engagement.Store) tooldef.Tool {
 	return newStoreTool("plan_complete",
-		"Mark a task done. A task should be completed only when exact-quote evidence exists for it.",
+		"Mark a task done. The task needs a done_when condition, recorded evidence, the ids of the evidence that establishes that condition, and a basis saying how it does.",
 		planCompleteArgs{},
 		func(ctx context.Context, argsJSON string) (string, error) {
 			var a planCompleteArgs
@@ -195,19 +203,68 @@ func newPlanCompleteTool(st *engagement.Store) tooldef.Tool {
 			if strings.TrimSpace(a.ID) == "" {
 				return "plan_complete: invalid arguments: id is required", nil
 			}
-			ev, err := st.EvidenceFor(a.ID)
+			task, err := st.GetTask(a.ID)
+			if errors.Is(err, engagement.ErrNotFound) {
+				return "plan_complete: task " + a.ID + " not found", nil
+			}
 			if err != nil {
 				return "plan_complete: " + err.Error(), nil
 			}
-			if len(ev) == 0 {
+			if strings.TrimSpace(task.DoneWhen) == "" {
+				return "plan_complete: cannot complete " + a.ID + " without a done_when condition; plan_update it with the observable condition the task must meet, then complete it", nil
+			}
+			rows, err := st.EvidenceRowsFor(a.ID)
+			if err != nil {
+				return "plan_complete: " + err.Error(), nil
+			}
+			if len(rows) == 0 {
 				return "plan_complete: cannot complete " + a.ID + " without recorded evidence; run the task, then record_evidence an exact quote of its output first", nil
 			}
-			rev, err := st.Apply(engagement.Delta{Completes: []string{a.ID}, Kind: "plan_complete", Detail: a.ID})
+			if strings.TrimSpace(a.Basis) == "" {
+				return "plan_complete: cannot complete " + a.ID + " without a basis; state how the recorded evidence meets its done_when condition", nil
+			}
+			cited, err := citedEvidenceIDs(rows, a.EvidenceIDs)
+			if err != nil {
+				return "plan_complete: " + err.Error(), nil
+			}
+			rev, err := st.Apply(engagement.Delta{
+				Completes:             []string{a.ID},
+				CompletionBasis:       a.Basis,
+				CompletionEvidenceIDs: cited,
+				Kind:                  "plan_complete",
+				Detail:                a.ID,
+			})
 			if err != nil {
 				return "plan_complete: rejected: " + err.Error(), nil
 			}
 			return fmt.Sprintf("completed task %s (revision %d)", a.ID, rev), nil
 		})
+}
+
+// citedEvidenceIDs returns the cited ids as decimal strings, in the order given
+// and without repeats. Every id must be an evidence row of the same task, so a
+// completion cannot cite evidence that does not exist or belongs elsewhere.
+func citedEvidenceIDs(rows []engagement.EvidenceRow, cited []int64) ([]string, error) {
+	if len(cited) == 0 {
+		return nil, errors.New("evidence_ids is required; cite the record_evidence ids whose quotes establish the done_when condition")
+	}
+	known := make(map[int64]bool, len(rows))
+	for _, r := range rows {
+		known[r.ID] = true
+	}
+	seen := map[int64]bool{}
+	out := make([]string, 0, len(cited))
+	for _, id := range cited {
+		if !known[id] {
+			return nil, fmt.Errorf("evidence %d is not recorded evidence for this task; cite an id record_evidence returned for it", id)
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, strconv.FormatInt(id, 10))
+	}
+	return out, nil
 }
 
 func newRecordEvidenceTool(st *engagement.Store) tooldef.Tool {

@@ -221,3 +221,40 @@ func TestRenderMarkdownOmitsEmptySecretCandidateSection(t *testing.T) {
 		t.Error("secret candidate section rendered with no candidates")
 	}
 }
+
+// TestRenderMarkdownShowsStatedCompletionBasis pins that a completed task
+// renders the basis plan_complete recorded and the evidence ids it cited,
+// labelled as the executor's assertion rather than a verified fact.
+func TestRenderMarkdownShowsStatedCompletionBasis(t *testing.T) {
+	m := sampleModel()
+	m.Engagement.Tasks[0].DoneWhen = "an open port is listed in scan output"
+	m.Engagement.Tasks[0].CompletionBasis = "the quote lists 80/tcp open"
+	m.Engagement.Tasks[0].CompletionEvidenceIDs = []string{"4", "7"}
+	md := RenderMarkdown(m)
+	for _, want := range []string{
+		"- Done when: an open port is listed in scan output",
+		"- Completion basis (asserted, not verified): the quote lists 80/tcp open",
+		"- Cited evidence: 4, 7",
+		"blkChain checked only that the cited evidence exists",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("markdown missing %q:\n%s", want, md)
+		}
+	}
+}
+
+// TestRenderMarkdownSaysWhenNoCompletionBasisWasStated pins the rendering of a
+// task completed with no condition and no basis, as tasks completed before
+// plan_complete required them have. Saying nothing would read as a task whose
+// condition the report merely omitted.
+func TestRenderMarkdownSaysWhenNoCompletionBasisWasStated(t *testing.T) {
+	md := RenderMarkdown(sampleModel()) // t1 is done with no DoneWhen and no basis
+	for _, want := range []string{
+		"- Done when: no condition was recorded for this task.",
+		"- Completion basis: none was stated; the task was completed on recorded evidence alone.",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("markdown missing %q:\n%s", want, md)
+		}
+	}
+}

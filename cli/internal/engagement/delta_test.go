@@ -3,6 +3,8 @@ package engagement
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -415,5 +417,60 @@ func TestCodeCandidateModelDeltaCannotChangeIdentity(t *testing.T) {
 	gap.Status = StatusTodo
 	if _, err := s.Apply(Delta{Kind: "plan_update", Upserts: []Task{gap}}); err == nil {
 		t.Fatal("model plan unblocked coverage gap")
+	}
+}
+
+// TestCompletionBasisOnlyWrittenByCompletion pins the ownership of the stored
+// completion basis: the Completes path writes it, and a later Upsert of the
+// same task (which carries no basis of its own) cannot clear it.
+func TestCompletionBasisOnlyWrittenByCompletion(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "A", Kind: "recon", Status: StatusTodo, DoneWhen: "a port is listed"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Apply(Delta{
+		Completes:             []string{"A"},
+		CompletionBasis:       "the quote lists 22/tcp open",
+		CompletionEvidenceIDs: []string{"1", "4"},
+		Kind:                  "plan_complete",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetTask("A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CompletionBasis != "the quote lists 22/tcp open" || !reflect.DeepEqual(got.CompletionEvidenceIDs, []string{"1", "4"}) {
+		t.Fatalf("stored basis = %q %v", got.CompletionBasis, got.CompletionEvidenceIDs)
+	}
+	// An Upsert carries no basis field of its own and must not clear the stored one.
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "A", Kind: "recon", Status: StatusDone, DoneWhen: "a port is listed"}}, Kind: "plan_update"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetTask("A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CompletionBasis != "the quote lists 22/tcp open" || len(got.CompletionEvidenceIDs) != 2 {
+		t.Fatalf("upsert cleared the completion basis: %q %v", got.CompletionBasis, got.CompletionEvidenceIDs)
+	}
+}
+
+// TestCompletionBasisIsCapped pins that an oversized basis is cut at the cap
+// rather than stored whole.
+func TestCompletionBasisIsCapped(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.Apply(Delta{Upserts: []Task{{ID: "A", Kind: "recon", Status: StatusTodo}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Apply(Delta{Completes: []string{"A"}, CompletionBasis: strings.Repeat("b", CompletionBasisCap+500), Kind: "plan_complete"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetTask("A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len([]rune(got.CompletionBasis)); n != CompletionBasisCap {
+		t.Fatalf("stored basis length = %d, want %d", n, CompletionBasisCap)
 	}
 }

@@ -100,14 +100,16 @@ func RenderMarkdown(m Model) string {
 		b.WriteString("\n")
 	}
 
-	// Completed tasks with their evidence and skill receipts. plan_complete
-	// requires a recorded evidence quote; it does not check the task's DoneWhen
-	// condition, so the section states what completion establishes rather than
-	// presenting every done task as a finding.
+	// Completed tasks with their evidence, stated completion basis, and skill
+	// receipts. plan_complete checks that the cited evidence rows belong to the
+	// task; whether that evidence meets the task's DoneWhen condition is the
+	// completer's judgement, so the section states what completion establishes
+	// rather than presenting every done task as a finding.
 	b.WriteString("## Completed tasks\n\n")
 	b.WriteString("Each task below was marked done with at least one recorded evidence quote. ")
-	b.WriteString("Completion records the executor's assertion and the output it captured; ")
-	b.WriteString("the stated \"Done when\" condition was not independently verified.\n\n")
+	b.WriteString("The completion basis is the executor's assertion that the cited evidence meets the ")
+	b.WriteString("stated \"Done when\" condition; blkChain checked only that the cited evidence exists, ")
+	b.WriteString("so the condition itself was not independently verified.\n\n")
 	done := 0
 	for _, t := range tasks {
 		if t.Status != engagement.StatusDone {
@@ -120,6 +122,16 @@ func RenderMarkdown(m Model) string {
 		}
 		if t.DoneWhen != "" {
 			fmt.Fprintf(&b, "- Done when: %s\n", safeMarkdownLine(t.DoneWhen))
+		} else {
+			b.WriteString("- Done when: no condition was recorded for this task.\n")
+		}
+		if strings.TrimSpace(t.CompletionBasis) != "" {
+			fmt.Fprintf(&b, "- Completion basis (asserted, not verified): %s\n", safeMarkdownLine(t.CompletionBasis))
+			if len(t.CompletionEvidenceIDs) > 0 {
+				fmt.Fprintf(&b, "- Cited evidence: %s\n", safeMarkdownLine(strings.Join(t.CompletionEvidenceIDs, ", ")))
+			}
+		} else {
+			b.WriteString("- Completion basis: none was stated; the task was completed on recorded evidence alone.\n")
 		}
 		quotes := m.Evidence[t.ID]
 		if len(quotes) > 0 {

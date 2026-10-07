@@ -56,11 +56,11 @@ func TestEngageConvergenceNoOpRevisionsHalt(t *testing.T) {
 func TestEngageConvergenceEvidenceAndCompletionResetIdle(t *testing.T) {
 	t.Setenv("BLKCHAIN_ENGAGE_NO_PROGRESS_ROUNDS", "2")
 	m := &fakeModel{queue: []*llms.ContentResponse{
-		callResp("c1", "plan_add", `{"id":"t1","kind":"web","target":"10.0.0.5","objective":"inspect"}`),
+		callResp("c1", "plan_add", `{"id":"t1","kind":"web","target":"10.0.0.5","objective":"inspect","done_when":"a response status is captured"}`),
 		callResp("c2", "missing", "{}"),
 		callResp("c3", "record_evidence", `{"task_id":"t1","quote":"HTTP 200"}`),
 		callResp("c4", "missing", "{}"),
-		callResp("c5", "plan_complete", `{"id":"t1"}`),
+		callResp("c5", "plan_complete", `{"id":"t1","basis":"the quote is the captured status line","evidence_ids":[1]}`),
 		callResp("c6", "missing", "{}"),
 		textResp("normal final report"),
 	}}

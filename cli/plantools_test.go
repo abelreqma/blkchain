@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -50,7 +53,63 @@ func TestPlanAddRejectsBadDeltaSoftly(t *testing.T) {
 	}
 }
 
+// seedCompletable adds a task with a done_when condition and one evidence
+// quote, returning the evidence row id a completion must cite.
+func seedCompletable(t *testing.T, st *engagement.Store, id, quote string) int64 {
+	t.Helper()
+	if _, err := newPlanAddTool(st).Call(context.Background(),
+		`{"id":"`+id+`","kind":"recon","objective":"enumerate for `+id+`","done_when":"an open port is listed"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newRecordEvidenceTool(st).Call(context.Background(),
+		`{"task_id":"`+id+`","quote":"`+quote+`"}`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.EvidenceRowsFor(id)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("EvidenceRowsFor(%s) = %v, %v", id, rows, err)
+	}
+	return rows[0].ID
+}
+
 func TestPlanCompleteMarksDone(t *testing.T) {
+	st := openStore(t)
+	ev := seedCompletable(t, st, "t1", "port 22 open")
+	args := fmt.Sprintf(`{"id":"t1","basis":"the quote lists port 22 open","evidence_ids":[%d]}`, ev)
+	if _, err := newPlanCompleteTool(st).Call(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.GetTask("t1")
+	if got.Status != engagement.StatusDone {
+		t.Errorf("status = %q, want done", got.Status)
+	}
+}
+
+// TestPlanCompleteStoresCitedBasis pins what completion records: the stated
+// basis and the cited evidence ids, so a report can say why a task is done
+// instead of implying the evidence alone proved it.
+func TestPlanCompleteStoresCitedBasis(t *testing.T) {
+	st := openStore(t)
+	ev := seedCompletable(t, st, "t1", "port 22 open")
+	args := fmt.Sprintf(`{"id":"t1","basis":"the quote lists port 22 open","evidence_ids":[%d,%d]}`, ev, ev)
+	if _, err := newPlanCompleteTool(st).Call(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.GetTask("t1")
+	if got.CompletionBasis != "the quote lists port 22 open" {
+		t.Errorf("CompletionBasis = %q", got.CompletionBasis)
+	}
+	// A repeated id is cited once.
+	want := []string{strconv.FormatInt(ev, 10)}
+	if !reflect.DeepEqual(got.CompletionEvidenceIDs, want) {
+		t.Errorf("CompletionEvidenceIDs = %v, want %v", got.CompletionEvidenceIDs, want)
+	}
+}
+
+// TestPlanCompleteRequiresDoneWhen pins that a task with no stated success
+// condition cannot be completed: recorded evidence cannot meet a condition
+// that was never written down.
+func TestPlanCompleteRequiresDoneWhen(t *testing.T) {
 	st := openStore(t)
 	if _, err := newPlanAddTool(st).Call(context.Background(), `{"id":"t1","kind":"recon"}`); err != nil {
 		t.Fatal(err)
@@ -58,12 +117,79 @@ func TestPlanCompleteMarksDone(t *testing.T) {
 	if _, err := newRecordEvidenceTool(st).Call(context.Background(), `{"task_id":"t1","quote":"port 22 open"}`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newPlanCompleteTool(st).Call(context.Background(), `{"id":"t1"}`); err != nil {
+	out, err := newPlanCompleteTool(st).Call(context.Background(), `{"id":"t1","basis":"it is open","evidence_ids":[1]}`)
+	if err != nil {
 		t.Fatal(err)
 	}
-	got, _ := st.GetTask("t1")
-	if got.Status != engagement.StatusDone {
-		t.Errorf("status = %q, want done", got.Status)
+	if !strings.Contains(out, "done_when") {
+		t.Errorf("result %q should name the missing done_when condition", out)
+	}
+	if got, _ := st.GetTask("t1"); got.Status == engagement.StatusDone {
+		t.Error("task completed without a success condition")
+	}
+}
+
+// TestPlanCompleteRequiresBasis pins that completion states how the evidence
+// meets the condition rather than asserting done on the evidence alone.
+func TestPlanCompleteRequiresBasis(t *testing.T) {
+	st := openStore(t)
+	ev := seedCompletable(t, st, "t1", "port 22 open")
+	for _, args := range []string{
+		fmt.Sprintf(`{"id":"t1","evidence_ids":[%d]}`, ev),
+		fmt.Sprintf(`{"id":"t1","basis":"   ","evidence_ids":[%d]}`, ev),
+		`{"id":"t1","basis":"the quote lists port 22 open"}`,
+	} {
+		out, err := newPlanCompleteTool(st).Call(context.Background(), args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, "cannot complete") && !strings.Contains(out, "evidence_ids is required") {
+			t.Errorf("args %s accepted: %q", args, out)
+		}
+		if got, _ := st.GetTask("t1"); got.Status == engagement.StatusDone {
+			t.Fatalf("args %s completed the task", args)
+		}
+	}
+}
+
+// TestPlanCompleteRejectsUncitableEvidence pins the code-checked half of the
+// basis: a cited id must be an evidence row of that same task, so a completion
+// cannot point at evidence that does not exist or belongs to another task.
+func TestPlanCompleteRejectsUncitableEvidence(t *testing.T) {
+	st := openStore(t)
+	ev1 := seedCompletable(t, st, "t1", "port 22 open")
+	ev2 := seedCompletable(t, st, "t2", "port 80 open")
+	if ev1 == ev2 {
+		t.Fatal("evidence ids must differ across tasks")
+	}
+	for _, args := range []string{
+		fmt.Sprintf(`{"id":"t1","basis":"b","evidence_ids":[%d]}`, ev2),
+		fmt.Sprintf(`{"id":"t1","basis":"b","evidence_ids":[%d,%d]}`, ev1, ev2),
+		`{"id":"t1","basis":"b","evidence_ids":[99999]}`,
+	} {
+		out, err := newPlanCompleteTool(st).Call(context.Background(), args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, "not recorded evidence for this task") {
+			t.Errorf("args %s accepted: %q", args, out)
+		}
+		if got, _ := st.GetTask("t1"); got.Status == engagement.StatusDone {
+			t.Fatalf("args %s completed the task", args)
+		}
+	}
+}
+
+// TestPlanCompleteUnknownTaskSoft pins that an unknown id is a tool-level
+// message, not a Go error, and creates nothing.
+func TestPlanCompleteUnknownTaskSoft(t *testing.T) {
+	st := openStore(t)
+	out, err := newPlanCompleteTool(st).Call(context.Background(), `{"id":"nope","basis":"b","evidence_ids":[1]}`)
+	if err != nil {
+		t.Fatalf("unknown task must not be a Go error: %v", err)
+	}
+	if !strings.Contains(out, "not found") {
+		t.Errorf("result %q, want a not-found message", out)
 	}
 }
 
@@ -136,11 +262,11 @@ func TestPlanUpdateUnknownTaskSoft(t *testing.T) {
 
 func TestPlanCompleteRequiresEvidence(t *testing.T) {
 	st := openStore(t)
-	if _, err := newPlanAddTool(st).Call(context.Background(), `{"id":"t1","kind":"recon"}`); err != nil {
+	if _, err := newPlanAddTool(st).Call(context.Background(), `{"id":"t1","kind":"recon","done_when":"an open port is listed"}`); err != nil {
 		t.Fatal(err)
 	}
 	// No evidence yet -> complete is soft-rejected and the task stays not-done.
-	out, err := newPlanCompleteTool(st).Call(context.Background(), `{"id":"t1"}`)
+	out, err := newPlanCompleteTool(st).Call(context.Background(), `{"id":"t1","basis":"b","evidence_ids":[1]}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +281,9 @@ func TestPlanCompleteRequiresEvidence(t *testing.T) {
 	if _, err := newRecordEvidenceTool(st).Call(context.Background(), `{"task_id":"t1","quote":"port 22 open"}`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newPlanCompleteTool(st).Call(context.Background(), `{"id":"t1"}`); err != nil {
+	rows, _ := st.EvidenceRowsFor("t1")
+	args := fmt.Sprintf(`{"id":"t1","basis":"the quote lists port 22 open","evidence_ids":[%d]}`, rows[0].ID)
+	if _, err := newPlanCompleteTool(st).Call(context.Background(), args); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.GetTask("t1")

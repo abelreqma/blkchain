@@ -28,6 +28,13 @@ type Delta struct {
 	// (surface, asset). created_rev is preserved across an update; only
 	// updated_rev advances.
 	ReconUpserts []ReconCoverage
+	// CompletionBasis is the stated reason the recorded evidence meets the
+	// done_when of every task in Completes, and CompletionEvidenceIDs are the
+	// evidence row ids it cites. The Completes write below is their only writer,
+	// so an Upsert can neither set nor clear a stored basis. A basis longer than
+	// CompletionBasisCap runes is cut.
+	CompletionBasis       string
+	CompletionEvidenceIDs []string
 }
 
 func (s *Store) Apply(d Delta) (newRev int64, err error) {
@@ -257,9 +264,14 @@ func (s *Store) applyLocked(d Delta) (newRev int64, err error) {
 			return 0, err
 		}
 	}
+	completionBasis := d.CompletionBasis
+	if r := []rune(completionBasis); len(r) > CompletionBasisCap {
+		completionBasis = string(r[:CompletionBasisCap])
+	}
 	for _, id := range d.Completes {
 		if _, err := conn.ExecContext(ctx,
-			`UPDATE task SET status = 'done', updated_rev = ? WHERE id = ?`, newRev, id); err != nil {
+			`UPDATE task SET status = 'done', completion_basis = ?, completion_evidence = ?, updated_rev = ? WHERE id = ?`,
+			completionBasis, marshalStrings(d.CompletionEvidenceIDs), newRev, id); err != nil {
 			return 0, err
 		}
 	}
