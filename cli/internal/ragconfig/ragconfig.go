@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -139,6 +140,10 @@ func findContractFile() (string, bool) {
 // cfg in place, ignoring unset or unparsable values. An unparsable synthesis
 // sampling value also writes a note.
 func envOverrides(cfg *Config) {
+	if os.Getenv("BLKCHAIN_EMBED_HOST") != "" || os.Getenv("BLKCHAIN_EMBED_PORT") != "" {
+		host, port := EmbeddingAddress()
+		cfg.EmbedServerURL = "http://" + net.JoinHostPort(host, strconv.Itoa(port))
+	}
 	if v, ok := os.LookupEnv("BLKCHAIN_ANSWER_MAX_CHUNKS"); ok {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.AnswerMaxChunks = n
@@ -211,6 +216,23 @@ func envOverrides(cfg *Config) {
 			cfg.PocDomains = domains
 		}
 	}
+}
+
+// EmbeddingAddress resolves the embedding service bind settings shared with Python.
+func EmbeddingAddress() (string, int) {
+	host := strings.TrimSpace(os.Getenv("BLKCHAIN_EMBED_HOST"))
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := 8100
+	if raw := strings.TrimSpace(os.Getenv("BLKCHAIN_EMBED_PORT")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 1 && n <= 65535 {
+			port = n
+		} else {
+			warnf("ignoring BLKCHAIN_EMBED_PORT=%q: expected a port from 1 to 65535; using 8100", raw)
+		}
+	}
+	return host, port
 }
 
 // envFloat sets *dst from the float in environment variable name. An empty or

@@ -63,6 +63,28 @@ func TestEnvOverridesFileAndDefault(t *testing.T) {
 	}
 }
 
+func TestEmbeddingHostPortOverrideRetrievalURL(t *testing.T) {
+	for _, tc := range []struct {
+		host, port, want string
+	}{
+		{"localhost", "8199", "http://localhost:8199"},
+		{"127.0.0.1", "8198", "http://127.0.0.1:8198"},
+		{"", "8197", "http://127.0.0.1:8197"},
+		{"localhost", "", "http://localhost:8100"},
+		{"::1", "8196", "http://[::1]:8196"},
+		{"localhost", "99999", "http://localhost:8100"},
+		{"localhost", "bad", "http://localhost:8100"},
+	} {
+		t.Run(tc.host+":"+tc.port, func(t *testing.T) {
+			t.Setenv("BLKCHAIN_EMBED_HOST", tc.host)
+			t.Setenv("BLKCHAIN_EMBED_PORT", tc.port)
+			if got := Load().EmbedServerURL; got != tc.want {
+				t.Fatalf("embedding URL = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // repoRootForTest walks up to the dir containing blkchain/contract/rag.json.
 func repoRootForTest() (string, error) {
 	d, _ := os.Getwd()

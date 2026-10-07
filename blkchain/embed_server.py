@@ -14,6 +14,7 @@ Endpoints:
 """
 from __future__ import annotations
 import sys
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -173,6 +174,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class _Server(ThreadingHTTPServer):
+    address_family = socket.AF_INET6 if ":" in config.EMBED_SERVER_HOST else socket.AF_INET
     allow_reuse_address = True   # rebind immediately after a restart
     daemon_threads = True        # don't block shutdown on in-flight requests
 

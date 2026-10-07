@@ -112,11 +112,13 @@ class BuildIndexResumeTest(unittest.TestCase):
         }
 
         upserted = []
+        refreshed = []
 
         class FakeClient:
             def __init__(self, *a, **k): pass
             def collection_exists(self, name): return True
             def upsert(self, collection_name, points): upserted.extend(points)
+            def batch_update_points(self, collection_name, update_operations): refreshed.extend(update_operations)
 
         class FakeSparse:
             def __init__(self, *a, **k): pass
@@ -134,6 +136,8 @@ class BuildIndexResumeTest(unittest.TestCase):
         self.assertEqual(stats["updated"], 1)   # changed
         self.assertEqual(stats["indexed"], 2)   # changed + new upserted
         self.assertEqual(len(upserted), 2)
+        self.assertEqual(len(refreshed), 1)
+        self.assertEqual(refreshed[0].overwrite_payload.payload, unchanged.payload("v1"))
 
 
 class AddPathTest(unittest.TestCase):

@@ -158,21 +158,16 @@ def _index_chunks(
     skipped = 0
     batches = 0
     pending: list = []
-    seen_ids: list[str] = []
+    payload_updates: list = []
 
-    def mark_seen() -> None:
-        if index_scope is None or not seen_ids:
+    def refresh_payloads() -> None:
+        if not payload_updates:
             return
-        payload = {"snapshot_version": snapshot_version, "index_scope": index_scope,
-                   "index_generation": index_generation}
-        if index_root is not None:
-            payload["index_root"] = index_root
-        client.set_payload(
+        client.batch_update_points(
             collection_name=collection,
-            payload=payload,
-            points=seen_ids.copy(),
+            update_operations=payload_updates.copy(),
         )
-        seen_ids.clear()
+        payload_updates.clear()
 
     def flush(pending_chunks: list) -> None:
         nonlocal indexed, batches
@@ -204,13 +199,16 @@ def _index_chunks(
             pid = _point_id(chunk.id)
             if pid in existing:
                 stored = existing[pid]
-                # Skip unchanged chunks (and points with no stored hash);
-                # re-embed when the content changed, overwriting the same id.
-                if stored is None or stored == content_hash(chunk.text):
-                    if index_scope is not None:
-                        seen_ids.append(pid)
-                        if len(seen_ids) >= 1000:
-                            mark_seen()
+                # Matching text keeps its vectors and refreshes its full payload.
+                if stored == content_hash(chunk.text):
+                    payload_updates.append(models.OverwritePayloadOperation(
+                        overwrite_payload=models.SetPayload(
+                            payload=chunk.payload(snapshot_version, index_scope, index_generation, index_root),
+                            points=[pid],
+                        ),
+                    ))
+                    if len(payload_updates) >= 1000:
+                        refresh_payloads()
                     skipped += 1
                     continue
                 updated += 1
@@ -219,7 +217,7 @@ def _index_chunks(
             flush(pending)
             pending = []
     flush(pending)
-    mark_seen()
+    refresh_payloads()
 
     return {"indexed": indexed, "updated": updated, "skipped": skipped, "batches": batches}
 

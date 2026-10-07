@@ -3,6 +3,9 @@
 Imports only blkchain.config (stdlib-light), so no MLX/transformers load.
 """
 import os
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -79,6 +82,31 @@ class OmlxApiKeyTest(unittest.TestCase):
         env.pop("OMLX_API_KEY", None)
         with mock.patch.dict(os.environ, env, clear=True):
             self.assertEqual(config.omlx_api_key(), "")
+
+
+class EmbeddingAddressTest(unittest.TestCase):
+    def test_bind_settings_and_index_url_agree(self):
+        cases = [
+            ({}, ["127.0.0.1", 8100, "http://127.0.0.1:8100"]),
+            ({"BLKCHAIN_EMBED_HOST": "localhost", "BLKCHAIN_EMBED_PORT": "8199"},
+             ["localhost", 8199, "http://localhost:8199"]),
+            ({"BLKCHAIN_EMBED_PORT": "8198"}, ["127.0.0.1", 8198, "http://127.0.0.1:8198"]),
+            ({"BLKCHAIN_EMBED_HOST": "::1", "BLKCHAIN_EMBED_PORT": "8196"},
+             ["::1", 8196, "http://[::1]:8196"]),
+            ({"BLKCHAIN_EMBED_HOST": " localhost ", "BLKCHAIN_EMBED_PORT": "bad"},
+             ["localhost", 8100, "http://localhost:8100"]),
+            ({"BLKCHAIN_EMBED_PORT": "99999"}, ["127.0.0.1", 8100, "http://127.0.0.1:8100"]),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "blkchain" / "config.py"
+            path.parent.mkdir()
+            path.write_text(Path(config.__file__).read_text() +
+                            '\nimport json\nprint(json.dumps([EMBED_SERVER_HOST, EMBED_SERVER_PORT, EMBED_SERVER_URL]))\n')
+            for env, expected in cases:
+                with self.subTest(env=env):
+                    result = subprocess.run([sys.executable, str(path)], env=env,
+                                            capture_output=True, text=True, timeout=10, check=True)
+                    self.assertEqual(json.loads(result.stdout), expected)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"blkchain/cli/internal/ragconfig"
 )
 
 func TestHealthURL(t *testing.T) {
@@ -28,6 +30,26 @@ func TestHealthURL(t *testing.T) {
 		if got := healthURL(c.port); got != c.want {
 			t.Errorf("healthURL(%d) = %q, want %q", c.port, got, c.want)
 		}
+	}
+}
+
+func TestConfiguredEmbeddingServiceUsesSharedAddress(t *testing.T) {
+	port := liveHealthPort(t)
+	t.Setenv("BLKCHAIN_EMBED_HOST", "localhost")
+	t.Setenv("BLKCHAIN_EMBED_PORT", strconv.Itoa(port))
+	svc := configuredEmbedService()
+	want := ragconfig.Load().EmbedServerURL + "/health"
+	if got := healthURL(svc.port, svc.host); got != want || !health(svc.port, svc.host) {
+		t.Fatalf("stack health URL=%q; want %q", got, want)
+	}
+	root := t.TempDir()
+	out := captureStdout(t, func() {
+		startPy(root, svc)
+		printServiceStatus(root, svc)
+		stopService(root, svc)
+	})
+	if !strings.Contains(out, "already up") || !strings.Contains(out, "not managed") || !strings.Contains(out, ":"+strconv.Itoa(port)) {
+		t.Fatalf("lifecycle ignored configured endpoint: %s", out)
 	}
 }
 

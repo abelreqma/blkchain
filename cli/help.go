@@ -937,6 +937,8 @@ func usageEnv() []rowGroup {
 			{"BLKCHAIN_ROOT", "project folder (default: found automatically)"},
 			{"BLKCHAIN_COLLECTION", "name of the index to search (default " + defaultCollection + ")"},
 			{"QDRANT_GRPC_URL", "qdrant gRPC address (default 127.0.0.1:6334)"},
+			{"BLKCHAIN_EMBED_HOST", "embedding service host (default 127.0.0.1)"},
+			{"BLKCHAIN_EMBED_PORT", "embedding service port (default 8100)"},
 		}},
 		{"WEB SEARCH", []helpRow{
 			{"TAVILY_API_KEY", "Tavily key; internet search requires web on"},

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"blkchain/cli/internal/ragconfig"
 )
 
 // stack.go is `blk up|down|status`: the qdrant container lifecycle and the
@@ -24,10 +27,17 @@ const qdrantContainer = "blkchain-qdrant"
 type pyService struct {
 	name   string
 	module string
+	host   string
 	port   int
 }
 
 var embedServerSvc = pyService{name: "embed_server", module: "blkchain.embed_server", port: 8100}
+
+func configuredEmbedService() pyService {
+	svc := embedServerSvc
+	svc.host, svc.port = ragconfig.EmbeddingAddress()
+	return svc
+}
 
 // runDir returns <root>/.run, creating it private if necessary.
 func runDir(root string) (string, error) {
@@ -53,8 +63,12 @@ const qdrantURL = "http://127.0.0.1:6333/"
 
 // healthURL builds the URL polled to decide whether a resident service at
 // port is up.
-func healthURL(port int) string {
-	return fmt.Sprintf("http://127.0.0.1:%d/health", port)
+func healthURL(port int, hosts ...string) string {
+	host := "127.0.0.1"
+	if len(hosts) > 0 && hosts[0] != "" {
+		host = hosts[0]
+	}
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + "/health"
 }
 
 const httpTimeout = 2 * time.Second
@@ -87,8 +101,8 @@ func isHealthyStatus(status int) bool {
 }
 
 // health reports whether the service at port answers its /health endpoint.
-func health(port int) bool {
-	status, _, err := httpGet(healthURL(port))
+func health(port int, hosts ...string) bool {
+	status, _, err := httpGet(healthURL(port, hosts...))
 	return err == nil && isHealthyStatus(status)
 }
 
@@ -191,7 +205,7 @@ func readPid(path string) (int, bool) {
 // stdout and stderr to <root>/.run/<name>.log and recording its pid to
 // <root>/.run/<name>.pid, then polls health for up to 90s.
 func startPy(root string, svc pyService) {
-	if health(svc.port) {
+	if health(svc.port, svc.host) {
 		printSvcLine(true, svc.name, "already up", svc.port)
 		return
 	}
@@ -227,10 +241,10 @@ func startPy(root string, svc pyService) {
 	// Detach: blk neither waits on nor owns this process from here on.
 	_ = cmd.Process.Release()
 
-	for i := 0; i < 90 && !health(svc.port); i++ {
+	for i := 0; i < 90 && !health(svc.port, svc.host); i++ {
 		time.Sleep(1 * time.Second)
 	}
-	if health(svc.port) {
+	if health(svc.port, svc.host) {
 		printSvcLine(true, svc.name, fmt.Sprintf("up, pid %d", pid), svc.port)
 	} else {
 		printSvcFail(svc.name, fmt.Sprintf("FAILED to become healthy (see %s)", logPath))
@@ -250,7 +264,7 @@ func stopService(root string, svc pyService) {
 	pidPath := pidFilePath(root, svc.name)
 	pid, ok := readPid(pidPath)
 	if !ok {
-		if health(svc.port) {
+		if health(svc.port, svc.host) {
 			fmt.Printf("  %s %s\n", Caut.Render(Glyph(GlyphWarn)), Body.Render(unmanagedNote(svc)))
 			return
 		}
@@ -258,7 +272,7 @@ func stopService(root string, svc pyService) {
 		return
 	}
 	if !runsService(root, pid, svc.module) {
-		if health(svc.port) {
+		if health(svc.port, svc.host) {
 			fmt.Printf("  %s %s\n", Caut.Render(Glyph(GlyphWarn)), Body.Render(unmanagedNote(svc)))
 			return
 		}
@@ -266,7 +280,9 @@ func stopService(root string, svc pyService) {
 		fmt.Printf("  %s %s\n", Fail.Render(Glyph(GlyphErr)), Body.Render(svc.name+": not running"))
 		return
 	}
-	escalated, err := terminateService(pid, svc.port, syscall.Kill, health, time.Sleep)
+	escalated, err := terminateService(pid, svc.port, syscall.Kill, func(port int) bool {
+		return health(port, svc.host)
+	}, time.Sleep)
 	if err != nil {
 		os.Remove(pidPath)
 		fmt.Printf("  %s %s\n", Fail.Render(Glyph(GlyphErr)), Body.Render(svc.name+": not running"))
@@ -374,7 +390,7 @@ func runStackUp(root string) {
 	fmt.Println(H1.Render("blk up") + "  " + Meta.Render("starting the stack"))
 
 	upQdrant(root)
-	startPy(root, embedServerSvc)
+	startPy(root, configuredEmbedService())
 
 	if tavilyKey() != "" {
 		fmt.Printf("  %s %s\n", OK.Render(Glyph(GlyphOK)), Body.Render("tavily: ")+Meta.Render("web fallback enabled"))
@@ -410,7 +426,7 @@ func upQdrant(root string) {
 func runStackDown(root string) {
 	fmt.Println(H1.Render("blk down") + "  " + Meta.Render("stopping the stack"))
 
-	stopService(root, embedServerSvc)
+	stopService(root, configuredEmbedService())
 
 	if err := exec.Command("docker", "stop", qdrantContainer).Run(); err != nil {
 		fmt.Printf("  %s %s\n", Fail.Render(Glyph(GlyphErr)), Body.Render("qdrant: ")+Meta.Render("not running"))
@@ -422,13 +438,13 @@ func runStackDown(root string) {
 // runStackStatus prints the up/down state of qdrant and embed_server.
 func runStackStatus(root string) {
 	printStatusLine("qdrant", qhealth(), 6333)
-	printServiceStatus(root, embedServerSvc)
+	printServiceStatus(root, configuredEmbedService())
 }
 
 // printServiceStatus prints svc's up/down line, and when it is up without a
 // valid pid file, the one line that says so.
 func printServiceStatus(root string, svc pyService) {
-	up := health(svc.port)
+	up := health(svc.port, svc.host)
 	printStatusLine(svc.name, up, svc.port)
 	if _, ok := readPid(pidFilePath(root, svc.name)); up && !ok {
 		fmt.Printf("  %s %s\n", Caut.Render(Glyph(GlyphWarn)), Meta.Render(unmanagedNote(svc)))

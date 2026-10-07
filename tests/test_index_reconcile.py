@@ -269,5 +269,85 @@ class ManualInputIsolationTest(unittest.TestCase):
         self.assertEqual(self.paths(), [url])
 
 
+class ResumeMetadataTest(unittest.TestCase):
+    def test_unchanged_text_refreshes_metadata_and_preserves_vectors(self):
+        from blkchain.schema import Chunk, chunk_id, content_hash
+
+        client = QdrantClient(":memory:")
+        self.addCleanup(client.close)
+        client.create_collection(
+            collection_name="resume-metadata",
+            vectors_config={config.DENSE_VECTOR_NAME: models.VectorParams(
+                size=2, distance=models.Distance.COSINE)},
+            sparse_vectors_config={config.SPARSE_VECTOR_NAME: models.SparseVectorParams()},
+        )
+        chunk = Chunk(id=chunk_id("notes", "note.md", "0"), text="Same text",
+                      source="notes", path="note.md", section="Updated heading",
+                      cwe_class="encoding", blurb="Updated context",
+                      identifiers={"product": ["current"]}, extra={"origin": "url"})
+        point_id = index._point_id(chunk.id)
+        client.upsert(collection_name="resume-metadata", points=[models.PointStruct(
+            id=point_id,
+            vector={config.DENSE_VECTOR_NAME: [0.1, 0.2],
+                    config.SPARSE_VECTOR_NAME: models.SparseVector(indices=[1], values=[2.0])},
+            payload={"text": chunk.text, "content_hash": content_hash(chunk.text),
+                     "section": "Old heading", "retired": "old metadata", "origin": "old",
+                     "index_scope": "manual", "index_generation": "old", "index_root": "/old"},
+        )])
+        before = client.retrieve(collection_name="resume-metadata", ids=[point_id], with_vectors=True)[0].vector
+        for scope in (None, "corpus", "manual"):
+            with self.subTest(scope=scope), mock.patch.object(index, "_embed_dense") as embed:
+                sparse = mock.Mock()
+                stats = index._index_chunks(client, sparse, "resume-metadata", [chunk],
+                                             {point_id: content_hash(chunk.text)}, True,
+                                             "current", scope, "generation" if scope else None,
+                                             "/current" if scope == "manual" else None)
+                after = client.retrieve(collection_name="resume-metadata", ids=[point_id], with_vectors=True)[0]
+                self.assertEqual(after.payload, chunk.payload("current", scope,
+                                 "generation" if scope else None,
+                                 "/current" if scope == "manual" else None))
+                self.assertEqual(after.vector, before)
+                self.assertEqual(stats["skipped"], 1)
+                self.assertEqual(stats["indexed"], 0)
+                embed.assert_not_called()
+                sparse.embed.assert_not_called()
+        chunk.extra = {}
+        index._index_chunks(client, mock.Mock(), "resume-metadata", [chunk],
+                            {point_id: content_hash(chunk.text)}, True, "last")
+        self.assertNotIn("origin", client.retrieve(collection_name="resume-metadata", ids=[point_id])[0].payload)
+
+    def test_resume_reembeds_points_without_a_content_hash(self):
+        from blkchain.schema import Chunk, chunk_id
+
+        chunk = Chunk(id=chunk_id("notes", "note.md", "0"), text="Current text", source="notes", path="note.md")
+        point_id = index._point_id(chunk.id)
+        client = mock.Mock()
+        sparse = mock.Mock()
+        sparse.embed.return_value = [types.SimpleNamespace(indices=np.array([1]), values=np.array([2.0]))]
+        with mock.patch.object(index, "_embed_dense", return_value=[[0.1, 0.2]]) as embed:
+            stats = index._index_chunks(client, sparse, "fixture", [chunk], {point_id: None}, True, "current")
+        self.assertEqual(stats["skipped"], 0)
+        self.assertEqual(stats["updated"], 1)
+        self.assertEqual(stats["indexed"], 1)
+        embed.assert_called_once_with([chunk.text])
+        self.assertEqual(client.upsert.call_args.kwargs["points"][0].payload, chunk.payload("current"))
+
+    def test_resume_payload_updates_are_bounded(self):
+        from blkchain.schema import Chunk, chunk_id, content_hash
+
+        chunks = [Chunk(id=chunk_id("notes", str(i), "0"), text="Same text", source="notes", path=str(i)) for i in range(1001)]
+        existing = {index._point_id(chunk.id): content_hash(chunk.text) for chunk in chunks}
+        sizes = []
+        client = mock.Mock()
+        client.batch_update_points.side_effect = lambda **kwargs: sizes.append(len(kwargs["update_operations"]))
+        sparse = mock.Mock()
+        with mock.patch.object(index, "_embed_dense") as embed:
+            stats = index._index_chunks(client, sparse, "fixture", iter(chunks), existing, True, "current")
+        self.assertEqual(sizes, [1000, 1])
+        self.assertEqual(stats["skipped"], 1001)
+        embed.assert_not_called()
+        sparse.embed.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

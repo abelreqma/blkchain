@@ -154,9 +154,10 @@ def _reranker_path() -> Path:
 
 RERANKER_PATH = _reranker_path()
 
-EMBED_SERVER_HOST = os.environ.get("BLKCHAIN_EMBED_HOST", "127.0.0.1")
+EMBED_SERVER_HOST = os.environ.get("BLKCHAIN_EMBED_HOST", "").strip() or "127.0.0.1"
 EMBED_SERVER_PORT = _int_env("BLKCHAIN_EMBED_PORT", 8100, minimum=1, maximum=65535)
-EMBED_SERVER_URL = f"http://{EMBED_SERVER_HOST}:{EMBED_SERVER_PORT}"
+_EMBED_URL_HOST = f"[{EMBED_SERVER_HOST}]" if ":" in EMBED_SERVER_HOST else EMBED_SERVER_HOST
+EMBED_SERVER_URL = f"http://{_EMBED_URL_HOST}:{EMBED_SERVER_PORT}"
 # Max texts per MLX forward pass inside the embed server, so a large /embed
 # request is split into bounded forward passes (avoids multi-minute batches).
 EMBED_SUBBATCH = _int_env("BLKCHAIN_EMBED_SUBBATCH", 32, minimum=1)
