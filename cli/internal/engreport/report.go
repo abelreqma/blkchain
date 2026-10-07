@@ -100,14 +100,20 @@ func RenderMarkdown(m Model) string {
 		b.WriteString("\n")
 	}
 
-	// Findings: done tasks with their evidence and skill receipts.
-	b.WriteString("## Findings\n\n")
-	findings := 0
+	// Completed tasks with their evidence and skill receipts. plan_complete
+	// requires a recorded evidence quote; it does not check the task's DoneWhen
+	// condition, so the section states what completion establishes rather than
+	// presenting every done task as a finding.
+	b.WriteString("## Completed tasks\n\n")
+	b.WriteString("Each task below was marked done with at least one recorded evidence quote. ")
+	b.WriteString("Completion records the executor's assertion and the output it captured; ")
+	b.WriteString("the stated \"Done when\" condition was not independently verified.\n\n")
+	done := 0
 	for _, t := range tasks {
 		if t.Status != engagement.StatusDone {
 			continue
 		}
-		findings++
+		done++
 		fmt.Fprintf(&b, "### %s [%s] %s\n\n", safeMarkdownLine(t.ID), safeMarkdownLine(t.Kind), safeMarkdownLine(t.Target))
 		if t.Objective != "" {
 			fmt.Fprintf(&b, "- Objective: %s\n", safeMarkdownLine(t.Objective))
@@ -132,19 +138,14 @@ func RenderMarkdown(m Model) string {
 		}
 		b.WriteString("\n")
 	}
-	if m.Web != nil {
-		for _, finding := range webanalysis.Display(*m.Web).Findings {
-			if finding.Kind != "secret-candidate" || finding.Value == "" {
-				continue
-			}
-			findings++
-			data, _ := webanalysis.FindingEvent("", finding)
-			fmt.Fprintf(&b, "### Discovered credential\n\n```json\n%s\n```\n\n", data)
-		}
-	}
-	if findings == 0 {
+	if done == 0 {
 		b.WriteString("None yet.\n\n")
 	}
+
+	// Secret candidates: a detector match graded by webanalysis, reported apart
+	// from the completed tasks because it is neither a task nor a validated
+	// credential.
+	writeSecretCandidates(&b, m.Web)
 
 	// Task graph.
 	b.WriteString("## Tasks\n\n")
@@ -257,6 +258,58 @@ func RenderMarkdown(m Model) string {
 		}
 	}
 	return b.String()
+}
+
+// writeSecretCandidates renders the valued secret candidates of a web snapshot
+// as their own section, carrying the analyzer's evidence grade and the locating
+// metadata. A match is a detector hit on captured source, not a validated
+// credential, and the heading says so. The full record, matched value included,
+// follows the summary: a discovered credential is target evidence the operator
+// needs in every output. The section is omitted when there is none.
+func writeSecretCandidates(b *strings.Builder, snap *webanalysis.Snapshot) {
+	if snap == nil {
+		return
+	}
+	shown := false
+	for _, f := range webanalysis.Display(*snap).Findings {
+		if f.Kind != "secret-candidate" || f.Value == "" {
+			continue
+		}
+		if !shown {
+			b.WriteString("## Secret candidates\n\n")
+			b.WriteString("Each entry is a detector match on captured source, not a validated credential.\n\n")
+			shown = true
+		}
+		kind := f.CredentialType
+		if kind == "" {
+			kind = f.Kind
+		}
+		fmt.Fprintf(b, "### %s", safeMarkdownLine(kind))
+		if f.Location.Unit != "" {
+			fmt.Fprintf(b, " in %s", safeMarkdownLine(f.Location.Unit))
+		}
+		b.WriteString("\n\n")
+		fmt.Fprintf(b, "- Evidence: %s. %s\n", safeMarkdownLine(f.Evidence.Grade), safeMarkdownLine(f.Evidence.Explanation))
+		fmt.Fprintf(b, "- Detector confidence: %s\n", safeMarkdownLine(f.Confidence))
+		fmt.Fprintf(b, "- Detector: %s\n", safeMarkdownLine(f.Detector))
+		if f.Name != "" {
+			fmt.Fprintf(b, "- Name: %s\n", safeMarkdownLine(f.Name))
+		}
+		if f.Location.Unit != "" {
+			fmt.Fprintf(b, "- Location: %s line %d\n", safeMarkdownLine(f.Location.Unit), f.Location.Line)
+		}
+		if f.SourceURL != "" {
+			fmt.Fprintf(b, "- Source: %s\n", safeMarkdownLine(f.SourceURL))
+		}
+		if f.Role != "" {
+			fmt.Fprintf(b, "- Role: %s\n", safeMarkdownLine(f.Role))
+		}
+		if f.Fingerprint != "" {
+			fmt.Fprintf(b, "- Fingerprint: %s\n", safeMarkdownLine(f.Fingerprint))
+		}
+		data, _ := webanalysis.FindingEvent("", f)
+		fmt.Fprintf(b, "\nFull record:\n\n```json\n%s\n```\n\n", data)
+	}
 }
 
 func sanitizeFinal(s string) string {

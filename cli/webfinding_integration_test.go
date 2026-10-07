@@ -127,8 +127,10 @@ func TestDiscoveredCredentialReachesStdoutLogAndReports(t *testing.T) {
 		t.Fatal(err)
 	}
 	encoded, _ := json.Marshal(password)
-	if !strings.Contains(string(markdown), "### Discovered credential") || strings.Contains(string(markdown), "None yet.") {
-		t.Fatal("credential omitted from report findings while its task was active")
+	// A secret candidate is reported whatever its task's status, under its own
+	// heading rather than as a completed-task finding.
+	if !strings.Contains(string(markdown), "## Secret candidates") {
+		t.Fatal("credential omitted from the report while its task was active")
 	}
 	if !bytes.Contains(markdown, append([]byte(`"value":`), encoded...)) {
 		t.Fatal("Markdown report lost exact encoded credential")

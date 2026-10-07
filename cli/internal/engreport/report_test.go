@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/webanalysis"
 )
 
 func sampleModel() Model {
@@ -35,7 +36,8 @@ func TestRenderMarkdownHasSections(t *testing.T) {
 	for _, want := range []string{
 		"assess example.com", // goal
 		"Coverage",
-		"Findings",
+		"Completed tasks",
+		"was not independently verified", // completion caveat
 		"t1", "t2",
 		"found open port 80", // evidence quote present
 		"recon-http",         // receipt skill present
@@ -138,5 +140,84 @@ func TestRenderMarkdownEscapesEvidence(t *testing.T) {
 	// A completed engagement omits the Next steps section.
 	if strings.Contains(md, "Next steps") {
 		t.Errorf("completed engagement should not render Next steps")
+	}
+}
+
+// secretModel is sampleModel with one valued secret candidate in its web snapshot.
+func secretModel() Model {
+	m := sampleModel()
+	m.Web = &webanalysis.Snapshot{Findings: []webanalysis.Finding{{
+		ID: "f1", Kind: "secret-candidate", Detector: "env-assignment", Confidence: "medium",
+		Location:    webanalysis.Location{Unit: "app.bundle.js", Line: 1482},
+		Preview:     `"fixture-secret-0001"`,
+		Value:       "fixture-secret-0001",
+		Name:        "STRIPE_API_KEY",
+		SourceURL:   "https://app.example.test/static/app.bundle.js",
+		Role:        "anonymous",
+		Fingerprint: "9f2c1ab4e70d5386",
+	}}}
+	return m
+}
+
+// A secret candidate renders under its own heading with the analyzer's evidence
+// grade. The old "Discovered credential" heading claimed more than the detector
+// establishes. The matched value stays in the report: a discovered credential is
+// target evidence the operator needs in every output.
+func TestRenderMarkdownSecretCandidateIsGraded(t *testing.T) {
+	md := RenderMarkdown(secretModel())
+	for _, want := range []string{
+		"## Secret candidates",
+		"not a validated credential",
+		"has not been tested for validity", // webanalysis evidence grade text
+		"Detector confidence: medium",
+		"app.bundle.js line 1482",
+		"9f2c1ab4e70d5386",
+		`"value":"fixture-secret-0001"`,
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("markdown missing %q", want)
+		}
+	}
+	if strings.Contains(md, "Discovered credential") {
+		t.Error("report still claims a discovered credential")
+	}
+}
+
+// The JSON report carries the value too.
+func TestRenderJSONKeepsSecretCandidateValue(t *testing.T) {
+	data, err := RenderJSON(secretModel())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "fixture-secret-0001") {
+		t.Error("JSON report dropped the secret candidate value")
+	}
+}
+
+// A secret candidate is not a completed task: it must not be counted as one, and
+// an engagement with no done tasks still says so.
+func TestRenderMarkdownSecretCandidateIsNotACompletedTask(t *testing.T) {
+	m := secretModel()
+	for i := range m.Engagement.Tasks {
+		m.Engagement.Tasks[i].Status = engagement.StatusTodo
+	}
+	md := RenderMarkdown(m)
+	// The document carries a secret candidate, so assert the missing marker
+	// rather than printing the rendered report.
+	for _, want := range []string{"## Completed tasks\n", "None yet."} {
+		if !strings.Contains(md, want) {
+			t.Errorf("no done tasks must render an empty completed-task section; missing %q", want)
+		}
+	}
+	if !strings.Contains(md, "## Secret candidates") {
+		t.Error("secret candidate section missing")
+	}
+}
+
+// With no web snapshot the section is omitted entirely rather than rendering an
+// empty heading.
+func TestRenderMarkdownOmitsEmptySecretCandidateSection(t *testing.T) {
+	if strings.Contains(RenderMarkdown(sampleModel()), "Secret candidates") {
+		t.Error("secret candidate section rendered with no candidates")
 	}
 }
