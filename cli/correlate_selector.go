@@ -16,12 +16,20 @@ import (
 )
 
 // MinCitationScore is the reranker-score floor a kb_search top hit must clear to
-// ground a candidate. 0 disables the score floor, leaving product/technique
-// specificity (acceptCitation's `term` gate) as the sole scale-free control; it
-// is a tunable being calibrated on the live corpus with the LLM-stack test
-// session, so a keyword-adjacent low-score hit can also be rejected by score once
-// the live distribution is known. It is never raised to a value that would reject
-// real product-specific hits.
+// ground a candidate. It stays 0, which rejects only the -1.0 sentinel
+// rerank_scores.py assigns a blank or non-finite row, because the live
+// distribution does not separate applicable from adjacent.
+//
+// Measured over the live corpus, 12 products through both query shapes
+// buildExploitQueries issues, top 5 each: hits that satisfy the specificity gate
+// score 0.8399 to 0.9533, and hits that fail it score 0.7885 to 0.9352. Two
+// invented products with no corpus page still drew hits up to 0.8617, above real
+// product hits for Elasticsearch (0.8399), Jenkins (0.8584), OpenSSH (0.8604) and
+// vsftpd (0.8607). The bands overlap, so any floor that keeps those real hits sits
+// below the invented-product band and any floor above it rejects them. The scores
+// are sigmoid outputs compressed into a narrow band, not a relevance scale.
+// Applicability is therefore enforced by specificity, in citationNamesSubject, and
+// raising this constant is not the way to tighten it.
 const MinCitationScore = 0.0
 
 // citationTerm returns the distinctive lowercased token a grounding hit must
@@ -45,11 +53,66 @@ func citationTerm(subject string) string {
 	return strings.Join(strings.Fields(strings.ToLower(subject)), " ")
 }
 
+// subjectAliases maps a normalized product phrase to the additional locating
+// tokens that identify its pages in the corpus, for products whose page is named
+// for the protocol they serve rather than for the product. Each entry is chosen
+// from measured corpus evidence, not from the product's name:
+//
+//	openssh -> ssh:  grounds pentesting-ssh.md, "22 - Pentesting SSH/SFTP >
+//	                 Recent Critical Vulnerabilities > CVE-2024-6387"
+//	samba   -> smb:  grounds pentesting-smb/README.md, "139,445 - Pentesting SMB"
+//
+// An alias must identify the product, so a vendor-only token is never one. The
+// measurement shows why: for "Apache httpd" the only metadata token available is
+// "apache", and its first match in the retrieved union is an Apache STRUTS CVE
+// page, a different product. Apache httpd therefore has no alias and falls to the
+// strict rule, which makes it a coverage gap rather than a false ground.
+var subjectAliases = map[string][]string{
+	"openssh": {"ssh"},
+	"samba":   {"smb"},
+}
+
+// citationNamesSubject is citationMentions restricted to a result's LOCATING
+// metadata - its source, path and section - so the hit has to be ABOUT the
+// subject rather than merely mention it. It gates the one path that grounds a
+// discovered service's product, where a body-text mention is what let a
+// product-adjacent page ground: measured on the live corpus, the body-text gate
+// grounded Grafana on an open-redirect page, while the pages really about a
+// product name it in the path or section (9200-pentesting-elasticsearch,
+// jenkins-security, pentesting-web/zabbix).
+//
+// A product in subjectAliases also grounds on its measured alias token, which
+// covers the protocol-named pages the strict rule would miss. A product with
+// neither its own name nor an alias in the metadata grounds nothing, and code
+// persists that as a blocked, unarmed coverage-gap candidate surfaced to the
+// operator, so the failure direction is a missing lead rather than a false one.
+//
+// The class-token callers (the OWASP LLM0x detectors, the cloud and local
+// logic-gap detectors) keep citationMentions: their terms are concept tokens that
+// legitimately live in body text, and narrowing them would deny real grounds.
+func citationNamesSubject(p retrieval.Payload, term string) bool {
+	meta := strings.ToLower(p.Source + " " + p.Path + " " + p.Section)
+	if allTokensOnWordBoundaries(meta, term) {
+		return true
+	}
+	for _, alias := range subjectAliases[strings.ToLower(strings.TrimSpace(term))] {
+		if wordBoundaryContains(meta, alias) {
+			return true
+		}
+	}
+	return false
+}
+
 // citationMentions reports whether the distinctive term appears anywhere in a
 // result's source/path/section/text, so a loose/keyword-adjacent hit that does
 // not actually name the subject is rejected (no false grounding).
 func citationMentions(p retrieval.Payload, term string) bool {
-	hay := strings.ToLower(p.Source + " " + p.Path + " " + p.Section + " " + p.Text)
+	return allTokensOnWordBoundaries(strings.ToLower(p.Source+" "+p.Path+" "+p.Section+" "+p.Text), term)
+}
+
+// allTokensOnWordBoundaries reports whether every token of term appears in hay on
+// word boundaries. hay is expected lowercased.
+func allTokensOnWordBoundaries(hay, term string) bool {
 	toks := strings.Fields(strings.ToLower(term))
 	if len(toks) == 0 {
 		return false
@@ -101,18 +164,33 @@ func acceptCitation(results []retrieval.Result, term string) (engagement.Citatio
 	return cit, ok
 }
 
+// acceptSubjectCitationAt is acceptCitationAt for a discovered service's product,
+// where the hit must be about the product and not merely mention it. See
+// citationNamesSubject.
+func acceptSubjectCitationAt(results []retrieval.Result, term string) (engagement.Citation, int, bool) {
+	return acceptCitationIn(results, term, citationNamesSubject)
+}
+
 // acceptCitationAt is acceptCitation plus the index of the accepted result, -1
 // when none grounds. A Citation names only source/path/section, which every chunk
 // of one corpus section shares, so the index is the only unambiguous handle on the
 // chunk that actually grounded; a caller feeding the accepted chunk's body to a
 // prompt must key on it rather than re-matching the citation fields.
 func acceptCitationAt(results []retrieval.Result, term string) (engagement.Citation, int, bool) {
+	return acceptCitationIn(results, term, citationMentions)
+}
+
+// acceptCitationIn is the shared scan. specific is the gate a hit must satisfy to
+// ground: citationMentions for a concept token, citationNamesSubject for a
+// product. An empty term means no specificity requirement, which is the
+// deterministic logic-gap case.
+func acceptCitationIn(results []retrieval.Result, term string, specific func(retrieval.Payload, string) bool) (engagement.Citation, int, bool) {
 	term = strings.ToLower(strings.TrimSpace(term))
 	for i, r := range results {
 		if r.Score < MinCitationScore {
 			continue
 		}
-		if term != "" && !citationMentions(r.Payload, term) {
+		if term != "" && !specific(r.Payload, term) {
 			continue
 		}
 		return engagement.Citation{
@@ -207,11 +285,27 @@ type selectResult struct {
 	citation engagement.Citation
 }
 
+// newKBExploitSelection keys the selection cache. The version belongs in the key
+// because it is part of what was selected: buildExploitQueries issues a
+// version-bearing query first, so two versions of one product can retrieve
+// different pages and yield different techniques and citations. Keying on the
+// product alone served the first version seen to every later one, which is how a
+// technique selected for a vulnerable build reached a patched build of the same
+// product. An absent version is its own key rather than a wildcard, since
+// "unknown version" is not the same subject as any specific one.
+func newKBExploitSelectionKey(svc Service) string {
+	product := strings.ToLower(strings.Join(strings.Fields(svc.Product), " "))
+	if product == "" {
+		return ""
+	}
+	return product + "\x00" + strings.ToLower(strings.Join(strings.Fields(svc.Version), " "))
+}
+
 // newKBExploitSelector builds the corpus-driven technique advisor: one read-only
 // kb_search over the product+version, then one deterministic (temperature 0)
-// model call for the label. It caches per normalized product so a repeated
-// service does not re-query, and fails closed (empty result) on any error - nil
-// deps, corpus miss, model error, or parse failure.
+// model call for the label. It caches per normalized product and version so a
+// repeated service does not re-query, and fails closed (empty result) on any
+// error - nil deps, corpus miss, model error, or parse failure.
 func newKBExploitSelector(m toolLoopModel, rc searcher, cfg ragconfig.Config) exploitSelector {
 	cache := map[string]selectResult{}
 	var mu sync.Mutex
@@ -219,7 +313,7 @@ func newKBExploitSelector(m toolLoopModel, rc searcher, cfg ragconfig.Config) ex
 		if m == nil || rc == nil {
 			return "", engagement.Citation{}
 		}
-		key := strings.ToLower(strings.TrimSpace(svc.Product))
+		key := newKBExploitSelectionKey(svc)
 		if key == "" {
 			return "", engagement.Citation{}
 		}
@@ -279,7 +373,7 @@ func computeExploitSelection(ctx context.Context, m toolLoopModel, rc searcher, 
 	// merged score order, because reranker scores are query-conditional and so are
 	// not comparable across the two queries; the version-bearing query is issued
 	// first, so its product-specific hits ground ahead of the version-free query's.
-	cit, accepted, ok := acceptCitationAt(results, citationTerm(svc.Product))
+	cit, accepted, ok := acceptSubjectCitationAt(results, citationTerm(svc.Product))
 	if !ok {
 		return "", engagement.Citation{}
 	}

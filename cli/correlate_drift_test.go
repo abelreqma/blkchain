@@ -151,18 +151,20 @@ func TestComputeExploitSelectionUnionFailsClosed(t *testing.T) {
 	}
 }
 
-// Several chunks of one corpus section share a Citation, which names only
-// source/path/section. The grounding chunk here is the second one (the product
-// appears only in its text); the first mentions no product token and so is
-// skipped by acceptCitation. The notes must carry the grounding chunk's body, not
-// the earlier same-section chunk's.
+// A Citation names only source/path/section, so it cannot identify which
+// retrieved chunk grounded a candidate; the accepted index is the only unambiguous
+// handle, and the notes fed to the label prompt must follow it rather than the
+// first result. The grounding chunk here is the second one: the first is a generic
+// page whose locating metadata does not name the product, so citationNamesSubject
+// skips it. (The discriminator is the metadata rather than the body text because
+// the product path grounds on locating metadata; see citationNamesSubject.)
 func TestComputeExploitSelectionNotesFollowTheGroundingChunk(t *testing.T) {
 	decoy := retrieval.Result{ID: "d1", Score: 1, Payload: retrieval.Payload{
 		Source: "offensive-rce", Path: "nosql.md", Section: "9200 - Pentesting NoSQL",
 		Text: "## Pentesting NoSQL\nGeneric document-store enumeration notes.\nNo product token here.",
 	}}
 	grounding := retrieval.Result{ID: "g1", Score: 1, Payload: retrieval.Payload{
-		Source: "offensive-rce", Path: "nosql.md", Section: "9200 - Pentesting NoSQL",
+		Source: "offensive-rce", Path: "9200-pentesting-elasticsearch.md", Section: "Elasticsearch",
 		Text: "### Groovy sandbox bypass\nCVE-2015-1427 yields RCE on Elasticsearch.",
 	}}
 	rc := &perQuerySearcher{byQuery: map[string][]retrieval.Result{
