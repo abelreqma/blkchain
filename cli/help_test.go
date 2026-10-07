@@ -42,6 +42,7 @@ var wordingDescs = map[string]string{
 	"gateway":    "set up and start the Hermes gateway for agent mode",
 	"mcp":        "serve the knowledge base to Hermes over MCP (stdio)",
 	"engage":     "plan and run a gated, multi-step assessment",
+	"store":      "inspect stored engagements and cite answers",
 	"kg":         "query the engagement knowledge graph",
 	"analyze":    "generate schema-validated JSON from the LLM",
 	"install":    "put blk on your PATH (run once, from the project)",
@@ -51,7 +52,7 @@ var wordingDescs = map[string]string{
 }
 
 var wordingGroups = [][]string{
-	{"engage", "kg"},
+	{"engage", "store", "kg"},
 	{"ask", "search", "web", "sources", "open", "add"},
 	{"up", "down", "status", "health", "doctor", "models", "logs"},
 	{"hermes", "gateway", "mcp", "analyze"},
@@ -439,14 +440,11 @@ func section(s, start, end string) string {
 	return rest
 }
 
-// The cap keeps the page scannable in one pass. It rose from 51 to 53 when
-// ENGAGE became its own group: the five groups cost two lines, and the three
-// cheaper sources of room are each bounded by a test above (three to four
-// examples, four to five short-list variables, and two verbatim closing lines).
-func TestUsageIsAtMost53Lines(t *testing.T) {
+// The cap keeps the page scannable in one pass at the standard width.
+func TestUsageIsAtMost54Lines(t *testing.T) {
 	out := renderUsage(80)
-	if n := strings.Count(out, "\n"); n > 53 {
-		t.Errorf("usage is %d lines at 80 columns, want at most 53:\n%s", n, out)
+	if n := strings.Count(out, "\n"); n > 54 {
+		t.Errorf("usage is %d lines at 80 columns, want at most 54:\n%s", n, out)
 	}
 }
 

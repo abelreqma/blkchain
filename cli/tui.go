@@ -382,15 +382,15 @@ var personaSymbols = map[string]string{
 	"cve":      "\U0001f52c",
 	"web":      "\U0001f310",
 	"api":      "\U0001f50c",
-	"ad":       "\U0001faaa",
+	"ad":       "🏢",
 	"cloud":    "\u2601\ufe0f",
 	"supply":   "\U0001f517",
 	"k8s":      "\u2638\ufe0f",
 	"linux":    "\U0001f427",
 	"windows":  "\U0001fa9f",
 	"wireless": "\U0001f4e1",
-	"binexp":   "\U0001f41b",
-	"network":  "\U0001f578\ufe0f",
+	"binexp":   "🧩",
+	"network":  "🛜",
 	"mobile":   "\U0001f4f1",
 	"recon":    "\U0001f50e",
 	"ai":       "\U0001f916",
@@ -416,6 +416,10 @@ type noResultsMsg struct{}
 type errMsg struct{ err error }
 type canceledMsg struct{}
 type execDoneMsg struct{ err error }
+type storeDoneMsg struct {
+	output string
+	err    error
+}
 
 // chunkMsg is one streamed token slice from the RAG synthesizer, pushed into
 // the event loop by the AnswerLoop stream callback via prog.Send.
@@ -1023,6 +1027,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.finish(tea.Println(styleErr(msg.Err)))
 		}
 		return m, m.finish(tea.Println(msg.Output))
+
+	case storeDoneMsg:
+		m.working = false
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
+		m.live = ""
+		m.workingVerb = ""
+		if msg.err != nil {
+			return m, m.finish(tea.Println(styleErr(msg.err)))
+		}
+		return m, m.finish(tea.Println(terminalSafe(strings.TrimRight(msg.output, "\n"))))
 
 	case engageDoneMsg:
 		m.working = false
@@ -1890,7 +1907,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 // isTurnVerb reports whether a verb starts a network turn (and so must queue
 // rather than run concurrently while another turn is in flight).
 func isTurnVerb(v string) bool {
-	return v == "ask" || v == "search" || v == "health" || v == "generate"
+	return v == "ask" || v == "search" || v == "health" || v == "generate" || v == "store"
 }
 
 // vizNext applies a /viz argument to the current setting. ok is false for an
@@ -2233,6 +2250,24 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.cancel = cancel
 		m.pendingQ = question
 		return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.generateCmd(ctx, question, results, m.turnStart))
+	case "store":
+		args, err := webArguments(arg)
+		if err != nil {
+			return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
+		}
+		m.working = true
+		m.tickGen++
+		m.workingVerb = "reading stored engagement" + ellipsis()
+		m.turnStart = time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RequestTimeout())
+		m.cancel = cancel
+		modelID := m.activeModel()
+		cmd := func() tea.Msg {
+			var b bytes.Buffer
+			err := runStoreTo(ctx, args, &b, nil, modelID)
+			return storeDoneMsg{output: b.String(), err: err}
+		}
+		return m, tea.Batch(tea.Println(echo), m.workTick(), cmd)
 	case "engage":
 		parts := strings.Fields(arg)
 		if len(parts) > 0 && parts[0] == "web" {

@@ -74,6 +74,7 @@ func slashCommands() []command {
 		{"generate", "[question]", "answer from the last search results, no new retrieval", groupAsk},
 		{"mode", "", "switch between native answers and Hermes (also /rag)", groupModes},
 		{"engage", "<goal|web>", "run a gated, multi-step engagement toward a goal", groupEngage},
+		{"store", "<action>", spec["store"], groupEngage},
 		{"candidates", "", "list the engagement's exploit candidates and their source", groupEngage},
 		{"evidence", "", "show the engagement's captured evidence (verified quotes)", groupEngage},
 		{"kg", "[node <id>|type]", "query the engagement knowledge graph", groupEngage},

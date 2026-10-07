@@ -4,7 +4,25 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
+
+var agentDisplayNames = map[string]string{
+	"auto": "Auto", "general": "General", "ad": "Active Directory",
+	"ai": "AI Security", "api": "API", "binexp": "Binary Exploitation",
+	"cloud": "Cloud", "cve": "CVE Research", "k8s": "Kubernetes",
+	"linux": "Linux", "mobile": "Mobile", "network": "Network",
+	"recon": "Reconnaissance", "supply": "Supply Chain", "web": "Web",
+	"windows": "Windows", "wireless": "Wireless",
+}
+
+func agentDisplayName(name string) string {
+	if display := agentDisplayNames[name]; display != "" {
+		return display
+	}
+	return name
+}
 
 func answerAgentNames() []string {
 	names := make([]string, 0, len(personas))
@@ -20,6 +38,13 @@ func parseAnswerAgent(value string) (string, error) {
 		return "", fmt.Errorf("agent: specialist name exceeds the limit")
 	}
 	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.Join(strings.Fields(value), " ")
+	for name, display := range agentDisplayNames {
+		if value == strings.ToLower(display) {
+			value = name
+			break
+		}
+	}
 	if value == "" || value == "auto" {
 		return "", nil
 	}
@@ -54,10 +79,11 @@ func answerAgentName(domain string) string {
 }
 
 func answerAgentLabel(name string) string {
+	display := agentDisplayName(name)
 	if plCurrentTier() == plASCII {
-		return name
+		return display
 	}
-	icon := "\U0001f500"
+	icon := "🔀"
 	if name != "auto" {
 		domain := name
 		if name == "general" {
@@ -65,7 +91,8 @@ func answerAgentLabel(name string) string {
 		}
 		icon = personaSymbols[domain]
 	}
-	return icon + " " + name
+	const iconColumn = 3
+	return icon + strings.Repeat(" ", max(iconColumn-lipgloss.Width(icon), 1)) + display
 }
 
 func (m model) answerAgentStatus() string {
@@ -85,7 +112,7 @@ func (m model) answerAgentStatus() string {
 			selected = "\U0001f4ac " + selected
 		}
 	}
-	return "agent " + selected + "\nnative specialists: " + strings.Join(names, ", ")
+	return "agent " + selected + "\nnative specialists:\n  " + strings.Join(names, "\n  ")
 }
 
 func (m *model) selectAnswerAgent(value string) error {

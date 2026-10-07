@@ -204,6 +204,12 @@ func migrate(db *sql.DB) error {
 	if _, err := tx.Exec(graphSchema); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(findingSchema); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(actionIndexSchema); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`INSERT OR IGNORE INTO meta (k, v) VALUES ('revision', '0')`); err != nil {
 		return err
 	}

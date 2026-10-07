@@ -58,6 +58,7 @@ type actionRecord struct {
 
 type actionTranscript struct {
 	onPersist                       func() error
+	onStore                         func([]byte) error
 	orderMu                         sync.Mutex
 	mu                              sync.Mutex
 	path, mode, runner, otherRunner string
@@ -120,9 +121,13 @@ func (t *actionTranscript) recordOrdered(rec actionRecord) error {
 		}
 	}
 	callback := t.onEvent
+	onStore := t.onStore
 	persist := t.onPersist
 	mode := t.mode
 	t.mu.Unlock()
+	if err == nil && onStore != nil {
+		err = onStore(data)
+	}
 	if err == nil && persist != nil {
 		err = persist()
 	}

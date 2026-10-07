@@ -223,6 +223,15 @@ func plainREPL() error {
 				args = append(args, strings.Fields(rest)...)
 				printErr(invokePlainEngage(args))
 			}
+		case "store":
+			args, err := webArguments(rest)
+			if err != nil {
+				printErr(err)
+			} else {
+				ctx, cancel := context.WithTimeout(context.Background(), pm.cfg.RequestTimeout())
+				printErr(runStoreTo(ctx, args, os.Stdout, nil, pm.activeModel()))
+				cancel()
+			}
 		case "history":
 			var err error
 			convo, err = plainHistory(&pm, rest, convo)
@@ -507,6 +516,7 @@ func replGroups() []rowGroup {
 		{replGroupEngage, []helpRow{
 			{"/engage [flags] <goal>", replSpecDesc("engage")},
 			{"/engage web <action>", "assess web targets within an engagement"},
+			{"/store <action>", replSpecDesc("store")},
 			{"/transcript <mode>", "show off, important, or full action output"},
 			{"/safe", "approve engagement actions interactively"},
 			{"/auto", "run within the active RoE without prompts"},

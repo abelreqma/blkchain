@@ -225,6 +225,7 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 	}
 	defer lease.Close()
 	trace := newActionTranscript(ws.Dir, o.transcript, roe.Policy.RunnerID, roe.Policy.MaxActions, roe.Policy.TotalBytes, input.Output)
+	trace.onStore = func(data []byte) error { return ws.Store.RecordActionDocument(context.Background(), data) }
 	trace.otherRunner = "web-broker"
 	trace.onEvent = input.OnAction
 	if o.resume != "" {

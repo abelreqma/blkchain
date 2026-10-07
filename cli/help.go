@@ -271,6 +271,20 @@ func commandSpecs() []cmdSpec {
 			run: runEngage,
 		},
 		{
+			name: "store", args: "[action]", group: hgEngage,
+			desc: "inspect stored engagements and cite answers",
+			long: "Use --interactive for a keyboard-driven store explorer; otherwise list and search earlier engagements with their tasks, findings, evidence, actions, web records, coverage, and audit history in SQLite. " +
+				"Use --id to select an earlier engagement and --surface to narrow a view. Records are paged with --kind, --offset, and --limit. " +
+				"Ask sends bounded, cited records to the local LLM without execution tools; validated findings require exact evidence ids.",
+			flags: func(fs *flag.FlagSet) { storeFlags(fs, &storeOptions{}) },
+			examples: []string{
+				"blk store --interactive",
+				"blk store list",
+				`blk store ask "What was found?"`,
+			},
+			run: runStore,
+		},
+		{
 			name: "kg", group: hgEngage,
 			desc: "query the engagement knowledge graph",
 			long: "Queries the engagement knowledge graph: a read-only, in-process projection of the engagement store that correlates tasks, assets, and evidence as nodes and edges. " +

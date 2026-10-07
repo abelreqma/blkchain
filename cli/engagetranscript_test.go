@@ -2,12 +2,38 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestActionTranscriptWritesSQLiteStore(t *testing.T) {
+	ws, _ := fixtureStoreWorkspace(t, t.TempDir())
+	defer ws.Close()
+	trace := newActionTranscript(ws.Dir, "off", "fixture-runner", 10, 65536, nil)
+	trace.onStore = func(data []byte) error { return ws.Store.RecordActionDocument(context.Background(), data) }
+	if err := trace.record(actionRecord{Task: "network-task", Kind: "command", Command: "fixture", Status: "complete", ExitCode: 0, Stdout: "fixture banner"}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := ws.Store.Records(context.Background(), "action", "network", 0, 10)
+	if err != nil || page.Total != 1 || len(page.Records) != 1 {
+		t.Fatalf("live action missing from SQLite: %+v %v", page, err)
+	}
+	summaries, err := ws.Store.RecentActions(context.Background(), "network", 10)
+	if err != nil || len(summaries) != 1 || summaries[0].Stdout != "fixture banner" {
+		t.Fatalf("action summary missing output: %+v %v", summaries, err)
+	}
+	if err := os.Remove(filepath.Join(ws.Dir, "actions.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	page, err = ws.Store.Records(context.Background(), "action", "network", 0, 10)
+	if err != nil || page.Total != 1 {
+		t.Fatalf("SQLite action depended on transcript file: %+v %v", page, err)
+	}
+}
 
 func TestEngageTerminalRejectsControlSequences(t *testing.T) {
 	input := "ok\x1b[31m red\x1b[0m\x1b]52;c;c2VjcmV0\x07\nnext\r\x00"

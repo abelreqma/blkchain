@@ -2,18 +2,22 @@ package main
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"strings"
 	"testing"
 )
 
 func TestAnswerAgentSelectionUsesRegisteredChoices(t *testing.T) {
-	for _, input := range []string{"", "auto", "general", "cloud", " API "} {
+	for _, input := range []string{"", "auto", "general", "cloud", " API ", "Active Directory", "Binary Exploitation"} {
 		choice, err := parseAnswerAgent(input)
 		if err != nil {
 			t.Fatalf("%q: %v", input, err)
 		}
 		if input == " API " && choice != "api" {
 			t.Fatal("choice not normalized")
+		}
+		if (input == "Active Directory" && choice != "ad") || (input == "Binary Exploitation" && choice != "binexp") {
+			t.Fatalf("display name %q did not resolve: %q", input, choice)
 		}
 	}
 	for _, input := range []string{"not-an-agent", "cloud web", strings.Repeat("a", 65), "web\x1b[31m"} {
@@ -73,6 +77,15 @@ func TestAgentTabCompletesWithoutChangingSelection(t *testing.T) {
 	}
 }
 
+func TestAgentPickerFindsNormalizedDisplayNames(t *testing.T) {
+	useDeadServices(t)
+	m := newKeyModel(t)
+	items := m.argumentSuggestions("/agent Active D")
+	if len(items) != 1 || items[0].value != "/agent ad " || !strings.Contains(items[0].label, "Active Directory") {
+		t.Fatalf("display-name completion: %+v", items)
+	}
+}
+
 func TestClearPreservesSelectedAnswerAgent(t *testing.T) {
 	useDeadServices(t)
 	m := newKeyModel(t)
@@ -92,13 +105,13 @@ func TestAgentCompletionAndStatusUseDomainEmoji(t *testing.T) {
 	vizForceTier(t, plNerd)
 	m := newKeyModel(t)
 	items := m.argumentSuggestions("/agent cl")
-	if len(items) != 1 || items[0].label != personaSymbols["cloud"]+" cloud" || items[0].value != "/agent cloud " {
+	if len(items) != 1 || items[0].label != answerAgentLabel("cloud") || items[0].value != "/agent cloud " {
 		t.Fatalf("emoji missing or leaked into input: %+v", items)
 	}
 	if err := m.selectAnswerAgent("cloud"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(m.answerAgentStatus(), personaSymbols["cloud"]+" cloud") {
+	if !strings.Contains(m.answerAgentStatus(), answerAgentLabel("cloud")) {
 		t.Fatal("selected agent has no emoji")
 	}
 	for _, name := range answerAgentNames() {
@@ -108,12 +121,48 @@ func TestAgentCompletionAndStatusUseDomainEmoji(t *testing.T) {
 	}
 }
 
+func TestAgentLabelsUseClearNamesAndAlignedIconColumns(t *testing.T) {
+	useDeadServices(t)
+	vizForceTier(t, plNerd)
+	if len(agentDisplayNames) != len(answerAgentNames()) {
+		t.Fatal("agent display names do not cover every choice")
+	}
+	for _, name := range answerAgentNames() {
+		label := answerAgentLabel(name)
+		display := agentDisplayName(name)
+		start := strings.Index(label, display)
+		if start < 0 || lipgloss.Width(label[:start]) != 3 {
+			t.Fatalf("agent %s label is not aligned: %q", name, label)
+		}
+	}
+	column := -1
+	for _, name := range answerAgentNames() {
+		item := paletteItem{label: answerAgentLabel(name)}
+		row := terminalSafe(paletteRow(item, false, 24, 60))
+		start := strings.Index(row, agentDisplayName(name))
+		if start < 0 {
+			t.Fatalf("agent row omitted %s: %q", name, row)
+		}
+		width := lipgloss.Width(row[:start])
+		if column < 0 {
+			column = width
+		} else if width != column {
+			t.Fatalf("agent %s starts at column %d, want %d", name, width, column)
+		}
+	}
+	for name, want := range map[string]string{"ad": "Active Directory", "ai": "AI Security", "binexp": "Binary Exploitation", "k8s": "Kubernetes", "recon": "Reconnaissance"} {
+		if got := agentDisplayName(name); got != want {
+			t.Errorf("%s display=%q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestAgentCompletionASCIIFallbackKeepsPlainNames(t *testing.T) {
 	useDeadServices(t)
 	vizForceTier(t, plASCII)
 	m := newKeyModel(t)
 	items := m.argumentSuggestions("/agent cl")
-	if len(items) != 1 || items[0].label != "cloud" || items[0].value != "/agent cloud " {
+	if len(items) != 1 || items[0].label != "Cloud" || items[0].value != "/agent cloud " {
 		t.Fatalf("ASCII completion contains an emoji: %+v", items)
 	}
 }

@@ -41,7 +41,9 @@ func (m model) argumentSuggestions(value string) []paletteItem {
 	if rest != "" && !strings.HasSuffix(rest, " ") {
 		position--
 	}
-	if len(words) > 0 && position > 0 {
+	if verb == "agent" {
+		prefix, head = rest, "/agent "
+	} else if len(words) > 0 && position > 0 {
 		prefix = ""
 		if !strings.HasSuffix(rest, " ") {
 			prefix = words[len(words)-1]
@@ -50,9 +52,7 @@ func (m model) argumentSuggestions(value string) []paletteItem {
 	}
 	switch verb {
 	case "agent":
-		if position == 0 {
-			choices = answerAgentNames()
-		}
+		choices = answerAgentNames()
 	case "models":
 		if position == 0 {
 			choices = []string{"on", "off", "load", "unload"}
@@ -75,6 +75,10 @@ func (m model) argumentSuggestions(value string) []paletteItem {
 			choices = []string{"inspect", "analyze", "import", "export", "archive", "collect", "replay"}
 		} else if position == 1 && words[0] == "resume" {
 			return pathSuggestions(head, prefix)
+		}
+	case "store":
+		if position == 0 {
+			choices = []string{"list", "show", "records", "findings", "ask", "add", "review"}
 		}
 	case "context":
 		if position == 0 {
@@ -131,7 +135,11 @@ func (m model) argumentSuggestions(value string) []paletteItem {
 	var out []paletteItem
 	seen := map[string]bool{}
 	for _, choice := range choices {
-		if choice == "" || seen[choice] || !strings.HasPrefix(strings.ToLower(choice), strings.ToLower(prefix)) {
+		matches := strings.HasPrefix(strings.ToLower(choice), strings.ToLower(prefix))
+		if verb == "agent" {
+			matches = matches || strings.HasPrefix(strings.ToLower(agentDisplayName(choice)), strings.ToLower(prefix))
+		}
+		if choice == "" || seen[choice] || !matches {
 			continue
 		}
 		seen[choice] = true
