@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,29 @@ import (
 
 	"github.com/tmc/langchaingo/llms"
 )
+
+func TestCitedSourceNumbersSurviveSelectionAndDuplicateLocations(t *testing.T) {
+	chunks := []retrieval.Result{
+		chunk("kb", "same.md", "Part", "first"),
+		chunk("kb", "same.md", "Part", "second"),
+		chunk("kb", "third.md", "Third", "third"),
+	}
+	citations := citationsFromAnswer("Second [2], first [1], and third [3].", chunks)
+	if len(citations) != 3 {
+		t.Fatalf("distinct source numbers collapsed: %+v", citations)
+	}
+	for i, cit := range citations {
+		line := stripANSI(citationLine("", i, cit))
+		if !strings.HasPrefix(line, fmt.Sprintf("[%d]", i+1)) {
+			t.Fatalf("source number changed: %q", line)
+		}
+	}
+	selected := citationsFromAnswer("Only third [3].", chunks)
+	line := stripANSI(citationLine("", 0, selected[0]))
+	if !strings.HasPrefix(line, "[3]") {
+		t.Fatalf("selected citation renumbered: %q", line)
+	}
+}
 
 func chunk(source, path, section, text string) retrieval.Result {
 	return retrieval.Result{

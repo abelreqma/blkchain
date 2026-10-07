@@ -167,7 +167,7 @@ func TestAskWebFlagUsesSavedPermission(t *testing.T) {
 	if err := savePrefs(p); err != nil {
 		t.Fatal(err)
 	}
-	m, _ = tuiSlash(t, m, "/ask --web query")
+	tuiSlash(t, m, "/ask --web query")
 	if !loadPrefs().Web {
 		t.Fatal("interactive answer persisted permission")
 	}

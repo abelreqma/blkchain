@@ -115,7 +115,7 @@ func TestCandidateScanNoticesNewOnlyOnce(t *testing.T) {
 		t.Fatalf("a new candidate should produce a notice command")
 	}
 	// A second scan with the same candidates announces nothing new.
-	nm, cmd = m.Update(candidateScanMsg{cands: cands})
+	_, cmd = m.Update(candidateScanMsg{cands: cands})
 	if cmd != nil {
 		t.Fatalf("no new candidates should produce no notice: %v", cmd)
 	}

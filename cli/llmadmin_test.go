@@ -376,3 +376,17 @@ func TestKeyBearingModelCallsNeverFollowRedirects(t *testing.T) {
 		t.Errorf("the redirect target got %d requests, want none", hits)
 	}
 }
+
+func TestFallbackModelDiscoveryPreservesErrors(t *testing.T) {
+	adminServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/admin/api/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	models, _, err := fetchChatModels(context.Background())
+	if err == nil || len(models) > 0 {
+		t.Fatalf("fallback failure hidden: models=%v err=%v", models, err)
+	}
+}

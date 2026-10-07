@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,25 +8,6 @@ import (
 	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/secgate"
 )
-
-func checkpointAutoActions(wsDir string) (*autoActionPolicy, error) {
-	checkpoint, err := loadEngageCheckpoint(wsDir)
-	if err != nil {
-		return nil, err
-	}
-	if checkpoint.ScopeKind != "roe" {
-		return nil, nil
-	}
-	data, err := checkpointScopeBytes(wsDir, checkpoint)
-	if err != nil {
-		return nil, err
-	}
-	roe, err := ParseRoE(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	return roe.AutoActions, nil
-}
 
 type autoActionRule struct {
 	phase   secgate.Phase
@@ -38,18 +18,6 @@ type autoActionRule struct {
 type autoActionPolicy struct {
 	scope *secgate.Scope
 	rules []autoActionRule
-}
-
-func (p *autoActionPolicy) hasLocalRule() bool {
-	if p == nil {
-		return false
-	}
-	for _, rule := range p.rules {
-		if rule.surface == secgate.SurfaceLocal {
-			return true
-		}
-	}
-	return false
 }
 
 func buildAutoActionPolicy(entries []string, scope *secgate.Scope) (*autoActionPolicy, error) {

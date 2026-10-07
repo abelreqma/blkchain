@@ -8,17 +8,9 @@ import (
 	"strconv"
 )
 
-// graph.go is the engagement knowledge graph: two additive SQLite tables that
-// hold a pure projection of the store (tasks, their targets, evidence rows,
-// recon coverage, and the depends_on/basis_ids/citation relationships) as nodes
-// and edges, so tasks/assets/evidence correlate across an engagement.
-//
-// The graph is derived, never authoritative: PopulateGraph rebuilds it from
-// current store state as an idempotent upsert (the store is append-only for
-// tasks/evidence/assets, and a task status change is an upsert), so a query can
-// populate-then-read and always reflect the store. Graph writes take the store
-// write lock and never go through Apply, so they never fire the Apply listeners
-// and never recurse.
+// The graph projects stored tasks, assets, evidence and provenance relationships.
+// Full snapshots remove superseded relationships and ignore older revisions.
+// Graph writes serialize with store mutations without firing Apply listeners.
 
 // graphSchema creates the node and edge tables and their lookup indexes. It is
 // run once from migrate() alongside the core schema and is idempotent.
@@ -285,18 +277,7 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// PopulateGraph rebuilds the knowledge graph from current store state as an
-// idempotent upsert: a task node per task, an asset node per distinct task
-// Target and per recon-coverage asset (correlated by value so a target and a
-// coverage row for the same value are one node), and an evidence node per stored
-// evidence quote. Edges carry the task relationships: targets (task -> asset),
-// depends_on and derived_from (task -> task, the latter from basis_ids
-// provenance), and evidenced_by (task -> evidence). The task Citation is folded
-// into the task node as provenance attributes.
-//
-// It reads evidence and recon-coverage rows through the store; those reads and
-// the snapshot e are separate points, which is acceptable for a derived
-// projection (the next populate reconciles any skew). It never calls Apply.
+// PopulateGraph refreshes the derived task, asset and evidence graph.
 func (s *Store) PopulateGraph(ctx context.Context, e Engagement) error {
 	rev := e.Revision
 	var nodes []GraphNode
@@ -348,7 +329,7 @@ func (s *Store) PopulateGraph(ctx context.Context, e Engagement) error {
 			Label:      firstNonEmpty(t.Objective, t.Kind, t.ID),
 			Attrs:      attrs,
 			CreatedRev: t.CreatedRev,
-			UpdatedRev: t.UpdatedRev,
+			UpdatedRev: rev,
 		})
 		if t.Target != "" {
 			ensureAsset(t.Target)
@@ -406,7 +387,7 @@ func (s *Store) PopulateGraph(ctx context.Context, e Engagement) error {
 		})
 	}
 
-	return s.UpsertGraph(nodes, edges)
+	return s.writeGraph(ctx, nodes, edges, &rev)
 }
 
 // UpsertGraph writes nodes and edges in one transaction. A node update preserves
@@ -418,9 +399,12 @@ func (s *Store) PopulateGraph(ctx context.Context, e Engagement) error {
 // It takes the store write lock and runs on its own connection, never through
 // Apply, so it does not fire the Apply listeners and cannot recurse.
 func (s *Store) UpsertGraph(nodes []GraphNode, edges []GraphEdge) error {
+	return s.writeGraph(context.Background(), nodes, edges, nil)
+}
+
+func (s *Store) writeGraph(ctx context.Context, nodes []GraphNode, edges []GraphEdge, snapshotRevision *int64) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
-	ctx := context.Background()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
@@ -435,6 +419,21 @@ func (s *Store) UpsertGraph(nodes []GraphNode, edges []GraphEdge) error {
 			conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
+	if snapshotRevision != nil {
+		stored, err := getMeta(ctx, conn, "graph_revision")
+		if err != nil {
+			return err
+		}
+		if stored != "" {
+			previous, err := strconv.ParseInt(stored, 10, 64)
+			if err != nil {
+				return err
+			}
+			if *snapshotRevision < previous {
+				return nil
+			}
+		}
+	}
 	for _, n := range nodes {
 		if _, err := conn.ExecContext(ctx,
 			`INSERT INTO graph_node (id, type, label, attrs, created_rev, updated_rev)
@@ -455,6 +454,19 @@ func (s *Store) UpsertGraph(nodes []GraphNode, edges []GraphEdge) error {
 			 VALUES (?, ?, ?, ?)
 			 ON CONFLICT(src, dst, rel) DO UPDATE SET updated_rev = excluded.updated_rev`,
 			e.Src, e.Dst, e.Rel, e.UpdatedRev); err != nil {
+			return err
+		}
+	}
+	if snapshotRevision != nil {
+		for _, query := range []string{
+			"DELETE FROM graph_edge WHERE updated_rev < ?",
+			"DELETE FROM graph_node WHERE updated_rev < ? AND id NOT IN (SELECT src FROM graph_edge UNION SELECT dst FROM graph_edge)",
+		} {
+			if _, err := conn.ExecContext(ctx, query, *snapshotRevision); err != nil {
+				return err
+			}
+		}
+		if _, err := conn.ExecContext(ctx, "INSERT INTO meta(k,v) VALUES('graph_revision',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", strconv.FormatInt(*snapshotRevision, 10)); err != nil {
 			return err
 		}
 	}

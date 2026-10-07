@@ -3,9 +3,25 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestGatewayStreamRequiresCompletionEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: assistant.delta\ndata: {\"delta\":\"partial\"}\n\n")
+	}))
+	defer server.Close()
+	t.Setenv("HERMES_API_URL", server.URL)
+	err := StreamAgent(context.Background(), "fixture", "question", "", "", func(agentEvent) {})
+	if err == nil {
+		t.Fatal("incomplete stream reported success")
+	}
+}
 
 func TestMapAgentEventGateway(t *testing.T) {
 	cases := []struct {

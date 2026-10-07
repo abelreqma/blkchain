@@ -263,10 +263,6 @@ func webSameOrigin(a, b string) bool {
 	return strings.EqualFold(ua.Scheme, ub.Scheme) && strings.EqualFold(ua.Host, ub.Host)
 }
 
-func webClearHeaders(headers map[string]string) {
-	clear(headers)
-}
-
 // webRedirectAuthorizer re-validates a redirect hop by its Location URL/host; the
 // driver MUST call it for every redirect hop and abort the navigation/request
 // when it returns false. It is wired to Gate.AuthorizeWebRedirect so a 30x cannot

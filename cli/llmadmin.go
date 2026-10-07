@@ -168,6 +168,9 @@ func fetchChatModels(ctx context.Context) (models []chatModel, admin bool, err e
 		if errors.Is(lerr, errLLMRedirect) {
 			return nil, false, errLLMRedirect
 		}
+		if lerr != nil {
+			return nil, false, lerr
+		}
 		for _, id := range ids {
 			models = append(models, chatModel{ID: id})
 		}

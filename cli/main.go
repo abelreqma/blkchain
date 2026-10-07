@@ -62,6 +62,7 @@ type searchResponse struct {
 // citation is one source of an answer, as blk ask --json and kb_answer
 // report it.
 type citation struct {
+	Number  int    `json:"number,omitempty"`
 	Source  string `json:"source"`
 	Path    string `json:"path"`
 	Section string `json:"section"`
@@ -628,10 +629,16 @@ func isWebCitation(cit citation) bool { return cit.Source == webSource }
 // survives without color.
 const webTag = "[web, untrusted]"
 
-// citationLine renders one numbered SOURCES row: index, source, path and
-// section (all sanitized, they come from the corpus or the web), and the web tag.
+func citationNumber(index int, cit citation) int {
+	if cit.Number > 0 {
+		return cit.Number
+	}
+	return index + 1
+}
+
+// citationLine renders a numbered source with sanitized metadata.
 func citationLine(indent string, i int, cit citation) string {
-	line := indent + Key.Render(fmt.Sprintf("[%d]", i+1)) + "  " + Body.Render(sanitizeTerminal(cit.Source))
+	line := indent + Key.Render(fmt.Sprintf("[%d]", citationNumber(i, cit))) + "  " + Body.Render(sanitizeTerminal(cit.Source))
 	meta := sanitizeTerminal(cit.Path)
 	if cit.Section != "" {
 		if meta != "" {

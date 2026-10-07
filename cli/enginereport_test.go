@@ -289,3 +289,46 @@ func TestReportWriterIncludesExactWebOperationRecords(t *testing.T) {
 		}
 	}
 }
+
+func TestReportIncludesPersistedFindingReview(t *testing.T) {
+	store := openStore(t)
+	if _, err := store.Apply(engagement.Delta{Upserts: []engagement.Task{
+		{ID: "fixture", Kind: "web", Target: "fixture.invalid", Status: engagement.StatusTodo},
+	}, Kind: "seed"}); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := store.RecordEvidence("fixture", "fixture observation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.SaveFinding(context.Background(), engagement.Finding{
+		TaskID: "fixture", Surface: engagement.SurfaceWeb, Asset: "fixture.invalid",
+		Title: "Reviewed fixture finding", Status: engagement.FindingValidated,
+		Severity: "high", Impact: "verified fixture impact", EvidenceIDs: []int64{evidence},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := newReportWriter(store, t.TempDir(), "fixture", "fixture", "safe")
+	model, err := writer.buildModel("complete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := engreport.RenderJSON(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		Findings []engagement.Finding `json:"findings"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	if len(record.Findings) != 1 || record.Findings[0].Status != engagement.FindingValidated {
+		t.Fatalf("review missing from JSON: %s", data)
+	}
+	markdown := engreport.RenderMarkdown(model)
+	if !strings.Contains(markdown, "Reviewed fixture finding") || !strings.Contains(markdown, "validated") {
+		t.Fatalf("review missing from Markdown: %s", markdown)
+	}
+}

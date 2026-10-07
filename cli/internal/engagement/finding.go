@@ -129,7 +129,7 @@ func (s *Store) validateFinding(ctx context.Context, f Finding) error {
 	return nil
 }
 
-func (s *Store) SaveFinding(ctx context.Context, f Finding) (Finding, error) {
+func (s *Store) SaveFinding(ctx context.Context, f Finding) (saved Finding, err error) {
 	if f.ID == "" {
 		var nonce [12]byte
 		if _, err := rand.Read(nonce[:]); err != nil {
@@ -147,7 +147,12 @@ func (s *Store) SaveFinding(ctx context.Context, f Finding) (Finding, error) {
 		return Finding{}, errors.New("invalid finding source")
 	}
 	s.wmu.Lock()
-	defer s.wmu.Unlock()
+	defer func() {
+		s.wmu.Unlock()
+		if err == nil {
+			s.notifyFinding()
+		}
+	}()
 	if err := s.validateFinding(ctx, f); err != nil {
 		return Finding{}, err
 	}
@@ -233,29 +238,15 @@ func (s *Store) Findings(ctx context.Context, surface Surface) ([]Finding, error
 	if surface != "" && !surface.valid() {
 		return nil, errors.New("invalid surface")
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,surface,task_id,asset,title,status,severity,source,impact,confidence,detail,evidence_ids,created_at,updated_at FROM finding_record ORDER BY created_at,id LIMIT 100001`)
+	records, err := s.findingRecords(ctx, 100001)
 	if err != nil {
 		return nil, err
 	}
 	findings := map[string]Finding{}
-	for rows.Next() {
-		var f Finding
-		var ids string
-		if err := rows.Scan(&f.ID, &f.Surface, &f.TaskID, &f.Asset, &f.Title, &f.Status, &f.Severity, &f.Source, &f.Impact, &f.Confidence, &f.Detail, &ids, &f.CreatedAt, &f.UpdatedAt); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if err := json.Unmarshal([]byte(ids), &f.EvidenceIDs); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		findings[f.ID] = f
+	for _, finding := range records {
+		findings[finding.ID] = finding
 	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return nil, err
-	}
+	var rows *sql.Rows
 	if len(findings) > 100000 {
 		return nil, errors.New("finding limit exceeded")
 	}
@@ -326,4 +317,70 @@ func (s *Store) Finding(ctx context.Context, id string) (Finding, error) {
 		}
 	}
 	return Finding{}, sql.ErrNoRows
+}
+
+func (s *Store) findingRecords(ctx context.Context, limit int) ([]Finding, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,surface,task_id,asset,title,status,severity,source,impact,confidence,detail,evidence_ids,created_at,updated_at FROM finding_record ORDER BY created_at,id LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	records := []Finding{}
+	for rows.Next() {
+		var finding Finding
+		var ids string
+		if err := rows.Scan(&finding.ID, &finding.Surface, &finding.TaskID, &finding.Asset, &finding.Title, &finding.Status, &finding.Severity, &finding.Source, &finding.Impact, &finding.Confidence, &finding.Detail, &ids, &finding.CreatedAt, &finding.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(ids), &finding.EvidenceIDs); err != nil {
+			return nil, err
+		}
+		records = append(records, finding)
+	}
+	return records, rows.Err()
+}
+
+// ReportFindings returns bounded persisted conclusions and flags omitted records.
+func (s *Store) ReportFindings(ctx context.Context, limit int) ([]Finding, bool, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, false, errors.New("invalid report finding limit")
+	}
+	findings, err := s.findingRecords(ctx, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	partial := len(findings) > limit
+	if partial {
+		findings = findings[:limit]
+	}
+	return findings, partial, nil
+}
+
+// AddOnFinding observes committed finding changes outside the store write lock.
+func (s *Store) AddOnFinding(fn func()) func() {
+	s.lmu.Lock()
+	defer s.lmu.Unlock()
+	if s.findingListeners == nil {
+		s.findingListeners = map[int]func(){}
+	}
+	id := s.nextID
+	s.nextID++
+	s.findingListeners[id] = fn
+	return func() {
+		s.lmu.Lock()
+		delete(s.findingListeners, id)
+		s.lmu.Unlock()
+	}
+}
+
+func (s *Store) notifyFinding() {
+	s.lmu.Lock()
+	listeners := make([]func(), 0, len(s.findingListeners))
+	for _, fn := range s.findingListeners {
+		listeners = append(listeners, fn)
+	}
+	s.lmu.Unlock()
+	for _, fn := range listeners {
+		fn()
+	}
 }

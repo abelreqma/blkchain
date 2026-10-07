@@ -95,7 +95,9 @@ func plainREPL() error {
 		}
 		convo = append(convo, priorTurn{Role: "human", Content: q}, priorTurn{Role: "ai", Content: ans})
 		pm.mode, pm.pendingQ, pm.lastAnswer = mode, q, ans
-		pm.recordTurn(ans)
+		if err := pm.recordTurn(ans); err != nil {
+			printErr(fmt.Errorf("conversation save failed: %w", err))
+		}
 		// The full conversation is carried; the shared answer path compresses it
 		// to the budget when it grows large, so nothing is truncated here.
 	}
@@ -229,7 +231,7 @@ func plainREPL() error {
 				printErr(err)
 			} else {
 				ctx, cancel := context.WithTimeout(context.Background(), pm.cfg.RequestTimeout())
-				printErr(runStoreTo(ctx, args, os.Stdout, nil, pm.activeModel()))
+				printErr(runStoreTo(ctx, args, os.Stdout, nil, pm.ragTurnModel()))
 				cancel()
 			}
 		case "history":

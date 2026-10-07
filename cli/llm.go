@@ -38,13 +38,6 @@ const defaultOMLXBaseURL = "http://127.0.0.1:8000/v1"
 // citationRefPattern matches single or comma-separated citation markers.
 var citationRefPattern = regexp.MustCompile(`\[(\d+(?:\s*,\s*\d+)*)\]`)
 
-// answerGenericPreamble is the default expert persona; a domain persona
-// (personas.go) swaps it for a specialist one. answerConstraints is the shared,
-// load-bearing body every persona must carry unchanged (grounding, citations,
-// payload generation, no fabricated specifics, and embedded-instruction handling), so
-// specializing the persona can never drop or contradict a constraint.
-const answerGenericPreamble = "You are a security research assistant for authorized testing. "
-
 const offensiveReasoningStandard = "Reason from the operator's stated scope, vantage, access, target behavior, and available tools. " +
 	"Separate observed facts, plausible hypotheses, and untested paths. For a proposed test, state its prerequisite, exact input or command when enough detail is known, expected positive and negative signals, and the next decision each result supports. " +
 	"Prefer a small reproducible proof over a broad scan or an assumed exploit chain. Account for current identity, application state, protocol, mitigations, and likely side effects. " +
@@ -171,14 +164,8 @@ func buildMessages(systemPrompt string, question string, chunks []retrieval.Resu
 	return messagesWithHistory(systemPrompt, history, buildUserPrompt(question, chunks))
 }
 
-// citationsFromAnswer extracts the citations for the chunks the answer
-// actually cited via inline [n] markers (1-based, matching the numbered
-// Sources block from buildContext). Cited indices are collected into a set,
-// sorted ascending, then mapped to chunks and deduped by (source, path,
-// section) with first-seen (i.e. ascending index) order preserved.
-// Out-of-range or unparsable indices are ignored. When the answer cites
-// nothing (no markers, or all out of range), it falls back to citing every
-// retrieved chunk in chunk order.
+// citationsFromAnswer preserves the source numbers referenced by the answer.
+// Answers without valid references retain the available-source fallback.
 func citationsFromAnswer(answer string, chunks []retrieval.Result) []citation {
 	indexSet := map[int]bool{}
 	for _, m := range citationRefPattern.FindAllStringSubmatch(answer, -1) {
@@ -196,14 +183,16 @@ func citationsFromAnswer(answer string, chunks []retrieval.Result) []citation {
 	}
 	sort.Ints(indices)
 
-	cited := make([]retrieval.Result, 0, len(indices))
+	if len(indices) == 0 {
+		return dedupCitations(chunks)
+	}
+	cited := make([]citation, 0, len(indices))
 	for _, n := range indices {
-		cited = append(cited, chunks[n-1])
+		p := chunks[n-1].Payload
+		cited = append(cited, citation{Number: n, Source: p.Source, Path: p.Path,
+			Section: p.Section, Untrusted: untrustedProvenance(p)})
 	}
-	if len(cited) == 0 {
-		cited = chunks
-	}
-	return dedupCitations(cited)
+	return cited
 }
 
 // dedupCitations turns a chunk slice into the citation list the SOURCES block

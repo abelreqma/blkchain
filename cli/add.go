@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -19,6 +20,7 @@ var addTypeMap = map[string]bool{"md": true, "txt": true, "pdf": true}
 // the index.add_path stats plus a "source" label for the success message.
 type addStats struct {
 	Indexed int    `json:"indexed"`
+	Deleted int    `json:"deleted"`
 	Updated int    `json:"updated"`
 	Skipped int    `json:"skipped"`
 	Batches int    `json:"batches"`
@@ -82,6 +84,12 @@ func runAdd(args []string) error {
 		return fmt.Errorf("add: venv python not found at %s, set up the project venv first", python)
 	}
 
+	if !strings.HasPrefix(strings.ToLower(a.path), "http://") && !strings.HasPrefix(strings.ToLower(a.path), "https://") {
+		a.path, err = filepath.Abs(expandTilde(a.path))
+		if err != nil {
+			return fmt.Errorf("add: resolving input path: %w", err)
+		}
+	}
 	pyArgs := []string{"-m", "blkchain.add", a.path}
 	if a.source != "" {
 		pyArgs = append(pyArgs, "--source", a.source)
@@ -128,8 +136,8 @@ func runAdd(args []string) error {
 		return fmt.Errorf("add: unexpected output from blkchain.add: %s", sanitizeTerminal(line))
 	}
 
-	fmt.Printf("%s added %d chunk(s) (%d updated, %d skipped) from %s\n",
-		OK.Render(Glyph(GlyphOK)), stats.Indexed, stats.Updated, stats.Skipped, Body.Render(sanitizeTerminal(stats.Source)))
+	fmt.Printf("%s added %d chunk(s) (%d updated, %d skipped, %d deleted) from %s\n",
+		OK.Render(Glyph(GlyphOK)), stats.Indexed, stats.Updated, stats.Skipped, stats.Deleted, Body.Render(sanitizeTerminal(stats.Source)))
 	return nil
 }
 

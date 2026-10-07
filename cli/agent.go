@@ -176,7 +176,8 @@ func StreamAgent(ctx context.Context, sessionID, message, model, reasoning strin
 
 	terminal := false
 	var termErr error
-	perr := parseAgentSSE(resp.Body, func(ev agentEvent) {
+	limited := &io.LimitedReader{R: resp.Body, N: 32 << 20}
+	perr := parseAgentSSE(limited, func(ev agentEvent) {
 		if ev.kind == agentTerminal {
 			terminal = true
 			termErr = ev.err
@@ -192,7 +193,13 @@ func StreamAgent(ctx context.Context, sessionID, message, model, reasoning strin
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	return perr
+	if perr != nil {
+		return perr
+	}
+	if limited.N == 0 {
+		return errors.New("hermes gateway: stream exceeded the response size limit")
+	}
+	return errors.New("hermes gateway: stream ended before a completion event")
 }
 
 // parseAgentSSE reads a Server-Sent Events stream and calls onEvent for each

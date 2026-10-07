@@ -324,7 +324,13 @@ func (b *webJobBrowser) Interact(ctx context.Context, raw, action string) error 
 	if e != nil {
 		return errors.New("interaction failed")
 	}
-	d.page.WaitForTimeout(250)
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
 	if e = d.cdpDrain(ctx); e != nil {
 		return e
 	}

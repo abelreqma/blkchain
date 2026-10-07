@@ -63,12 +63,6 @@ func readRevision(ctx context.Context, q rowQueryer) (int64, error) {
 	return strconv.ParseInt(v, 10, 64)
 }
 
-// scanAllTasks returns every task ordered by creation revision then id, read
-// through q.
-func scanAllTasks(ctx context.Context, q rowsQueryer) ([]Task, error) {
-	return scanTasks(ctx, q, 0)
-}
-
 func scanTasks(ctx context.Context, q rowsQueryer, limit int) ([]Task, error) {
 	query := `SELECT id, kind, target, objective, done_when, status, depends_on, basis_ids, created_rev, updated_rev, phase, surface, capability, armed, coverage_gap, code_candidate, citation, advisory, completion_basis, completion_evidence
 		 FROM task ORDER BY created_rev ASC, id ASC`

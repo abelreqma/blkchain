@@ -3,12 +3,50 @@ package modeleval
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestReadinessRejectsRedirectsAndAuthenticationFailures(t *testing.T) {
+	var redirected bool
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected = true
+	}))
+	defer destination.Close()
+	for _, status := range []int{http.StatusFound, http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", destination.URL)
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			_, err := waitReady(context.Background(), server.Client(), server.URL, 50*time.Millisecond, http.Header{"Authorization": {"Bearer fixture-key"}})
+			if err == nil || errors.Is(err, errUnreachable) || redirected {
+				t.Fatalf("readiness boundary: err=%v redirected=%v", err, redirected)
+			}
+		})
+	}
+}
+
+func TestReadinessTimeoutBoundsAnInFlightRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(time.Second):
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	start := time.Now()
+	_, err := waitReady(context.Background(), server.Client(), server.URL, 50*time.Millisecond)
+	if !errors.Is(err, errUnreachable) || time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("readiness timeout: err=%v elapsed=%s", err, time.Since(start))
+	}
+}
 
 func embedCfg(base string) Config {
 	return Config{

@@ -140,21 +140,27 @@ func (w *reportWriter) buildModel(status string) (engreport.Model, error) {
 			receipts[t.ID] = rc
 		}
 	}
+	findings, findingsPartial, err := w.st.ReportFindings(context.Background(), 1000)
+	if err != nil {
+		return engreport.Model{}, err
+	}
 	return engreport.Model{
-		Web:            &web,
-		Goal:           w.goal,
-		Scope:          w.scope,
-		Mode:           w.mode,
-		Workspace:      w.wsDir,
-		Status:         status,
-		Final:          w.final,
-		GeneratedAt:    time.Now().UTC().Format(time.RFC3339),
-		Engagement:     snap,
-		Evidence:       ev,
-		Receipts:       receipts,
-		Transitions:    trans,
-		Denials:        denials,
-		DenialsOmitted: omitted,
+		Findings:        findings,
+		FindingsPartial: findingsPartial,
+		Web:             &web,
+		Goal:            w.goal,
+		Scope:           w.scope,
+		Mode:            w.mode,
+		Workspace:       w.wsDir,
+		Status:          status,
+		Final:           w.final,
+		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+		Engagement:      snap,
+		Evidence:        ev,
+		Receipts:        receipts,
+		Transitions:     trans,
+		Denials:         denials,
+		DenialsOmitted:  omitted,
 	}, nil
 }
 
@@ -229,9 +235,11 @@ func (w *reportWriter) Start() (stop func()) {
 	}
 	removeApply := w.st.AddOnApply(func(int64, engagement.Engagement) { signalDirty() })
 	removeEvidence := w.st.AddOnEvidence(signalDirty)
+	removeFinding := w.st.AddOnFinding(signalDirty)
 	w.remove = func() {
 		removeApply()
 		removeEvidence()
+		removeFinding()
 	}
 	removeFindings := w.st.AddOnWebFinding(func([]byte) error {
 		signalDirty()

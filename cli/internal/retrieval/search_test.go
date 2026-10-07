@@ -64,7 +64,7 @@ func searchBackends(t *testing.T) (ragconfig.Config, *atomic.Int32) {
 			for i := range scores {
 				scores[i] = float64(i) // the last document scores highest
 			}
-			json.NewEncoder(w).Encode(rerankResponse{Scores: scores})
+			json.NewEncoder(w).Encode(map[string]any{"scores": scores})
 		}
 	}))
 	t.Cleanup(embed.Close)
@@ -214,5 +214,24 @@ func TestSearchReadsOptionalOriginProvenance(t *testing.T) {
 	}
 	if results[1].Payload.Origin != "url" {
 		t.Errorf("fetched chunk origin = %q, want \"url\"", results[1].Payload.Origin)
+	}
+}
+
+func TestReachableEmbeddingFailureIsNotUnreachable(t *testing.T) {
+	cfg, _ := searchBackends(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid query"}`))
+	}))
+	defer server.Close()
+	cfg.EmbedServerURL = server.URL
+	client, err := New(cfg, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_, err = client.Search(context.Background(), "query", 1, nil)
+	if err == nil || errors.Is(err, ErrUnreachable) {
+		t.Fatalf("HTTP rejection misclassified: %v", err)
 	}
 }

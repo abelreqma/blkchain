@@ -124,6 +124,28 @@ func TestRenderJSONValid(t *testing.T) {
 	}
 }
 
+func TestReviewedFindingsAreRedactedAndPreserveEvidence(t *testing.T) {
+	m := sampleModel()
+	m.Findings = []engagement.Finding{{ID: "f:fixture", Surface: engagement.SurfaceWeb, Asset: "https://example.test/path?token=fixture-secret", Title: "Reviewed fixture", Detail: "Authorization: Bearer fixture-secret", Status: engagement.FindingObserved, EvidenceIDs: []int64{7}}}
+	m.FindingsPartial = true
+	b, err := RenderJSON(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, output := range []string{string(b), RenderMarkdown(m)} {
+		if strings.Contains(output, "fixture-secret") || !strings.Contains(output, "Reviewed fixture") || !strings.Contains(output, "observed") {
+			t.Fatalf("unsafe or incomplete finding report: %s", output)
+		}
+	}
+	var decoded Model
+	if err := json.Unmarshal(b, &decoded); err != nil || !decoded.FindingsPartial || len(decoded.Findings) != 1 || len(decoded.Findings[0].EvidenceIDs) != 1 || decoded.Findings[0].EvidenceIDs[0] != 7 {
+		t.Fatalf("finding provenance missing: %+v %v", decoded.Findings, err)
+	}
+	if !strings.Contains(m.Findings[0].Detail, "fixture-secret") {
+		t.Fatal("rendering mutated source evidence")
+	}
+}
+
 func TestRenderMarkdownEscapesEvidence(t *testing.T) {
 	m := sampleModel()
 	m.Status = "complete"

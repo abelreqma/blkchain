@@ -23,28 +23,37 @@ const maxBodyBytes = 1 << 20
 // returning the elapsed time to ready. It returns errUnreachable if the timeout
 // is reached without a 2xx. This is the readiness phase; the perf-phase timeout
 // clock starts only after this returns nil.
-func waitReady(ctx context.Context, client *http.Client, url string, timeout time.Duration) (time.Duration, error) {
+func waitReady(ctx context.Context, client *http.Client, url string, timeout time.Duration, headers ...http.Header) (time.Duration, error) {
 	start := time.Now()
-	deadline := start.Add(timeout)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	boundedClient := *client
+	boundedClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	req, err := http.NewRequestWithContext(readyCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
 	}
+	if len(headers) > 0 {
+		req.Header = headers[0].Clone()
+	}
 	for {
-		resp, err := client.Do(req)
+		resp, err := boundedClient.Do(req)
 		if err == nil {
-			io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
+			_, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
 			resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+			if resp.StatusCode >= 300 && resp.StatusCode < 400 || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				return time.Since(start), fmt.Errorf("readiness status %d; check the service URL and authentication", resp.StatusCode)
+			}
+			if readErr == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				return time.Since(start), nil
 			}
 		}
-		if time.Now().After(deadline) {
-			return time.Since(start), errUnreachable
-		}
 		select {
-		case <-ctx.Done():
-			return time.Since(start), ctx.Err()
+		case <-readyCtx.Done():
+			if ctx.Err() != nil {
+				return time.Since(start), ctx.Err()
+			}
+			return time.Since(start), errUnreachable
 		case <-time.After(150 * time.Millisecond):
 		}
 	}
@@ -156,7 +165,11 @@ func ProbeChat(ctx context.Context, cfg Config) ModelReport {
 	client := cfg.httpClient()
 
 	readyURL := strings.TrimRight(cfg.ChatBaseURL, "/") + "/models"
-	elapsed, err := waitReady(ctx, client, readyURL, cfg.ReadyTimeout)
+	headers := http.Header{}
+	if cfg.ChatAPIKey != "" {
+		headers.Set("Authorization", "Bearer "+cfg.ChatAPIKey)
+	}
+	elapsed, err := waitReady(ctx, client, readyURL, cfg.ReadyTimeout, headers)
 	rep.ReadyElapsed = elapsed
 	if err != nil {
 		rep.Err = err

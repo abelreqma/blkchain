@@ -358,7 +358,7 @@ class DirCapTest(unittest.TestCase):
 
             def fake_index_chunks(client, sparse_model, collection, chunks,
                                   existing, resume, snapshot_version,
-                                  index_scope=None, index_generation=None):
+                                  index_scope=None, index_generation=None, index_root=None):
                 # Prove a generator (streamed), not a materialized list, is passed.
                 captured["is_generator"] = isinstance(chunks, types.GeneratorType)
                 n = sum(1 for _ in chunks)

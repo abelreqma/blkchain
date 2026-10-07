@@ -1,6 +1,8 @@
 package engagement
 
 import (
+	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -110,5 +112,36 @@ func TestCodeCandidatePersistsAcrossOpen(t *testing.T) {
 	task, err := s.GetTask("c1")
 	if err != nil || !task.CodeCandidate {
 		t.Fatalf("reopened candidate=%+v err=%v", task, err)
+	}
+}
+
+func TestStoreConnectionsUseWALAndBusyTimeout(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "policy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, err := store.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := store.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	for _, conn := range []*sql.Conn{first, second} {
+		var mode string
+		var timeout int
+		if err := conn.QueryRowContext(context.Background(), "PRAGMA journal_mode").Scan(&mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&timeout); err != nil {
+			t.Fatal(err)
+		}
+		if mode != "wal" || timeout != 5000 {
+			t.Fatalf("connection policy missing: mode=%s timeout=%d", mode, timeout)
+		}
 	}
 }

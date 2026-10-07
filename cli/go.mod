@@ -4,6 +4,7 @@ go 1.27.1
 
 require (
 	github.com/BishopFox/jsluice v0.0.0-20240110145140-0ddfab153e06
+	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/glamour v0.10.0
@@ -14,6 +15,7 @@ require (
 	github.com/muesli/termenv v0.16.0
 	github.com/mxschmitt/playwright-go v0.6201.1
 	github.com/qdrant/go-client v1.19.3
+	github.com/rivo/uniseg v0.4.7
 	github.com/smacker/go-tree-sitter v0.0.0-20230720070738-0d0a9f78d8f8
 	github.com/tmc/langchaingo v0.1.13
 	golang.org/x/net v0.58.0
@@ -28,7 +30,6 @@ require (
 	github.com/PuerkitoBio/goquery v1.8.1 // indirect
 	github.com/alecthomas/chroma/v2 v2.20.0 // indirect
 	github.com/andybalholm/cascadia v1.3.2 // indirect
-	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/charmbracelet/colorprofile v0.2.3-0.20250311203215-f60798e515dc // indirect
@@ -56,13 +57,12 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pkoukk/tiktoken-go v0.1.6 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sahilm/fuzzy v0.1.1 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	github.com/yuin/goldmark v1.7.13 // indirect
+	github.com/yuin/goldmark v1.7.17 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect

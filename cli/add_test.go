@@ -180,3 +180,25 @@ func TestIsConnectionRefused(t *testing.T) {
 		}
 	}
 }
+
+func TestRunAddPreservesCallerRelativePathAndReportsDeletions(t *testing.T) {
+	fakeAddPython(t, `printf '%s\n' "$3" >&2
+printf '{"indexed":1,"deleted":2,"source":"notes"}\n'
+`)
+	caller := t.TempDir()
+	t.Chdir(caller)
+	var err error
+	var stderr string
+	stdout := captureStdout(t, func() {
+		stderr = captureStderr(t, func() { err = runAdd([]string{"./notes.md"}) })
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, filepath.Join(caller, "notes.md")) {
+		t.Fatalf("caller-relative path was lost: %q", stderr)
+	}
+	if !strings.Contains(stdout, "2 deleted") {
+		t.Fatalf("deletions omitted: %q", stdout)
+	}
+}

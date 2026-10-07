@@ -195,23 +195,3 @@ func checkpointScopeBytes(wsDir string, c engageCheckpoint) ([]byte, error) {
 	}
 	return data, nil
 }
-
-func checkpointScope(wsDir string, c engageCheckpoint) (*secgate.Scope, string, string, error) {
-	if c.ScopeKind == "none" {
-		return nil, "(none)", "", nil
-	}
-	data, err := checkpointScopeBytes(wsDir, c)
-	if err != nil {
-		return nil, "", "", err
-	}
-	if c.ScopeKind == "scope" {
-		scope, err := secgate.ParseScope(bytes.NewReader(data))
-		return scope, filepath.Join(wsDir, "scope.txt"), "", err
-	}
-	roe, err := ParseRoE(bytes.NewReader(data))
-	if err != nil {
-		return nil, "", "", err
-	}
-	path := filepath.Join(wsDir, "ROE.md")
-	return roe.Scope, path, path, nil
-}

@@ -104,6 +104,10 @@ func (g *Gate) authorizeWebAction(ctx context.Context, c Command) Decision {
 			g.mu.Unlock()
 			return d
 		}
+		if d := g.rateAllowLocked(c); !d.Allowed {
+			g.mu.Unlock()
+			return d
+		}
 		d := g.confirmTailLocked(ctx, c)
 		if !d.Allowed {
 			return d

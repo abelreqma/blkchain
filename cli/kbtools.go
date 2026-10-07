@@ -122,7 +122,7 @@ func newKBAnswerTool(rc searcher, cfg ragconfig.Config, noWeb bool) tooldef.Tool
 			if len(cits) > 0 {
 				b.WriteString("\n\nSources:")
 				for i, c := range cits {
-					fmt.Fprintf(&b, "\n[%d] %s | %s", i+1, c.Source, c.Path)
+					fmt.Fprintf(&b, "\n[%d] %s | %s", citationNumber(i, c), c.Source, c.Path)
 					if c.Section != "" {
 						fmt.Fprintf(&b, " | %s", c.Section)
 					}

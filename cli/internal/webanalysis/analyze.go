@@ -31,7 +31,6 @@ type value struct {
 	fields map[string]value
 	items  []value
 	kind   string
-	params []string
 }
 type symbol struct {
 	v         value

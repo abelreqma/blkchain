@@ -16,7 +16,6 @@ They pin the fix for the reranker NaN/degenerate-row defect:
 """
 import contextlib
 import io
-import math
 import unittest
 
 from blkchain.rerank_scores import (

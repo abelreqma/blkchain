@@ -88,3 +88,25 @@ func TestProbeChatUsageAbsentFallsBackToDeltaCount(t *testing.T) {
 		t.Errorf("delta count = %d want 3", rep.Perf.GenTokens)
 	}
 }
+
+func TestChatReadinessUsesConfiguredAuthentication(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer fixture-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			fmt.Fprint(w, `{"data":[{"id":"fixture"}]}`)
+			return
+		}
+		sse(w, true)
+	}))
+	defer server.Close()
+	cfg := chatCfg(server.URL)
+	cfg.ChatAPIKey = "fixture-key"
+	cfg.ReadyTimeout = 100 * time.Millisecond
+	report := ProbeChat(context.Background(), cfg)
+	if !report.Ready || report.Err != nil {
+		t.Fatalf("authenticated server misclassified: %+v", report)
+	}
+}

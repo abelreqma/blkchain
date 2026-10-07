@@ -2,9 +2,23 @@ package main
 
 import (
 	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 )
+
+func TestClearReplacesGatewayConversationIdentity(t *testing.T) {
+	useDeadServices(t)
+	m := newKeyModel(t)
+	m.agentSession = "old-gateway-session"
+	if err := m.resetConversation(); err != nil {
+		t.Fatal(err)
+	}
+	if m.agentSession != "" {
+		t.Fatal("clear retained gateway conversation identity")
+	}
+}
 
 func TestClearStartsFreshMemoryAndPreservesSavedSession(t *testing.T) {
 	useDeadServices(t)
@@ -105,5 +119,24 @@ func TestUndoRejectsMismatchedTranscriptAndMemory(t *testing.T) {
 	replay, err := loadMessages(m.sess.id)
 	if err != nil || len(replay) != 2 {
 		t.Fatalf("rejected undo changed transcript: %v, %v", replay, err)
+	}
+}
+
+func TestPersistenceFailureDoesNotMirrorAnUnsavedExchange(t *testing.T) {
+	useDeadServices(t)
+	m := newKeyModel(t)
+	if err := os.WriteFile(m.sess.filePath(), []byte(""), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(m.sess.filePath(), maxSessionBytes); err != nil {
+		t.Fatal(err)
+	}
+	m.pendingQ = "fixture question"
+	if err := m.recordTurn("fixture answer"); !errors.Is(err, errSessionFull) {
+		t.Fatalf("persistence failure hidden: %v", err)
+	}
+	messages, err := m.hist.Messages(context.Background(), m.sess.id)
+	if err != nil || len(messages) != 0 {
+		t.Fatalf("unsaved exchange mirrored: %v %v", messages, err)
 	}
 }

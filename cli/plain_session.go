@@ -126,9 +126,9 @@ func plainHistory(m *model, arg string, before []priorTurn) ([]priorTurn, error)
 	}
 	var turns []priorTurn
 	if sessionExists(id) {
-		recs, err := loadMessages(id)
-		if err != nil {
-			return before, err
+		recs, readErr := loadMessages(id)
+		if readErr != nil {
+			return before, readErr
 		}
 		for _, r := range recs {
 			switch r.Role {

@@ -79,3 +79,65 @@ func TestWebFindingProjectsAsLeadWithoutCredentialValue(t *testing.T) {
 		t.Fatalf("review history: %+v %v", events, err)
 	}
 }
+
+func TestFindingNotificationsObserveOnlyCommittedChanges(t *testing.T) {
+	s := openTemp(t)
+	seedAB(t, s)
+	id, err := s.RecordEvidence("A", "fixture observation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := 0
+	remove := s.AddOnFinding(func() {
+		if !s.wmu.TryLock() {
+			t.Error("finding callback ran under the write lock")
+			return
+		}
+		s.wmu.Unlock()
+		findings, _, err := s.ReportFindings(context.Background(), 10)
+		if err != nil || len(findings) != 1 {
+			t.Errorf("callback could not read committed finding: %v %v", findings, err)
+		}
+		observed++
+	})
+	f := Finding{Surface: SurfaceNetwork, TaskID: "A", Asset: "192.0.2.1", Title: "Fixture", Status: FindingObserved, EvidenceIDs: []int64{id}}
+	saved, err := s.SaveFinding(context.Background(), f)
+	if err != nil || observed != 1 {
+		t.Fatalf("committed notification: %d %v", observed, err)
+	}
+	f.EvidenceIDs = []int64{id + 1}
+	if _, err := s.SaveFinding(context.Background(), f); err == nil || observed != 1 {
+		t.Fatalf("invalid save notified: %d %v", observed, err)
+	}
+	remove()
+	saved.Status = FindingDismissed
+	if _, err := s.SaveFinding(context.Background(), saved); err != nil || observed != 1 {
+		t.Fatalf("removed observer notified: %d %v", observed, err)
+	}
+}
+
+func TestReportFindingsSignalsTruncation(t *testing.T) {
+	s := openTemp(t)
+	seedAB(t, s)
+	id, err := s.RecordEvidence("A", "fixture observation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, title := range []string{"First", "Second"} {
+		_, err := s.SaveFinding(context.Background(), Finding{Surface: SurfaceNetwork, TaskID: "A", Asset: "192.0.2.1", Title: title, Status: FindingObserved, EvidenceIDs: []int64{id}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	findings, partial, err := s.ReportFindings(context.Background(), 1)
+	if err != nil || len(findings) != 1 || findings[0].Title != "First" || !partial {
+		t.Fatalf("bounded findings: %+v partial=%v err=%v", findings, partial, err)
+	}
+	findings, partial, err = s.ReportFindings(context.Background(), 2)
+	if err != nil || len(findings) != 2 || partial {
+		t.Fatalf("complete findings: %+v partial=%v err=%v", findings, partial, err)
+	}
+	if _, _, err := s.ReportFindings(context.Background(), 1001); err == nil {
+		t.Fatal("accepted an unbounded report limit")
+	}
+}

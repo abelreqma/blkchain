@@ -28,6 +28,7 @@ type Store struct {
 	listeners           map[int]func(rev int64, e Engagement)
 	webFindingListeners map[int]func([]byte) error
 	evidenceListeners   map[int]func()
+	findingListeners    map[int]func()
 	nextID              int
 }
 

@@ -208,7 +208,9 @@ func TestInteractiveSearchSynthesizesAnAnswer(t *testing.T) {
 	for _, line := range []string{"/search current LLM testing techniques", "search for current LLM testing techniques", "s current LLM testing techniques"} {
 		m := frameModel(t)
 		updated, cmd := m.dispatchInput(line)
-		m = updated.(model)
+		if !updated.(model).working {
+			t.Fatalf("%q did not start synthesis", line)
+		}
 		found := false
 		for _, msg := range drain(cmd) {
 			if done, ok := msg.(streamDoneMsg); ok && done.full == "Synthesis from retrieved evidence." {

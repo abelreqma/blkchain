@@ -18,6 +18,7 @@ func (m *model) resetConversation() error {
 		return err
 	}
 	m.sess, m.sessTitle = s, "new session"
+	m.agentSession = ""
 	m.lastAnswer, m.pendingQ, m.lastQuery = "", "", ""
 	m.lastResults, m.openTargets, m.attachments, m.queue = nil, nil, nil, nil
 	m.lastCostSet = false

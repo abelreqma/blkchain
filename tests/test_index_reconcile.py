@@ -1,4 +1,5 @@
 import types
+import numpy as np
 import unittest
 import uuid
 from pathlib import Path
@@ -149,9 +150,9 @@ class ManualReconcileTest(unittest.TestCase):
     def test_readding_shrunk_source_deletes_orphans(self):
         ns = types.SimpleNamespace
         records = [
-            ns(id="a", payload={"source": "docs", "index_scope": "manual", "index_generation": "gen2"}),
-            ns(id="b", payload={"source": "docs", "index_scope": "manual", "index_generation": "gen2"}),
-            ns(id="c", payload={"source": "docs", "index_scope": "manual", "index_generation": "gen1"}),  # orphan
+            ns(id="a", payload={"source": "docs", "index_root": "/docs", "index_scope": "manual", "index_generation": "gen2"}),
+            ns(id="b", payload={"source": "docs", "index_root": "/docs", "index_scope": "manual", "index_generation": "gen2"}),
+            ns(id="c", payload={"source": "docs", "index_root": "/docs", "index_scope": "manual", "index_generation": "gen1"}),  # orphan
             ns(id="other", payload={"source": "notes", "index_scope": "manual", "index_generation": "gz"}),
             ns(id="corp", payload={"source": "docs", "index_scope": "corpus", "index_generation": "gen1"}),
         ]
@@ -167,7 +168,7 @@ class ManualReconcileTest(unittest.TestCase):
                 self.deleted.extend(kwargs["points_selector"])
 
         client = FakeClient()
-        deleted = index._reconcile_manual_source(client, "col", "docs", "gen2")
+        deleted = index._reconcile_manual_source(client, "col", "docs", "gen2", "/docs")
         self.assertEqual(deleted, 1)
         self.assertEqual(client.deleted, ["c"])  # only the stale 'docs' manual point
 
@@ -203,6 +204,69 @@ class ReconcileWithQdrantBackendTest(unittest.TestCase):
         records, _ = client.scroll(collection_name="reconcile-test", with_payload=True, with_vectors=False)
         self.assertEqual({str(record.id) for record in records}, {ids["fresh"], ids["manual"]})
         client.close()
+
+
+class ManualInputIsolationTest(unittest.TestCase):
+    def setUp(self):
+        self.client = QdrantClient(":memory:")
+        self.client.create_collection(
+            collection_name="manual-test",
+            vectors_config={config.DENSE_VECTOR_NAME: models.VectorParams(
+                size=2, distance=models.Distance.COSINE)},
+            sparse_vectors_config={config.SPARSE_VECTOR_NAME: models.SparseVectorParams()},
+        )
+        self.addCleanup(self.client.close)
+        self.bodies = {}
+
+    def add(self, url):
+        from blkchain.schema import Chunk, chunk_id
+
+        def chunks(path, source, kind):
+            for number, text in enumerate(self.bodies[path]):
+                yield Chunk(id=chunk_id(source, path, str(number)), text=text,
+                            source=source, path=path)
+
+        sparse = types.SimpleNamespace(embed=lambda texts: [types.SimpleNamespace(
+            indices=np.array([1]), values=np.array([1.0])) for _ in texts])
+        with mock.patch.object(index, "ensure_collection"), \
+             mock.patch.object(index, "QdrantClient", return_value=self.client), \
+             mock.patch.object(index, "SparseTextEmbedding", return_value=sparse), \
+             mock.patch.object(index, "_embed_dense", side_effect=lambda texts: [[0.1, 0.2] for _ in texts]), \
+             mock.patch.object(index, "_chunk_url", side_effect=chunks), \
+             mock.patch.object(self.client, "close"):
+            return index.add_path(url, collection="manual-test")
+
+    def paths(self):
+        rows, _ = self.client.scroll(collection_name="manual-test", limit=100,
+                                     with_payload=True, with_vectors=False)
+        return [row.payload["path"] for row in rows]
+
+    def test_distinct_urls_with_the_same_label_are_preserved(self):
+        first, second = "https://example.test/first", "https://example.test/second"
+        self.bodies = {first: ["first note"], second: ["second note"]}
+        self.add(first)
+        result = self.add(second)
+        self.assertEqual(result["deleted"], 0)
+        self.assertCountEqual(self.paths(), [first, second])
+
+    def test_readding_one_url_prunes_only_its_orphan_chunks(self):
+        first, second = "https://example.test/first", "https://example.test/second"
+        self.bodies = {first: ["first note", "old section"], second: ["second note"]}
+        self.add(first)
+        self.add(second)
+        self.bodies[first] = ["first note"]
+        result = self.add(first)
+        self.assertEqual(result["deleted"], 1)
+        self.assertCountEqual(self.paths(), [first, second])
+
+    def test_empty_ingestion_preserves_previous_content(self):
+        url = "https://example.test/first"
+        self.bodies[url] = ["first note"]
+        self.add(url)
+        self.bodies[url] = []
+        with self.assertRaisesRegex(ValueError, "no indexable chunks"):
+            self.add(url)
+        self.assertEqual(self.paths(), [url])
 
 
 if __name__ == "__main__":

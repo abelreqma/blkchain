@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -361,5 +363,40 @@ func TestStoreLocalModelE2E(t *testing.T) {
 	answer, err := answerStore(ctx, ws.Store, "fixture", engagement.SurfaceNetwork, "What was found? Cite the stored record.", client, client.model)
 	if err != nil || answer.Synthesis != "model" || len(answer.Citations) == 0 {
 		t.Fatalf("local synthesis did not cite the store: synthesis=%s citations=%d err=%v", answer.Synthesis, len(answer.Citations), err)
+	}
+}
+
+func TestStoreQuestionUsesNativeModelWhileHermesIsSelected(t *testing.T) {
+	useDeadServices(t)
+	workspace, _ := fixtureStoreWorkspace(t, t.TempDir())
+	defer workspace.Close()
+	var modelID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		modelID = request.Model
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"Fixture observation [R1]."},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+	t.Setenv("OMLX_BASE_URL", server.URL+"/v1")
+	t.Setenv("OMLX_API_KEY", "")
+	m := newKeyModel(t)
+	m.mode, m.agentModel, m.ragModel = "agent", "foreign-hermes-model", "native-fixture-model"
+	_, command := m.dispatchInput("/store ask --workspace " + workspace.Dir + " What was observed?")
+	found := false
+	for _, message := range drain(command) {
+		if done, ok := message.(storeDoneMsg); ok {
+			found = true
+			if done.err != nil {
+				t.Fatal(done.err)
+			}
+		}
+	}
+	if !found || modelID != "native-fixture-model" {
+		t.Fatalf("native question routed to %q, result=%v", modelID, found)
 	}
 }

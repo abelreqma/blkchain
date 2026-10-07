@@ -243,15 +243,6 @@ func SafeText(s string) string {
 		return r
 	}, s)
 }
-func RedactHeaders(h http.Header) http.Header {
-	out := h.Clone()
-	for k := range out {
-		if Sensitive(k) {
-			out[k] = []string{"[REDACTED]"}
-		}
-	}
-	return out
-}
 func Fingerprint(s string) string { return Hash([]byte(s)) }
 func RecordID(v any) string       { b, _ := json.Marshal(v); return Hash(b) }
 

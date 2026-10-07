@@ -25,7 +25,6 @@ from blkchain.eval.engage_bench import (
     LabConfig,
     LabConfigError,
     LabTarget,
-    ReconObserved,
     RunAggregate,
     TargetScore,
     aggregate_runs,
@@ -843,7 +842,6 @@ class ScoreTargetTest(unittest.TestCase):
         self.assertEqual(score.contradictions, 0)
 
     def test_dedupe_services_across_quotes(self):
-        target = LabTarget(host="10.0.0.5")
         report = _report(
             [
                 {"ID": "t1", "Target": "10.0.0.5:80"},
@@ -984,7 +982,6 @@ class ScoreTargetTest(unittest.TestCase):
         self.assertEqual(score.false_positives, 2)
 
     def test_nmap_out_of_range_port_not_added(self):
-        target = LabTarget(host="10.0.0.5")
         report = _report(
             [{"ID": "t1", "Target": "10.0.0.5:80"}],
             evidence={"t1": ["70000/tcp open http", "22/tcp open ssh"]},

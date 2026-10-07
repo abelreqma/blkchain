@@ -70,6 +70,17 @@ func hasNode(t *testing.T, s *Store, id string) bool {
 	return false
 }
 
+func TestGraphProjectionRetainsUnchangedIsolatedTask(t *testing.T) {
+	s := openGraphStore(t)
+	e := Engagement{Revision: 2, Tasks: []Task{{ID: "fixture", Objective: "Offline review", CreatedRev: 1, UpdatedRev: 1}}}
+	if err := s.PopulateGraph(context.Background(), e); err != nil {
+		t.Fatal(err)
+	}
+	if !hasNode(t, s, "task:fixture") {
+		t.Fatal("current isolated task was removed as stale")
+	}
+}
+
 // populateFromSnapshot snapshots the store and populates the graph from it.
 func populateFromSnapshot(t *testing.T, s *Store) {
 	t.Helper()
@@ -446,5 +457,43 @@ func TestUpsertGraphRoundTrip(t *testing.T) {
 	}
 	if nc != 2 {
 		t.Fatalf("after re-upsert got %d nodes, want 2 (no duplicate)", nc)
+	}
+}
+
+func TestGraphProjectionDropsOldRelationsAndRejectsStaleSnapshot(t *testing.T) {
+	store := openGraphStore(t)
+	task := Task{ID: "task", Kind: "recon", Target: "first.invalid", Status: StatusTodo,
+		DependsOn: []string{"first"}, BasisIDs: []string{"first"}}
+	_, err := store.Apply(Delta{Upserts: []Task{
+		{ID: "first", Status: StatusTodo}, {ID: "second", Status: StatusTodo}, task,
+	}, Kind: "seed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	populateFromSnapshot(t, store)
+	task.Target, task.DependsOn, task.BasisIDs = "second.invalid", []string{"second"}, []string{"second"}
+	if _, err := store.Apply(Delta{Upserts: []Task{task}, Kind: "plan_update"}); err != nil {
+		t.Fatal(err)
+	}
+	populateFromSnapshot(t, store)
+	for _, relation := range []string{
+		"task:task|targets|asset:first.invalid", "task:task|depends_on|task:first", "task:task|derived_from|task:first",
+	} {
+		if hasEdge(t, store, relation) {
+			t.Errorf("superseded relation retained: %s", relation)
+		}
+	}
+	if hasNode(t, store, "asset:first.invalid") {
+		t.Error("orphan target retained")
+	}
+	if err := store.PopulateGraph(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	if hasEdge(t, store, "task:task|targets|asset:first.invalid") {
+		t.Fatal("stale snapshot restored old target")
 	}
 }

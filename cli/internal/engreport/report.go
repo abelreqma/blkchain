@@ -16,20 +16,22 @@ import (
 
 // Model is the assembled, render-ready view of an engagement.
 type Model struct {
-	Final          string                          `json:"final,omitempty"`
-	Web            *webanalysis.Snapshot           `json:"web,omitempty"`
-	Goal           string                          `json:"goal"`
-	Scope          string                          `json:"scope"`
-	Mode           string                          `json:"mode"`
-	Workspace      string                          `json:"workspace"`
-	Status         string                          `json:"status"` // complete | in-progress | interrupted | paused
-	GeneratedAt    string                          `json:"generated_at"`
-	Engagement     engagement.Engagement           `json:"engagement"`
-	Evidence       map[string][]string             `json:"evidence"` // task id -> evidence quotes
-	Receipts       map[string][]engagement.Receipt `json:"receipts"` // task id -> skill receipts
-	Transitions    []engagement.Transition         `json:"transitions"`
-	Denials        []Denial                        `json:"denials,omitempty"`
-	DenialsOmitted int                             `json:"denials_omitted,omitempty"`
+	Findings        []engagement.Finding            `json:"findings,omitempty"`
+	FindingsPartial bool                            `json:"findings_partial,omitempty"`
+	Final           string                          `json:"final,omitempty"`
+	Web             *webanalysis.Snapshot           `json:"web,omitempty"`
+	Goal            string                          `json:"goal"`
+	Scope           string                          `json:"scope"`
+	Mode            string                          `json:"mode"`
+	Workspace       string                          `json:"workspace"`
+	Status          string                          `json:"status"` // complete | in-progress | interrupted | paused
+	GeneratedAt     string                          `json:"generated_at"`
+	Engagement      engagement.Engagement           `json:"engagement"`
+	Evidence        map[string][]string             `json:"evidence"` // task id -> evidence quotes
+	Receipts        map[string][]engagement.Receipt `json:"receipts"` // task id -> skill receipts
+	Transitions     []engagement.Transition         `json:"transitions"`
+	Denials         []Denial                        `json:"denials,omitempty"`
+	DenialsOmitted  int                             `json:"denials_omitted,omitempty"`
 }
 
 type Denial struct {
@@ -43,7 +45,22 @@ func RenderJSON(m Model) ([]byte, error) {
 		w := webanalysis.Display(*m.Web)
 		m.Web = &w
 	}
+	m.Findings = redactedFindings(m.Findings)
 	return json.MarshalIndent(m, "", "  ")
+}
+
+func redactedFindings(findings []engagement.Finding) []engagement.Finding {
+	findings = append([]engagement.Finding(nil), findings...)
+	for i := range findings {
+		f := &findings[i]
+		f.Asset = webanalysis.RedactURL(f.Asset)
+		f.Title = webanalysis.RedactText(f.Title)
+		f.Impact = webanalysis.RedactText(f.Impact)
+		f.Detail = webanalysis.RedactText(f.Detail)
+		f.Confidence = webanalysis.RedactText(f.Confidence)
+		f.Source = webanalysis.RedactText(f.Source)
+	}
+	return findings
 }
 
 // RenderMarkdown renders the model as a Markdown report.
@@ -98,6 +115,25 @@ func RenderMarkdown(m Model) string {
 			fmt.Fprintf(&b, "- %d additional denial(s) remain in the audit log.\n", m.DenialsOmitted)
 		}
 		b.WriteString("\n")
+	}
+
+	if len(m.Findings) > 0 || m.FindingsPartial {
+		b.WriteString("## Findings\n\n")
+		b.WriteString("Review states are stored conclusions supported by the cited evidence records.\n\n")
+		for _, finding := range redactedFindings(m.Findings) {
+			fmt.Fprintf(&b, "### %s\n\n", safeMarkdownLine(finding.Title))
+			fmt.Fprintf(&b, "- ID: %s\n- State: %s\n- Severity: %s\n- Surface: %s\n- Asset: %s\n", safeMarkdownLine(finding.ID), safeMarkdownLine(string(finding.Status)), safeMarkdownLine(finding.Severity), safeMarkdownLine(string(finding.Surface)), safeMarkdownLine(webanalysis.RedactURL(finding.Asset)))
+			if finding.Impact != "" {
+				fmt.Fprintf(&b, "- Impact: %s\n", safeMarkdownLine(webanalysis.RedactText(finding.Impact)))
+			}
+			if finding.Detail != "" {
+				fmt.Fprintf(&b, "- Detail: %s\n", safeMarkdownLine(webanalysis.RedactText(finding.Detail)))
+			}
+			fmt.Fprintf(&b, "- Evidence IDs: %v\n\n", finding.EvidenceIDs)
+		}
+		if m.FindingsPartial {
+			b.WriteString("Additional finding records remain in the engagement store.\n\n")
+		}
 	}
 
 	// Completed tasks with their evidence, stated completion basis, and skill

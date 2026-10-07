@@ -64,6 +64,17 @@ func TestRerankParsesScores(t *testing.T) {
 	}
 }
 
+func TestRerankNullScoreRanksBelowValidScores(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"scores":[null,0.0,0.9]}`))
+	}))
+	defer server.Close()
+	scores, err := rerank(context.Background(), server.URL, "q", []string{"a", "b", "c"})
+	if err != nil || len(scores) != 3 || scores[0] >= scores[1] || scores[2] != 0.9 {
+		t.Fatalf("null score was not ranked last: %v %v", scores, err)
+	}
+}
+
 // A failing embed_server's body is cut short in the error, which reaches the
 // terminal.
 func TestPostJSONCutsTheErrorBody(t *testing.T) {

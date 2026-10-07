@@ -270,6 +270,7 @@ func TestAskJSONGolden(t *testing.T) {
   "answer": "ok [1]",
   "citations": [
     {
+      "number": 1,
       "source": "wstg",
       "path": "a.md",
       "section": "intro"

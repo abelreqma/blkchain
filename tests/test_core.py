@@ -9,7 +9,7 @@ from unittest import mock
 import numpy as np
 
 from blkchain import index, ingest
-from blkchain.schema import Chunk, chunk_from_payload, chunk_id, content_hash
+from blkchain.schema import Chunk, chunk_id, content_hash
 
 
 class SchemaTest(unittest.TestCase):
@@ -34,13 +34,13 @@ class SchemaTest(unittest.TestCase):
         content_hash("bad \ud800 text")
         chunk_id("s", "p \ud800", "0")
 
-    def test_payload_has_hash_and_roundtrip_excludes_meta(self):
-        pl = Chunk(id="x", text="hi", source="s", path="p", extra={"line_count": 5}).payload("v1")
-        self.assertEqual(pl["content_hash"], content_hash("hi"))
-        back = chunk_from_payload("pid", pl)
-        self.assertNotIn("content_hash", back.extra)
-        self.assertNotIn("snapshot_version", back.extra)
-        self.assertEqual(back.extra.get("line_count"), 5)
+    def test_payload_preserves_core_hash_and_input_owner(self):
+        chunk = Chunk(id="x", text="hi", source="s", path="p",
+                      extra={"line_count": 5, "index_root": "untrusted"})
+        payload = chunk.payload("v1", "manual", "generation", "/owned/input")
+        self.assertEqual(payload["content_hash"], content_hash("hi"))
+        self.assertEqual(payload["index_root"], "/owned/input")
+        self.assertEqual(payload["line_count"], 5)
 
     def test_payload_extra_does_not_overwrite_core(self):
         pl = Chunk(id="x", text="hi", source="real", path="p",
@@ -149,6 +149,7 @@ class AddPathTest(unittest.TestCase):
             def upsert(self, collection_name, points):
                 collections_used.append(collection_name)
                 upserted.extend(points)
+            def close(self): pass
 
         class FakeSparse:
             def __init__(self, *a, **k): pass
@@ -188,7 +189,7 @@ class AddPathTest(unittest.TestCase):
                  mock.patch.object(index, "_existing_hashes", return_value={}), \
                  mock.patch.object(index, "_reconcile_manual_source", return_value=0), \
                  mock.patch.object(index, "_index_chunks") as fake_index_chunks:
-                fake_index_chunks.return_value = {"indexed": 0, "updated": 0, "skipped": 0, "batches": 0}
+                fake_index_chunks.return_value = {"indexed": 1, "updated": 0, "skipped": 0, "batches": 1}
                 index.add_path(str(f))
 
             (_, _, _, chunks_arg, *_rest), _ = fake_index_chunks.call_args
@@ -206,7 +207,7 @@ class OriginTaggingTest(unittest.TestCase):
     """P12: URL-sourced chunks carry origin=url so the Go answer prompt can treat
     their citations as untrusted; file-sourced chunks do not."""
 
-    def test_url_chunk_tagged_and_roundtrips(self):
+    def test_url_chunk_is_tagged_in_the_index_payload(self):
         chunks = list(index._chunk_text("prose about ssrf metadata", "example.com",
                                         "https://example.com/", markdown=False))
         self.assertTrue(chunks)
@@ -214,8 +215,6 @@ class OriginTaggingTest(unittest.TestCase):
             self.assertEqual(c.extra.get("origin"), "url")
             pl = c.payload("v1")
             self.assertEqual(pl["origin"], "url")
-            back = chunk_from_payload("pid", pl)
-            self.assertEqual(back.extra.get("origin"), "url")
 
     def test_file_chunk_has_no_origin(self):
         import tempfile

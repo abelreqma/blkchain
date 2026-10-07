@@ -144,6 +144,7 @@ def _index_chunks(
     snapshot_version: str,
     index_scope: str | None = None,
     index_generation: str | None = None,
+    index_root: str | None = None,
 ) -> dict:
     """Embed + upsert an iterable of chunks into `collection`, resumably.
 
@@ -162,10 +163,13 @@ def _index_chunks(
     def mark_seen() -> None:
         if index_scope is None or not seen_ids:
             return
+        payload = {"snapshot_version": snapshot_version, "index_scope": index_scope,
+                   "index_generation": index_generation}
+        if index_root is not None:
+            payload["index_root"] = index_root
         client.set_payload(
             collection_name=collection,
-            payload={"snapshot_version": snapshot_version, "index_scope": index_scope,
-                     "index_generation": index_generation},
+            payload=payload,
             points=seen_ids.copy(),
         )
         seen_ids.clear()
@@ -187,7 +191,7 @@ def _index_chunks(
                         values=sparse.values.tolist(),
                     ),
                 },
-                payload=chunk.payload(snapshot_version, index_scope, index_generation),
+                payload=chunk.payload(snapshot_version, index_scope, index_generation, index_root),
             )
             for chunk, dense, sparse in zip(pending_chunks, dense_vecs, sparse_vecs)
         ]
@@ -281,11 +285,9 @@ def _reconcile_corpus(
 
 
 def _reconcile_manual_source(
-    client: QdrantClient, collection: str, source: str, index_generation: str
+    client: QdrantClient, collection: str, source: str, index_generation: str, index_root: str
 ) -> int:
-    """Delete manual-scope points of `source` whose index_generation is not the
-    current one: orphan chunks left after re-adding a shrunk file/dir/URL (P8).
-    Scoped to the one source label, so other manual adds are untouched."""
+    """Delete orphan manual points belonging to this exact input root."""
     stale: list[str] = []
     offset = None
     while True:
@@ -293,13 +295,14 @@ def _reconcile_manual_source(
             collection_name=collection,
             limit=1000,
             offset=offset,
-            with_payload=["source", "index_scope", "index_generation"],
+            with_payload=["source", "index_scope", "index_generation", "index_root"],
             with_vectors=False,
         )
         for record in records:
             payload = record.payload or {}
             if (payload.get("source") == source
                     and payload.get("index_scope") == "manual"
+                    and payload.get("index_root") == index_root
                     and payload.get("index_generation") != index_generation):
                 stale.append(str(record.id))
         if offset is None:
@@ -752,6 +755,7 @@ def add_path(
     collection = collection or config.QDRANT_COLLECTION
     snapshot_version = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     label = derive_source_label(path, source)
+    index_root = path if _URL_RE.match(path) else str(Path(path).expanduser().resolve())
 
     # Stream chunks (generators, not materialized lists) into _index_chunks so
     # memory stays bounded on a large add; _index_chunks consumes and batches.
@@ -782,15 +786,15 @@ def add_path(
 
     ensure_collection(collection)
     client = QdrantClient(url=config.QDRANT_URL)
-    sparse_model = SparseTextEmbedding(model_name=config.SPARSE_MODEL)
-    existing = _existing_hashes(client, collection) if resume else {}
-
-    # A fresh per-add generation stamps every point seen this pass (new, changed,
-    # and re-stamped unchanged); orphan points of this source from a previous add
-    # keep the old generation and are then deleted, so re-adding a shrunk file/dir
-    # /URL does not leave stale chunks behind (P8). Only runs on a clean pass.
-    generation = uuid.uuid4().hex
-    stats = _index_chunks(client, sparse_model, collection, chunks, existing, resume,
-                          snapshot_version, "manual", generation)
-    stats["deleted"] = _reconcile_manual_source(client, collection, label, generation)
-    return stats
+    try:
+        sparse_model = SparseTextEmbedding(model_name=config.SPARSE_MODEL)
+        existing = _existing_hashes(client, collection) if resume else {}
+        generation = uuid.uuid4().hex
+        stats = _index_chunks(client, sparse_model, collection, chunks, existing, resume,
+                              snapshot_version, "manual", generation, index_root)
+        if stats["indexed"] + stats["skipped"] == 0:
+            raise ValueError("add: no indexable chunks; existing indexed content is preserved")
+        stats["deleted"] = _reconcile_manual_source(client, collection, label, generation, index_root)
+        return stats
+    finally:
+        client.close()

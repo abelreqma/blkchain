@@ -97,6 +97,14 @@ func splitHostPort(addr string) (string, int) {
 	return host, port
 }
 
+func embeddingFailure(stage string, err error) error {
+	var transport *net.OpError
+	if errors.As(err, &transport) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %s: %v", ErrUnreachable, stage, err)
+	}
+	return fmt.Errorf("%s: %w", stage, err)
+}
+
 // Search retrieves the top-scoring chunks for query: it embeds the query,
 // runs a hybrid dense+sparse RRF query against Qdrant to build a candidate
 // pool, reranks that pool with the cross-encoder, and returns the top topK
@@ -116,7 +124,7 @@ func (c *Client) Search(ctx context.Context, query string, topK int, filter map[
 
 	dense, err := embedQuery(ctx, c.cfg.EmbedServerURL, query)
 	if err != nil {
-		return nil, fmt.Errorf("%w: embed_server: %v", ErrUnreachable, err)
+		return nil, embeddingFailure("embed_server", err)
 	}
 
 	req := buildHybridQuery(c.collection, c.cfg.DenseVectorName, c.cfg.SparseVectorName,
@@ -158,7 +166,7 @@ func (c *Client) Search(ctx context.Context, query string, topK int, filter map[
 
 	scores, err := rerank(ctx, c.cfg.EmbedServerURL, query, texts)
 	if err != nil {
-		return nil, fmt.Errorf("%w: embed_server rerank: %v", ErrUnreachable, err)
+		return nil, embeddingFailure("embed_server rerank", err)
 	}
 	if len(scores) != len(results) {
 		return nil, fmt.Errorf("rerank returned %d scores for %d documents", len(scores), len(results))

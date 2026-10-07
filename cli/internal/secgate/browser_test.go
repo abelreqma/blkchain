@@ -196,3 +196,22 @@ func TestWildcardPolicyChecksAPIAndRedirectAddresses(t *testing.T) {
 		}
 	}
 }
+
+func TestPolicyWebActionsConsumeTheSharedRateWindow(t *testing.T) {
+	scope, err := BuildScope(ScopeSpec{In: []string{"10.20.0.7"}, Rate: "1/s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &Gate{Mode: Auto, Scope: scope, Policy: DefaultPolicy()}
+	if err := gate.Start(); err != nil {
+		t.Fatal(err)
+	}
+	first := gate.AuthorizeAPIRequest(context.Background(), APIRequest{Method: "GET", URL: "http://10.20.0.7/fixture"})
+	if !first.Allowed {
+		t.Fatalf("first action denied: %+v", first)
+	}
+	second := gate.AuthorizeBrowser(context.Background(), BrowserAction{URL: "http://10.20.0.7/fixture"})
+	if second.Allowed || !strings.Contains(second.Reason, "rate") {
+		t.Fatalf("web rate window ignored: %+v", second)
+	}
+}

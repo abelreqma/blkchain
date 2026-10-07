@@ -454,36 +454,6 @@ func toolFor(binary string) (tool, bool) {
 	return tool{}, false
 }
 
-// toolsForPersona returns the catalog entries a persona's prompt may name, in
-// catalog order.
-func toolsForPersona(persona string) []tool {
-	var out []tool
-	for _, t := range toolCatalog {
-		for _, p := range t.Personas {
-			if p == persona {
-				out = append(out, t)
-				break
-			}
-		}
-	}
-	return out
-}
-
-// catalogBinaries returns every binary in the catalog that the image ships, in
-// sorted order. sudo is excluded: it is catalogued for its gate exception, not
-// installed.
-func catalogBinaries() []string {
-	var out []string
-	for _, t := range toolCatalog {
-		if t.Probe == nil {
-			continue
-		}
-		out = append(out, t.Binary)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // catalogPackages returns the distinct apk packages the catalog requires, in
 // sorted order. It is the set packages.list must declare.
 func catalogPackages() []string {
@@ -495,20 +465,6 @@ func catalogPackages() []string {
 		}
 		seen[t.Package] = true
 		out = append(out, t.Package)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// enumToolBinaries returns the tierEnum binaries: the EXTERNAL-profile
-// allowlist candidates. A candidate reaches the allowlist only once its flag
-// surface is audited, which externalEngageAllowlist enforces.
-func enumToolBinaries() []string {
-	var out []string
-	for _, t := range toolCatalog {
-		if t.Tier == tierEnum {
-			out = append(out, t.Binary)
-		}
 	}
 	sort.Strings(out)
 	return out

@@ -76,8 +76,10 @@ type ModelReport struct {
 
 // httpClient returns the configured client or a default with ProbeTimeout.
 func (c Config) httpClient() *http.Client {
+	client := http.Client{Timeout: c.ProbeTimeout}
 	if c.HTTPClient != nil {
-		return c.HTTPClient
+		client = *c.HTTPClient
 	}
-	return &http.Client{Timeout: c.ProbeTimeout}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &client
 }

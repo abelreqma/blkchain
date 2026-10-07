@@ -42,7 +42,7 @@ type rerankRequest struct {
 
 // rerankResponse is the response body of embed_server's POST /rerank.
 type rerankResponse struct {
-	Scores []float64 `json:"scores"`
+	Scores []*float64 `json:"scores"`
 }
 
 // embedQuery embeds a single query string via embed_server's POST /embed and
@@ -74,7 +74,14 @@ func rerank(ctx context.Context, embedURL, query string, docs []string) ([]float
 	if err := postJSON(ctx, embedURL+"/rerank", body, &out); err != nil {
 		return nil, err
 	}
-	return out.Scores, nil
+	scores := make([]float64, len(out.Scores))
+	for i, score := range out.Scores {
+		scores[i] = -1
+		if score != nil {
+			scores[i] = *score
+		}
+	}
+	return scores, nil
 }
 
 // postJSON POSTs body as application/json to url and decodes the JSON

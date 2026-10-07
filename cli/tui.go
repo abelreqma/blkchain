@@ -979,9 +979,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(full) == "" {
 				return m, m.finish(tea.Println("   " + Meta.Render("(agent returned no output)")))
 			}
-			m.recordTurn(full)
+			persistenceErr := m.recordTurn(full)
 			m.lastCost, m.lastCostSet = cost, true
 			out := formatAgentAnswer(full, elapsed, m.renderWidth()) + "\n" + costFooter(cost)
+			if persistenceErr != nil {
+				m.queuePaused = true
+				out += "\n" + styleErr(fmt.Errorf("conversation save failed: %w", persistenceErr))
+			}
 			return m, m.finish(tea.Println(out))
 		}
 		if msg.err != nil {
@@ -1006,10 +1010,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastQuery, m.lastResults = m.pendingQ, msg.results
 		}
 		m.servicesOK, m.servicesChecked = true, true
-		m.recordTurn(full)
+		persistenceErr := m.recordTurn(full)
 		m.lastCost, m.lastCostSet = cost, true
 		resp := &answerResponse{Answer: full, Citations: msg.citations, UsedWeb: msg.usedWeb}
 		out := formatAnswer(resp, elapsed, m.renderWidth(), msg.rerankOff) + "\n" + costFooter(cost)
+		if persistenceErr != nil {
+			m.queuePaused = true
+			out += "\n" + styleErr(fmt.Errorf("conversation save failed: %w", persistenceErr))
+		}
 		return m, m.finish(tea.Println(out))
 
 	case webFindingMsg:
@@ -1731,27 +1739,32 @@ func (m model) conversationHistory() []priorTurn {
 	return pt
 }
 
-// recordTurn appends the completed user question and answer to the current
-// session transcript. It is best-effort: a nil session or an IO error just skips
-// persistence (an errSessionFull is surfaced as a muted note by the caller path).
-func (m *model) recordTurn(answer string) {
+// recordTurn saves a completed exchange and reports persistence failures.
+func (m *model) recordTurn(answer string) error {
 	if m.sess == nil || strings.TrimSpace(m.pendingQ) == "" {
-		return
+		return nil
 	}
+	defer func() { m.pendingQ = "" }()
 	model := m.currentModel()
-	_ = m.sess.appendTurn(turnRecord{Role: roleUser, Content: m.pendingQ, Model: model, Mode: m.mode})
-	_ = m.sess.appendTurn(turnRecord{Role: roleAssistant, Content: answer, Model: model, Mode: m.mode})
+	if err := m.sess.appendTurn(turnRecord{Role: roleUser, Content: m.pendingQ, Model: model, Mode: m.mode}); err != nil {
+		return err
+	}
+	if err := m.sess.appendTurn(turnRecord{Role: roleAssistant, Content: answer, Model: model, Mode: m.mode}); err != nil {
+		return err
+	}
 	if m.hist != nil {
-		// Mirror the exchange into the persistent langchaingo memory, keyed by the
-		// same session id. Best-effort: a write error just skips persistence.
 		ctx := context.Background()
-		_ = m.hist.AppendUser(ctx, m.sess.id, m.pendingQ)
-		_ = m.hist.AppendAI(ctx, m.sess.id, answer)
+		if err := m.hist.AppendUser(ctx, m.sess.id, m.pendingQ); err != nil {
+			return err
+		}
+		if err := m.hist.AppendAI(ctx, m.sess.id, answer); err != nil {
+			return err
+		}
 	}
 	if m.sess.title != "" {
 		m.sessTitle = m.sess.title
 	}
-	m.pendingQ = ""
+	return nil
 }
 
 // applyModel applies a model-picker selection to subsequent turns and refreshes
@@ -2261,7 +2274,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.turnStart = time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RequestTimeout())
 		m.cancel = cancel
-		modelID := m.activeModel()
+		modelID := m.ragTurnModel()
 		cmd := func() tea.Msg {
 			var b bytes.Buffer
 			err := runStoreTo(ctx, args, &b, nil, modelID)
