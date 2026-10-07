@@ -236,6 +236,38 @@ func TestStoreAnswerRejectsInventedReferences(t *testing.T) {
 	}
 }
 
+func TestStorePreservesTaskCompletionBasisFromEngagement(t *testing.T) {
+	ws, evidenceID := fixtureStoreWorkspace(t, t.TempDir())
+	defer ws.Close()
+	basis := "The captured banner meets the service observation objective."
+	if _, err := ws.Store.Apply(engagement.Delta{
+		Kind: "plan_complete", Completes: []string{"network-task"},
+		CompletionBasis: basis, CompletionEvidenceIDs: []string{fmt.Sprint(evidenceID)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := runStoreTo(context.Background(), []string{"records", "--workspace", ws.Dir, "--kind", "task", "--surface", "network", "--json"}, &output, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	var page engagement.RecordPage
+	if err := json.Unmarshal(output.Bytes(), &page); err != nil || len(page.Records) != 1 {
+		t.Fatalf("task records: count=%d err=%v", len(page.Records), err)
+	}
+	var task engagement.Task
+	if err := json.Unmarshal(page.Records[0].Document, &task); err != nil || task.CompletionBasis != basis || len(task.CompletionEvidenceIDs) != 1 || task.CompletionEvidenceIDs[0] != fmt.Sprint(evidenceID) {
+		t.Fatalf("completion basis or evidence lost: err=%v", err)
+	}
+	model := &fakeModel{queue: []*llms.ContentResponse{textResp("The executor recorded its completion basis [R1].")}}
+	if _, err := answerStore(context.Background(), ws.Store, "fixture", engagement.SurfaceNetwork, "Why was this task completed?", model, "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	prompt := fmt.Sprint(model.seen)
+	if !strings.Contains(prompt, basis) || !strings.Contains(prompt, "completion_evidence_ids=["+fmt.Sprint(evidenceID)+"]") || !strings.Contains(prompt, "executor's assertion, not independent verification") {
+		t.Fatal("answer path omitted or overstated the completion basis")
+	}
+}
+
 func TestStoreAskRejectsRemoteModelEndpoint(t *testing.T) {
 	ws, _ := fixtureStoreWorkspace(t, t.TempDir())
 	defer ws.Close()
