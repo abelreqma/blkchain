@@ -11,6 +11,10 @@ import (
 )
 
 func TestEngageAutoRequiresScope(t *testing.T) {
+	// runEngage reads the working directory to find ROE.md and, finding none, writes
+	// the template there. An empty temp directory keeps that out of the package and
+	// keeps the verdict from depending on a file an earlier run left behind.
+	t.Chdir(t.TempDir())
 	err := runEngage([]string{"--auto", "do a scan"})
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "scope") {
 		t.Errorf("--auto without --scope must be a usage error mentioning scope, got %v", err)
@@ -18,6 +22,7 @@ func TestEngageAutoRequiresScope(t *testing.T) {
 }
 
 func TestEngageRequiresGoal(t *testing.T) {
+	t.Chdir(t.TempDir())
 	err := runEngage([]string{})
 	if err == nil {
 		t.Error("engage with no goal must be a usage error")

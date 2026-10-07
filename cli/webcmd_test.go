@@ -371,6 +371,10 @@ func TestWebSharedInspectAndInteractiveRendering(t *testing.T) {
 	}
 }
 func TestWebArgumentsQuotedPathsAndCancellation(t *testing.T) {
+	// webExecute below resolves its policy from the working directory and, finding no
+	// ROE.md, writes the template there. An empty temp directory keeps that out of the
+	// package, the same reason the engage entry tests change directory.
+	t.Chdir(t.TempDir())
 	v, e := webArguments(`inspect "/tmp/list of domains.txt" --workspace '/tmp/engagement one'`)
 	if e != nil || len(v) != 4 || v[1] != "/tmp/list of domains.txt" {
 		t.Fatal(v, e)

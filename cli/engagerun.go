@@ -41,6 +41,18 @@ func loadEngageRoE(o engageOpts, cwd string, db *sql.DB) (*RoE, string, error) {
 	}
 	f, err := os.Open(path)
 	if err != nil {
+		// No policy to run under. roeTemplate exists precisely for this moment and
+		// had no caller, so an operator was told to create the file and left to write
+		// a scope policy from scratch. Write the commented template instead, which is
+		// idempotent and never clobbers an existing ROE.md, and still refuse to run:
+		// the template parses to an empty scope, so it authorizes nothing until it is
+		// filled in. A write failure is not fatal to the message the operator needs.
+		if o.roe == "" {
+			if written, werr := writeRoETemplate(cwd); werr == nil && written {
+				return nil, "", usageErr("engage: scope requires ROE.md, so a commented template was written to %s; fill in Targets and In Scope, then run engage again",
+					filepath.Join(cwd, "ROE.md"))
+			}
+		}
 		return nil, "", usageErr("engage: scope requires ROE.md; supply --roe PATH or create the file in this directory")
 	}
 	defer f.Close()

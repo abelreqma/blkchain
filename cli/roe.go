@@ -24,7 +24,13 @@ Describe the authorized engagement here.
 <!-- domains, systems, users, or accounts in the engagement, one per line -->
 
 ## In Scope
-<!-- hosts, IPs, or CIDRs allowed, one per line, e.g. 10.0.0.0/24 -->
+<!-- hosts, IPs, or CIDRs allowed, one per line, e.g. 10.0.0.0/24
+
+     An internal address - loopback, RFC1918 private, or link-local - is allowed
+     only by its own explicit IP or CIDR line here, e.g. 127.0.0.1 or 10.0.0.0/8.
+     A hostname line does NOT authorize the address it resolves to, so listing
+     "localhost" leaves 127.0.0.1 out of scope. This is deliberate: a name that
+     resolves inward must not reach an internal service by accident. -->
 
 ## Out of Scope
 <!-- hosts, IPs, or CIDRs explicitly forbidden; out of scope always wins -->
@@ -39,8 +45,14 @@ Describe the authorized engagement here.
 
      transport=ssh (the default) needs user= and key=; key= is a path, or $NAME
      naming an environment variable that holds the path. Add knownhosts= to pin
-     the host key and refuse an unverified one. Add env=A,B to forward named
-     environment variables to the carrier.
+     the host key and refuse an unverified one.
+
+     env=A,B forwards named environment variables to the carrier: each name's
+     value from this process reaches the worker and the environment of every
+     command it starts, so a carrier can authenticate. Nothing else from this
+     environment crosses. PATH, HOME, and LANG are fixed by the worker and cannot
+     be redirected by a declaration, and a name that is unset here contributes
+     nothing. At most 64 names.
 
        10.0.0.9 user=svc-deploy key=$BLKCHAIN_FOOTHOLD_KEY
 
@@ -52,7 +64,13 @@ Describe the authorized engagement here.
 
      surfaces= selects which surfaces pivot; the default is local. Commands run
      on the foothold are outside the runner's network guard, so scope is enforced
-     by the command gate alone and every such action records its destination. -->
+     by the command gate alone and every such action records its destination.
+
+     On a pivoted surface this host's PATH and symlinks no longer describe the file
+     a command names, so a target-analysis task must name its inspection tool by
+     absolute path (/usr/bin/file, not file). A bare name that matches the analysis
+     target's own base name is refused, because on the foothold it could resolve to
+     the target the task exists to inspect rather than execute. -->
 
 ## Allowed Actions
 <!-- All actions below are enabled. Wrap an entire entry in an HTML comment to disable it. -->
@@ -64,7 +82,18 @@ Describe the authorized engagement here.
 - browser-write
 
 ## Autonomous Actions
-<!-- phase/surface target, e.g. exploit/network 192.0.2.1 or recon/local local -->
+<!-- One "phase/surface target" per line, naming an action class this engagement may
+     arm without asking. Accepted classes are exploit/<surface>, post-ex/<surface>,
+     and recon/local; any other phase, recon/network among them, is rejected,
+     because reconnaissance needs no arming outside the local surface.
+
+     <surface> is one of local, network, web, ad, cloud (or cloud-aws, cloud-gcp,
+     cloud-azure), container, ai-security. target must also be In Scope.
+
+       exploit/network 192.0.2.1
+       recon/local local
+
+     Leave this section empty to arm nothing automatically. -->
 `
 
 // writeRoETemplate writes roeTemplate to <dir>/ROE.md when that file does not
@@ -104,8 +133,8 @@ type RoE struct {
 	Policy      *secgate.Policy
 }
 
-// ParseRoE reads an ROE.md. Recognized level-2+ sections are Summary, Targets,
-// In Scope, Out of Scope, and Rate (heading match is case-insensitive). Within a
+// ParseRoE reads an ROE.md. The recognized level-2+ sections are the ones
+// roeSections names (heading match is case-insensitive). Within a
 // section, bullet lines (- / * / +) and bare non-empty lines are entries. An
 // UNRECOGNIZED level-2+ heading is a parse error (fail closed): silently dropping
 // a typo'd or synonym heading would discard an operator's exclusions and defeat
@@ -155,7 +184,7 @@ func ParseRoE(r io.Reader) (*RoE, error) {
 			}
 			key := normalizeSection(h)
 			if !isKnownSection(key) {
-				return nil, fmt.Errorf("ROE.md: unrecognized section heading %q (expected: Summary, Targets, In Scope, Out of Scope, Rate, Foothold, Autonomous Actions)", h)
+				return nil, fmt.Errorf("ROE.md: unrecognized section heading %q (expected: %s)", h, strings.Join(roeSections, ", "))
 			}
 			if seen[key] {
 				return nil, fmt.Errorf("ROE.md: duplicate section %q", h)
@@ -266,10 +295,22 @@ func headingText(line string) (text string, level int, ok bool) {
 
 // isKnownSection reports whether a normalized heading is one of the recognized
 // ROE.md sections.
+// roeSections is the one list of sections ParseRoE accepts, in the order the
+// unrecognized-heading error names them. isKnownSection and that error message both
+// read it, so the two cannot disagree: the message previously listed seven of the
+// twelve and told an operator that Allowed Actions, which the template itself
+// emits, was not expected.
+var roeSections = []string{
+	"Summary", "Targets", "In Scope", "Out of Scope", "Rate", "Foothold",
+	"Allowed Actions", "Denied Actions", "Denied Commands", "Autonomous Actions",
+	"Resource Caps", "Runner",
+}
+
 func isKnownSection(key string) bool {
-	switch key {
-	case "summary", "targets", "in scope", "out of scope", "rate", "autonomous actions", "allowed actions", "denied actions", "denied commands", "resource caps", "runner", "foothold":
-		return true
+	for _, name := range roeSections {
+		if normalizeSection(name) == key {
+			return true
+		}
 	}
 	return false
 }

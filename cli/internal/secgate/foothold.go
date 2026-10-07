@@ -167,6 +167,9 @@ func ParseFoothold(entry string) (*Foothold, error) {
 				if !isEnvName(name) {
 					return nil, fmt.Errorf("secgate: foothold env name %q is not a valid environment variable name", name)
 				}
+				if len(f.Env) == FootholdEnvCap {
+					return nil, fmt.Errorf("secgate: foothold env declares more than %d names", FootholdEnvCap)
+				}
 				f.Env = append(f.Env, name)
 			}
 		case "quote":
@@ -277,6 +280,14 @@ func (f *Foothold) validate() error {
 // isEnvName reports whether s is a POSIX environment variable name. Only a
 // declared name is forwarded into a worker, so a malformed entry is rejected
 // rather than silently dropped.
+// FootholdEnvCap bounds how many environment variable names one foothold may
+// declare. The worker's launcher rejects a request carrying more than this, so
+// without the same bound here an oversized declaration parses, seals into the
+// policy, and then fails every command at exec time with the launcher's own
+// message. Enforcing it at parse makes it one clear error before the engagement
+// starts. TestFootholdEnvCapMatchesTheLauncher keeps the two in lockstep.
+const FootholdEnvCap = 64
+
 func isEnvName(s string) bool {
 	if s == "" {
 		return false
