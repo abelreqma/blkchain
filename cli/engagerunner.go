@@ -403,12 +403,14 @@ func planWildcardEgress(ctx context.Context, scope *secgate.Scope, stages []pipe
 		return engageEgressPlan{}, errors.New("engagement scope missing")
 	}
 	var targets []string
+	var nets []*net.IPNet
 	for _, stage := range stages {
-		found, ok := secgate.ExtractTargets(secgate.Command{Binary: stage.Binary, Args: stage.Args})
-		if !ok || len(targets)+len(found) > 16 {
+		found, foundNets, ok := secgate.ExtractTargetSet(secgate.Command{Binary: stage.Binary, Args: stage.Args})
+		if !ok || len(targets)+len(nets)+len(found)+len(foundNets) > 16 {
 			return engageEgressPlan{}, errors.New("command targets cannot be verified within the limit")
 		}
 		targets = append(targets, found...)
+		nets = append(nets, foundNets...)
 	}
 	plan := engageEgressPlan{}
 	for _, target := range targets {
@@ -416,6 +418,14 @@ func planWildcardEgress(ctx context.Context, scope *secgate.Scope, stages []pipe
 			return engageEgressPlan{}, errors.New("command target is outside the engagement scope")
 		}
 		plan.Dynamic = plan.Dynamic || scope.WildcardHost(target)
+	}
+	// A network target is authorized on the rule the gate applies: one in-scope
+	// CIDR covers the whole range and nothing excluded overlaps it. It names no
+	// hostname, so it never makes the plan dynamic.
+	for _, n := range nets {
+		if !scope.NetworkInScope(n) {
+			return engageEgressPlan{}, errors.New("command network is outside the engagement scope")
+		}
 	}
 	if !plan.Dynamic {
 		return plan, nil
@@ -425,6 +435,20 @@ func planWildcardEgress(ctx context.Context, scope *secgate.Scope, stages []pipe
 	}
 	seen := map[string]bool{}
 	hosts := map[string]string{}
+	// An authorized range is pinned as a range, which both the action guard's
+	// firewall and the narrowed scope accept, so a sweep still reaches it when
+	// another target of the same action made the plan dynamic.
+	for _, n := range nets {
+		entry := n.String()
+		if seen[entry] {
+			continue
+		}
+		if len(plan.IPs) >= 32 {
+			return engageEgressPlan{}, errors.New("command destination address limit reached")
+		}
+		plan.IPs = append(plan.IPs, entry)
+		seen[entry] = true
+	}
 	add := func(ip net.IP) error {
 		if ip == nil || !ip.IsGlobalUnicast() {
 			return errors.New("command destination has an unsafe address")
@@ -528,6 +552,18 @@ func (r *engageRunner) RunScoped(ctx context.Context, stages []pipelineStage, di
 	return result, outputs
 }
 
+// workerCap bounds the containers both pools hold together. A task in flight
+// can hold one general worker and one raw-socket worker, so each parallel slot
+// authorizes two containers; anything lower refuses a worker the sealed policy
+// already allowed. A runner built without slots still gets a bound.
+func (r *engageRunner) workerCap() int {
+	slots := cap(r.slots)
+	if slots < 1 {
+		slots = 1
+	}
+	return 2 * slots
+}
+
 // worker returns the container for an executor directory, creating it on first
 // use. raw selects the privileged raw-socket worker, which is created only when
 // a command actually needs the capability, so an enumeration command never runs
@@ -545,7 +581,7 @@ func (r *engageRunner) worker(ctx context.Context, dir string, raw bool) (string
 	if id := pool[dir]; id != "" {
 		return id, nil
 	}
-	if len(r.workers)+len(r.rawWorkers) >= 8 {
+	if len(r.workers)+len(r.rawWorkers) >= r.workerCap() {
 		return "", errors.New("runner worker cap reached")
 	}
 	id := runnerName(name)

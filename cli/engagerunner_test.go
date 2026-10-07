@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -188,6 +189,55 @@ func TestPlanWildcardEgressStopsOnCanceledContext(t *testing.T) {
 		})
 	if !errors.Is(err, context.Canceled) || called {
 		t.Fatalf("canceled action resolved a target: err=%v called=%v", err, called)
+	}
+}
+
+// The egress plan authorizes a network target on the same rule the gate uses:
+// one in-scope CIDR covers the whole range and nothing excluded overlaps it. A
+// range has no hostname to resolve, so it never makes the plan dynamic; when
+// another target does, the range is pinned into the action-scoped guard so the
+// sweep can still reach it.
+func TestPlanWildcardEgressAuthorizesScopedNetwork(t *testing.T) {
+	scope, err := secgate.BuildScope(secgate.ScopeSpec{
+		In:  []string{"10.20.0.0/16", "*.example.test"},
+		Out: []string{"10.20.9.9"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolve := func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if host == "api.example.test" {
+			return []net.IPAddr{{IP: net.ParseIP("10.20.0.6")}}, nil
+		}
+		return nil, errors.New("unresolved")
+	}
+	sweep := pipelineStage{Binary: "nmap", Args: []string{"-n", "-sn", "10.20.1.0/24"}}
+
+	plan, err := planWildcardEgress(context.Background(), scope, []pipelineStage{sweep}, resolve)
+	if err != nil {
+		t.Fatalf("in-scope sweep denied at the egress plan: %v", err)
+	}
+	if plan.Dynamic {
+		t.Errorf("a range target made the plan dynamic: %+v", plan)
+	}
+
+	mixed := []pipelineStage{sweep, {Binary: "curl", Args: []string{"http://api.example.test/"}}}
+	plan, err = planWildcardEgress(context.Background(), scope, mixed, resolve)
+	if err != nil {
+		t.Fatalf("mixed sweep and wildcard host denied: %v", err)
+	}
+	if !plan.Dynamic || !slices.Contains(plan.IPs, "10.20.1.0/24") || !slices.Contains(plan.IPs, "10.20.0.6") {
+		t.Errorf("action-scoped plan = %+v, want the range and the resolved host pinned", plan)
+	}
+
+	for _, args := range [][]string{
+		{"-n", "-sn", "10.30.0.0/24"}, // wholly outside the scope
+		{"-n", "-sn", "10.20.0.0/8"},  // wider than any single in-scope entry
+		{"-n", "-sn", "10.20.9.0/24"}, // overlaps an excluded host
+	} {
+		if _, err := planWildcardEgress(context.Background(), scope, []pipelineStage{{Binary: "nmap", Args: args}}, resolve); err == nil {
+			t.Errorf("egress plan accepted the network in %v", args)
+		}
 	}
 }
 
@@ -439,6 +489,33 @@ func TestEngageRunnerWorkerCapSpansBothPools(t *testing.T) {
 	// An existing directory still resolves without creating anything.
 	if id, err := r.worker(context.Background(), "a", true); err != nil || id != "5" {
 		t.Fatalf("existing raw worker not reused: %q %v", id, err)
+	}
+}
+
+// The container bound follows the policy's own parallelism. A task in flight
+// can hold one general worker and one raw-socket worker, so each parallel slot
+// authorizes two containers; a bound below that refuses a worker the sealed
+// policy already allowed and stalls the rest of the engagement.
+func TestEngageRunnerWorkerCapFollowsParallelism(t *testing.T) {
+	for _, tc := range []struct{ parallel, want int }{{1, 2}, {4, 8}, {8, 16}} {
+		r := &engageRunner{slots: make(chan struct{}, tc.parallel)}
+		if got := r.workerCap(); got != tc.want {
+			t.Errorf("parallel %d: worker cap = %d, want %d", tc.parallel, got, tc.want)
+		}
+	}
+	if got := (&engageRunner{}).workerCap(); got != 2 {
+		t.Errorf("worker cap without slots = %d, want 2", got)
+	}
+
+	// The bound is still enforced: the check precedes any docker call, so a
+	// refused worker touches no daemon.
+	r := &engageRunner{guard: "guard", slots: make(chan struct{}, 2), workers: map[string]string{}, rawWorkers: map[string]string{}}
+	for i := 0; i < 2; i++ {
+		r.workers[strconv.Itoa(i)] = "worker" + strconv.Itoa(i)
+		r.rawWorkers[strconv.Itoa(i)] = "rawworker" + strconv.Itoa(i)
+	}
+	if _, err := r.worker(context.Background(), "new", false); err == nil || !strings.Contains(err.Error(), "cap reached") {
+		t.Errorf("worker past the bound was not refused: %v", err)
 	}
 }
 
