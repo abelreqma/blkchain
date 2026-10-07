@@ -191,7 +191,7 @@ func adCorrelateSamba(t *testing.T, sel exploitSelector) engagement.Task {
 		t.Fatal(err)
 	}
 	ex := adExecutor{genericExecutor{d: d}}
-	ex.correlateNewEvidence(context.Background(), "adr1", []engagement.EvidenceRow{{ID: id, Quote: quote}}, sel)
+	ex.correlateNewEvidence(context.Background(), "adr1", "", []engagement.EvidenceRow{{ID: id, Quote: quote}}, sel)
 	return soleExploitCandidate(t, d)
 }
 
@@ -392,7 +392,7 @@ func TestADLogicGapGatedSamePath(t *testing.T) {
 			t.Fatal(err)
 		}
 		ex := adExecutor{genericExecutor{d: d}}
-		ex.correlateNewEvidence(context.Background(), "adr2", []engagement.EvidenceRow{{ID: id, Quote: quote}}, nil)
+		ex.correlateNewEvidence(context.Background(), "adr2", "", []engagement.EvidenceRow{{ID: id, Quote: quote}}, nil)
 		return soleExploitCandidate(t, d)
 	}
 

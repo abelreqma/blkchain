@@ -245,7 +245,7 @@ func containerCorrelate(t *testing.T, d engageDeps, sel exploitSelector) (engage
 		t.Fatal(err)
 	}
 	ex := containerExecutor{genericExecutor{d: d}}
-	ex.correlateNewEvidence(context.Background(), "t1", []engagement.EvidenceRow{{ID: id, Quote: containerReconEvidence}}, sel)
+	ex.correlateNewEvidence(context.Background(), "t1", "", []engagement.EvidenceRow{{ID: id, Quote: containerReconEvidence}}, sel)
 	return d.Store.GetTask("exploit-10.0.0.5-6443-nginx")
 }
 

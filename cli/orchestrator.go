@@ -107,15 +107,24 @@ func markTaskActive(task engagement.Task) engagement.Task {
 // os.MkdirTemp is safe under concurrent use. An empty root means run_command
 // is disabled, so no scratch dir is created; the returned cleanup is always
 // safe to call.
-func newExecutorScratchDir(root string) (dir string, cleanup func(), err error) {
+//
+// The directory is also the isolated runner's worker-pool key, so cleanup
+// releases the task's workers before removing it. The pool is bounded and has
+// no eviction, so an engagement whose executors did not release would refuse
+// every command once it filled. Owning the release here keeps it off each
+// executor's list of things to remember.
+func newExecutorScratchDir(ctx context.Context, root string) (dir string, cleanup func(), err error) {
 	if root == "" {
-		return "", func() {}, nil
+		return "", func() { releaseEngageWorker(ctx, "") }, nil
 	}
 	dir, err = os.MkdirTemp(root, "exec-")
 	if err != nil {
 		return "", func() {}, err
 	}
-	return dir, func() { os.RemoveAll(dir) }, nil
+	return dir, func() {
+		releaseEngageWorker(ctx, dir)
+		os.RemoveAll(dir)
+	}, nil
 }
 
 // newDispatchAgentTool builds the orchestrator-only dispatch_agent tool.

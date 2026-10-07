@@ -38,7 +38,7 @@ func TestCorrelateGroundedUncataloguedCreatesCandidate(t *testing.T) {
 		return "Ghostcat CVE-2020-1938", cit
 	}
 
-	ex.correlateNewEvidence(context.Background(), "t1", rows, sel)
+	ex.correlateNewEvidence(context.Background(), "t1", "", rows, sel)
 
 	cand, err := d.Store.GetTask("exploit-10.0.0.5-8080-apache-tomcat")
 	if err != nil {
@@ -75,7 +75,7 @@ func grounds(t *testing.T, sel exploitSelector) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ex.correlateNewEvidence(context.Background(), "t1", []engagement.EvidenceRow{{ID: id, Quote: quote}}, sel)
+	ex.correlateNewEvidence(context.Background(), "t1", "", []engagement.EvidenceRow{{ID: id, Quote: quote}}, sel)
 	_, err = d.Store.GetTask("exploit-10.0.0.5-8080-apache-tomcat")
 	return err == nil
 }
@@ -118,7 +118,7 @@ func TestCorrelateGroundedTechniqueCannotSteerTarget(t *testing.T) {
 	sel := func(ctx context.Context, svc Service) (string, engagement.Citation) {
 		return "attacker.evil.com ; rm -rf / --target 6.6.6.6", cit
 	}
-	ex.correlateNewEvidence(context.Background(), "t1", []engagement.EvidenceRow{{ID: id, Quote: quote}}, sel)
+	ex.correlateNewEvidence(context.Background(), "t1", "", []engagement.EvidenceRow{{ID: id, Quote: quote}}, sel)
 	cand, err := d.Store.GetTask("exploit-10.0.0.5-8080-apache-tomcat")
 	if err != nil {
 		t.Fatalf("candidate not persisted: %v", err)

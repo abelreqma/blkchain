@@ -108,7 +108,7 @@ func (e aiSecExecutor) Run(ctx context.Context, task engagement.Task) (string, e
 // skews its probes to the access context.
 func (e aiSecExecutor) aiSecRunReconPhase(ctx context.Context, task engagement.Task, v engagement.Vantage) (string, error) {
 	runTimeout, runCap := resolveRunCaps()
-	execDir, cleanup, err := newExecutorScratchDir(e.d.WorkDir)
+	execDir, cleanup, err := newExecutorScratchDir(ctx, e.d.WorkDir)
 	if err != nil {
 		return "", err
 	}

@@ -155,7 +155,7 @@ func containerTierPrompt(task engagement.Task, asset string, tier reconTier, sel
 // re-read here.
 func (e containerExecutor) containerRunReconPhase(ctx context.Context, task engagement.Task, v engagement.Vantage) (string, error) {
 	runTimeout, runCap := resolveRunCaps()
-	execDir, cleanup, err := newExecutorScratchDir(e.d.WorkDir)
+	execDir, cleanup, err := newExecutorScratchDir(ctx, e.d.WorkDir)
 	if err != nil {
 		return "", err
 	}
@@ -217,7 +217,7 @@ func (e containerExecutor) containerRunReconPhase(ctx context.Context, task enga
 			return tierOutcome{}, err
 		}
 		out := tierOutcomeFromSignals(tier, e.d.Runs.Count(task.ID)-beforeCmds, len(newRows))
-		out.NewAssets = e.correlateNewEvidence(ctx, task.ID, newRows, exploitSel)
+		out.NewAssets = e.correlateNewEvidence(ctx, task.ID, asset, newRows, exploitSel)
 		return out, nil
 	}
 

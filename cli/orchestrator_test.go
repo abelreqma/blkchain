@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -214,12 +215,12 @@ func TestExecutorRunsCommandAndRecordsEvidence(t *testing.T) {
 
 func TestNewExecutorScratchDirDistinctPerCall(t *testing.T) {
 	root := t.TempDir()
-	dir1, cleanup1, err := newExecutorScratchDir(root)
+	dir1, cleanup1, err := newExecutorScratchDir(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cleanup1()
-	dir2, cleanup2, err := newExecutorScratchDir(root)
+	dir2, cleanup2, err := newExecutorScratchDir(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +237,7 @@ func TestNewExecutorScratchDirDistinctPerCall(t *testing.T) {
 }
 
 func TestNewExecutorScratchDirEmptyRootNoScratch(t *testing.T) {
-	dir, cleanup, err := newExecutorScratchDir("")
+	dir, cleanup, err := newExecutorScratchDir(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +258,7 @@ func TestNewExecutorScratchDirConcurrentDistinct(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			dir, cleanup, err := newExecutorScratchDir(root)
+			dir, cleanup, err := newExecutorScratchDir(context.Background(), root)
 			if err != nil {
 				errs <- err
 				return
@@ -335,5 +336,37 @@ func TestOrchestratorRejectsFabricatedEvidenceWithRuns(t *testing.T) {
 	}
 	if got.Status == engagement.StatusDone {
 		t.Error("task must not complete without real evidence")
+	}
+}
+
+// An executor's scratch cleanup also releases that task's runner workers, so a
+// long engagement cannot exhaust the eight-worker pool. The release belongs to
+// the one helper every executor already calls rather than to a second deferred
+// call each executor has to remember.
+func TestExecutorScratchCleanupReleasesRunnerWorkers(t *testing.T) {
+	r := &engageRunner{workers: map[string]string{}, rawWorkers: map[string]string{}}
+	var removed []string
+	r.remove = func(_ context.Context, id string) error {
+		removed = append(removed, id)
+		return nil
+	}
+	ctx := context.WithValue(context.Background(), engageRuntimeKey{}, &engageRuntime{runner: r})
+	dir, cleanup, err := newExecutorScratchDir(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.workers[dir] = "worker"
+	r.rawWorkers[dir] = "rawworker"
+
+	cleanup()
+
+	if len(r.workers) != 0 || len(r.rawWorkers) != 0 {
+		t.Errorf("cleanup left workers in the pool: %v %v", r.workers, r.rawWorkers)
+	}
+	if !slices.Contains(removed, "worker") || !slices.Contains(removed, "rawworker") {
+		t.Errorf("removed = %v, want both workers removed", removed)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("cleanup left the scratch dir behind: %v", err)
 	}
 }

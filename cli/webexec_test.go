@@ -171,7 +171,7 @@ func TestWebFindingsCarryProvenance(t *testing.T) {
 	}
 	rows := []engagement.EvidenceRow{{ID: id, Quote: quote}}
 
-	ex.correlateNewEvidence(context.Background(), "w1", rows, nil)
+	ex.correlateNewEvidence(context.Background(), "w1", "", rows, nil)
 
 	cand, err := d.Store.GetTask("exploit-10.0.0.5-22-openssh")
 	if err != nil {
@@ -223,7 +223,7 @@ func TestWebSurfaceLogicGapNoSilentDrop(t *testing.T) {
 		d.Gate = autoGate(t)
 		gapID := seed(d)
 		rows, _ := d.Store.EvidenceRowsFor("w1")
-		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "w1", rows, nil)
+		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "w1", "", rows, nil)
 		cand, err := d.Store.GetTask(gapID)
 		if err != nil {
 			t.Fatalf("web logic-gap candidate DROPPED (no-silent-drop violated): %v", err)
@@ -250,7 +250,7 @@ func TestWebSurfaceLogicGapNoSilentDrop(t *testing.T) {
 		}}
 		gapID := seed(d)
 		rows, _ := d.Store.EvidenceRowsFor("w1")
-		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "w1", rows, nil)
+		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "w1", "", rows, nil)
 		cand, err := d.Store.GetTask(gapID)
 		if err != nil {
 			t.Fatalf("web logic-gap candidate missing: %v", err)
@@ -271,7 +271,7 @@ func TestWebSurfaceLogicGapNoSilentDrop(t *testing.T) {
 		}}
 		gapID := seed(d)
 		rows, _ := d.Store.EvidenceRowsFor("w1")
-		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "w1", rows, nil)
+		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "w1", "", rows, nil)
 		cand, err := d.Store.GetTask(gapID)
 		if err != nil {
 			t.Fatalf("web logic-gap candidate dropped: %v", err)

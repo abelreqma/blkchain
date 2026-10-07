@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -144,6 +145,33 @@ func correlateFromEvidence(store *engagement.Store, taskID string) ([]engagement
 		}
 	}
 	return out, nil
+}
+
+// assetFallbackHost returns the recon asset when it names one host, which a
+// service row parsed without a host of its own takes as its target. The asset
+// comes from the recon ladder, so it is code-derived. A range, a URL, a
+// user@host, and an empty asset name no single host, so they yield no fallback:
+// a candidate with no host has no target to act on, and its id would collide
+// with every other hostless candidate on the same port.
+func assetFallbackHost(asset string) string {
+	host := strings.Trim(strings.TrimSpace(asset), "[]")
+	if host == "" {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	// Anything that is not one bare hostname (a range, a URL, a user@host, a
+	// port, a list) names no single host. The value becomes a command target, so
+	// it is validated here rather than trusted for its origin.
+	for _, r := range host {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-':
+		default:
+			return ""
+		}
+	}
+	return host
 }
 
 // sanitizeSegment maps a string to a task-id-safe segment: characters outside

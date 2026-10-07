@@ -93,12 +93,11 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 	}
 	if e.d.Gate != nil && e.d.Runs != nil {
 		runTimeout, runCap := resolveRunCaps()
-		execDir, cleanup, err := newExecutorScratchDir(e.d.WorkDir)
+		execDir, cleanup, err := newExecutorScratchDir(ctx, e.d.WorkDir)
 		if err != nil {
 			return "", err
 		}
 		defer cleanup()
-		defer releaseEngageWorker(ctx, execDir)
 		// Stamp the task's engagement context so the gate tiers each run_command
 		// for its phase (exploit/post-ex require an armed task and force per-action
 		// confirmation). secgate mirrors engagement's Phase/Surface by string value.

@@ -39,7 +39,7 @@ func TestCorrelateNewEvidenceInScopeAndCandidates(t *testing.T) {
 	// emitted as an actionable candidate: it is surfaced as a non-actionable
 	// coverage-gap (Status blocked, empty Citation, Objective marker). In-scope
 	// asset recursion is unaffected.
-	newAssets := ex.correlateNewEvidence(context.Background(), "t1", rows, nil)
+	newAssets := ex.correlateNewEvidence(context.Background(), "t1", "", rows, nil)
 	if len(newAssets) != 1 || newAssets[0] != "10.0.0.42" {
 		t.Fatalf("newAssets = %v, want [10.0.0.42] (8.8.8.8 is out of scope and dropped)", newAssets)
 	}
@@ -88,7 +88,7 @@ func TestCorrelateNewEvidenceCandidateCarriesCitation(t *testing.T) {
 		return "CVE-2020-15778", cit
 	}
 
-	ex.correlateNewEvidence(context.Background(), "t1", rows, sel)
+	ex.correlateNewEvidence(context.Background(), "t1", "", rows, sel)
 
 	cand, err := d.Store.GetTask("exploit-10.0.0.5-22-openssh")
 	if err != nil {
@@ -122,7 +122,7 @@ func TestCorrelateNewEvidenceMutateCoverageGap(t *testing.T) {
 	coverageRemoved := func(ctx context.Context, svc Service) (string, engagement.Citation) {
 		return "", engagement.Citation{}
 	}
-	ex.correlateNewEvidence(context.Background(), "t1", rows, coverageRemoved)
+	ex.correlateNewEvidence(context.Background(), "t1", "", rows, coverageRemoved)
 
 	cand, err := d.Store.GetTask("exploit-10.0.0.5-22-openssh")
 	if err != nil {
@@ -140,6 +140,66 @@ func TestCorrelateNewEvidenceMutateCoverageGap(t *testing.T) {
 	if !strings.Contains(cand.Objective, "corpus-coverage-gap") {
 		t.Errorf("Objective missing gap marker: %q", cand.Objective)
 	}
+}
+
+// A model-curated quote often holds the service table without the scan-report
+// header the host comes from. The tier's asset is code-derived, so a service
+// parsed with no host of its own takes the asset's host: the candidate keeps an
+// addressable target and an id that stays distinct per host. With no asset to
+// fall back on there is no target, so no candidate is emitted rather than one
+// keyed on a bare port, which every host would collide on.
+func TestCorrelateNewEvidenceHostlessServiceTakesTheAsset(t *testing.T) {
+	quote := "22/tcp open ssh OpenSSH 8.2p1\n" // no "Nmap scan report for" line
+	seed := func(d engageDeps) []engagement.EvidenceRow {
+		if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{
+			ID: "t1", Kind: "recon", Target: "10.0.0.5", Status: engagement.StatusTodo,
+			Phase: engagement.PhaseRecon, Surface: engagement.SurfaceNetwork,
+		}}}); err != nil {
+			t.Fatal(err)
+		}
+		id, err := d.Store.RecordEvidence("t1", quote)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return []engagement.EvidenceRow{{ID: id, Quote: quote}}
+	}
+
+	t.Run("asset supplies the host", func(t *testing.T) {
+		d := testDeps(t, nil)
+		d.Gate = autoGate(t)
+		rows := seed(d)
+		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "t1", "10.0.0.42", rows, nil)
+		cand, err := d.Store.GetTask("exploit-10.0.0.42-22-openssh")
+		if err != nil {
+			t.Fatalf("candidate not keyed on the asset host: %v", err)
+		}
+		if cand.Target != "10.0.0.42:22" {
+			t.Errorf("Target = %q, want 10.0.0.42:22", cand.Target)
+		}
+	})
+
+	t.Run("a range asset supplies no host", func(t *testing.T) {
+		d := testDeps(t, nil)
+		d.Gate = autoGate(t)
+		rows := seed(d)
+		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "t1", "10.0.0.0/24", rows, nil)
+		if _, err := d.Store.GetTask("exploit-10.0.0.0-24-22-openssh"); err == nil {
+			t.Error("a range asset was used as a candidate host")
+		}
+		if _, err := d.Store.GetTask("exploit--22-openssh"); err == nil {
+			t.Error("a candidate was emitted with no host, keyed on a bare port")
+		}
+	})
+
+	t.Run("no asset emits no hostless candidate", func(t *testing.T) {
+		d := testDeps(t, nil)
+		d.Gate = autoGate(t)
+		rows := seed(d)
+		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "t1", "", rows, nil)
+		if _, err := d.Store.GetTask("exploit--22-openssh"); err == nil {
+			t.Error("a candidate was emitted with no host, keyed on a bare port")
+		}
+	})
 }
 
 func TestCorrelateNewEvidenceLogicGapGated(t *testing.T) {
@@ -163,7 +223,7 @@ func TestCorrelateNewEvidenceLogicGapGated(t *testing.T) {
 		d.Gate = autoGate(t)
 		gapID := seed(d)
 		rows, _ := d.Store.EvidenceRowsFor("t1")
-		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "t1", rows, nil)
+		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "t1", "", rows, nil)
 		cand, err := d.Store.GetTask(gapID)
 		if err != nil {
 			t.Fatalf("logic-gap candidate dropped: %v", err)
@@ -181,7 +241,7 @@ func TestCorrelateNewEvidenceLogicGapGated(t *testing.T) {
 		}}
 		gapID := seed(d)
 		rows, _ := d.Store.EvidenceRowsFor("t1")
-		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "t1", rows, nil)
+		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "t1", "", rows, nil)
 		cand, err := d.Store.GetTask(gapID)
 		if err != nil {
 			t.Fatalf("logic-gap candidate missing: %v", err)
@@ -220,7 +280,7 @@ func TestLogicGapClassTermGate(t *testing.T) {
 		}}
 		gapID := seed(d)
 		rows, _ := d.Store.EvidenceRowsFor("t1")
-		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "t1", rows, nil)
+		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "t1", "", rows, nil)
 		cand, err := d.Store.GetTask(gapID)
 		if err != nil {
 			t.Fatalf("logic-gap candidate dropped (no-silent-drop violated): %v", err)
@@ -241,7 +301,7 @@ func TestLogicGapClassTermGate(t *testing.T) {
 		}}
 		gapID := seed(d)
 		rows, _ := d.Store.EvidenceRowsFor("t1")
-		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "t1", rows, nil)
+		genericExecutor{d: d}.correlateNewEvidence(context.Background(), "t1", "", rows, nil)
 		cand, err := d.Store.GetTask(gapID)
 		if err != nil {
 			t.Fatalf("logic-gap candidate missing: %v", err)

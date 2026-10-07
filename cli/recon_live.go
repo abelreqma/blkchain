@@ -26,12 +26,11 @@ import (
 // (genericExecutor.Run) has already applied the vantage check.
 func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task) (string, error) {
 	runTimeout, runCap := resolveRunCaps()
-	execDir, cleanup, err := newExecutorScratchDir(e.d.WorkDir)
+	execDir, cleanup, err := newExecutorScratchDir(ctx, e.d.WorkDir)
 	if err != nil {
 		return "", err
 	}
 	defer cleanup()
-	defer releaseEngageWorker(ctx, execDir)
 
 	// Stamp the task's engagement context so the gate tiers every run_command
 	// (recon is auto-tier; the structural denials and scope always apply).
@@ -103,7 +102,7 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 			return tierOutcome{}, err
 		}
 		out := tierOutcomeFromSignals(tier, e.d.Runs.Count(task.ID)-beforeCmds, len(newRows))
-		out.NewAssets = e.correlateNewEvidence(ctx, task.ID, newRows, exploitSel)
+		out.NewAssets = e.correlateNewEvidence(ctx, task.ID, asset, newRows, exploitSel)
 		return out, nil
 	}
 
@@ -218,7 +217,12 @@ func tierOutcomeFromSignals(tier reconTier, commandDelta, evidenceDelta int) tie
 // with the advised technique and its corpus basis (provenance); the
 // deterministic catalog owns whether a candidate exists. An out-of-scope asset
 // is never returned for recursion.
-func (e genericExecutor) correlateNewEvidence(ctx context.Context, taskID string, newRows []engagement.EvidenceRow, sel exploitSelector) []string {
+//
+// asset is the host this tier pass scanned, which the recon ladder supplies. A
+// service row parsed without a host of its own takes it as the candidate's
+// target, so a model-curated quote that holds the service table without the
+// scan report header still yields an addressable candidate.
+func (e genericExecutor) correlateNewEvidence(ctx context.Context, taskID, asset string, newRows []engagement.EvidenceRow, sel exploitSelector) []string {
 	// The in-scope filter below needs a scope. In production all three engage
 	// entry paths build a non-nil gate, and a scope is present for any engagement
 	// that defines targets; a nil scope (e.g. a Safe-mode run with no scope)
@@ -233,6 +237,7 @@ func (e genericExecutor) correlateNewEvidence(ctx context.Context, taskID string
 	// candidate (finalizeCandidate/groundCandidate call it), so every detector
 	// surfaces a gap through the one audit path.
 	auditFn := func(action, detail string) { _ = e.d.Store.Audit("correlate", action, detail) }
+	fallbackHost := assetFallbackHost(asset)
 	assetSeen := map[string]bool{}
 	candSeen := map[string]bool{}
 	var newAssets []string
@@ -250,6 +255,16 @@ func (e genericExecutor) correlateNewEvidence(ctx context.Context, taskID string
 			newAssets = append(newAssets, a.Host)
 		}
 		for _, svc := range parseServices(prov, r.Quote) {
+			if svc.Host == "" {
+				svc.Host = fallbackHost
+			}
+			if svc.Host == "" {
+				// Without a host there is no target to act on, and the candidate's
+				// id would collide with every other hostless one on this port. The
+				// finding is surfaced rather than dropped silently.
+				auditFn("missing-host", fmt.Sprintf("%s port=%d product=%q reason=no-host-in-evidence-or-asset", taskID, svc.Port, svc.Product))
+				continue
+			}
 			cand, inCatalog := correlateService(svc)
 			var tech string
 			var cit engagement.Citation

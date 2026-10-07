@@ -87,7 +87,7 @@ func (e networkExecutor) Run(ctx context.Context, task engagement.Task) (string,
 // embedding dispatch.
 func (e networkExecutor) networkRunReconPhase(ctx context.Context, task engagement.Task, v engagement.Vantage) (string, error) {
 	runTimeout, runCap := resolveRunCaps()
-	execDir, cleanup, err := newExecutorScratchDir(e.d.WorkDir)
+	execDir, cleanup, err := newExecutorScratchDir(ctx, e.d.WorkDir)
 	if err != nil {
 		return "", err
 	}
@@ -145,7 +145,7 @@ func (e networkExecutor) networkRunReconPhase(ctx context.Context, task engageme
 			return tierOutcome{}, err
 		}
 		out := tierOutcomeFromSignals(tier, e.d.Runs.Count(task.ID)-beforeCmds, len(newRows))
-		out.NewAssets = e.correlateNewEvidence(ctx, task.ID, newRows, exploitSel)
+		out.NewAssets = e.correlateNewEvidence(ctx, task.ID, asset, newRows, exploitSel)
 		return out, nil
 	}
 

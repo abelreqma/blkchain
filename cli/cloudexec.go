@@ -102,7 +102,7 @@ func cloudVantageSkew(v engagement.Vantage) string {
 // vantage from Run so all four surfaces skew by vantage identically.
 func (e cloudExecutor) cloudRunReconPhase(ctx context.Context, task engagement.Task, v engagement.Vantage) (string, error) {
 	runTimeout, runCap := resolveRunCaps()
-	execDir, cleanup, err := newExecutorScratchDir(e.d.WorkDir)
+	execDir, cleanup, err := newExecutorScratchDir(ctx, e.d.WorkDir)
 	if err != nil {
 		return "", err
 	}

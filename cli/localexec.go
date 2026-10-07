@@ -104,12 +104,11 @@ func (e localExecutor) localRunTargetAnalysis(ctx context.Context, task engageme
 	}
 	if e.d.Gate != nil && e.d.Runs != nil {
 		runTimeout, runCap := resolveRunCaps()
-		execDir, cleanup, err := newExecutorScratchDir(e.d.WorkDir)
+		execDir, cleanup, err := newExecutorScratchDir(ctx, e.d.WorkDir)
 		if err != nil {
 			return "", err
 		}
 		defer cleanup()
-		defer releaseEngageWorker(ctx, execDir)
 		cmdCtx := secgate.Command{
 			TaskID:  task.ID,
 			Phase:   secgate.Phase(string(task.Phase)),
