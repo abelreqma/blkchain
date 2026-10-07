@@ -1803,6 +1803,7 @@ func (m model) openSessionInto(id string) (tea.Model, tea.Cmd) {
 	if m.sessTitle == "" {
 		m.sessTitle = s.id
 	}
+	dropped := m.reconcileConversationContext(true)
 
 	cmds := []tea.Cmd{tea.Println(" " + Meta.Render("resumed session: "+sanitizeTerminal(m.sessTitle)))}
 	for _, r := range recs {
@@ -1812,6 +1813,9 @@ func (m model) openSessionInto(id string) (tea.Model, tea.Cmd) {
 		case roleAssistant:
 			cmds = append(cmds, tea.Println(formatReplayAnswer(r.Content, m.renderWidth())))
 		}
+	}
+	if note := reconciledNote(dropped); note != "" {
+		cmds = append(cmds, tea.Println(note))
 	}
 	return m, tea.Sequence(cmds...)
 }
@@ -1845,6 +1849,8 @@ func (m model) openHistorySessionInto(id string) (tea.Model, tea.Cmd) {
 		m.sessTitle = s.id
 	}
 
+	dropped := m.reconcileConversationContext(true)
+
 	cmds := []tea.Cmd{tea.Println(" " + Meta.Render("opened from history: "+sanitizeTerminal(m.sessTitle)))}
 	for _, r := range msgs {
 		switch r.Role {
@@ -1853,6 +1859,9 @@ func (m model) openHistorySessionInto(id string) (tea.Model, tea.Cmd) {
 		case histstore.RoleAI:
 			cmds = append(cmds, tea.Println(formatReplayAnswer(r.Content, m.renderWidth())))
 		}
+	}
+	if note := reconciledNote(dropped); note != "" {
+		cmds = append(cmds, tea.Println(note))
 	}
 	return m, tea.Sequence(cmds...)
 }
@@ -2959,11 +2968,16 @@ func ensureFirst(models []string, current string) []string {
 // undo appends a tombstone to the session (so replay skips the last exchange) and
 // notes that already-committed scrollback lines can't be unprinted.
 func (m model) undo(echo string) (tea.Model, tea.Cmd) {
-	if err := m.undoConversation(); err != nil {
+	dropped, err := m.undoConversationContext()
+	if err != nil {
 		return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(fmt.Errorf("undo: %w", err))))
 	}
 	note := "   " + Meta.Render(Glyph(GlyphArrow)+" undid the last turn (dropped from this session; printed lines remain in scrollback)")
-	return m, tea.Sequence(tea.Println(echo), tea.Println(note))
+	cmds := []tea.Cmd{tea.Println(echo), tea.Println(note)}
+	if reconciled := reconciledNote(dropped); reconciled != "" {
+		cmds = append(cmds, tea.Println(reconciled))
+	}
+	return m, tea.Sequence(cmds...)
 }
 
 // clearScrollback starts a fresh conversation and preserves terminal scrollback.

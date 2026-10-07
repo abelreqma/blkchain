@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestClearReplacesGatewayConversationIdentity(t *testing.T) {
@@ -138,5 +140,81 @@ func TestPersistenceFailureDoesNotMirrorAnUnsavedExchange(t *testing.T) {
 	messages, err := m.hist.Messages(context.Background(), m.sess.id)
 	if err != nil || len(messages) != 0 {
 		t.Fatalf("unsaved exchange mirrored: %v %v", messages, err)
+	}
+}
+
+// Undo drops the exchange locally, so the gateway's own conversation no longer
+// matches this session and the next agent turn must start a new one. Pending
+// context is not part of the undone exchange: attachments are consumed when a
+// turn is sent, so anything staged now was staged afterwards and is kept.
+func TestUndoReplacesGatewayConversationAndKeepsPendingContext(t *testing.T) {
+	useDeadServices(t)
+	m := newKeyModel(t)
+	m.pendingQ = "first question"
+	if err := m.recordTurn("first answer"); err != nil {
+		t.Fatal(err)
+	}
+	m.agentSession = "old-gateway-session"
+	m.attachments = []attachment{{path: "notes.txt", content: "notes"}}
+	m.queue = []string{"queued question"}
+
+	if err := m.undoConversation(); err != nil {
+		t.Fatal(err)
+	}
+
+	if m.agentSession != "" {
+		t.Errorf("undo retained the gateway conversation identity: %q", m.agentSession)
+	}
+	if len(m.attachments) != 1 {
+		t.Errorf("undo dropped staged attachments: %v", m.attachments)
+	}
+	if len(m.queue) != 1 {
+		t.Errorf("undo dropped the queued question: %v", m.queue)
+	}
+}
+
+// Reopening a session switches conversation, so everything that belongs to the
+// previous one goes: the gateway handle, the citation targets /open reads, the
+// retained search results, and the attachments staged for it.
+func TestReopenReplacesPreviousConversationContext(t *testing.T) {
+	useDeadServices(t)
+	m := newKeyModel(t)
+	m.pendingQ = "first question"
+	if err := m.recordTurn("first answer"); err != nil {
+		t.Fatal(err)
+	}
+	id := m.sess.id
+
+	for _, reopen := range []struct {
+		name string
+		call func(model) (tea.Model, tea.Cmd)
+	}{
+		{"openSessionInto", func(m model) (tea.Model, tea.Cmd) { return m.openSessionInto(id) }},
+		{"openHistorySessionInto", func(m model) (tea.Model, tea.Cmd) { return m.openHistorySessionInto(id) }},
+	} {
+		t.Run(reopen.name, func(t *testing.T) {
+			stale := m
+			stale.agentSession = "old-gateway-session"
+			stale.attachments = []attachment{{path: "notes.txt", content: "notes"}}
+			stale.openTargets = []openTarget{{Path: "previous-citation.md"}}
+			stale.lastQuery = "previous query"
+			stale.lastCostSet = true
+
+			nm, _ := reopen.call(stale)
+			got := nm.(model)
+
+			if got.agentSession != "" {
+				t.Errorf("reopen retained the gateway conversation identity: %q", got.agentSession)
+			}
+			if len(got.attachments) != 0 {
+				t.Errorf("reopen retained the previous session's attachments: %v", got.attachments)
+			}
+			if len(got.openTargets) != 0 {
+				t.Errorf("reopen retained the previous session's open targets: %v", got.openTargets)
+			}
+			if got.lastQuery != "" || got.lastCostSet {
+				t.Errorf("reopen retained the previous turn's query or cost: %q %v", got.lastQuery, got.lastCostSet)
+			}
+		})
 	}
 }

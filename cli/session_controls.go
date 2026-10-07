@@ -9,6 +9,47 @@ import (
 	"blkchain/cli/internal/histstore"
 )
 
+// reconcileConversationContext drops the in-memory state that does not follow
+// m.sess and names what it dropped, so a caller can report it. The gateway
+// conversation handle is the load-bearing one: a reopened or undone transcript
+// no longer matches the server-side history that handle points at, so the next
+// agent turn starts a new conversation rather than continuing one whose
+// contents no longer match this session.
+//
+// switching is true when the session itself changes, which also invalidates the
+// context staged for the conversation being left. An undo stays in the same
+// session, where attachments and the queue are pending work rather than part of
+// the removed exchange: a sent turn consumes its attachments, so anything
+// staged at undo time was staged afterwards.
+func (m *model) reconcileConversationContext(switching bool) []string {
+	var dropped []string
+	if m.agentSession != "" {
+		m.agentSession = ""
+		dropped = append(dropped, "agent conversation restarted")
+	}
+	m.lastAnswer, m.lastQuery = "", ""
+	m.lastResults, m.openTargets = nil, nil
+	m.lastCostSet = false
+	if switching {
+		if n := len(m.attachments); n > 0 {
+			m.attachments = nil
+			dropped = append(dropped, fmt.Sprintf("%d %s cleared", n, plural(n, "attachment")))
+		}
+		m.pendingQ = ""
+		m.queue = nil
+	}
+	return dropped
+}
+
+// reconciledNote renders the muted line naming what reconcileConversationContext
+// dropped, or "" when it dropped nothing worth saying.
+func reconciledNote(dropped []string) string {
+	if len(dropped) == 0 {
+		return ""
+	}
+	return "   " + Meta.Render(Glyph(GlyphBullet)+" "+joinSep(dropped...))
+}
+
 func (m *model) resetConversation() error {
 	if m.working {
 		return fmt.Errorf("cancel the current turn before starting fresh")
@@ -18,10 +59,7 @@ func (m *model) resetConversation() error {
 		return err
 	}
 	m.sess, m.sessTitle = s, "new session"
-	m.agentSession = ""
-	m.lastAnswer, m.pendingQ, m.lastQuery = "", "", ""
-	m.lastResults, m.openTargets, m.attachments, m.queue = nil, nil, nil, nil
-	m.lastCostSet = false
+	m.reconcileConversationContext(true)
 	m.queuePaused = false
 	m.ta.Reset()
 	m.draftTruncated, m.draftTop, m.draftVertical = false, 0, false
@@ -31,32 +69,39 @@ func (m *model) resetConversation() error {
 }
 
 func (m *model) undoConversation() error {
+	_, err := m.undoConversationContext()
+	return err
+}
+
+// undoConversationContext is undoConversation plus the reconciliation report:
+// the state the removed exchange invalidated, named for the caller to print.
+func (m *model) undoConversationContext() ([]string, error) {
 	if m.working {
-		return fmt.Errorf("cancel the current turn before undoing")
+		return nil, fmt.Errorf("cancel the current turn before undoing")
 	}
 	if m.sess == nil {
-		return fmt.Errorf("no active session")
+		return nil, fmt.Errorf("no active session")
 	}
 	saved := *m.sess
 	var size int64
 	fi, err := os.Stat(m.sess.filePath())
 	exists := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return nil, err
 	}
 	if exists {
 		size = fi.Size()
 		if m.hist != nil {
 			replay, readErr := loadMessages(m.sess.id)
 			if readErr != nil {
-				return readErr
+				return nil, readErr
 			}
 			memory, readErr := m.hist.Messages(context.Background(), m.sess.id)
 			if readErr != nil {
-				return readErr
+				return nil, readErr
 			}
 			if len(replay) != len(memory) {
-				return fmt.Errorf("undo: saved transcript and answer memory differ; start a fresh session with /clear")
+				return nil, fmt.Errorf("undo: saved transcript and answer memory differ; start a fresh session with /clear")
 			}
 			for i, turn := range replay {
 				role := histstore.RoleUser
@@ -64,7 +109,7 @@ func (m *model) undoConversation() error {
 					role = histstore.RoleAI
 				}
 				if (turn.Role != roleUser && turn.Role != roleAssistant) || memory[i].Role != role || memory[i].Content != turn.Content {
-					return fmt.Errorf("undo: saved transcript and answer memory differ; start a fresh session with /clear")
+					return nil, fmt.Errorf("undo: saved transcript and answer memory differ; start a fresh session with /clear")
 				}
 			}
 		}
@@ -81,11 +126,11 @@ func (m *model) undoConversation() error {
 		var changed bool
 		changed, err = m.hist.UndoLastExchange(context.Background(), m.sess.id, update)
 		if err == nil && !changed {
-			return fmt.Errorf("no completed exchange to undo")
+			return nil, fmt.Errorf("no completed exchange to undo")
 		}
 	} else {
 		if m.sess.count < 2 {
-			return fmt.Errorf("no completed exchange to undo")
+			return nil, fmt.Errorf("no completed exchange to undo")
 		}
 		err = update()
 	}
@@ -94,10 +139,7 @@ func (m *model) undoConversation() error {
 			*m.sess = saved
 			err = errors.Join(err, os.Truncate(m.sess.filePath(), size), m.sess.syncIndex())
 		}
-		return err
+		return nil, err
 	}
-	m.lastAnswer, m.lastQuery = "", ""
-	m.openTargets, m.lastResults = nil, nil
-	m.lastCostSet = false
-	return nil
+	return m.reconcileConversationContext(false), nil
 }
