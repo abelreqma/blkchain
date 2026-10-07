@@ -130,8 +130,8 @@ func (g *Gate) checkPolicyLocked(c Command) Decision {
 	if policyRedirectViolation(c) {
 		return g.deny("redirect", c, "command redirect following is not scope-checked; use the gated browser or API path", "")
 	}
-	if _, bad := TargetSelfExecViolation(c, g.Scratch); bad {
-		return g.deny("target-self-exec", c, "an inspection task cannot execute its analysis target", "")
+	if _, bad := TargetSelfExecViolation(c, g.Scratch, g.execOffHost(c)); bad {
+		return g.deny("target-self-exec", c, "an inspection task cannot execute its analysis target", TargetSelfExecSuggestion)
 	}
 	if targets, nets, ok := ExtractTargetSet(c); ok {
 		for _, target := range targets {

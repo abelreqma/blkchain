@@ -93,6 +93,16 @@ func FootholdSurfaces() []string {
 
 // Covers reports whether commands on surface s execute on this foothold. A nil
 // foothold covers nothing, so the sandbox worker remains the destination.
+// execOffHost reports whether a command executes somewhere other than this host.
+// A declared foothold carries commands on the surfaces it covers to that host, so
+// this host's PATH and symlinks stop describing what a path in the command names.
+func (g *Gate) execOffHost(c Command) bool {
+	if g == nil || g.Policy == nil {
+		return false
+	}
+	return g.Policy.Foothold.Covers(c.Surface)
+}
+
 func (f *Foothold) Covers(s Surface) bool {
 	if f == nil {
 		return false

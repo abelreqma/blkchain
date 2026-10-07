@@ -264,8 +264,8 @@ func (g *Gate) checkLocked(c Command) Decision {
 	// the operator-edit re-validation) and arming, mode, profile, and the
 	// human-confirmed classifier relaxations never reach it. Inert for any
 	// non-target-analysis Kind and for an empty Target, so it moves no other verdict.
-	if tgt, bad := TargetSelfExecViolation(c, g.Scratch); bad {
-		return g.deny("target-self-exec", c, "a target-analysis task must not execute its own analysis target: "+tgt, "inspect the target read-only (file, stat, nm, readelf, objdump, strings, ldd, getcap) instead of executing it")
+	if tgt, bad := TargetSelfExecViolation(c, g.Scratch, g.execOffHost(c)); bad {
+		return g.deny("target-self-exec", c, "a target-analysis task must not execute its own analysis target: "+tgt, TargetSelfExecSuggestion)
 	}
 	// Human-governed paths (LOCAL HITL, Safe, the Auto HITL-fallback)
 	// relax the structural shell/interpreter/exec-wrapper/metacharacter/exec-flag

@@ -15,6 +15,26 @@ limit = request["limit"]
 timeout = request["timeout"]
 if not 1 <= len(stages) <= 3 or not 1 <= limit <= 67108864 or not 1 <= timeout <= 1800:
     raise ValueError("invalid execution bounds")
+# declared holds the environment variable names the operator declared for the
+# foothold carrier, forwarded into this container by the worker arguments; their
+# values are copied into every command's environment so a carrier can
+# authenticate. The names are validated here rather than trusted, and a declared
+# name that is unset in this container contributes nothing. Validation runs before
+# the scratch home is created so a rejected request leaves nothing behind.
+declared = request.get("env") or []
+if not isinstance(declared, list) or len(declared) > 64:
+    raise ValueError("invalid declared environment")
+command_env = {}
+for name in declared:
+    if not isinstance(name, str) or not name or len(name) > 256 or not name.isascii():
+        raise ValueError("invalid declared environment name")
+    if not (name[0].isalpha() or name[0] == "_") or not all(c.isalnum() or c == "_" for c in name):
+        raise ValueError("invalid declared environment name")
+    if name in os.environ:
+        command_env[name] = os.environ[name]
+home = tempfile.mkdtemp(prefix="home-", dir="/work")
+# The fixed base is applied last, so a declaration cannot redirect PATH or HOME.
+command_env.update({"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home, "LANG": "C"})
 lock = threading.Lock()
 used = 0
 results = [{"stdout": bytearray(), "stderr": bytearray(), "dropped": 0, "exit_code": -1} for _ in stages]
@@ -23,7 +43,6 @@ threads = []
 started = time.monotonic()
 timed_out = False
 error = ""
-home = tempfile.mkdtemp(prefix="home-", dir="/work")
 
 def prepare():
     os.setsid()
@@ -62,7 +81,7 @@ try:
             raise ValueError("command exceeds argument bounds")
         process = subprocess.Popen(argv, stdin=subprocess.DEVNULL if index == 0 else subprocess.PIPE,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/work",
-                                   env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home, "LANG": "C"},
+                                   env=command_env,
                                    preexec_fn=prepare)
         processes.append(process)
     for index, process in enumerate(processes):

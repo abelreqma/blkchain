@@ -649,6 +649,25 @@ type isolatedStageResult struct {
 	Dropped  int64  `json:"dropped"`
 }
 
+// launcherRequest builds the JSON the worker's launcher reads from stdin. env
+// names the environment variables the launcher copies from the container into each
+// command's environment, which is the same set workerArgs forwards into the
+// container.
+func launcherRequest(stages []pipelineStage, limit int, timeout time.Duration, env []string) ([]byte, error) {
+	return json.Marshal(map[string]any{"stages": stages, "limit": limit, "timeout": timeout.Seconds(), "env": env})
+}
+
+// footholdEnvNames returns the environment variable names the operator declared
+// for the foothold carrier. workerArgs forwards them into the worker container;
+// the launcher replaces the environment of every command it starts, so it needs
+// the names too or a carrier never receives the value it authenticates with.
+func (r *engageRunner) footholdEnvNames() []string {
+	if r == nil || r.foothold == nil {
+		return nil
+	}
+	return r.foothold.env
+}
+
 func (r *engageRunner) Run(ctx context.Context, stages []pipelineStage, dir string, limit int, timeout time.Duration) (runResult, []isolatedStageResult) {
 	if r.runFn != nil {
 		return r.runFn(ctx, stages, dir, limit, timeout)
@@ -663,7 +682,7 @@ func (r *engageRunner) Run(ctx context.Context, stages []pipelineStage, dir stri
 	if err != nil {
 		return runResult{Err: err}, nil
 	}
-	data, err := json.Marshal(map[string]any{"stages": stages, "limit": limit, "timeout": timeout.Seconds()})
+	data, err := launcherRequest(stages, limit, timeout, r.footholdEnvNames())
 	if err != nil {
 		return runResult{Err: err}, nil
 	}
