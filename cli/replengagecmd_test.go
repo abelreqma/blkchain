@@ -120,6 +120,38 @@ func TestBuildReplEngageRun(t *testing.T) {
 	}
 }
 
+// An engagement runs on blk's own LLM, so it selects the native model the way a
+// grounded turn does. The agent-mode status model names a Hermes gateway model
+// and reads "unknown" before one is discovered; neither is a model the oMLX
+// server serves, so neither may reach the engagement client.
+func TestBuildReplEngageRunSelectsTheNativeModel(t *testing.T) {
+	t.Setenv("OMLX_MODEL", "native-model")
+	m := engageReadyModel(t)
+	m.mode = "agent"
+	m.agentModel = "hermes-gateway-model"
+
+	run, err := m.buildReplEngageRun("assess the host")
+	if err != nil {
+		t.Fatalf("buildReplEngageRun: %v", err)
+	}
+	client, ok := run.model.(*llmClient)
+	if !ok {
+		t.Fatalf("run.model = %T, want *llmClient", run.model)
+	}
+	if client.model != "native-model" {
+		t.Errorf("engagement model = %q, want native-model", client.model)
+	}
+
+	m.ragModel = "picked-model"
+	run, err = m.buildReplEngageRun("assess the host")
+	if err != nil {
+		t.Fatalf("buildReplEngageRun: %v", err)
+	}
+	if client, _ := run.model.(*llmClient); client == nil || client.model != "picked-model" {
+		t.Errorf("engagement model = %+v, want the model /model picked", client)
+	}
+}
+
 // A retrieval-client error aborts /engage before a turn starts (mirrors blk engage).
 func TestEngageDispatchReportsRetrievalError(t *testing.T) {
 	m := newTestModel(t)

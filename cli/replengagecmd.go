@@ -71,8 +71,12 @@ type replEngageRun struct {
 // before a turn starts (like blk engage) when the model, retrieval client, or
 // skill catalog cannot be built. The dispatch supplies a confirmer only in
 // Safe mode.
+//
+// An engagement runs on blk's own LLM, so it takes the native model
+// (ragTurnModel) and never the agent-mode status model, which names a Hermes
+// gateway model and reads "unknown" before one is discovered.
 func (m model) buildReplEngageRun(goal string) (replEngageRun, error) {
-	model, err := newOMLX(m.cfg, m.activeModel())
+	model, err := newOMLX(m.cfg, m.ragTurnModel())
 	if err != nil {
 		return replEngageRun{}, fmt.Errorf("engage: %w", err)
 	}
