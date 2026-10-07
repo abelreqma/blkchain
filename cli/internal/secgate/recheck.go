@@ -81,8 +81,10 @@ func (g *Gate) recheck(c Command) Decision {
 				}
 			}
 		}
-		return Decision{Allowed: true}
 	}
+	// The file guard runs on both paths. A sealed policy authorizes targets and
+	// action classes, which is a different question from whether an argument
+	// reaches a file outside the scratch working directory.
 	if arg, bad := FileAccessViolation(c); bad {
 		g.audit(denialAction(c, "fileaccess"), Signature(c))
 		return Decision{Allowed: false, Reason: "file path outside the working directory, or a config-file option, is not allowed: " + arg}
