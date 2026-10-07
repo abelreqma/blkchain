@@ -81,6 +81,42 @@ Describe the authorized engagement here.
 - browser-read
 - browser-write
 
+## Denied Actions
+<!-- Optional. Action names from the list above, one per line. A denied action wins
+     over the same name in Allowed Actions, so this is the way to switch one off
+     without editing the list. -->
+
+## Denied Commands
+<!-- Optional. One rule per line, on top of the gate's own structural denials.
+
+       binary: NAME          refuses that executable outright
+       argument: NAME TOKEN  refuses that executable when TOKEN appears in its argv
+
+     NAME is a bare executable name, never a path.
+
+       binary: nikto
+       argument: curl --upload-file -->
+
+## Resource Caps
+<!-- Optional. "key: positive integer" per line, overriding one bound. Omitted keys
+     keep the defaults shown here.
+
+       max_commands: 500        commands the engagement may run
+       max_actions: 500         actions of every kind, web and API included
+       wall_seconds: 7200       total engagement duration
+       command_seconds: 300     per-command timeout
+       output_bytes: 4194304    captured output per command
+       total_bytes: 67108864    captured output across the engagement
+       parallel: 1              commands in flight at once -->
+
+## Runner
+<!-- Optional. "key: value" per line.
+
+       id: isolated-worker     the runner this policy expects; a resume refuses a
+                               workspace recorded against a different one
+       image: NAME@sha256:...  the worker image, which must be pinned by digest; a
+                               tag is refused -->
+
 ## Autonomous Actions
 <!-- One "phase/surface target" per line, naming an action class this engagement may
      arm without asking. Accepted classes are exploit/<surface>, post-ex/<surface>,

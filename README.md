@@ -38,6 +38,12 @@ RoE without a prompt for every action. Safe requests interactive approval. The p
 in-scope and excluded targets, allowed and denied action types, command denials, rate limits,
 resource caps, and the isolated runner. Empty or ambiguous scope fails closed.
 
+The policy is a file you own. Running `blk engage` in a directory with no `ROE.md` writes a commented
+template there and stops, so the sections and their syntax are in front of you rather than recalled;
+fill in `Targets` and `In Scope` and run again. The template is never overwritten once it exists, and
+on its own it authorizes nothing, because an unfilled scope is an empty scope. Pass `--roe PATH` to use
+a policy kept elsewhere.
+
 The harness records tasks, dependencies, evidence, coverage gaps, policy decisions, and action
 transcripts in an engagement workspace. It supports stop and resume. Resume requires the same sealed
 policy and retains the original deadline and usage counters. A run that reaches a limit or cannot
@@ -60,6 +66,13 @@ Reconnaissance, candidate generation, and task execution are separate steps. A r
 or model suggestion does not establish a vulnerability or authorize execution. Candidate targets and
 armed state are derived by code and remain subject to the RoE gate.
 
+Reports distinguish what ran from what was shown. A completed task is one that ran, recorded an exact
+quote of its output, and was completed on a stated basis naming the evidence that meets its `done_when`
+condition; blkChain checks that the cited evidence exists and belongs to that task, not that it proves
+the condition, so completed work appears under `Completed tasks` rather than as findings. A matched
+secret pattern appears under `Secret candidates` with its detector and evidence grade, because a match
+is a lead and not a credential anyone has shown to work.
+
 #### External to internal pivot
 
 An engagement that reaches internal access can execute on it. An optional `Foothold` section of the
@@ -72,7 +85,15 @@ The carrier is selected by how the access was acquired, not fixed to one client.
 needs a user and a key. `transport=command` takes an argv prefix of the operator's own, such as
 `kubectl exec -i web-0 --`, for access ssh cannot reach. Key material is named by environment
 variable and read at setup, never written into the policy or a prompt, and is delivered to the worker
-as an owner-only file rather than mounted from the operator's filesystem.
+as an owner-only file rather than mounted from the operator's filesystem. A carrier that authenticates
+with something other than a key file names it with `env=A,B`: those variables, and nothing else from
+the operator's environment, reach the environment of every command the worker starts. `PATH`, `HOME`,
+and `LANG` are fixed by the worker, so a declaration cannot repoint command lookup.
+
+A pivoted command runs on a filesystem that is not this host's, so a check that identifies a file by
+resolving a path cannot speak for it. Name an inspection tool by absolute path when a task analyzes an
+executable on the foothold: a bare name matching the analysis target's own base name is refused,
+because there it could resolve to the file the task exists to read rather than run.
 
 The declaration is authorization data. It is sealed into the policy, so a resume with a different
 foothold is refused; its host must also be in scope, so the runner's firewall permits the connection;
@@ -134,7 +155,9 @@ separately through an OpenAI-compatible local endpoint.
 
 Use blkChain only on systems and applications you are authorized to assess. The RoE is the authority
 for target-facing actions. Authorized private and internal targets are supported when they appear in
-scope. The isolated command runner restricts host access, network destinations, CPU, memory,
+scope, which for a loopback, RFC1918, or link-local address means its own IP or CIDR entry: a hostname
+entry does not authorize the address it resolves to, so a name that resolves inward cannot reach an
+internal service by accident. The isolated command runner restricts host access, network destinations, CPU, memory,
 processes, output, and time. A command carried to a declared foothold is the one exception to the
 network restriction: it executes on a host whose egress is not the runner's to filter, so its scope
 is enforced by the command gate alone, and every such action records the host it ran on. The web request broker checks destinations on resolution and redirect,

@@ -165,6 +165,10 @@ During `blk engage`, the CLI and REPL/TUI emit each discovered credential as a
 structured JSON event. The same event is appended to
 `evidence/web/findings.jsonl`. Reports retain the exact value in `report.json`
 and in a JSON block in `report.md`, even when the originating task is unfinished.
+In `report.md` these appear under their own `Secret candidates` section, each
+carrying its detector, confidence, location, and evidence grade, and are not
+counted as completed tasks: the section states that a match is a lead rather
+than a credential shown to work.
 The report refreshes when a credential is stored. Control and Unicode characters
 use reversible JSON escapes in live output. Passwords are not replaced with masks.
 The same output contract covers named API keys, access/client secrets, tokens,

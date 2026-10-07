@@ -24,6 +24,7 @@ func TestTemplateSectionsAreAllParserSections(t *testing.T) {
 	if roe.Scope == nil {
 		t.Fatal("the template must yield a scope")
 	}
+	emitted := map[string]bool{}
 	for _, line := range strings.Split(roeTemplate, "\n") {
 		h, level, ok := headingText(strings.TrimSpace(line))
 		if !ok || level == 1 {
@@ -32,6 +33,54 @@ func TestTemplateSectionsAreAllParserSections(t *testing.T) {
 		if !isKnownSection(normalizeSection(h)) {
 			t.Errorf("the template emits section %q, which the parser rejects", h)
 		}
+		emitted[normalizeSection(h)] = true
+	}
+	// And the other direction: the template is the default policy an operator is
+	// handed, so a section the parser accepts and the unrecognized-heading error
+	// advertises must appear there with its syntax, not be left to be discovered.
+	for _, name := range roeSections {
+		if !emitted[normalizeSection(name)] {
+			t.Errorf("the parser accepts section %q but the template does not document it", name)
+		}
+	}
+}
+
+// The template's guidance for the optional sections has to be syntax an operator can
+// copy. Each example is uncommented into a policy and must parse.
+func TestTemplateOptionalSectionExamplesParse(t *testing.T) {
+	for _, tc := range []struct{ section, entry string }{
+		{"Denied Actions", "api-write"},
+		{"Denied Commands", "binary: nikto"},
+		{"Denied Commands", "argument: curl --upload-file"},
+		{"Resource Caps", "max_commands: 500"},
+		{"Resource Caps", "wall_seconds: 7200"},
+		{"Resource Caps", "parallel: 1"},
+		{"Runner", "id: isolated-worker"},
+	} {
+		t.Run(tc.section+" "+tc.entry, func(t *testing.T) {
+			filled := strings.Replace(roeTemplate, "## In Scope\n", "## In Scope\n192.0.2.1\n", 1)
+			filled = strings.Replace(filled, "## "+tc.section+"\n", "## "+tc.section+"\n"+tc.entry+"\n", 1)
+			if _, err := ParseRoE(strings.NewReader(filled)); err != nil {
+				t.Errorf("the template documents %q under %s, but it does not parse: %v", tc.entry, tc.section, err)
+			}
+		})
+	}
+}
+
+// A runner image must be pinned by digest, which the template states. A tag is
+// refused, so the guidance is not merely advisory.
+func TestTemplateRunnerImageMustBePinned(t *testing.T) {
+	withImage := func(image string) error {
+		filled := strings.Replace(roeTemplate, "## In Scope\n", "## In Scope\n192.0.2.1\n", 1)
+		filled = strings.Replace(filled, "## Runner\n", "## Runner\nimage: "+image+"\n", 1)
+		_, err := ParseRoE(strings.NewReader(filled))
+		return err
+	}
+	if err := withImage("dhi.io/qdrant@sha256:" + strings.Repeat("a", 64)); err != nil {
+		t.Errorf("a digest-pinned image must parse: %v", err)
+	}
+	if err := withImage("dhi.io/qdrant:latest"); err == nil {
+		t.Error("the template says a tag is refused; it parsed")
 	}
 }
 
