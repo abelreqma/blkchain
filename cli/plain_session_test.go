@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -191,5 +194,93 @@ func TestPlainUndoWithoutSQLitePreservesEarlierExchange(t *testing.T) {
 	replay, err := loadMessages(metas[0].ID)
 	if err != nil || len(replay) != 4 || replay[0].Content != "first question" || replay[2].Content != "third question" {
 		t.Fatalf("replay differs from surviving memory: %v, %v", replay, err)
+	}
+}
+
+// fakeGateway serves the three endpoints an agent turn uses: the health probe
+// that selects the transport, session creation, and the SSE chat stream.
+func fakeGateway(t *testing.T, answer string) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/health":
+			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/api/sessions":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id":"gw-1"}`)
+		case strings.HasSuffix(r.URL.Path, "/chat/stream"):
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "event: tool.started\ndata: {\"tool\":\"kb_search\"}\n\n")
+			fmt.Fprintf(w, "event: assistant.delta\ndata: {\"delta\":%q}\n\n", answer)
+			fmt.Fprint(w, "event: run.completed\ndata: {}\n\n")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("HERMES_API_URL", server.URL)
+}
+
+// A plain-REPL agent turn runs through the same transport wiring the TUI uses,
+// so its answer is captured rather than streamed straight past: the turn
+// reaches the JSONL transcript and the history store, and the gateway
+// conversation handle it created is kept for the next turn.
+func TestPlainAgentTurnPersistsAndKeepsTheConversation(t *testing.T) {
+	useDeadServices(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	fakeGateway(t, "SSRF reaches internal services.")
+
+	m := model{cfg: loadConfig(), mode: "agent", hist: histstore.OpenDefault()}
+	if m.hist == nil {
+		t.Fatal("history store unavailable")
+	}
+	defer m.hist.Close()
+	var err error
+	if m.sess, err = newSession(); err != nil {
+		t.Fatal(err)
+	}
+
+	var answer string
+	var rc replClient
+	defer rc.close()
+	out := captureStdout(t, func() {
+		answer, err = plainAsk(&m, "agent", "summarize the SSRF notes", &rc, nil, "", false)
+	})
+	if err != nil {
+		t.Fatalf("plain agent turn: %v", err)
+	}
+	if !strings.Contains(answer, "SSRF reaches internal services") {
+		t.Fatalf("answer not captured, got %q", answer)
+	}
+	// The approved rendering: the tool line as it arrives, then the answered-in
+	// header, the answer, and the cost footer, the same shape the TUI prints.
+	rendered := stripANSI(out)
+	for _, want := range []string{
+		Glyph(GlyphBullet) + " kb_search running",
+		Glyph(GlyphOK) + " Agent answered in",
+		"SSRF reaches internal services",
+		Glyph(GlyphBullet) + " 0s",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("rendering is missing %q, got:\n%s", want, rendered)
+		}
+	}
+	if m.agentSession != "gw-1" {
+		t.Errorf("gateway conversation handle = %q, want gw-1", m.agentSession)
+	}
+
+	m.pendingQ = "summarize the SSRF notes"
+	if err := m.recordTurn(answer); err != nil {
+		t.Fatalf("recordTurn: %v", err)
+	}
+	turns, err := m.hist.Messages(context.Background(), m.sess.id)
+	if err != nil || len(turns) != 2 || turns[1].Content != answer {
+		t.Fatalf("agent turn not in the history store: %v, %v", turns, err)
+	}
+	replay, err := loadMessages(m.sess.id)
+	if err != nil || len(replay) != 2 || replay[1].Content != answer {
+		t.Fatalf("agent turn not in the transcript: %v, %v", replay, err)
 	}
 }

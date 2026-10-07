@@ -257,7 +257,7 @@ func plainREPL() error {
 				fmt.Println(Meta.Render("started a fresh session"))
 			}
 		case "undo":
-			if err := pm.undoConversation(); err != nil {
+			if dropped, err := pm.undoConversationContext(); err != nil {
 				printErr(err)
 			} else {
 				if pm.hist != nil {
@@ -267,6 +267,9 @@ func plainREPL() error {
 				}
 				last = nil
 				fmt.Println(Meta.Render("undid the last question and answer"))
+				if note := reconciledNote(dropped); note != "" {
+					fmt.Println(note)
+				}
 			}
 		case "mode":
 			if mode == "agent" {
@@ -292,7 +295,7 @@ func plainREPL() error {
 				_ = savePrefs(p)
 				fmt.Println(Meta.Render("rag " + boolOnOff(on)))
 			} else if q != "" {
-				ans, err := plainAsk(mode, q, &rc, convo, pm.takeContextPreface(q), true)
+				ans, err := plainAsk(&pm, mode, q, &rc, convo, pm.takeContextPreface(q), true)
 				printErr(err)
 				recordConvo(q, ans)
 			} else {
@@ -304,7 +307,7 @@ func plainREPL() error {
 		case "search", "s":
 			query := rest
 			if !strings.HasPrefix(cmd, "/") && strings.EqualFold(cmd, "search") {
-				ans, err := plainAsk(mode, line, &rc, convo, pm.takeContextPreface(line), false)
+				ans, err := plainAsk(&pm, mode, line, &rc, convo, pm.takeContextPreface(line), false)
 				printErr(err)
 				recordConvo(line, ans)
 				break
@@ -313,7 +316,7 @@ func plainREPL() error {
 			last = results
 			recordConvo(query, ans)
 		case "ask", "a":
-			ans, err := plainAsk(mode, rest, &rc, convo, pm.takeContextPreface(rest), false)
+			ans, err := plainAsk(&pm, mode, rest, &rc, convo, pm.takeContextPreface(rest), false)
 			printErr(err)
 			recordConvo(rest, ans)
 		case "hermes":
@@ -327,7 +330,7 @@ func plainREPL() error {
 			}
 			// Bare input with no recognized verb is an ask (matches the TUI); in
 			// agent mode it runs the hermes agent instead.
-			ans, err := plainAsk(mode, line, &rc, convo, pm.takeContextPreface(line), false)
+			ans, err := plainAsk(&pm, mode, line, &rc, convo, pm.takeContextPreface(line), false)
 			printErr(err)
 			recordConvo(line, ans)
 		}
