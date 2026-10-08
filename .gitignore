@@ -32,6 +32,11 @@ models/
 corpus/
 data/
 
+# Release build output
+/stage/
+/blk-v*.tar.gz
+/blk-v*.tar.gz.sha256
+
 # Tooling reports & runtime
 .reports/
 .run/

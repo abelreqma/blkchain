@@ -1,0 +1,108 @@
+name: release
+
+# Builds the blk binary for each supported platform and attaches it to the
+# GitHub release for the pushed tag.
+#
+# The release is created as a draft and published only after every archive has
+# uploaded, so a partly populated release is never visible.
+#
+# Tag a commit whose ci run has passed. This workflow does not run the test
+# suites: ci runs them on main, and repeating them here would not cover the
+# platform matrix any better.
+#
+# Each target builds on its own native runner. The module needs cgo for a
+# tree-sitter grammar, so cross-compiling would need a C toolchain for the
+# other platform. There is no darwin/amd64 archive: the embedding service
+# targets MLX on Apple Silicon, so an Intel build could not run the stack.
+#
+# Third-party actions are pinned to a commit SHA rather than a tag, so a moved
+# tag cannot change what runs.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: create the draft release
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+
+  build:
+    needs: draft
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include:
+          - runner: macos-15
+            goos: darwin
+            goarch: arm64
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+    runs-on: ${{ matrix.runner }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - name: build, archive and upload
+        shell: bash
+        run: |
+          set -u
+
+          mkdir -p stage
+
+          # The version is read by blk version. trimpath keeps build paths out
+          # of the binary.
+          CGO_ENABLED=1 go build \
+            -C cli \
+            -trimpath \
+            -ldflags "-X main.version=$GITHUB_REF_NAME" \
+            -o "$GITHUB_WORKSPACE/stage/blk" .
+
+          # Apache-2.0 requires the license and the notice travel with a
+          # redistributed binary.
+          cp LICENSE NOTICE stage/
+
+          name="blk-$GITHUB_REF_NAME-${{ matrix.goos }}-${{ matrix.goarch }}"
+          tar -czf "$name.tar.gz" -C stage blk LICENSE NOTICE
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          else
+            shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          fi
+
+          ./stage/blk version
+          gh release upload "$GITHUB_REF_NAME" "$name.tar.gz" "$name.tar.gz.sha256"
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: publish the release
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
