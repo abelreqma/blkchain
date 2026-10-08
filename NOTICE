@@ -3,15 +3,48 @@ Copyright 2026 Abel Maldonado
 
 Licensed under the Apache License, Version 2.0 (see LICENSE).
 
+Third-party models
+------------------
+
 This software downloads and uses third-party models that are NOT included in
 this repository and are each governed by their own license:
 
-  - Qwen3-Embedding-0.6B (dense embedder): Apache-2.0
+  - Qwen3-Embedding-0.6B (dense embedder, the default): Apache-2.0
     https://huggingface.co/mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ
-  - gte-reranker-modernbert-base (reranker): Apache-2.0
+  - gte-reranker-modernbert-base (reranker, the default): Apache-2.0
     https://huggingface.co/afanjul/gte-reranker-modernbert-base-mlx
+  - Qwen3-Reranker-0.6B (reranker, selected by BLKCHAIN_RERANKER_KIND=qwen3):
+    Apache-2.0
+  - jina-reranker-v3 (reranker, selected by BLKCHAIN_RERANKER_KIND=jina):
+    CC-BY-NC-4.0, which permits non-commercial use only. The default reranker
+    is Apache-2.0; select this one only where that license fits your use.
   - The synthesis LLM is served separately (any OpenAI-compatible local model)
     and carries its own license; it is referenced, not distributed here.
 
 The corpus indexed by blkChain is user-supplied and is not distributed with
 this software.
+
+Third-party code
+----------------
+
+This software depends on third-party packages that are NOT included in this
+repository. They are resolved at build time and each carries its own license.
+The authoritative lists are cli/go.mod and cli/go.sum for Go, and
+pyproject.toml and uv.lock for Python; the license texts ship with each
+package in its own distribution.
+
+Direct Go dependencies include the Charm terminal libraries (bubbletea,
+bubbles, lipgloss, glamour), mattn/go-sqlite3, modernc.org/sqlite,
+tmc/langchaingo, qdrant/go-client, modelcontextprotocol/go-sdk,
+mxschmitt/playwright-go, gorilla/websocket, smacker/go-tree-sitter,
+BishopFox/jsluice, muesli/termenv, atotto/clipboard, rivo/uniseg,
+google.golang.org/grpc, the golang.org/x packages, and gopkg.in/yaml.v3.
+
+Direct Python dependencies include mlx-lm, mlx-embeddings, qdrant-client,
+fastembed, langchain-text-splitters, openai, tiktoken, pypdf, requests, and
+numpy.
+
+The isolated runner and browser images install operating system packages from
+their base distribution, pinned in cli/runner/packages-amd64.lock and
+cli/runner/packages-arm64.lock. Those packages carry their own licenses and
+are not distributed with this software.

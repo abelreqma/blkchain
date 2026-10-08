@@ -162,6 +162,11 @@ provides schema-validated JSON generation.
 Go owns query-time retrieval, answering, engagement execution, and MCP. Python serves the MLX models
 and builds the index offline. Models and corpus content are supplied by the operator.
 
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) documents what a change has to hold to: the language
+boundary, the two cross-language contracts, the command output shapes the evaluation harness parses,
+the security invariants, and the testing and commit conventions. Read it before changing the
+retrieval path, the engagement harness, or the embedding service.
+
 ## Complete setup guide
 
 This guide targets macOS on Apple Silicon. Run the core steps first to get local retrieval and
@@ -291,6 +296,25 @@ Python indexing client, Go retrieval client, and stack lifecycle checks together
 bound to loopback for local operation. The Go retrieval parameters live in
 `blkchain/contract/rag.json`; Python indexing settings live in `blkchain/config.py`.
 
+These settings are read but are not part of the guide's path above. Leave them unset unless you need
+the behavior described.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `BLKCHAIN_DOCKER_BIN` | `docker` | Container runtime binary used to run and inspect the isolated browser and proxy. Changing it changes what executes the sandbox. |
+| `BLKCHAIN_REPUTABLE_DOMAINS` | the list in `blkchain/contract/rag.json` | Comma-separated replacement for the domains a web result is treated as reputable from. |
+| `BLKCHAIN_POC_DOMAINS` | the list in `blkchain/contract/rag.json` | Comma-separated replacement for the domains permitted as proof-of-concept destinations. |
+| `BLKCHAIN_WEB_FALLBACK` | unset | Set to `duckduckgo` to use DuckDuckGo when no Tavily key is configured. |
+| `BLKCHAIN_PLAYWRIGHT_HEADED` | unset | Must be `1` to permit a headed browser run, alongside an operator-provisioned headed container. |
+| `BLKCHAIN_ANALYZE_MAX_INPUT_BYTES` | 1048576 | Subject size cap for `blk analyze`. |
+| `BLKCHAIN_MAX_TEXT_FILE_BYTES` | 8388608 | Largest text file the indexer reads. |
+| `BLKCHAIN_MAX_JSON_FILE_BYTES` | 4194304 | Largest JSON file the indexer reads. |
+| `BLKCHAIN_EMBED_SUBBATCH` | 32 | Forward-pass sub-batch size in the embedding service. |
+| `BLKCHAIN_EMBED_CACHE_RELEASE_AFTER` | 64 | Batches processed before the embedding service releases the Metal cache. |
+| `BLKCHAIN_MMDFLUX` | `mmdflux` on `PATH` | Path to the diagram renderer used by the engagement views. |
+| `BLKCHAIN_POWERLINE` | unset | Set to `0` to force plain unicode status separators instead of powerline glyphs. |
+| `HERMES_HOME` | `~/.hermes` | Hermes configuration directory that `blk doctor` and the gateway setup read. |
+
 ### 4. Download the pinned models
 
 The locked Python environment already includes the Hugging Face download library. Run this from
@@ -330,6 +354,11 @@ Apache-2.0 MLX conversion with a tool-aware chat template. Review licenses for o
 The embedder produces 1024-dimensional vectors. A different embedding dimension requires a
 compatible Qdrant collection. `BLKCHAIN_RERANKER_KIND` selects an alternative reranker; its model
 path and weights must match that choice.
+
+Both default models are Apache-2.0. The reranker alternatives are not equivalent in licensing:
+`BLKCHAIN_RERANKER_KIND=qwen3` uses Qwen3-Reranker-0.6B, which is Apache-2.0, and
+`BLKCHAIN_RERANKER_KIND=jina` uses jina-reranker-v3, which is CC-BY-NC-4.0 and permits
+non-commercial use only. Select the jina backend only where that license fits your use. See NOTICE.
 
 ### 5. Start Qdrant and the embedding service
 
@@ -523,9 +552,11 @@ blk gateway
 ```
 
 `blk gateway` configures the API server in Hermes's private environment file, preserving unrelated
-settings, then runs the gateway in the foreground. In the terminal running `blk`, export
-`API_SERVER_KEY` with the same value and use the same `HERMES_API_URL`. The client uses the gateway
-when available and can use the Hermes CLI fallback otherwise. `blk up` does not start Hermes.
+settings, then runs the gateway in the foreground. The two keys it writes there are
+`API_SERVER_ENABLED` and `API_SERVER_KEY`; both belong to Hermes, and blk keeps a backup when a
+value changes. In the terminal running `blk`, export `API_SERVER_KEY` with the same value and use
+the same `HERMES_API_URL`. The client uses the gateway when available and can use the Hermes CLI
+fallback otherwise. `blk up` does not start Hermes.
 
 ### 9. Provision the isolated command runner
 
