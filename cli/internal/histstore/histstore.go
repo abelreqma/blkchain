@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tmc/langchaingo/memory/sqlite3"
 )
@@ -104,21 +105,62 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, err
-	}
 	s := &Store{db: db}
-	// Rename an old blk_history table to blk_sessions before langchaingo (re)creates
-	// the table under the new name, so existing history survives the rename.
-	s.migrate()
-	// Constructing one handle runs langchaingo's CREATE TABLE IF NOT EXISTS. It
-	// panics on a schema error, so recover into a normal error for the caller.
-	if err := s.initSchema(); err != nil {
+	if err := s.prepare(); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// prepare runs the one-time setup every handle needs, retrying while the
+// database is locked.
+//
+// Switching a fresh database to WAL takes an exclusive lock, and that switch
+// does not go through the busy handler the DSN configures, so several blk
+// processes opening the same new database at once can each be told the database
+// is locked. The contention lasts only as long as one of them needs to finish
+// its setup, so a bounded retry resolves it. Without this, a process that lost
+// the race got no store at all: it would keep its transcripts but write no
+// memory and no listing row.
+func (s *Store) prepare() error {
+	const attempts = 40
+	var err error
+	for i := range attempts {
+		// Ping opens the first connection, which is where the DSN applies the
+		// journal-mode switch, so it is inside the retry too.
+		if err = s.db.Ping(); err == nil {
+			// Rename an old blk_history table to blk_sessions before
+			// langchaingo (re)creates the table under the new name, so existing
+			// history survives the rename.
+			s.migrate()
+			// Constructing one handle runs langchaingo's CREATE TABLE IF NOT
+			// EXISTS. It panics on a schema error, so recover into an error.
+			if err = s.initSchema(); err == nil {
+				if err = s.initSessionRows(); err == nil {
+					return nil
+				}
+			}
+		}
+		if !lockedErr(err) {
+			return err
+		}
+		if i < attempts-1 {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	return err
+}
+
+// lockedErr reports whether err is SQLite's contention error. It matches on the
+// message because the driver reports it as a plain error here, and the schema
+// step reaches us through a recovered panic rather than a driver error value.
+func lockedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "database table is locked")
 }
 
 // migrate renames the old blk_history table to tableName when it exists and the

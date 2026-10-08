@@ -3,9 +3,11 @@ package histstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Slice 1 seam: the histStore public methods, backed by langchaingo's
@@ -201,5 +203,71 @@ func TestHistStoreEraseSessionAndEraseAll(t *testing.T) {
 	sess, _ = s.Sessions(ctx)
 	if len(sess) != 0 {
 		t.Fatalf("after eraseAll want 0 sessions, got %d", len(sess))
+	}
+}
+
+// Several blk processes can open the same database at once, and the first one
+// through takes an exclusive lock to set the journal mode, which does not go
+// through the busy handler the DSN configures. Open waits that out rather than
+// handing the loser no store, because a process with no store writes no memory
+// and no session listing while still appending transcripts.
+func TestOpenWaitsOutAnExclusiveLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.db")
+
+	// A database that exists but is still in rollback-journal mode, with a write
+	// transaction open on it. That is the state the loser of the startup race
+	// sees: switching this to WAL needs a lock the holder has, and the switch
+	// does not wait for it.
+	holder, err := sql.Open("sqlite3", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if _, err := holder.Exec("CREATE TABLE lock_probe (id INTEGER);"); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := holder.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("INSERT INTO lock_probe (id) VALUES (1);"); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_ = tx.Rollback()
+		close(released)
+	}()
+
+	s, err := Open(path)
+	<-released
+	if err != nil {
+		t.Fatalf("open gave up while the database was briefly locked: %v", err)
+	}
+	defer s.Close()
+	// The store is usable, not just opened.
+	if err := s.UpsertSessionRow(context.Background(), SessionRow{ID: "after-the-lock"}); err != nil {
+		t.Fatalf("store opened but cannot write: %v", err)
+	}
+}
+
+// A locked database is retried; anything else is reported as it is, so a real
+// schema problem is not retried forty times before surfacing.
+func TestLockedErrOnlyMatchesContention(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{errors.New("database is locked"), true},
+		{errors.New("Database Is Locked"), true},
+		{errors.New("database table is locked"), true},
+		{errors.New("no such column: watermark"), false},
+		{errors.New("disk I/O error"), false},
+	} {
+		if got := lockedErr(tc.err); got != tc.want {
+			t.Errorf("lockedErr(%v) = %v, want %v", tc.err, got, tc.want)
+		}
 	}
 }
