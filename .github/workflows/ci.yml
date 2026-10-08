@@ -4,9 +4,10 @@ name: ci
 # local-model suites need provisioned services or a local model and do not run
 # here; they stay behind their own environment gates.
 #
-# macOS runners: the Go module does not build for linux because a tree-sitter
-# grammar dependency has no non-darwin build, and the embedding service targets
-# MLX on Apple Silicon.
+# The Go and Python jobs run on macOS: the embedding service targets MLX on
+# Apple Silicon, and the runner and command tests in cli skip when GOOS is not
+# darwin, so a linux runner would report a pass it never executed. The git-only
+# jobs have no platform dependency and run on linux.
 #
 # Third-party actions are pinned to a commit SHA rather than a tag, so a moved
 # tag cannot change what runs.
@@ -78,29 +79,82 @@ jobs:
         run: .venv/bin/python -m unittest discover tests
 
   secrets:
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
       - name: no secret-shaped strings in history
+        shell: bash
         run: |
-          pattern='sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]{10,}|tvly-[A-Za-z0-9]{10,}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'
-          # The repository's own redaction tests carry synthetic fixtures: the
-          # canonical AWS documentation key and keys whose body decodes to
-          # "fixture". They are allowed by path so a real key elsewhere fails.
-          hits=$(git grep -lI -E "$pattern" $(git rev-list --all) 2>/dev/null \
-            | sed 's/^[0-9a-f]*://' \
-            | sort -u \
-            | grep -v '_test\.go$' || true)
+          set -u
+
+          pattern='sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|tvly-[A-Za-z0-9]{10,}|AIza[0-9A-Za-z_-]{35}|(AKIA|ASIA)[0-9A-Z]{16}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'
+
+          # The credential detectors under cli/internal/webanalysis and the
+          # transcript redaction tests carry synthetic fixtures: the AWS
+          # documentation key, a sequential placeholder, and PEM headers whose
+          # body decodes to "fixture". A hit is exempt only when its path and
+          # its matched text both appear below, so a real credential in one of
+          # these same files still fails. This file lists the values and so
+          # matches the pattern itself.
+          printf '%s\n' \
+            .github/workflows/ci.yml \
+            cli/cloudexec_test.go \
+            cli/engagetranscript_test.go \
+            cli/internal/secgate/foothold_test.go \
+            cli/internal/webanalysis/config_credentials_test.go \
+            cli/toolcatalog_e2e_test.go \
+            cli/webfinding_integration_test.go > allowed-paths.txt
+          printf '%s\n' \
+            AKIAIOSFODNN7EXAMPLE \
+            ASIAABCDEFGHIJKLMNOP \
+            'BEGIN OPENSSH PRIVATE KEY' \
+            'BEGIN PRIVATE KEY' > allowed-values.txt
+
+          git rev-list --all > commits.txt
+          if [ ! -s commits.txt ]; then
+            echo "git rev-list --all produced no commits"
+            exit 1
+          fi
+
+          # git grep reports 0 for a match, 1 for no match and above 1 for a
+          # failure. A failure exits here rather than reading as a clean
+          # history. The commit list is chunked so the argument list cannot
+          # overflow as history grows.
+          : > hits.txt
+          while read -r -a chunk; do
+            if [ "${#chunk[@]}" -eq 0 ]; then
+              continue
+            fi
+            status=0
+            git grep -oI -E "$pattern" "${chunk[@]}" >> hits.txt || status=$?
+            if [ "$status" -gt 1 ]; then
+              echo "git grep failed with status $status"
+              exit 1
+            fi
+          done < <(xargs -n 256 echo < commits.txt)
+
+          hits=$(sed 's/^[0-9a-f]*://' hits.txt | sort -u | awk '
+            FILENAME == "allowed-paths.txt"  { paths[$0] = 1; next }
+            FILENAME == "allowed-values.txt" { values[$0] = 1; next }
+            {
+              sep = index($0, ":")
+              path = substr($0, 1, sep - 1)
+              value = substr($0, sep + 1)
+              if (!(path in paths) || !(value in values)) {
+                print
+              }
+            }
+          ' allowed-paths.txt allowed-values.txt -)
           if [ -n "$hits" ]; then
-            echo "secret-shaped strings outside test fixtures:"
+            echo "secret-shaped strings outside the known fixtures:"
             echo "$hits"
             exit 1
           fi
 
   local-only-paths:
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: no local-only agent paths are tracked
@@ -108,9 +162,21 @@ jobs:
         # are kept out by ignore rules. Those rules live outside the repository,
         # so they do not reach a clone that has not been configured. This fails
         # the build instead, which covers every clone.
+        shell: bash
         run: |
+          set -u
+
           pattern='(^|/)(\.claude|\.deepeval)/|handoff'
-          tracked=$(git ls-files | grep -iE "$pattern" || true)
+
+          # grep reports 1 for no match, which is the passing case, and above 1
+          # for a failure. A failure exits rather than reading as a clean tree.
+          git ls-files > tracked-files.txt
+          status=0
+          tracked=$(grep -iE "$pattern" tracked-files.txt) || status=$?
+          if [ "$status" -gt 1 ]; then
+            echo "grep failed with status $status"
+            exit 1
+          fi
           if [ -n "$tracked" ]; then
             echo "these paths are local-only and must not be tracked:"
             echo "$tracked"
