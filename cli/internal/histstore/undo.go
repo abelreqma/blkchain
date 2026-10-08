@@ -2,11 +2,18 @@ package histstore
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 )
 
-// UndoLastExchange removes the last completed exchange and coordinates its transcript update.
-func (s *Store) UndoLastExchange(ctx context.Context, session string, updateTranscript func() error) (bool, error) {
+// UndoLastExchange removes the last completed exchange and coordinates its
+// transcript update. updateTranscript appends the tombstone and returns the
+// transcript's new length, which is committed as the session's watermark in the
+// same transaction as the row deletions, so the two stores stay in step: either
+// the exchange is gone from both and the tombstone is accounted for, or neither
+// happened. meta carries the session's listing fields; its Watermark is ignored
+// in favour of the length updateTranscript reports.
+func (s *Store) UndoLastExchange(ctx context.Context, session string, meta SessionRow, updateTranscript func() (int64, error)) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -42,7 +49,15 @@ func (s *Store) UndoLastExchange(ctx context.Context, session string, updateTran
 		return false, err
 	}
 	if updateTranscript != nil {
-		if err = updateTranscript(); err != nil {
+		size, err := updateTranscript()
+		if err != nil {
+			return false, err
+		}
+		// A reported length of 0 means the caller wrote no transcript, so the
+		// session has none to account for and its watermark is left alone.
+		meta.ID = session
+		meta.Watermark = sql.NullInt64{Int64: size, Valid: size > 0}
+		if err := execUpsertMeta(ctx, tx, meta); err != nil {
 			return false, err
 		}
 	}

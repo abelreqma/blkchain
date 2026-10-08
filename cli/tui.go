@@ -1740,6 +1740,13 @@ func (m model) conversationHistory() []priorTurn {
 }
 
 // recordTurn saves a completed exchange and reports persistence failures.
+//
+// The transcript lines go down first, then one commit records both memory rows
+// and the transcript length they account for. That commit is the turn's only
+// commit point, so a process interrupted part-way leaves a transcript tail that
+// no commit covers, which reconcileTranscript removes when the session is next
+// opened. The two stores therefore never diverge permanently, however many blk
+// processes share them.
 func (m *model) recordTurn(answer string) error {
 	if m.sess == nil || strings.TrimSpace(m.pendingQ) == "" {
 		return nil
@@ -1752,14 +1759,8 @@ func (m *model) recordTurn(answer string) error {
 	if err := m.sess.appendTurn(turnRecord{Role: roleAssistant, Content: answer, Model: model, Mode: m.mode}); err != nil {
 		return err
 	}
-	if m.hist != nil {
-		ctx := context.Background()
-		if err := m.hist.AppendUser(ctx, m.sess.id, m.pendingQ); err != nil {
-			return err
-		}
-		if err := m.hist.AppendAI(ctx, m.sess.id, answer); err != nil {
-			return err
-		}
+	if err := m.sess.commitTurn(m.pendingQ, answer); err != nil {
+		return err
 	}
 	if m.sess.title != "" {
 		m.sessTitle = m.sess.title

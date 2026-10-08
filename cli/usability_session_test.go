@@ -101,27 +101,74 @@ func TestUndoPreservesUnfinishedExchange(t *testing.T) {
 	}
 }
 
-func TestUndoRejectsMismatchedTranscriptAndMemory(t *testing.T) {
-	useDeadServices(t)
-	m := newKeyModel(t)
-	m.pendingQ = "first question"
-	m.recordTurn("first answer")
-	m.pendingQ = "second question"
-	m.recordTurn("second answer")
-	if err := m.sess.appendTurn(turnRecord{Role: roleTombstone}); err != nil {
-		t.Fatal(err)
+// Undo sorts the two kinds of divergence between the stores. A transcript tail
+// past the committed watermark was never committed, so it is reconciled away and
+// undo proceeds; a transcript that disagrees with memory inside the committed
+// region cannot be reconciled from either side, so undo still refuses and
+// leaves both stores untouched.
+func TestUndoReconcilesAnUncommittedTailAndStillRejectsRealDivergence(t *testing.T) {
+	seed := func(t *testing.T) model {
+		t.Helper()
+		m := newKeyModel(t)
+		m.pendingQ = "first question"
+		if err := m.recordTurn("first answer"); err != nil {
+			t.Fatal(err)
+		}
+		m.pendingQ = "second question"
+		if err := m.recordTurn("second answer"); err != nil {
+			t.Fatal(err)
+		}
+		return m
 	}
-	if err := m.undoConversation(); err == nil {
-		t.Fatal("undo accepted inconsistent stores")
-	}
-	memory, err := m.hist.Messages(context.Background(), m.sess.id)
-	if err != nil || len(memory) != 4 {
-		t.Fatalf("rejected undo changed memory: %v, %v", memory, err)
-	}
-	replay, err := loadMessages(m.sess.id)
-	if err != nil || len(replay) != 2 {
-		t.Fatalf("rejected undo changed transcript: %v, %v", replay, err)
-	}
+
+	t.Run("uncommitted tail is reconciled", func(t *testing.T) {
+		useDeadServices(t)
+		m := seed(t)
+		// A transcript line no commit accounts for, as an interrupted turn leaves.
+		if err := m.sess.appendTurn(turnRecord{Role: roleTombstone}); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.undoConversation(); err != nil {
+			t.Fatalf("undo refused a reconcilable divergence: %v", err)
+		}
+		memory, err := m.hist.Messages(context.Background(), m.sess.id)
+		if err != nil || len(memory) != 2 {
+			t.Fatalf("undo did not remove the exchange from memory: %v, %v", memory, err)
+		}
+		replay, err := loadMessages(m.sess.id)
+		if err != nil || len(replay) != 2 {
+			t.Fatalf("transcript after undo = %v, %v", replay, err)
+		}
+	})
+
+	t.Run("divergent content is still refused", func(t *testing.T) {
+		useDeadServices(t)
+		m := seed(t)
+		// Rewrite a committed answer in place, keeping the byte length so the
+		// watermark still covers the file and only the content disagrees.
+		data, err := os.ReadFile(m.sess.filePath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		edited := strings.Replace(string(data), "first answer", "FIRST ANSWER", 1)
+		if edited == string(data) {
+			t.Fatal("fixture did not change the transcript")
+		}
+		if err := os.WriteFile(m.sess.filePath(), []byte(edited), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.undoConversation(); err == nil {
+			t.Fatal("undo accepted stores that disagree inside the committed region")
+		}
+		memory, err := m.hist.Messages(context.Background(), m.sess.id)
+		if err != nil || len(memory) != 4 {
+			t.Fatalf("refused undo changed memory: %v, %v", memory, err)
+		}
+		replay, err := loadMessages(m.sess.id)
+		if err != nil || len(replay) != 4 {
+			t.Fatalf("refused undo changed the transcript: %v, %v", replay, err)
+		}
+	})
 }
 
 func TestPersistenceFailureDoesNotMirrorAnUnsavedExchange(t *testing.T) {

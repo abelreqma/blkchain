@@ -90,6 +90,16 @@ func (m *model) undoConversationContext() ([]string, error) {
 		return nil, err
 	}
 	if exists {
+		// A turn interrupted between its transcript append and its commit left
+		// a tail the memory rows do not account for. Reconciling removes it, so
+		// the two stores agree here instead of the session refusing to undo for
+		// the rest of its life.
+		if err := m.sess.reconcileTranscript(); err != nil {
+			return nil, err
+		}
+		if fi, err = os.Stat(m.sess.filePath()); err != nil {
+			return nil, err
+		}
 		size = fi.Size()
 		if m.hist != nil {
 			replay, readErr := loadMessages(m.sess.id)
@@ -115,16 +125,22 @@ func (m *model) undoConversationContext() ([]string, error) {
 		}
 	}
 	wrote := false
-	update := func() error {
+	// update appends the tombstone and reports the transcript's new length, which
+	// UndoLastExchange commits as the watermark in the same transaction as the
+	// row deletions, so the tombstone and the deletions land together.
+	update := func() (int64, error) {
 		if !exists && m.hist != nil {
-			return nil
+			return 0, nil
 		}
 		wrote = true
-		return m.sess.appendTurn(turnRecord{Role: roleTombstone, Mode: m.mode})
+		if err := m.sess.appendTombstone(turnRecord{Role: roleTombstone, Mode: m.mode}); err != nil {
+			return 0, err
+		}
+		return m.sess.transcriptSize()
 	}
 	if m.hist != nil {
 		var changed bool
-		changed, err = m.hist.UndoLastExchange(context.Background(), m.sess.id, update)
+		changed, err = m.hist.UndoLastExchange(context.Background(), m.sess.id, storeMeta(m.sess.meta()), update)
 		if err == nil && !changed {
 			return nil, fmt.Errorf("no completed exchange to undo")
 		}
@@ -132,7 +148,7 @@ func (m *model) undoConversationContext() ([]string, error) {
 		if m.sess.count < 2 {
 			return nil, fmt.Errorf("no completed exchange to undo")
 		}
-		err = update()
+		_, err = update()
 	}
 	if err != nil {
 		if wrote {
