@@ -69,12 +69,15 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      # setup-python has no 3.12.14 build for macOS on arm64, so it cannot
+      # install the version .python-version pins. uv supplies that interpreter
+      # itself, which keeps the pin exact and needs no Python to bootstrap.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          python-version-file: .python-version
-      - name: install the pinned dependencies
+          version: "0.12.16"
+      - name: install the pinned interpreter and dependencies
         run: |
-          pip install uv==0.12.16
+          uv python install
           uv sync --locked
       - name: test
         run: .venv/bin/python -m unittest discover tests
