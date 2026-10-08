@@ -573,6 +573,12 @@ func deleteAllSessions() error {
 	return store.DeleteAllSessionRows(context.Background())
 }
 
+// errNoSessionStore means the listing could not be written because the history
+// database is unavailable. It is distinguishable so a caller can tell it from a
+// session that simply has no listing row yet, where the name is held in memory
+// and the next turn writes it.
+var errNoSessionStore = errors.New("the history database is unavailable")
+
 // renameSession overrides a session's title in the listing. It changes only the
 // title, so a concurrent writer's turn cannot be undone by the rename.
 func renameSession(id, title string) error {
@@ -581,7 +587,7 @@ func renameSession(id, title string) error {
 	}
 	store := openSessionStore()
 	if store == nil {
-		return errors.New("rename needs the history database, which is unavailable")
+		return errNoSessionStore
 	}
 	m, ok, err := store.GetSessionRow(context.Background(), id)
 	if err != nil {

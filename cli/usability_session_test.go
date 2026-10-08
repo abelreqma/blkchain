@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -264,4 +265,126 @@ func TestReopenReplacesPreviousConversationContext(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An undo removes the exchange from memory and writes a tombstone to the
+// transcript, so the listed count and the replayed transcript must drop
+// together. The count is derived from the memory rows and the transcript's is
+// derived by applying tombstones, so this pins the two definitions agreeing.
+func TestListedCountAndTranscriptAgreeAcrossUndo(t *testing.T) {
+	useDeadServices(t)
+	m := newKeyModel(t)
+
+	listed := func() int {
+		t.Helper()
+		metas, err := listSessions()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, meta := range metas {
+			if meta.ID == m.sess.id {
+				return meta.MsgCount
+			}
+		}
+		t.Fatalf("session %s is not listed", m.sess.id)
+		return 0
+	}
+	replayed := func() int {
+		t.Helper()
+		recs, err := loadMessages(m.sess.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(recs)
+	}
+
+	m.pendingQ = "first question"
+	if err := m.recordTurn("first answer"); err != nil {
+		t.Fatal(err)
+	}
+	m.pendingQ = "second question"
+	if err := m.recordTurn("second answer"); err != nil {
+		t.Fatal(err)
+	}
+	if listed() != 4 || replayed() != 4 {
+		t.Fatalf("after two turns listed=%d replayed=%d, want 4 and 4", listed(), replayed())
+	}
+
+	if err := m.undoConversation(); err != nil {
+		t.Fatal(err)
+	}
+	if listed() != 2 || replayed() != 2 {
+		t.Errorf("after undo listed=%d replayed=%d, want 2 and 2", listed(), replayed())
+	}
+}
+
+// /title discards the persistence error, so with no history database the new
+// name lasted only until the process exited while the command still reported
+// success. It now says when the name could not be saved. A session with no
+// listing row yet is not that case: its name is held in memory and the next
+// turn writes it, so that stays quiet.
+func TestTitleSaysWhenTheNewNameCannotBeSaved(t *testing.T) {
+	t.Run("renameSession reports a missing database distinguishably", func(t *testing.T) {
+		dir := tempSessions(t)
+		if err := privateDir(dir); err != nil {
+			t.Fatal(err)
+		}
+		// A directory where the database file belongs, so it cannot be opened.
+		if err := os.MkdirAll(filepath.Join(filepath.Dir(dir), "history.db"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if openSessionStore() != nil {
+			t.Fatal("fixture did not make the database unopenable")
+		}
+		s, err := newSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := renameSession(s.id, "vector tuning notes"); !errors.Is(err, errNoSessionStore) {
+			t.Fatalf("renameSession err = %v, want errNoSessionStore", err)
+		}
+	})
+
+	t.Run("the warning is printed only for a missing database", func(t *testing.T) {
+		withStore := stripANSI(strings.Join(retitleNotes("vector tuning notes", nil), "\n"))
+		if !strings.Contains(withStore, "renamed session to: vector tuning notes") {
+			t.Errorf("rename note missing: %q", withStore)
+		}
+		if strings.Contains(withStore, "not saved") {
+			t.Errorf("warned on a successful rename: %q", withStore)
+		}
+
+		// A session with no listing row yet is not a failure: the next turn
+		// writes the name, so that error prints nothing.
+		noRow := stripANSI(strings.Join(retitleNotes("vector tuning notes", errors.New("session abc not found")), "\n"))
+		if strings.Contains(noRow, "not saved") {
+			t.Errorf("warned about a name the next turn will save: %q", noRow)
+		}
+
+		noStore := stripANSI(strings.Join(retitleNotes("vector tuning notes", errNoSessionStore), "\n"))
+		if !strings.Contains(noStore, "renamed session to: vector tuning notes") {
+			t.Errorf("rename note missing: %q", noStore)
+		}
+		if !strings.Contains(noStore, "not saved") || !strings.Contains(noStore, "only for this session") {
+			t.Errorf("no warning that the name was not saved: %q", noStore)
+		}
+	})
+
+	t.Run("a rename before the first turn is written by that turn", func(t *testing.T) {
+		useDeadServices(t)
+		m := newKeyModel(t)
+		nm, _ := m.retitle("", "vector tuning notes")
+		m = nm.(model)
+		m.pendingQ = "a question"
+		if err := m.recordTurn("an answer"); err != nil {
+			t.Fatal(err)
+		}
+		metas, err := listSessions()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(metas) != 1 || metas[0].Title != "vector tuning notes" {
+			t.Errorf("listed %+v, want the name the rename set", metas)
+		}
+	})
 }

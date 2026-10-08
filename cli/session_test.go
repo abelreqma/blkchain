@@ -616,3 +616,61 @@ func TestAppendWithoutACommitIsNotTreatedAsCommitted(t *testing.T) {
 		t.Errorf("uncommitted turn survived the reopen: %+v", recs)
 	}
 }
+
+// The listed message count tracks the committed conversation across a sequence
+// of turns and an undo, which is the sequence the count is read after. It is
+// derived from the memory rows inside the upsert, so it does not depend on which
+// process committed, and this pins that it still matches the transcript.
+func TestListedMessageCountTracksCommittedTurns(t *testing.T) {
+	tempSessions(t)
+	if openSessionStore() == nil {
+		t.Fatal("session store unavailable")
+	}
+	s, err := newSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listed := func() int {
+		t.Helper()
+		metas, err := listSessions()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range metas {
+			if m.ID == s.id {
+				return m.MsgCount
+			}
+		}
+		t.Fatalf("session %s is not listed", s.id)
+		return 0
+	}
+	turn := func(q, a string) {
+		t.Helper()
+		if err := s.appendTurn(turnRecord{Role: roleUser, Content: q}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.appendTurn(turnRecord{Role: roleAssistant, Content: a}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.commitTurn(q, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	turn("first question", "first answer")
+	if got := listed(); got != 2 {
+		t.Errorf("after one turn MsgCount = %d, want 2", got)
+	}
+	turn("second question", "second answer")
+	if got := listed(); got != 4 {
+		t.Errorf("after two turns MsgCount = %d, want 4", got)
+	}
+	recs, err := loadMessages(s.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != listed() {
+		t.Errorf("listed %d messages, transcript replays %d", listed(), len(recs))
+	}
+}

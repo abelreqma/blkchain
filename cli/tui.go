@@ -2991,7 +2991,13 @@ func (m model) clearScrollback(echo string) (tea.Model, tea.Cmd) {
 	return m, tea.Sequence(tea.Println(echo), tea.Println(sep), tea.Println(note))
 }
 
-// retitle renames the current session (persisted to the index once it exists).
+// retitle renames the current session, persisted to the listing once it exists.
+//
+// A session with no listing row yet reports an error here, which is not a
+// failure: the name is held on the handle and the next turn writes it. A missing
+// history database is a failure, because nothing later will write it either, so
+// that one is said out loud rather than leaving the command claiming a name that
+// does not outlive the process.
 func (m model) retitle(echo, arg string) (tea.Model, tea.Cmd) {
 	name := strings.TrimSpace(arg)
 	if name == "" {
@@ -3002,8 +3008,24 @@ func (m model) retitle(echo, arg string) (tea.Model, tea.Cmd) {
 	}
 	m.sess.title = name // seeds the title even before the first turn is written
 	m.sessTitle = name
-	_ = renameSession(m.sess.id, name) // no-op error when the session isn't on disk yet
-	return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render("renamed session to: "+name)))
+	cmds := []tea.Cmd{tea.Println(echo)}
+	for _, note := range retitleNotes(name, renameSession(m.sess.id, name)) {
+		cmds = append(cmds, tea.Println(note))
+	}
+	return m, tea.Sequence(cmds...)
+}
+
+// retitleNotes renders what /title prints: the rename note, and a caution when
+// the new name could not be written anywhere that outlives the process. Any
+// other error is left unsaid, because a session with no listing row yet keeps
+// the name on its handle and the next turn writes it.
+func retitleNotes(name string, err error) []string {
+	notes := []string{"   " + Meta.Render("renamed session to: "+name)}
+	if errors.Is(err, errNoSessionStore) {
+		notes = append(notes, "   "+Caut.Render(Glyph(GlyphWarn)+" not saved: "+err.Error()+
+			", so this name lasts only for this session"))
+	}
+	return notes
 }
 
 // barRune is the horizontal separator glyph, unicode or ascii.
