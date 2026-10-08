@@ -89,7 +89,7 @@ jobs:
         run: |
           set -u
 
-          pattern='sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|tvly-[A-Za-z0-9]{10,}|AIza[0-9A-Za-z_-]{35}|(AKIA|ASIA)[0-9A-Z]{16}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'
+          pattern='sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|tvly-[A-Za-z0-9]{10,}|AIza[0-9A-Za-z_-]{35}|(AKIA|ASIA)[0-9A-Z]{16}|BEGIN [A-Z0-9 ]*PRIVATE KEY'
 
           # The credential detectors under cli/internal/webanalysis and the
           # transcript redaction tests carry synthetic fixtures: the AWS
