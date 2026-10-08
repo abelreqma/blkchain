@@ -23,7 +23,7 @@ func TestPinnedResolutionAndRedirectCredentials(t *testing.T) {
 		w.Write([]byte("body"))
 	}))
 	defer dst.Close()
-	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, dst.URL, 302) }))
+	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, dst.URL, http.StatusFound) }))
 	defer src.Close()
 	b := fixtureBroker()
 	out, e := b.Fetch(context.Background(), Request{Method: "GET", URL: src.URL, Headers: http.Header{"Authorization": []string{"test-only"}}})

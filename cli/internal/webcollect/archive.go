@@ -101,7 +101,7 @@ func (a *Archive) original(raw string) error {
 	if ip := net.ParseIP(u.Hostname()); ip != nil && (ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()) {
 		return errors.New("private original is not sent to archive providers")
 	}
-	if strings.Contains(u.Hostname(), ".") == false {
+	if !strings.Contains(u.Hostname(), ".") {
 		return errors.New("private host is not sent to archive providers")
 	}
 	for k := range u.Query() {

@@ -227,8 +227,7 @@ func TestImportHARBodiesAndScope(t *testing.T) {
 	}
 }
 func TestArchiveVersionsAndInfrastructureBoundary(t *testing.T) {
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/cdx/") {
 			fmt.Fprint(w, `[["timestamp","original","statuscode","mimetype","digest"],["20200101000000","https://fixture.test/app.js","200","application/javascript","old"],["20250101000000","https://fixture.test/app.js","200","application/javascript","new"]]`)
 			return
@@ -241,7 +240,7 @@ func TestArchiveVersionsAndInfrastructureBoundary(t *testing.T) {
 			fmt.Fprint(w, "fetch('/api/new')")
 			return
 		}
-		http.Redirect(w, r, "https://fixture.test/live", 302)
+		http.Redirect(w, r, "https://fixture.test/live", http.StatusFound)
 	}))
 	defer server.Close()
 	allowed := func(u string) bool { return strings.HasPrefix(u, "https://fixture.test/") }

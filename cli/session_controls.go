@@ -84,7 +84,7 @@ func (m *model) undoConversationContext() ([]string, error) {
 	}
 	saved := *m.sess
 	var size int64
-	fi, err := os.Stat(m.sess.filePath())
+	_, err := os.Stat(m.sess.filePath())
 	exists := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -93,11 +93,13 @@ func (m *model) undoConversationContext() ([]string, error) {
 		// A turn interrupted between its transcript append and its commit left
 		// a tail the memory rows do not account for. Reconciling removes it, so
 		// the two stores agree here instead of the session refusing to undo for
-		// the rest of its life.
+		// the rest of its life. The size is read after that, since reconciling
+		// is what decides it.
 		if err := m.sess.reconcileTranscript(); err != nil {
 			return nil, err
 		}
-		if fi, err = os.Stat(m.sess.filePath()); err != nil {
+		fi, err := os.Stat(m.sess.filePath())
+		if err != nil {
 			return nil, err
 		}
 		size = fi.Size()

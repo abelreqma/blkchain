@@ -16,7 +16,7 @@ import (
 const webPackageIntegrity = "wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw=="
 
 func webVerifyPackage(dir string) error {
-	fail := errors.New("Playwright package must match the pinned 1.62.1 tarball and integrity hash")
+	fail := errors.New("playwright package must match the pinned 1.62.1 tarball and integrity hash")
 	file, err := os.Open(filepath.Join(dir, "playwright-core-1.62.1.tgz"))
 	if err != nil {
 		return fail

@@ -126,7 +126,7 @@ func TestWebSocketLimitsRedirectsAndTLSVerification(t *testing.T) {
 	var reached atomic.Int32
 	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached.Add(1) }))
 	defer destination.Close()
-	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, destination.URL, 302) }))
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, destination.URL, http.StatusFound) }))
 	defer source.Close()
 	broker := wsBroker()
 	_, response, err := broker.OpenWebSocket(context.Background(), "ws"+strings.TrimPrefix(source.URL, "http"), nil, nil)
