@@ -98,3 +98,21 @@ jobs:
             echo "$hits"
             exit 1
           fi
+
+  local-only-paths:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: no local-only agent paths are tracked
+        # The directories agent tooling writes into are local to a machine and
+        # are kept out by ignore rules. Those rules live outside the repository,
+        # so they do not reach a clone that has not been configured. This fails
+        # the build instead, which covers every clone.
+        run: |
+          pattern='(^|/)(\.claude|\.deepeval)/|handoff'
+          tracked=$(git ls-files | grep -iE "$pattern" || true)
+          if [ -n "$tracked" ]; then
+            echo "these paths are local-only and must not be tracked:"
+            echo "$tracked"
+            exit 1
+          fi
