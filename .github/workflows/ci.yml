@@ -1,0 +1,100 @@
+name: ci
+
+# The hermetic suites and the static checks. The opt-in browser, runner, MCP and
+# local-model suites need provisioned services or a local model and do not run
+# here; they stay behind their own environment gates.
+#
+# macOS runners: the Go module does not build for linux because a tree-sitter
+# grammar dependency has no non-darwin build, and the embedding service targets
+# MLX on Apple Silicon.
+#
+# Third-party actions are pinned to a commit SHA rather than a tag, so a moved
+# tag cannot change what runs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - name: gofmt
+        working-directory: cli
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: vet
+        working-directory: cli
+        run: go vet ./...
+      - name: test
+        working-directory: cli
+        run: go test ./...
+
+  go-analysis:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - name: staticcheck
+        working-directory: cli
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+      - name: govulncheck
+        working-directory: cli
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+  python:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: install the pinned dependencies
+        run: |
+          pip install uv==0.12.16
+          uv sync --locked
+      - name: test
+        run: .venv/bin/python -m unittest discover tests
+
+  secrets:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - name: no secret-shaped strings in history
+        run: |
+          pattern='sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]{10,}|tvly-[A-Za-z0-9]{10,}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'
+          # The repository's own redaction tests carry synthetic fixtures: the
+          # canonical AWS documentation key and keys whose body decodes to
+          # "fixture". They are allowed by path so a real key elsewhere fails.
+          hits=$(git grep -lI -E "$pattern" $(git rev-list --all) 2>/dev/null \
+            | sed 's/^[0-9a-f]*://' \
+            | sort -u \
+            | grep -v '_test\.go$' || true)
+          if [ -n "$hits" ]; then
+            echo "secret-shaped strings outside test fixtures:"
+            echo "$hits"
+            exit 1
+          fi
