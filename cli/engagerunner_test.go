@@ -91,7 +91,8 @@ func TestEngageFirewallDenialsPrecedePermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, bad := range []string{"10.20.0.5", "10.20.0.1", "127.0.0.0/8", "169.254.0.0/16"} {
-		if strings.Index(rules, "-d "+bad+" -j DROP") < 0 || strings.Index(rules, "-d "+bad+" -j DROP") > strings.Index(rules, "-d 10.20.0.0/24 -j ACCEPT") {
+		deny := strings.Index(rules, "-d "+bad+" -j DROP")
+		if deny < 0 || deny > strings.Index(rules, "-d 10.20.0.0/24 -j ACCEPT") {
 			t.Fatalf("denial %s does not precede allowance: %s", bad, rules)
 		}
 	}
@@ -338,7 +339,16 @@ func TestEngageRunnerLiveBoundary(t *testing.T) {
 	defer runner.Close()
 	os.Setenv("BLKCHAIN_OPERATOR_SENTINEL", "must-not-reach-worker")
 	t.Cleanup(func() { os.Unsetenv("BLKCHAIN_OPERATOR_SENTINEL") })
-	result, stages := runner.Run(ctx, []pipelineStage{{Binary: "python3", Args: []string{"-c", "import os; print(os.getenv('BLKCHAIN_OPERATOR_SENTINEL', 'absent')); print(os.path.exists('/Users/blkbrd')); print(os.getuid())"}}}, "boundary", 65536, 5*time.Second)
+	// The operator home is resolved here and passed as an argument, so the check
+	// is against this machine's home rather than one spelling of it. A literal
+	// path is absent from any container whatever the runner mounts, so it would
+	// pass on every other machine while a real mount of their home leaked.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Fatalf("cannot resolve the operator home to prove it is unreachable: %v", err)
+	}
+	probe := "import os, sys; print(os.getenv('BLKCHAIN_OPERATOR_SENTINEL', 'absent')); print(os.path.exists(sys.argv[1])); print(os.getuid())"
+	result, stages := runner.Run(ctx, []pipelineStage{{Binary: "python3", Args: []string{"-c", probe, home}}}, "boundary", 65536, 5*time.Second)
 	if result.Err != nil || len(stages) != 1 || !strings.Contains(result.Output, "absent\nFalse\n1000") {
 		t.Fatalf("isolation result=%+v stages=%+v", result, stages)
 	}
@@ -556,5 +566,83 @@ func TestBothExecutionPathsUseTheBuiltImage(t *testing.T) {
 	}
 	if !strings.HasPrefix(tag, "blkchain-engage-runner:") || len(tag) != len("blkchain-engage-runner:")+64 {
 		t.Fatalf("runner tag is not the content-addressed form: %q", tag)
+	}
+}
+
+// The reaper considers only containers this package named, so nothing else on
+// the host can be selected however it is labeled.
+func TestRunnerListingIgnoresForeignContainers(t *testing.T) {
+	listing := strings.Join([]string{
+		"blk-guard-aaaa\t111",
+		"blk-worker-bbbb\t111",
+		"blk-rawworker-cccc\t222",
+		"postgres\t111",
+		"blkchain-qdrant\t111",
+		"blk-web-browser\t111",
+		"\t111",
+		"blk-guard-dddd\t",
+	}, "\n")
+	got := parseRunnerContainers(listing)
+	want := []string{"blk-guard-aaaa", "blk-worker-bbbb", "blk-rawworker-cccc", "blk-guard-dddd"}
+	if len(got) != len(want) {
+		t.Fatalf("selected %+v, want only the runner containers %v", got, want)
+	}
+	for i, name := range want {
+		if got[i].name != name {
+			t.Errorf("selected[%d] = %q, want %q", i, got[i].name, name)
+		}
+	}
+}
+
+// A container is removed only when its owner process is proven gone. A live
+// owner, an owner whose liveness cannot be established, and a container with no
+// owner label are all left alone, so a concurrent engagement is never disturbed.
+func TestOrphanedRunnersRemoveOnlyProvenDeadOwners(t *testing.T) {
+	listed := []runnerContainer{
+		{name: "blk-guard-live", owner: "111"},
+		{name: "blk-worker-live", owner: "111"},
+		{name: "blk-guard-dead", owner: "222"},
+		{name: "blk-rawworker-dead", owner: "222"},
+		{name: "blk-guard-unlabeled", owner: ""},
+		{name: "blk-guard-garbled", owner: "not-a-pid"},
+	}
+	alive := func(pid int) bool { return pid == 111 }
+
+	orphaned, unjudged := orphanedRunners(listed, alive)
+
+	if strings.Join(orphaned, ",") != "blk-guard-dead,blk-rawworker-dead" {
+		t.Errorf("orphaned = %v, want only the containers whose owner is gone", orphaned)
+	}
+	if strings.Join(unjudged, ",") != "blk-guard-unlabeled,blk-guard-garbled" {
+		t.Errorf("unjudged = %v, want the containers with no usable owner", unjudged)
+	}
+}
+
+// ownerAlive answers yes unless the process is proven absent, so the reaper
+// errs towards leaving a container in place.
+func TestOwnerAliveOnlyReportsAbsentForNoSuchProcess(t *testing.T) {
+	if !ownerAlive(os.Getpid()) {
+		t.Error("this process reported as gone")
+	}
+	if !ownerAlive(0) || !ownerAlive(-1) {
+		t.Error("a pid that names no process must not be treated as gone")
+	}
+	// A pid this high is not in use; the reaper may judge it gone.
+	if ownerAlive(1 << 30) {
+		t.Error("an unused pid reported as alive")
+	}
+}
+
+// Every runner container carries the owner label, which is what makes the
+// reaper able to tell a leftover from a live run's container.
+func TestRunnerContainersCarryTheOwnerLabel(t *testing.T) {
+	for _, args := range [][]string{
+		engageWorkerArgs("w", "guard", "image", "", nil),
+		engageRawWorkerArgs("w", "guard", "image", "", nil),
+	} {
+		joined := strings.Join(args, " ")
+		if !strings.Contains(joined, "--label "+runnerOwnerLabel+"="+strconv.Itoa(os.Getpid())) {
+			t.Errorf("worker args carry no owner label: %s", joined)
+		}
 	}
 }

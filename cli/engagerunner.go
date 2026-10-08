@@ -16,8 +16,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -72,6 +74,7 @@ func workerArgs(name, guard, image, hostsFile string, env []string, raw bool) []
 		user, work = "0:0", "/work:rw,nosuid,nodev,size=128m,uid=0,gid=0"
 	}
 	args := []string{"run", "-d", "--name", name, "--network", "container:" + guard, "--read-only", "--cap-drop", "ALL"}
+	args = append(args, runnerOwnerArgs()...)
 	if raw {
 		args = append(args, "--cap-add", "NET_RAW")
 	}
@@ -84,6 +87,105 @@ func workerArgs(name, guard, image, hostsFile string, env []string, raw bool) []
 	}
 	args = append(args, image, "-c", "exec sleep 86400")
 	return args
+}
+
+// runnerOwnerLabel marks every container this process creates with the pid that
+// owns it, so a later run can tell its own leftovers from a concurrent run's
+// live containers.
+const runnerOwnerLabel = "blkchain.owner-pid"
+
+// runnerNamePrefixes are the names this package gives its containers. The reaper
+// uses them to recognize leftovers from a build that predates the owner label.
+var runnerNamePrefixes = []string{"blk-guard-", "blk-worker-", "blk-rawworker-"}
+
+// runnerOwnerArgs are the label arguments every runner container carries.
+func runnerOwnerArgs() []string {
+	return []string{"--label", runnerOwnerLabel + "=" + strconv.Itoa(os.Getpid())}
+}
+
+// ownerAlive reports whether pid still names a live process. Signal 0 delivers
+// nothing and only asks the question. A permission error means the pid belongs
+// to someone else and is alive, so both error cases that are not "no such
+// process" answer yes: the reaper must never remove a container whose owner it
+// cannot prove is gone.
+func ownerAlive(pid int) bool {
+	if pid <= 0 {
+		return true
+	}
+	err := syscall.Kill(pid, 0)
+	return !errors.Is(err, syscall.ESRCH)
+}
+
+// runnerContainer is one container the reaper considered.
+type runnerContainer struct {
+	name  string
+	owner string
+}
+
+// parseRunnerContainers reads the reaper's docker listing: one container per
+// line as name and owner label, tab separated. Lines for containers this
+// package did not name are dropped, so the reaper never considers anything
+// else running on the host. It is pure, so the selection is unit tested.
+func parseRunnerContainers(listing string) []runnerContainer {
+	var out []runnerContainer
+	for _, line := range strings.Split(listing, "\n") {
+		name, owner, _ := strings.Cut(strings.TrimSpace(line), "\t")
+		if name == "" {
+			continue
+		}
+		ours := false
+		for _, prefix := range runnerNamePrefixes {
+			if strings.HasPrefix(name, prefix) {
+				ours = true
+				break
+			}
+		}
+		if ours {
+			out = append(out, runnerContainer{name: name, owner: strings.TrimSpace(owner)})
+		}
+	}
+	return out
+}
+
+// orphanedRunners splits the listed containers into the ones safe to remove and
+// the ones left alone. A container is orphaned only when its owner label names a
+// process that no longer exists, so a concurrent engagement is never disturbed:
+// a live run's owner is alive by definition. A container with no owner label
+// predates the label and cannot be judged, so it is reported rather than
+// removed.
+func orphanedRunners(listed []runnerContainer, alive func(int) bool) (orphaned, unjudged []string) {
+	for _, c := range listed {
+		pid, err := strconv.Atoi(c.owner)
+		if c.owner == "" || err != nil {
+			unjudged = append(unjudged, c.name)
+			continue
+		}
+		if !alive(pid) {
+			orphaned = append(orphaned, c.name)
+		}
+	}
+	return orphaned, unjudged
+}
+
+// reapOrphanedRunners removes runner containers whose owning process is gone,
+// which is what a blk killed outright leaves behind: its deferred cleanup never
+// runs and its guard and workers survive indefinitely. It is best-effort, so a
+// docker failure here never fails the engagement that called it. Containers it
+// cannot judge are named on stderr once, for the operator to remove.
+func reapOrphanedRunners(ctx context.Context, remove func(context.Context, string) error) {
+	listing, err := runnerDocker(ctx, nil, "ps", "-a", "--no-trunc",
+		"--format", "{{.Names}}\t{{.Label \""+runnerOwnerLabel+"\"}}")
+	if err != nil {
+		return
+	}
+	orphaned, unjudged := orphanedRunners(parseRunnerContainers(listing), ownerAlive)
+	for _, name := range orphaned {
+		_ = remove(ctx, name)
+	}
+	if len(unjudged) > 0 {
+		fmt.Fprintf(os.Stderr, "blk: %d runner %s with no owner label left in place: %s\n",
+			len(unjudged), plural(len(unjudged), "container"), strings.Join(unjudged, ", "))
+	}
 }
 
 // pipelineNeedsRawSocket reports whether any stage needs the raw-socket worker.
@@ -249,6 +351,12 @@ func newEngageRunner(ctx context.Context, roe *RoE) (result *engageRunner, err e
 	if err != nil {
 		return nil, err
 	}
+	// Remove what an earlier blk left behind when it was killed before its
+	// cleanup could run. Containers belonging to a live run are untouched.
+	reapOrphanedRunners(check, func(ctx context.Context, name string) error {
+		_, err := runnerDocker(ctx, nil, "rm", "-f", name)
+		return err
+	})
 	guardName := runnerName("blk-guard-")
 	r := &engageRunner{image: imageID, workers: map[string]string{}, rawWorkers: map[string]string{}, slots: make(chan struct{}, p.Parallel), foothold: transport}
 	ok := false
@@ -267,7 +375,9 @@ func newEngageRunner(ctx context.Context, roe *RoE) (result *engageRunner, err e
 	// address is pinned directly rather than extracted from a carrier's argv.
 	commandIPs := append(runnerCommandIPs(roe.Scope), footholdPinIPs(p.Foothold, hosts)...)
 	r.hosts = hosts
-	_, err = runnerDocker(check, nil, "run", "-d", "--name", guardName, "--network", "bridge", "--read-only", "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges", "--user", "0:0", "--memory", "64m", "--cpus", "0.25", "--pids-limit", "16", "--entrypoint", "/bin/sh", imageID, "-c", "exec sleep 86400")
+	guardArgs := append([]string{"run", "-d", "--name", guardName, "--network", "bridge", "--read-only", "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges", "--user", "0:0", "--memory", "64m", "--cpus", "0.25", "--pids-limit", "16"}, runnerOwnerArgs()...)
+	guardArgs = append(guardArgs, "--entrypoint", "/bin/sh", imageID, "-c", "exec sleep 86400")
+	_, err = runnerDocker(check, nil, guardArgs...)
 	if err != nil {
 		return nil, err
 	}
