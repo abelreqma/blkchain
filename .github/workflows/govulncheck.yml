@@ -1,0 +1,46 @@
+name: govulncheck
+
+# Vulnerability scanning for the Go module, as its own workflow so it is a
+# separately named status check that a branch protection rule can require.
+#
+# The schedule is the point of separating it. A pull request run only catches a
+# vulnerability that the change itself introduces. A vulnerability published
+# against an already pinned dependency reaches this repository without any
+# commit, so the weekly run is what finds it.
+#
+# macOS matches the other Go jobs. The module builds cgo dependencies, and the
+# analysis loads packages for the host platform, so it runs where the code is
+# built and tested rather than on a platform the project does not target.
+#
+# Third-party actions are pinned to a commit SHA rather than a tag, so a moved
+# tag cannot change what runs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The event is part of the group so a scheduled run and a push run on the same
+# ref do not cancel each other.
+concurrency:
+  group: govulncheck-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  govulncheck:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - name: govulncheck
+        working-directory: cli
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...

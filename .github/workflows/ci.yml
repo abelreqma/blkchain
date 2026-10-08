@@ -4,6 +4,10 @@ name: ci
 # local-model suites need provisioned services or a local model and do not run
 # here; they stay behind their own environment gates.
 #
+# Vulnerability scanning is in govulncheck.yml, which also runs on a schedule so
+# an advisory published against an already pinned dependency is caught without a
+# commit.
+#
 # The Go and Python jobs run on macOS: the embedding service targets MLX on
 # Apple Silicon, and the runner and command tests in cli skip when GOOS is not
 # darwin, so a linux runner would report a pass it never executed. The git-only
@@ -60,9 +64,6 @@ jobs:
       - name: staticcheck
         working-directory: cli
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
-      - name: govulncheck
-        working-directory: cli
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
   python:
     runs-on: macos-15
