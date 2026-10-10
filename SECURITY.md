@@ -22,7 +22,9 @@ The project is maintained by one person. Expect an acknowledgement within a week
 
 ## Supported versions
 
-`main` only. There are no tagged releases, so a report should name the commit it was found on.
+`main` is where a fix lands. The latest tagged release, built from a commit on `main`, is the only
+supported release; an earlier tag gets no backport. A report should name the release it was found
+on, or the commit when it was found on a build of `main`.
 
 ## In scope
 

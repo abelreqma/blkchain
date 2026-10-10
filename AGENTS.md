@@ -47,13 +47,22 @@ keeps the letter of an invariant while defeating its purpose is a regression.
 ```sh
 cd cli && go build -o blk .
 cd cli && go test ./...
+cd cli && go test -race ./...
 uv sync --locked
 .venv/bin/python -m unittest discover tests
+uvx ruff check blkchain tests
 ```
 
-Run both suites before claiming a change works. The default suites are hermetic. The browser,
-runner, MCP and local-model suites need provisioned services or a local model and are gated behind
-their own environment variables, so a green default run does not cover them.
+Run both suites before claiming a change works. CI gates on more than the suites: `gofmt`,
+`go vet`, staticcheck, the race detector, ruff, `govulncheck`, `pip-audit`, a workflow lint over
+anything under `.github`, a secret-shaped-string scan over the whole history, and a check that no
+local-only path is tracked. Read `.github/workflows` for the current set rather than this list.
+The analyzer versions are pinned in the workflow that runs each one, which is the authority on
+them.
+
+The default suites are hermetic. The browser, runner, MCP and local-model suites need provisioned
+services or a local model and are gated behind their own environment variables, so a green default
+run does not cover them.
 
 Add a regression test with every fix, in the file that matches its area. A test that cannot fail
 proves nothing: for a security boundary in particular, confirm the test fails when the control is
