@@ -66,9 +66,13 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: ./.github/actions/go-toolchain
+      # TestCredentialFindingFromRealCLIAndParserWorker builds the CLI inside a
+      # 45s budget that holds only when the non-instrumented build cache is
+      # warm, which -race does not leave. Its work runs in a child process built
+      # without -race, so the detector covers nothing here. The go job runs it.
       - name: test with the race detector
         working-directory: cli
-        run: go test -race ./...
+        run: go test -race -skip '^TestCredentialFindingFromRealCLIAndParserWorker$' ./...
 
   python:
     runs-on: macos-15
