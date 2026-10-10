@@ -4,9 +4,9 @@ name: ci
 # local-model suites need provisioned services or a local model and do not run
 # here; they stay behind their own environment gates.
 #
-# Vulnerability scanning is in govulncheck.yml, which also runs on a schedule so
-# an advisory published against an already pinned dependency is caught without a
-# commit.
+# Vulnerability scanning is in govulncheck.yml and pip-audit.yml, which also run
+# on a schedule so an advisory published against an already pinned dependency is
+# caught without a commit.
 #
 # The Go and Python jobs run on macOS: the embedding service targets MLX on
 # Apple Silicon, and the runner and command tests in cli skip when GOOS is not
@@ -34,10 +34,7 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version-file: cli/go.mod
-          cache-dependency-path: cli/go.sum
+      - uses: ./.github/actions/go-toolchain
       - name: gofmt
         working-directory: cli
         run: |
@@ -57,30 +54,83 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version-file: cli/go.mod
-          cache-dependency-path: cli/go.sum
+      - uses: ./.github/actions/go-toolchain
+      # A master commit, not a tagged release: v0.8.1 reads export data up to
+      # version 4, and the toolchain cli/go.mod requires emits version 5.
       - name: staticcheck
         working-directory: cli
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0-0.dev.0.20261009230814-452d5bb86b45 ./...
+
+  go-race:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: ./.github/actions/go-toolchain
+      - name: test with the race detector
+        working-directory: cli
+        run: go test -race ./...
 
   python:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      # setup-python has no 3.12.14 build for macOS on arm64, so it cannot
-      # install the version .python-version pins. uv supplies that interpreter
-      # itself, which keeps the pin exact and needs no Python to bootstrap.
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          version: "0.12.16"
+      - uses: ./.github/actions/uv
       - name: install the pinned interpreter and dependencies
         run: |
           uv python install
           uv sync --locked
       - name: test
         run: .venv/bin/python -m unittest discover tests
+
+  # ruff needs no project environment, so this job installs neither the pinned
+  # interpreter nor the dependencies.
+  python-analysis:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: ./.github/actions/uv
+      - name: ruff
+        run: uvx ruff@0.14.3 check blkchain tests
+
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: ./.github/actions/go-toolchain
+      - name: actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      # actionlint accepts a relative action path that does not exist, so this
+      # step checks the paths resolve.
+      - name: every local action reference resolves
+        shell: bash
+        run: |
+          set -u
+
+          # Anchored at the start of the line so it matches a step's own key and
+          # not a mention of one in a comment. The dash is optional because a
+          # step that also sets `name` carries `uses` on its own line. grep
+          # reports 1 for no match, which is valid here, so only a status above
+          # 1 is a failure.
+          key='^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*\./'
+          status=0
+          grep -rhE "$key" .github/workflows .github/actions > refs.txt || status=$?
+          if [ "$status" -gt 1 ]; then
+            echo "grep failed with status $status"
+            exit 1
+          fi
+
+          : > missing.txt
+          while read -r path; do
+            if [ ! -f "$path/action.yml" ] && [ ! -f "$path/action.yaml" ]; then
+              echo "$path" >> missing.txt
+            fi
+          done < <(sed -E 's|^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*||; s|[[:space:]].*$||' refs.txt | sort -u)
+
+          if [ -s missing.txt ]; then
+            echo "these local action references do not resolve:"
+            cat missing.txt
+            exit 1
+          fi
 
   secrets:
     runs-on: ubuntu-latest
