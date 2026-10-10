@@ -1,0 +1,39 @@
+name: pip-audit
+
+# Vulnerability scanning for the Python dependencies, as its own workflow so it
+# is a separately named status check that a branch protection rule can require.
+# The schedule catches an advisory published against an already pinned
+# dependency, which reaches this repository without a commit.
+#
+# The audit reads uv.lock rather than an installed environment, so it needs no
+# project environment and nothing from the Apple Silicon stack.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "41 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The event is part of the group so a scheduled run and a push run on the same
+# ref do not cancel each other.
+concurrency:
+  group: pip-audit-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: ./.github/actions/uv
+      - name: pip-audit
+        # --disable-pip requires a hashed requirements file, which is what the
+        # export produces by default.
+        run: |
+          uv export --locked --format requirements-txt --no-emit-project > "$RUNNER_TEMP/requirements.txt"
+          uvx pip-audit@2.9.0 --requirement "$RUNNER_TEMP/requirements.txt" --disable-pip

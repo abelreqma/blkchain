@@ -1,4 +1,4 @@
-FROM alpine@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0
+FROM alpine:3.23.6@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0
 ARG TARGETARCH
 COPY packages-${TARGETARCH}.lock /packages.lock
 RUN set -eu; mkdir /packages; cd /packages; \
