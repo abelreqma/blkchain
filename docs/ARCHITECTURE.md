@@ -198,7 +198,15 @@ import the engine fail with `ModuleNotFoundError`.
 .venv/bin/python -m unittest discover tests
 ```
 
-Go tests are `cd cli && go test ./...`.
+Go tests are `cd cli && go test ./...`, and `cd cli && go test -race ./...` for the race detector,
+which CI runs as its own job because the harness fans out worker pools per task and the session
+store is written by several processes.
+
+The Python static check is `uvx ruff check blkchain tests`. Its rule selection lives in
+`pyproject.toml`: `E501` is ignored because its findings disagree with the project's wrap width
+rather than naming a defect, and ruff's formatter is not adopted. Every analyzer CI runs is pinned
+in the workflow that runs it. Nothing updates a version inside a `go run` or `uvx` argument, so
+those pins move by hand.
 
 The default suites are hermetic. Opt-in browser, runner, MCP, and local-model integration tests
 require provisioned services or containers and are gated behind environment variables. Add a
