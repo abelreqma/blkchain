@@ -175,7 +175,7 @@ engagements, and the browser container for runtime web collection.
 
 | Component | Required for |
 | --- | --- |
-| Apple Silicon, Python 3.12.14, uv, Go 1.27.1, Xcode Command Line Tools | Building blk and running the MLX embedding service. |
+| Apple Silicon, Python 3.12.14, uv, Go 1.27.2, Xcode Command Line Tools | Building blk and running the MLX embedding service. |
 | Docker Desktop | Qdrant and the isolated execution containers. |
 | Embedder and reranker model files | Local retrieval. |
 | OpenAI-compatible chat server and chat model | Native answers and model-driven engagements. |
@@ -207,7 +207,7 @@ uv --version
 go version
 ```
 
-The Go module requires Go 1.27.1. Use that version or a compatible newer toolchain. Go's automatic
+The Go module requires Go 1.27.2. Use that version or a compatible newer toolchain. Go's automatic
 toolchain selection can obtain the module's required version when enabled. See the
 [Go installation guide](https://go.dev/doc/install) and
 [uv installation guide](https://docs.astral.sh/uv/getting-started/installation/) for other methods.
