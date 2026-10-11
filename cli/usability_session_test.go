@@ -129,6 +129,7 @@ func TestUndoReconcilesAnUncommittedTailAndStillRejectsRealDivergence(t *testing
 		if err := m.sess.appendTurn(turnRecord{Role: roleTombstone}); err != nil {
 			t.Fatal(err)
 		}
+		m.sess.endTurn()
 		if err := m.undoConversation(); err != nil {
 			t.Fatalf("undo refused a reconcilable divergence: %v", err)
 		}

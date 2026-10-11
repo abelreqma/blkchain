@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"blkchain/cli/internal/histstore"
@@ -90,12 +91,47 @@ type sessionMeta struct {
 // created lazily on the first appendTurn, so launching blk (which calls
 // newSession on start) never litters empty transcripts on disk.
 type session struct {
-	id    string
-	dir   string
-	title string
-	count int
-	model string
-	mode  string
+	id       string
+	dir      string
+	title    string
+	count    int
+	model    string
+	mode     string
+	turnLock *os.File
+}
+
+func (s *session) lock() (*os.File, error) {
+	if err := privateDir(s.dir); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(s.dir, s.id+".lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
+		f.Close()
+		return nil, errors.New("invalid session lock file")
+	}
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("session %s is active in another process", s.id)
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
+func (s *session) endTurn() {
+	if s.turnLock != nil {
+		_ = s.turnLock.Close()
+		s.turnLock = nil
+	}
 }
 
 // sessionsDir resolves $XDG_DATA_HOME/blk/sessions, falling back to
@@ -151,7 +187,6 @@ func openSession(id string) (*session, error) {
 		return nil, err
 	}
 	s := &session{id: id, dir: dir}
-	s.hydrate()
 	if _, err := os.Stat(s.filePath()); err != nil {
 		return nil, fmt.Errorf("session %s not found", id)
 	}
@@ -161,6 +196,7 @@ func openSession(id string) (*session, error) {
 	if err := s.reconcileTranscript(); err != nil {
 		return nil, err
 	}
+	s.hydrate()
 	return s, nil
 }
 
@@ -190,6 +226,15 @@ func (s *session) hydrate() {
 // committed. Truncation is to a byte offset the writer recorded at a line
 // boundary, and the transcript is append-only, so no surviving line is cut.
 func (s *session) reconcileTranscript() error {
+	lock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	return s.reconcileTranscriptLocked()
+}
+
+func (s *session) reconcileTranscriptLocked() error {
 	store := openSessionStore()
 	if store == nil {
 		return nil
@@ -262,10 +307,27 @@ func validSessionID(id string) bool {
 // commit point. appendTombstone is the variant without it, for the one caller
 // that appends from inside a store transaction.
 func (s *session) appendTurn(rec turnRecord) error {
+	if s.turnLock == nil {
+		lock, err := s.lock()
+		if err != nil {
+			return err
+		}
+		s.turnLock = lock
+		if err := s.reconcileTranscriptLocked(); err != nil {
+			s.endTurn()
+			return err
+		}
+		s.hydrate()
+	}
 	if err := s.appendTombstone(rec); err != nil {
+		s.endTurn()
 		return err
 	}
-	return s.ensureListed()
+	if err := s.ensureListed(); err != nil {
+		s.endTurn()
+		return err
+	}
+	return nil
 }
 
 // appendTombstone appends one record to the transcript and writes no listing
@@ -366,6 +428,10 @@ func (s *session) syncIndex() error { return s.ensureListed() }
 // after the caller has appended both lines. Until it returns, the appended
 // lines are uncommitted and reconcileTranscript will remove them.
 func (s *session) commitTurn(user, ai string) error {
+	if s.turnLock == nil {
+		return errors.New("session turn not started")
+	}
+	defer s.endTurn()
 	store := openSessionStore()
 	if store == nil {
 		return nil

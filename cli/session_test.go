@@ -326,6 +326,7 @@ func TestUncommittedTranscriptTailIsReconciledOnOpen(t *testing.T) {
 	if err := s.appendTurn(turnRecord{Role: roleAssistant, Content: "interrupted answer"}); err != nil {
 		t.Fatal(err)
 	}
+	s.endTurn()
 
 	reopened, err := openSession(s.id)
 	if err != nil {
@@ -604,6 +605,7 @@ func TestAppendWithoutACommitIsNotTreatedAsCommitted(t *testing.T) {
 	if err := s.appendTurn(turnRecord{Role: roleAssistant, Content: "interrupted answer"}); err != nil {
 		t.Fatal(err)
 	}
+	s.endTurn()
 
 	if _, err := openSession(s.id); err != nil {
 		t.Fatalf("openSession: %v", err)
@@ -672,5 +674,113 @@ func TestListedMessageCountTracksCommittedTurns(t *testing.T) {
 	}
 	if len(recs) != listed() {
 		t.Errorf("listed %d messages, transcript replays %d", listed(), len(recs))
+	}
+}
+
+func TestSameSessionRejectsConcurrentUncommittedTurn(t *testing.T) {
+	tempSessions(t)
+	seed, err := newSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.appendTurn(turnRecord{Role: roleUser, Content: "seed question"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.appendTurn(turnRecord{Role: roleAssistant, Content: "seed answer"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.commitTurn("seed question", "seed answer"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := openSession(seed.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := openSession(seed.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.appendTurn(turnRecord{Role: roleUser, Content: "first question"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.appendTurn(turnRecord{Role: roleUser, Content: "uncommitted question"}); err == nil {
+		t.Error("a second process appended to an in-progress session turn")
+	}
+	if err := first.appendTurn(turnRecord{Role: roleAssistant, Content: "first answer"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.commitTurn("first question", "first answer"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openSession(seed.id); err != nil {
+		t.Fatal(err)
+	}
+	transcript, err := loadMessages(seed.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := openSessionStore()
+	if store == nil {
+		t.Fatal("session store unavailable")
+	}
+	memory, err := store.Messages(context.Background(), seed.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transcript) != len(memory) {
+		t.Errorf("transcript has %d records, memory has %d", len(transcript), len(memory))
+	}
+}
+
+func TestOpenSessionDoesNotReconcileAnActiveTurn(t *testing.T) {
+	tempSessions(t)
+	s, err := newSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.appendTurn(turnRecord{Role: roleUser, Content: "in progress"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openSession(s.id); err == nil {
+		t.Error("openSession read an in-progress turn")
+	}
+	if err := s.appendTurn(turnRecord{Role: roleAssistant, Content: "complete"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.commitTurn("in progress", "complete"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openSession(s.id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSameSessionCrossProcessLock(t *testing.T) {
+	if id := os.Getenv("BLK_SAME_SESSION_ID"); id != "" {
+		t.Setenv("XDG_DATA_HOME", os.Getenv("BLK_SAME_SESSION_DIR"))
+		if _, err := openSession(id); err == nil || !strings.Contains(err.Error(), "active in another process") {
+			t.Fatalf("openSession during another process's turn = %v", err)
+		}
+		return
+	}
+	base := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", base)
+	s, err := newSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.appendTurn(turnRecord{Role: roleUser, Content: "in progress"}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSameSessionCrossProcessLock$")
+	cmd.Env = append(os.Environ(), "BLK_SAME_SESSION_ID="+s.id, "BLK_SAME_SESSION_DIR="+base)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("other process opened the active session: %v: %s", err, output)
+	}
+	if err := s.appendTurn(turnRecord{Role: roleAssistant, Content: "complete"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.commitTurn("in progress", "complete"); err != nil {
+		t.Fatal(err)
 	}
 }

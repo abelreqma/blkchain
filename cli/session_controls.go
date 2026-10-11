@@ -82,9 +82,14 @@ func (m *model) undoConversationContext() ([]string, error) {
 	if m.sess == nil {
 		return nil, fmt.Errorf("no active session")
 	}
+	lock, err := m.sess.lock()
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
 	saved := *m.sess
 	var size int64
-	_, err := os.Stat(m.sess.filePath())
+	_, err = os.Stat(m.sess.filePath())
 	exists := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -95,7 +100,7 @@ func (m *model) undoConversationContext() ([]string, error) {
 		// the two stores agree here instead of the session refusing to undo for
 		// the rest of its life. The size is read after that, since reconciling
 		// is what decides it.
-		if err := m.sess.reconcileTranscript(); err != nil {
+		if err := m.sess.reconcileTranscriptLocked(); err != nil {
 			return nil, err
 		}
 		fi, err := os.Stat(m.sess.filePath())

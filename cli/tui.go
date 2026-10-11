@@ -1751,6 +1751,7 @@ func (m *model) recordTurn(answer string) error {
 	if m.sess == nil || strings.TrimSpace(m.pendingQ) == "" {
 		return nil
 	}
+	defer m.sess.endTurn()
 	defer func() { m.pendingQ = "" }()
 	model := m.currentModel()
 	if err := m.sess.appendTurn(turnRecord{Role: roleUser, Content: m.pendingQ, Model: model, Mode: m.mode}); err != nil {
