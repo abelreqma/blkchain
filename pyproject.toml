@@ -21,6 +21,8 @@ dependencies = [
   "transformers==5.17.0",  # tokenizer-only (reranker); no torch
   # evaluation
   "deepeval==4.2.8",
+  # Tavily client, kept for operator use; the web search path is Go and calls the HTTP API.
+  "tavily-python==0.8.5",
 ]
 
 # Secrets are read from the environment.
