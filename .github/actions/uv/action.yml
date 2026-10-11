@@ -1,8 +1,7 @@
 name: "uv"
 description: "Installs the pinned uv release, which supplies the interpreter and the tool environments."
 
-# setup-python has no 3.12.14 build for macOS on arm64, so it cannot install the
-# version .python-version pins. uv supplies that interpreter itself.
+# setup-python has no macOS arm64 build for the version .python-version pins.
 
 runs:
   using: "composite"

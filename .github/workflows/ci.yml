@@ -55,8 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: ./.github/actions/go-toolchain
-      # A master commit, not a tagged release: v0.8.1 reads export data up to
-      # version 4, and the toolchain cli/go.mod requires emits version 5.
+      # v0.8.1 reads export data version 4; the toolchain cli/go.mod requires emits 5.
       - name: staticcheck
         working-directory: cli
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0-0.dev.0.20261009230814-452d5bb86b45 ./...
@@ -66,10 +65,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: ./.github/actions/go-toolchain
-      # TestCredentialFindingFromRealCLIAndParserWorker builds the CLI inside a
-      # 45s budget that holds only when the non-instrumented build cache is
-      # warm, which -race does not leave. Its work runs in a child process built
-      # without -race, so the detector covers nothing here. The go job runs it.
+      # The skipped test builds the CLI in 45s, needing the warm plain cache -race lacks.
       - name: test with the race detector
         working-directory: cli
         run: go test -race -skip '^TestCredentialFindingFromRealCLIAndParserWorker$' ./...
@@ -86,8 +82,7 @@ jobs:
       - name: test
         run: .venv/bin/python -m unittest discover tests
 
-  # ruff needs no project environment, so this job installs neither the pinned
-  # interpreter nor the dependencies.
+  # ruff needs no project environment, so this job installs no interpreter or deps.
   python-analysis:
     runs-on: macos-15
     steps:
@@ -103,18 +98,13 @@ jobs:
       - uses: ./.github/actions/go-toolchain
       - name: actionlint
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-      # actionlint accepts a relative action path that does not exist, so this
-      # step checks the paths resolve.
+      # actionlint accepts a relative action path that does not exist.
       - name: every local action reference resolves
         shell: bash
         run: |
           set -u
 
-          # Anchored at the start of the line so it matches a step's own key and
-          # not a mention of one in a comment. The dash is optional because a
-          # step that also sets `name` carries `uses` on its own line. grep
-          # reports 1 for no match, which is valid here, so only a status above
-          # 1 is a failure.
+          # Anchored so a comment naming the key is not read as a reference.
           key='^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*\./'
           status=0
           grep -rhE "$key" .github/workflows .github/actions > refs.txt || status=$?
