@@ -225,8 +225,8 @@ func commandSpecs() []cmdSpec {
 			name: "gateway", group: hgIntegrations,
 			desc: "set up and start the Hermes gateway for agent mode",
 			long: "Prepares Hermes for agent mode and starts its gateway. " +
-				"It writes API_SERVER_ENABLED and API_SERVER_KEY into ~/.hermes/.env, using your LLM server key (OMLX_API_KEY or OMLX_API), and keeps a backup when a value changes. " +
-				"The key itself is never printed. " +
+				"It writes API_SERVER_ENABLED and API_SERVER_KEY into ~/.hermes/.env, using OMLX_API then OMLX_API_KEY, keeps a backup on change, and never prints the key. " +
+				"Export the same API_SERVER_KEY in the client terminal; authenticated /health/detailed selects the gateway, otherwise the Hermes CLI fallback runs. " +
 				"Use --setup-only to write the file and stop without starting the gateway.",
 			flags:    func(fs *flag.FlagSet) { defineGatewayFlags(fs, new(bool)) },
 			examples: []string{"blk gateway --setup-only", "blk gateway"},
@@ -261,7 +261,8 @@ func commandSpecs() []cmdSpec {
 			desc: "plan and run a gated, multi-step assessment",
 			long: "Runs an engagement under one operator policy that sets target scope, actions, caps, and an isolated runner. " +
 				"Auto runs permitted actions without per-action approval; --safe asks for interactive approval. " +
-				"The workspace records policy, evidence, transcripts, and reports, and --resume continues interrupted work under the same policy.",
+				"The workspace records policy, evidence, transcripts, and reports, and --resume continues interrupted work under the same policy. " +
+				"Use blk engage setup to warm the offline OSV and Grype databases; a dispatched vuln-analysis task can fetch a recognized in-scope manifest URL and store scanner advisories as leads.",
 			flags: func(fs *flag.FlagSet) { defineEngageFlags(fs, &engageOpts{}) },
 			examples: []string{
 				`blk engage --roe ROE.md "enumerate 10.0.0.5 and report open ports"`,
@@ -274,12 +275,13 @@ func commandSpecs() []cmdSpec {
 			name: "store", args: "[action]", group: hgEngage,
 			desc: "inspect stored engagements and cite answers",
 			long: "Use --interactive for a keyboard-driven store explorer; otherwise list and search earlier engagements with their tasks, findings, evidence, actions, web records, coverage, and audit history in SQLite. " +
-				"Use --id to select an earlier engagement and --surface to narrow a view. Records are paged with --kind, --offset, and --limit. " +
+				"Use --id to select an earlier engagement, --surface to narrow a view, and --kind, --offset, and --limit to page records. " +
+				"Vulns lists scanner-reported advisories and surface lists external-surface observations, each narrowed by its own flags and paged the same way. " +
 				"Ask sends bounded, cited records to the local LLM without execution tools; validated findings require exact evidence ids.",
 			flags: func(fs *flag.FlagSet) { storeFlags(fs, &storeOptions{}) },
 			examples: []string{
-				"blk store --interactive",
 				"blk store list",
+				"blk store vulns --package lodash",
 				`blk store ask "What was found?"`,
 			},
 			run: runStore,

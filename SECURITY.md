@@ -62,8 +62,9 @@ particular:
   machine.
 - Findings that require the operator to run the tool against a system they were not authorized to
   test.
-- Dependency advisories with no reachable call path. `govulncheck` runs in the build; a report that
-  contradicts it should say which call path reaches the vulnerable symbol.
+- Dependency advisories with no reachable call path. OSV and Grype version matches are leads, not
+  proof of exploitability. `govulncheck` runs in the build; a report that contradicts it should
+  say which call path reaches the vulnerable symbol.
 
 ## Using this project
 

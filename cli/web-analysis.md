@@ -119,6 +119,34 @@ and finding previews still mask detected secrets. Storage remains restricted.
 | Source maps | depth 8, 1,000 sources, 16 MiB recovered source bytes, 5 seconds |
 | HAR import | 16 MiB, 500 entries, 64 MiB decoded bodies |
 
+# External surface and offline dependency scans
+
+During `blk engage`, a recon task naming an HTTP or HTTPS origin queues a code-owned surface
+sweep. It checks TLS, headers, cookies, CORS, methods, and metadata paths. Subdomain names come
+only from material already captured by the engagement. Every stored surface row cites the
+observation that supports it. A failed probe records a gap. The sweep uses the host-side web
+broker; command and scanner actions use isolated workers, so a host-only routing failure does not
+prove the worker cannot reach the same address.
+
+A dispatched `vuln-analysis` task with a recognized manifest, lockfile, SBOM, or `.tar` URL
+fetches the material before the model turn. The fixed `curl` request passes the RoE gate, accepts
+only HTTP 200, does not follow redirects, and caps the transfer at 10 seconds and 16 MiB. URL
+credentials, queries, fragments, traversal segments, and unsafe filenames do not enter this
+automatic path. A denied or failed fetch is an audit gap. A successful fetch runs OSV and Grype
+offline over the worker's staged file. A model-issued `curl -o` fetch can stage material for the
+same scanners. Scanners use the cache built by `blk engage setup`, mounted read-only in the worker.
+
+```sh
+blk store surface --workspace ./assessment --kind tls-protocol --limit 20
+blk store vulns --workspace ./assessment --package lodash --limit 20
+blk store vulns --workspace ./assessment --scanner grype --json
+```
+
+Scanner rows retain the task, asset, package, installed and fixed versions, advisory id, scanner,
+and exact evidence row. OSV and Grype can create separate rows for one advisory. These rows are
+version-match leads, not proof that the affected code path is reachable or exploitable. Empty or
+failed scans with missing databases remain gaps rather than clean results.
+
 # Sessions, analysis, and history
 
 Supply `--session sessions.json` to collect roles independently. Values refer to
@@ -193,7 +221,9 @@ Set `BLKCHAIN_RETIRE_MANIFEST` to a JSON file containing `path`, `sha256`, `date
 match its SHA256 and remains bounded to 4 MiB. Unsupported extractors and missing
 snapshots produce coverage gaps. Advisory findings retain snapshot date, revision,
 and hash. Outdated-library findings remain separate from vulnerability findings.
-No scanner, runtime, or advisory data downloads during an engagement.
+The Retire snapshot and OSV/Grype databases are prepared locally before a run. Engagements do
+not download scanner databases or advisory repository updates; authorized target collection can
+still fetch application content and dependency material.
 
 `archive` queries the bounded Wayback CDX adapter, saves distinct content versions,
 and selects dependency captures at or before the parent capture time. Capture
