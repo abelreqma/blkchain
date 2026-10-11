@@ -136,6 +136,14 @@ jobs:
             exit 1
           fi
 
+  runner-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: build the isolated runner image
+        working-directory: cli/runner
+        run: docker build --tag blkchain-runner:ci .
+
   secrets:
     runs-on: ubuntu-latest
     steps:
