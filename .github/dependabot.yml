@@ -16,6 +16,9 @@ updates:
       gomod:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    # langchaingo past 0.1.13 sanitizes network errors, severing the chain mapLLMError matches on.
+    ignore:
+      - dependency-name: "github.com/tmc/langchaingo"
 
   - package-ecosystem: "uv"
     directory: "/"
