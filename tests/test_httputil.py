@@ -12,7 +12,9 @@ would raise (killing the handler thread) or over-allocate.
 """
 import io
 import json
+import time
 import unittest
+from unittest import mock
 
 from blkchain.httputil import _json_sanitize, read_json_body, send_json
 
@@ -67,6 +69,56 @@ class ReadJsonBodyTest(unittest.TestCase):
         self.assertIsNone(obj)
         self.assertEqual(code, 413)
         self.assertEqual(msg, "request body too large")
+
+    def test_very_long_numeric_content_length_is_rejected(self):
+        h = FakeHandler(b"", "9" * 5000)
+        obj, code, msg = read_json_body(h, MAX)
+        self.assertIsNone(obj)
+        self.assertEqual(code, 413)
+        self.assertEqual(msg, "request body too large")
+
+    def test_incomplete_body_is_rejected(self):
+        h = FakeHandler(b"{}", "10")
+        obj, code, msg = read_json_body(h, MAX)
+        self.assertIsNone(obj)
+        self.assertEqual(code, 400)
+        self.assertEqual(msg, "incomplete request body")
+
+    def test_read_timeout_is_rejected(self):
+        class TimedOutReader:
+            def read(self, _length):
+                raise TimeoutError("read timed out")
+
+        h = FakeHandler(b"", "10")
+        h.rfile = TimedOutReader()
+        obj, code, msg = read_json_body(h, MAX)
+        self.assertIsNone(obj)
+        self.assertEqual(code, 408)
+        self.assertEqual(msg, "request body timed out")
+
+    def test_drip_does_not_extend_body_deadline(self):
+        class DripReader:
+            def __init__(self):
+                self.data = b'{"x":1}'
+
+            def read1(self, _length):
+                time.sleep(0.03)
+                chunk, self.data = self.data[:1], self.data[1:]
+                return chunk
+
+            def read(self, length):
+                chunks = []
+                for _ in range(length):
+                    chunks.append(self.read1(1))
+                return b"".join(chunks)
+
+        h = FakeHandler(b"", "7")
+        h.rfile = DripReader()
+        with mock.patch("blkchain.httputil.BODY_READ_SECONDS", 0.05):
+            obj, code, msg = read_json_body(h, MAX)
+        self.assertIsNone(obj)
+        self.assertEqual(code, 408)
+        self.assertEqual(msg, "request body timed out")
 
     def test_malformed_json_400(self):
         body = b"{not valid json"

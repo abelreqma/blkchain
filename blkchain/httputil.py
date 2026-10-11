@@ -13,7 +13,10 @@ import json
 import math
 import os
 import sys
+import time
 import traceback
+
+BODY_READ_SECONDS = 15.0
 
 
 def _json_sanitize(obj):
@@ -91,11 +94,43 @@ def read_json_body(handler, max_bytes: int):
     raw = str(handler.headers.get("Content-Length", "0")).strip() or "0"
     if not (raw.isascii() and raw.isdigit()):
         return None, 400, "invalid Content-Length"
-    length = int(raw)
-    if length > max_bytes:
+    digits = raw.lstrip("0") or "0"
+    maximum = str(max_bytes)
+    if len(digits) > len(maximum) or (len(digits) == len(maximum) and digits > maximum):
         return None, 413, "request body too large"
+    length = int(digits)
+    deadline = time.monotonic() + BODY_READ_SECONDS
+    connection = getattr(handler, "connection", None)
+    previous_timeout = connection.gettimeout() if connection is not None else None
+    read = getattr(handler.rfile, "read1", handler.rfile.read)
+    chunks = []
+    remaining = length
     try:
-        req = json.loads(handler.rfile.read(length) or b"{}")
+        while remaining:
+            seconds = deadline - time.monotonic()
+            if seconds <= 0:
+                return None, 408, "request body timed out"
+            if connection is not None:
+                connection.settimeout(seconds)
+            chunk = read(min(remaining, 64 * 1024))
+            if time.monotonic() >= deadline:
+                return None, 408, "request body timed out"
+            if not chunk:
+                return None, 400, "incomplete request body"
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except TimeoutError:
+        return None, 408, "request body timed out"
+    except (OSError, ValueError):
+        return None, 400, "request body read failed"
+    finally:
+        if connection is not None:
+            try:
+                connection.settimeout(previous_timeout)
+            except OSError:
+                pass
+    try:
+        req = json.loads(b"".join(chunks) or b"{}")
     except Exception as e:
         return None, 400, f"bad json: {e}"
     # The handlers immediately do req.get(...); a non-object body (list, string,

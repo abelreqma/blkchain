@@ -22,7 +22,7 @@ import numpy as np
 import mlx.core as mx
 
 from blkchain import config, embed_wire
-from blkchain.httputil import max_body_bytes, read_json_body, send_error, send_json
+from blkchain.httputil import BODY_READ_SECONDS, max_body_bytes, read_json_body, send_error, send_json
 
 # /embed legitimately posts many texts in one batch, so allow a larger body
 # than the retrieval API while still bounding it against a memory-DoS.
@@ -30,6 +30,8 @@ _MAX_BODY_BYTES = max_body_bytes(32 * 1024 * 1024)  # 32 MiB
 # Defense-in-depth cap on element count per request (the body-byte cap above is
 # the primary bound); a request over this is rejected before any inference.
 _MAX_ELEMENTS = 200_000
+_MAX_CLIENTS = 16
+_CLIENT_IO_TIMEOUT = BODY_READ_SECONDS
 
 # MLX forward passes are not thread-safe; serialize all inference.
 _INFER_LOCK = threading.Lock()
@@ -177,6 +179,31 @@ class _Server(ThreadingHTTPServer):
     address_family = socket.AF_INET6 if ":" in config.EMBED_SERVER_HOST else socket.AF_INET
     allow_reuse_address = True   # rebind immediately after a restart
     daemon_threads = True        # don't block shutdown on in-flight requests
+
+    def __init__(self, address, handler):
+        self._slots = threading.BoundedSemaphore(_MAX_CLIENTS)
+        super().__init__(address, handler)
+
+    def get_request(self):
+        conn, address = super().get_request()
+        conn.settimeout(_CLIENT_IO_TIMEOUT)
+        return conn, address
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
 
 def main():
