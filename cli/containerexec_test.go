@@ -42,6 +42,32 @@ type containerReconModel struct {
 	quote   string
 }
 
+func TestVulnAnalysisUsesItsScannerPersona(t *testing.T) {
+	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("scan material")}})
+	d.ReconTiers = true
+	d.Gate = autoGate(t)
+	d.Runs = NewRunOutputs()
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{
+		ID: "v1", Kind: "vuln-analysis", Target: "10.0.0.5",
+		Objective: "fetch and scan a lockfile", Status: engagement.StatusTodo,
+		Phase: engagement.PhaseRecon, Surface: engagement.SurfaceContainer,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := d.Store.GetTask("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := executorFor(d, task).Run(context.Background(), task)
+	if err != nil || !strings.Contains(out, "scan material") {
+		t.Fatalf("vulnerability task entered a recon ladder: output=%q err=%v", out, err)
+	}
+	coverage, err := d.Store.AllReconCoverage()
+	if err != nil || len(coverage) != 0 {
+		t.Fatalf("vulnerability task produced recon coverage: rows=%+v err=%v", coverage, err)
+	}
+}
+
 func (m containerReconModel) GenerateContent(_ context.Context, msgs []llms.MessageContent, _ ...llms.CallOption) (*llms.ContentResponse, error) {
 	for _, mm := range msgs {
 		if mm.Role != llms.ChatMessageTypeHuman {

@@ -1,0 +1,344 @@
+{
+ "matches": [
+  {
+   "vulnerability": {
+    "id": "CVE-2025-60876",
+    "dataSource": "https://nvd.nist.gov/vuln/detail/CVE-2025-60876",
+    "namespace": "nvd:cpe",
+    "severity": "Medium",
+    "description": "BusyBox wget thru 1.3.7 accepted raw CR (0x0D)/LF (0x0A) and other C0 control bytes in the HTTP request-target (path/query), allowing the request line to be split and attacker-controlled headers to be",
+    "cvss": [
+     {
+      "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+      "type": "Secondary",
+      "version": "3.1",
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",
+      "metrics": {
+       "baseScore": 6.5,
+       "exploitabilityScore": 3.9,
+       "impactScore": 2.6
+      },
+      "vendorMetadata": {}
+     }
+    ],
+    "fix": {
+     "versions": [],
+     "state": ""
+    }
+   },
+   "relatedVulnerabilities": [],
+   "artifact": {
+    "id": "2062803fe5f208bb",
+    "name": "busybox",
+    "version": "1.36.1-r7",
+    "type": "apk",
+    "locations": [
+     {
+      "path": "/lib/apk/db/installed",
+      "layerID": "sha256:171a26c7bc56cc6ba67549042b24db9f5bc7cc7d4f195e8f03aaf58e956b2544",
+      "accessPath": "/lib/apk/db/installed",
+      "annotations": {
+       "evidence": "primary"
+      }
+     }
+    ],
+    "language": "",
+    "purl": "pkg:apk/alpine/busybox@1.36.1-r7?arch=aarch64&distro=alpine-3.18.12",
+    "metadataType": "ApkMetadata"
+   }
+  }
+ ],
+ "source": {
+  "type": "image",
+  "target": {
+   "userInput": "alpine:3.18",
+   "imageID": "sha256:de2b9975f8fd4ab0d5ea39f52592791fadff62c0592a6e7db5640dc0d6469a01",
+   "manifestDigest": "sha256:8e37848f7b78cc19b37c74c616d919d8e50eb72f74dbc5f2c1f400debc97fae6",
+   "tags": []
+  }
+ },
+ "distro": {
+  "name": "alpine",
+  "version": "3.18.12",
+  "idLike": []
+ },
+ "descriptor": {
+  "name": "grype",
+  "version": "[not provided]",
+  "configuration": {
+   "output": [
+    "json"
+   ],
+   "file": "",
+   "pretty": false,
+   "distro": "",
+   "add-cpes-if-none": false,
+   "output-template-file": "",
+   "check-for-app-update": true,
+   "only-fixed": false,
+   "only-notfixed": false,
+   "ignore-wontfix": "",
+   "platform": "",
+   "search": {
+    "scope": "squashed",
+    "unindexed-archives": false,
+    "indexed-archives": true
+   },
+   "ignore": [
+    {
+     "vulnerability": "",
+     "include-aliases": false,
+     "reason": "",
+     "namespace": "",
+     "fix-state": "",
+     "package": {
+      "name": "kernel-headers",
+      "version": "",
+      "language": "",
+      "type": "rpm",
+      "location": "",
+      "upstream-name": "kernel"
+     },
+     "vex-status": "",
+     "vex-justification": "",
+     "match-type": "exact-indirect-match"
+    },
+    {
+     "vulnerability": "",
+     "include-aliases": false,
+     "reason": "",
+     "namespace": "",
+     "fix-state": "",
+     "package": {
+      "name": "linux(-.*)?-headers-.*",
+      "version": "",
+      "language": "",
+      "type": "deb",
+      "location": "",
+      "upstream-name": "linux.*"
+     },
+     "vex-status": "",
+     "vex-justification": "",
+     "match-type": "exact-indirect-match"
+    },
+    {
+     "vulnerability": "",
+     "include-aliases": false,
+     "reason": "",
+     "namespace": "",
+     "fix-state": "",
+     "package": {
+      "name": "linux-libc-dev",
+      "version": "",
+      "language": "",
+      "type": "deb",
+      "location": "",
+      "upstream-name": "linux"
+     },
+     "vex-status": "",
+     "vex-justification": "",
+     "match-type": "exact-indirect-match"
+    }
+   ],
+   "exclude": [],
+   "externalSources": {
+    "enable": false,
+    "maven": {
+     "searchUpstreamBySha1": true,
+     "baseUrl": "https://search.maven.org/solrsearch/select",
+     "rateLimit": 300000000
+    }
+   },
+   "match": {
+    "java": {
+     "using-cpes": false
+    },
+    "jvm": {
+     "using-cpes": true
+    },
+    "dotnet": {
+     "using-cpes": false
+    },
+    "golang": {
+     "using-cpes": false,
+     "always-use-cpe-for-stdlib": true,
+     "allow-main-module-pseudo-version-comparison": false
+    },
+    "javascript": {
+     "using-cpes": false
+    },
+    "python": {
+     "using-cpes": false
+    },
+    "ruby": {
+     "using-cpes": false
+    },
+    "rust": {
+     "using-cpes": false
+    },
+    "stock": {
+     "using-cpes": true
+    }
+   },
+   "fail-on-severity": "",
+   "registry": {
+    "insecure-skip-tls-verify": false,
+    "insecure-use-http": false,
+    "auth": null,
+    "ca-cert": ""
+   },
+   "show-suppressed": false,
+   "by-cve": false,
+   "SortBy": {
+    "sort-by": "risk"
+   },
+   "name": "",
+   "default-image-pull-source": "",
+   "vex-documents": [],
+   "vex-add": [],
+   "match-upstream-kernel-headers": false,
+   "fix-channel": {
+    "redhat-eus": {
+     "apply": "auto",
+     "versions": ">= 8.0"
+    }
+   },
+   "timestamp": true,
+   "db": {
+    "cache-dir": "/Users/blkbrd/Library/Caches/grype/db",
+    "update-url": "https://grype.anchore.io/databases",
+    "ca-cert": "",
+    "auto-update": true,
+    "validate-by-hash-on-start": true,
+    "validate-age": true,
+    "max-allowed-built-age": 432000000000000,
+    "require-update-check": false,
+    "update-available-timeout": 30000000000,
+    "update-download-timeout": 300000000000,
+    "max-update-check-frequency": 7200000000000
+   },
+   "exp": {},
+   "dev": {
+    "db": {
+     "debug": false
+    }
+   }
+  },
+  "db": {
+   "status": {
+    "schemaVersion": "v6.1.10",
+    "from": "https://grype.anchore.io/databases/v6/vulnerability-db_v6.1.10_2026-10-10T00:34:49Z_1791613801.tar.zst?checksum=sha256%3A9c7673c1d8526a5696e6af4cd26f48c3d4ab34c30e40ffe212a811c44ab5f0c1",
+    "built": "2026-10-10T06:30:01Z",
+    "path": "/Users/blkbrd/Library/Caches/grype/db/6/vulnerability.db",
+    "valid": true
+   },
+   "providers": {
+    "alma": {
+     "captured": "2026-10-10T00:35:19Z",
+     "input": "xxh64:fa6021eeb96614ec"
+    },
+    "alpine": {
+     "captured": "2026-10-10T00:35:30Z",
+     "input": "xxh64:935f13d8c01d6fc4"
+    },
+    "amazon": {
+     "captured": "2026-10-10T00:35:25Z",
+     "input": "xxh64:bc05a09fe38da3bd"
+    },
+    "arch": {
+     "captured": "2026-10-10T00:34:51Z",
+     "input": "xxh64:1d10d154d8868105"
+    },
+    "bitnami": {
+     "captured": "2026-10-10T00:34:59Z",
+     "input": "xxh64:bc896cdb9eeaf19f"
+    },
+    "chainguard": {
+     "captured": "2026-10-10T00:35:25Z",
+     "input": "xxh64:7edca4844746ccfc"
+    },
+    "chainguard-libraries": {
+     "captured": "2026-10-10T00:35:18Z",
+     "input": "xxh64:3ae753c47503b831"
+    },
+    "debian": {
+     "captured": "2026-10-10T00:35:03Z",
+     "input": "xxh64:e71e120e6da87253"
+    },
+    "echo": {
+     "captured": "2026-10-10T00:35:17Z",
+     "input": "xxh64:0758ad31e1529030"
+    },
+    "eol": {
+     "captured": "2026-10-10T00:34:49Z",
+     "input": "xxh64:93f53484fb0342e9"
+    },
+    "epss": {
+     "captured": "2026-10-10T00:35:07Z",
+     "input": "xxh64:aa4a3b9cb47532ce"
+    },
+    "fedora": {
+     "captured": "2026-10-10T00:34:58Z",
+     "input": "xxh64:091c01790140411d"
+    },
+    "github": {
+     "captured": "2026-10-10T00:35:35Z",
+     "input": "xxh64:ce27bb531ca44b73"
+    },
+    "govulndb": {
+     "captured": "2026-10-10T00:34:54Z",
+     "input": "xxh64:b365aa1c51dad946"
+    },
+    "hummingbird": {
+     "captured": "2026-10-10T00:37:31Z",
+     "input": "xxh64:c267f95d54ac3219"
+    },
+    "kev": {
+     "captured": "2026-10-10T00:34:58Z",
+     "input": "xxh64:b0d499c7f5ff1cee"
+    },
+    "mariner": {
+     "captured": "2026-10-10T00:34:54Z",
+     "input": "xxh64:3c820d09ff8ad6a3"
+    },
+    "minimos": {
+     "captured": "2026-10-10T00:34:57Z",
+     "input": "xxh64:951565842d89bb69"
+    },
+    "nvd": {
+     "captured": "2026-10-10T00:35:53Z",
+     "input": "xxh64:8c63c4f719534506"
+    },
+    "oracle": {
+     "captured": "2026-10-10T00:35:23Z",
+     "input": "xxh64:4cbf6a809d7cebdf"
+    },
+    "photon": {
+     "captured": "2026-10-10T00:35:18Z",
+     "input": "xxh64:d14c5749066516cb"
+    },
+    "rhel": {
+     "captured": "2026-10-10T00:36:12Z",
+     "input": "xxh64:6ee76ae7b60b3b4d"
+    },
+    "secureos": {
+     "captured": "2026-10-10T00:35:00Z",
+     "input": "xxh64:99ea90bc73b51505"
+    },
+    "sles": {
+     "captured": "2026-10-10T00:36:45Z",
+     "input": "xxh64:c2efa7ddee8ab23d"
+    },
+    "ubuntu": {
+     "captured": "2026-10-10T00:35:51Z",
+     "input": "xxh64:ff5039bbd738c793"
+    },
+    "wolfi": {
+     "captured": "2026-10-10T00:35:47Z",
+     "input": "xxh64:fac495e865ef7e24"
+    }
+   }
+  },
+  "timestamp": "2026-10-10T19:45:19.070692-07:00"
+ }
+}

@@ -104,7 +104,7 @@ func (e localExecutor) localRunTargetAnalysis(ctx context.Context, task engageme
 	}
 	if e.d.Gate != nil && e.d.Runs != nil {
 		runTimeout, runCap := resolveRunCaps()
-		execDir, cleanup, err := newExecutorScratchDir(ctx, e.d.WorkDir)
+		execDir, cleanup, err := newExecutorScratchDir(ctx, e.d)
 		if err != nil {
 			return "", err
 		}

@@ -297,11 +297,11 @@ func TestFootholdPinIPs(t *testing.T) {
 // confinement changes when a foothold is present.
 func TestWorkerArgsForwardsDeclaredEnvOnly(t *testing.T) {
 	image := "sha256:" + strings.Repeat("a", 64)
-	with := strings.Join(engageWorkerArgs("w", "guard", image, "", []string{"FOOTHOLD_TOKEN"}), " ")
+	with := strings.Join(engageWorkerArgs("w", "guard", image, "", "", []string{"FOOTHOLD_TOKEN"}), " ")
 	if !strings.Contains(with, "--env FOOTHOLD_TOKEN") {
 		t.Errorf("worker args %q do not forward the declared variable", with)
 	}
-	without := strings.Join(engageWorkerArgs("w", "guard", image, "", nil), " ")
+	without := strings.Join(engageWorkerArgs("w", "guard", image, "", "", nil), " ")
 	if strings.Contains(without, "FOOTHOLD_TOKEN") {
 		t.Error("an undeclared variable reached the worker")
 	}

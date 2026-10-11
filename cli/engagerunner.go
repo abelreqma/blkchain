@@ -34,16 +34,18 @@ type engageRunner struct {
 	hosts        []string
 	hostsDir     string
 	hostsFile    string
-	slots        chan struct{}
-	closed       bool
-	foothold     *footholdTransport
-	remove       func(context.Context, string) error
-	resolve      func(context.Context, string) ([]net.IPAddr, error)
-	runFn        func(context.Context, []pipelineStage, string, int, time.Duration) (runResult, []isolatedStageResult)
+	// vulnDB is the operator's provisioned scanner database directory, or "" when none is provisioned.
+	vulnDB   string
+	slots    chan struct{}
+	closed   bool
+	foothold *footholdTransport
+	remove   func(context.Context, string) error
+	resolve  func(context.Context, string) ([]net.IPAddr, error)
+	runFn    func(context.Context, []pipelineStage, string, int, time.Duration) (runResult, []isolatedStageResult)
 }
 
-func engageWorkerArgs(name, guard, image, hostsFile string, env []string) []string {
-	return workerArgs(name, guard, image, hostsFile, env, false)
+func engageWorkerArgs(name, guard, image, hostsFile, vulnDB string, env []string) []string {
+	return workerArgs(name, guard, image, hostsFile, vulnDB, env, false)
 }
 
 // engageRawWorkerArgs builds the raw-socket worker. It differs from the general
@@ -56,31 +58,35 @@ func engageWorkerArgs(name, guard, image, hostsFile string, env []string) []stri
 // no-new-privileges, the same memory, cpu, pid and file limits, the same
 // read-only host pins, and the guard's network namespace, so the firewall still
 // bounds every destination.
-func engageRawWorkerArgs(name, guard, image, hostsFile string, env []string) []string {
-	return workerArgs(name, guard, image, hostsFile, env, true)
+func engageRawWorkerArgs(name, guard, image, hostsFile, vulnDB string, env []string) []string {
+	return workerArgs(name, guard, image, hostsFile, vulnDB, env, true)
 }
 
 // workerArgs builds a worker container. env names environment variables the
 // operator declared for a foothold carrier; their values are forwarded from this
 // process so a carrier can authenticate, and nothing else from the operator
 // environment crosses into the worker.
-func workerArgs(name, guard, image, hostsFile string, env []string, raw bool) []string {
+func workerArgs(name, guard, image, hostsFile, vulnDB string, env []string, raw bool) []string {
 	// The raw worker runs as uid 0 but holds only NET_RAW, so it has no
 	// CAP_DAC_OVERRIDE and cannot write a scratch mount owned by another uid. Its
 	// /work must therefore be root-owned; it is still a private tmpfs per
 	// container.
-	user, work := "1000:1000", "/work:rw,nosuid,nodev,size=128m,uid=1000,gid=1000"
+	user, work, memory := "1000:1000", "/work:rw,nosuid,nodev,size=128m,uid=1000,gid=1000", "2g"
 	if raw {
-		user, work = "0:0", "/work:rw,nosuid,nodev,size=128m,uid=0,gid=0"
+		user, work, memory = "0:0", "/work:rw,nosuid,nodev,size=128m,uid=0,gid=0", "256m"
 	}
 	args := []string{"run", "-d", "--name", name, "--network", "container:" + guard, "--read-only", "--cap-drop", "ALL"}
 	args = append(args, runnerOwnerArgs()...)
 	if raw {
 		args = append(args, "--cap-add", "NET_RAW")
 	}
-	args = append(args, "--security-opt", "no-new-privileges", "--user", user, "--memory", "256m", "--cpus", "1", "--pids-limit", "64", "--ulimit", "nofile=256:256", "--ulimit", "fsize=67108864:67108864", "--tmpfs", work, "--tmpfs", "/tmp:rw,nosuid,nodev,size=32m", "--env", "HOME=/work", "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "--entrypoint", "/bin/sh")
+	args = append(args, "--security-opt", "no-new-privileges", "--user", user, "--memory", memory, "--cpus", "1", "--pids-limit", "64", "--ulimit", "nofile=256:256", "--ulimit", "fsize=67108864:67108864", "--tmpfs", work, "--tmpfs", "/tmp:rw,nosuid,nodev,size=32m", "--env", "HOME=/work", "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "--entrypoint", "/bin/sh")
 	if hostsFile != "" {
 		args = append(args, "--mount", "type=bind,src="+hostsFile+",dst=/etc/hosts,readonly")
+	}
+	// Workers read the cache prepared by setup but cannot change it.
+	if vulnDB != "" {
+		args = append(args, "--mount", "type=bind,src="+vulnDB+",dst="+vulnDBMount+",readonly")
 	}
 	for _, name := range env {
 		args = append(args, "--env", name)
@@ -317,8 +323,18 @@ func setupEngageRunner(ctx context.Context) error {
 			return err
 		}
 	}
-	_, err = runnerDocker(ctx, nil, "build", "--tag", defaultRunnerTag(), dir)
-	return err
+	if _, err = runnerDocker(ctx, nil, "build", "--tag", defaultRunnerTag(), dir); err != nil {
+		return err
+	}
+	db, err := vulnDBDir()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "Warming scanner databases in %s\n", db)
+	if err := updateVulnDB(ctx, db, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stdout, "%s\nScans without a cached database will report a gap; rerun setup after the download succeeds.\n", err)
+	}
+	return nil
 }
 
 func runnerName(prefix string) string {
@@ -358,7 +374,7 @@ func newEngageRunner(ctx context.Context, roe *RoE) (result *engageRunner, err e
 		return err
 	})
 	guardName := runnerName("blk-guard-")
-	r := &engageRunner{image: imageID, workers: map[string]string{}, rawWorkers: map[string]string{}, slots: make(chan struct{}, p.Parallel), foothold: transport}
+	r := &engageRunner{image: imageID, workers: map[string]string{}, rawWorkers: map[string]string{}, slots: make(chan struct{}, p.Parallel), foothold: transport, vulnDB: vulnDBCacheDir()}
 	ok := false
 	defer func() {
 		if !ok {
@@ -616,9 +632,9 @@ func planWildcardEgress(ctx context.Context, scope *secgate.Scope, stages []pipe
 }
 
 // RunScoped gives a wildcard action its own network guard and checked IP list.
-func (r *engageRunner) RunScoped(ctx context.Context, stages []pipelineStage, dir string, limit int, timeout time.Duration, plan engageEgressPlan, policy *secgate.Policy) (runResult, []isolatedStageResult) {
+func (r *engageRunner) RunScoped(ctx context.Context, stages []pipelineStage, dir string, limit int, timeout time.Duration, plan engageEgressPlan, policy *secgate.Policy, forceRaw bool, beforeClose func(*engageRunner, runResult, []isolatedStageResult)) (runResult, []isolatedStageResult) {
 	if !plan.Dynamic {
-		return r.Run(ctx, stages, dir, limit, timeout)
+		return r.runWithWorker(ctx, stages, dir, limit, timeout, forceRaw)
 	}
 	if r == nil || r.slots == nil || policy == nil || len(plan.IPs) == 0 {
 		return runResult{Err: errors.New("action-scoped runner configuration missing")}, nil
@@ -655,7 +671,10 @@ func (r *engageRunner) RunScoped(ctx context.Context, stages []pipelineStage, di
 		return runResult{Err: err}, nil
 	}
 	worker.hosts = append([]string(nil), plan.Hosts...)
-	result, outputs := worker.Run(ctx, stages, dir, limit, timeout)
+	result, outputs := worker.runWithWorker(ctx, stages, dir, limit, timeout, forceRaw)
+	if beforeClose != nil {
+		beforeClose(worker, result, outputs)
+	}
 	if err := worker.Close(); err != nil {
 		result.Err = errors.Join(result.Err, fmt.Errorf("action-scoped runner cleanup failed: %w", err))
 	}
@@ -706,7 +725,7 @@ func (r *engageRunner) worker(ctx context.Context, dir string, raw bool) (string
 	if r.foothold != nil {
 		env = r.foothold.env
 	}
-	if _, err := runnerDocker(ctx, nil, args(id, r.guard, r.image, r.hostsFile, env)...); err != nil {
+	if _, err := runnerDocker(ctx, nil, args(id, r.guard, r.image, r.hostsFile, r.vulnDB, env)...); err != nil {
 		return "", err
 	}
 	// Carrier secrets are written by the worker itself, so the files carry its
@@ -815,6 +834,10 @@ func (r *engageRunner) footholdEnvNames() []string {
 }
 
 func (r *engageRunner) Run(ctx context.Context, stages []pipelineStage, dir string, limit int, timeout time.Duration) (runResult, []isolatedStageResult) {
+	return r.runWithWorker(ctx, stages, dir, limit, timeout, false)
+}
+
+func (r *engageRunner) runWithWorker(ctx context.Context, stages []pipelineStage, dir string, limit int, timeout time.Duration, forceRaw bool) (runResult, []isolatedStageResult) {
 	if r.runFn != nil {
 		return r.runFn(ctx, stages, dir, limit, timeout)
 	}
@@ -824,7 +847,7 @@ func (r *engageRunner) Run(ctx context.Context, stages []pipelineStage, dir stri
 		return runResult{Err: ctx.Err()}, nil
 	}
 	defer func() { <-r.slots }()
-	id, err := r.worker(ctx, dir, pipelineNeedsRawSocket(stages))
+	id, err := r.worker(ctx, dir, forceRaw || pipelineNeedsRawSocket(stages))
 	if err != nil {
 		return runResult{Err: err}, nil
 	}

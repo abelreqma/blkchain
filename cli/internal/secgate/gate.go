@@ -52,6 +52,9 @@ type Gate struct {
 	AutoAction           func(Command) bool
 	AllowInterpreterPoC  bool
 
+	// NoDestination are the binaries audited as addressing no network destination and confining their own paths, for which the EXTERNAL profile accepts a command with no target.
+	NoDestination *Allowlist
+
 	// AutoScopeOverride is the explicit, logged operator override that relaxes
 	// "/auto requires a scope" to "/auto requires scope OR an override". It
 	// permits Auto to start with no scope; a one-time `override`
@@ -360,7 +363,8 @@ func (g *Gate) checkLocked(c Command) Decision {
 			if !ok {
 				return g.deny("scope", c, "command has an unverifiable target (cannot confirm it is in scope)", "")
 			}
-			if len(targets) == 0 && len(nets) == 0 {
+			// For a binary audited as addressing no destination, no target is the expected result rather than one the extractor missed.
+			if len(targets) == 0 && len(nets) == 0 && !g.noDestination(c.Binary) {
 				return g.deny("scope", c, "no verifiable target to check against the scope", "")
 			}
 			for _, tgt := range targets {
@@ -425,6 +429,11 @@ func (g *Gate) rateAllowLocked(c Command) Decision {
 // with confirmTailLocked's needConfirm, minus the session-approval memoization - a
 // remembered approval was still a human decision and does not make a path
 // unattended.
+// noDestination reports whether binary is audited as addressing no network destination.
+func (g *Gate) noDestination(binary string) bool {
+	return g != nil && g.NoDestination != nil && g.NoDestination.Permits(binary)
+}
+
 func (g *Gate) humanGovernedPath(c Command) bool {
 	if g.Confirm == nil {
 		return false

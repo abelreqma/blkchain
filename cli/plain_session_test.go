@@ -201,9 +201,15 @@ func TestPlainUndoWithoutSQLitePreservesEarlierExchange(t *testing.T) {
 // that selects the transport, session creation, and the SSE chat stream.
 func fakeGateway(t *testing.T, answer string) {
 	t.Helper()
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("HERMES_HOME", t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer fixture-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		switch {
-		case r.URL.Path == "/health":
+		case r.URL.Path == "/health/detailed":
 			w.WriteHeader(http.StatusOK)
 		case r.URL.Path == "/api/sessions":
 			w.Header().Set("Content-Type", "application/json")
@@ -219,6 +225,7 @@ func fakeGateway(t *testing.T, answer string) {
 	}))
 	t.Cleanup(server.Close)
 	t.Setenv("HERMES_API_URL", server.URL)
+	t.Setenv("API_SERVER_KEY", "fixture-key")
 }
 
 // A plain-REPL agent turn runs through the same transport wiring the TUI uses,

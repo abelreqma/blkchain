@@ -215,12 +215,12 @@ func TestExecutorRunsCommandAndRecordsEvidence(t *testing.T) {
 
 func TestNewExecutorScratchDirDistinctPerCall(t *testing.T) {
 	root := t.TempDir()
-	dir1, cleanup1, err := newExecutorScratchDir(context.Background(), root)
+	dir1, cleanup1, err := newExecutorScratchDir(context.Background(), engageDeps{WorkDir: root})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cleanup1()
-	dir2, cleanup2, err := newExecutorScratchDir(context.Background(), root)
+	dir2, cleanup2, err := newExecutorScratchDir(context.Background(), engageDeps{WorkDir: root})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestNewExecutorScratchDirDistinctPerCall(t *testing.T) {
 }
 
 func TestNewExecutorScratchDirEmptyRootNoScratch(t *testing.T) {
-	dir, cleanup, err := newExecutorScratchDir(context.Background(), "")
+	dir, cleanup, err := newExecutorScratchDir(context.Background(), engageDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestNewExecutorScratchDirConcurrentDistinct(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			dir, cleanup, err := newExecutorScratchDir(context.Background(), root)
+			dir, cleanup, err := newExecutorScratchDir(context.Background(), engageDeps{WorkDir: root})
 			if err != nil {
 				errs <- err
 				return
@@ -351,7 +351,7 @@ func TestExecutorScratchCleanupReleasesRunnerWorkers(t *testing.T) {
 		return nil
 	}
 	ctx := context.WithValue(context.Background(), engageRuntimeKey{}, &engageRuntime{runner: r})
-	dir, cleanup, err := newExecutorScratchDir(ctx, t.TempDir())
+	dir, cleanup, err := newExecutorScratchDir(ctx, engageDeps{WorkDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}

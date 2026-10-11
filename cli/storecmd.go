@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,11 @@ type storeOptions struct {
 	limit       int
 	evidence    string
 	search      string
+	advisory    string
+	scanner     string
+	ecosystem   string
+	pkg         string
+	name        string
 	interactive bool
 }
 
@@ -56,6 +62,11 @@ func storeFlags(fs *flag.FlagSet, o *storeOptions) {
 	fs.StringVar(&o.detail, "detail", "", "finding detail")
 	fs.StringVar(&o.evidence, "evidence", "", "comma-separated exact evidence row ids")
 	fs.StringVar(&o.search, "search", "", "find earlier engagements by id, name, target, or surface")
+	fs.StringVar(&o.advisory, "advisory", "", "advisory id such as CVE-2026-0001")
+	fs.StringVar(&o.scanner, "scanner", "", "scanner that reported the advisory")
+	fs.StringVar(&o.ecosystem, "ecosystem", "", "package ecosystem")
+	fs.StringVar(&o.pkg, "package", "", "package name")
+	fs.StringVar(&o.name, "name", "", "surface record name, such as a header or a path")
 	fs.BoolVar(&o.json, "json", false, "print JSON")
 	fs.BoolVar(&o.interactive, "interactive", false, "open the interactive engagement store")
 	fs.IntVar(&o.offset, "offset", 0, "record page offset")
@@ -64,11 +75,11 @@ func storeFlags(fs *flag.FlagSet, o *storeOptions) {
 
 func parseStoreArgs(args []string) (string, storeOptions, []string, error) {
 	if len(args) == 0 {
-		return "", storeOptions{}, nil, missingArg("store", "choose list, show, records, findings, ask, add, or review", "blk store list")
+		return "", storeOptions{}, nil, missingArg("store", "choose list, show, records, findings, vulns, surface, ask, add, or review", "blk store list")
 	}
 	verb := args[0]
 	switch verb {
-	case "list", "show", "records", "findings", "ask", "add", "review":
+	case "list", "show", "records", "findings", "vulns", "surface", "ask", "add", "review":
 	default:
 		return "", storeOptions{}, nil, fmt.Errorf("store: unknown action %q", verb)
 	}
@@ -76,7 +87,7 @@ func parseStoreArgs(args []string) (string, storeOptions, []string, error) {
 	o := storeOptions{}
 	storeFlags(fs, &o)
 	valueFlags := map[string]bool{}
-	for _, name := range []string{"id", "workspace", "surface", "kind", "status", "severity", "finding", "task", "asset", "title", "impact", "confidence", "detail", "evidence", "search", "offset", "limit"} {
+	for _, name := range []string{"id", "workspace", "surface", "kind", "status", "severity", "finding", "task", "asset", "title", "impact", "confidence", "detail", "evidence", "search", "advisory", "scanner", "ecosystem", "package", "name", "offset", "limit"} {
 		valueFlags[name] = true
 	}
 	if err := parseFlags(fs, reorder(args[1:], valueFlags)); err != nil {
@@ -111,11 +122,20 @@ func parseStoreArgs(args []string) (string, storeOptions, []string, error) {
 		}
 	}
 	if o.severity != "" {
-		switch o.severity {
-		case "info", "low", "medium", "high", "critical":
-		default:
-			return "", o, nil, fmt.Errorf("store: unknown severity %q", o.severity)
+		if verb == "vulns" {
+			if !slices.Contains(engagement.VulnSeverities(), o.severity) {
+				return "", o, nil, fmt.Errorf("store: unknown severity %q", o.severity)
+			}
+		} else {
+			switch o.severity {
+			case "info", "low", "medium", "high", "critical":
+			default:
+				return "", o, nil, fmt.Errorf("store: unknown severity %q", o.severity)
+			}
 		}
+	}
+	if verb == "surface" && o.kind != "" && !slices.Contains(engagement.SurfaceKinds(), o.kind) {
+		return "", o, nil, fmt.Errorf("store surface: unknown kind %q; use %s", o.kind, strings.Join(engagement.SurfaceKinds(), ", "))
 	}
 	return verb, o, fs.Args(), nil
 }
@@ -496,6 +516,65 @@ func runStoreTo(ctx context.Context, args []string, w io.Writer, model toolLoopM
 			_, err = fmt.Fprintln(w, "No matching findings.")
 		}
 		return err
+	case "vulns":
+		if len(rest) != 0 {
+			return errors.New("store vulns takes no arguments")
+		}
+		vs, err := ws.Store.Vulns(ctx, engagement.VulnFilter{
+			Asset: o.asset, Advisory: o.advisory, Severity: o.severity,
+			Scanner: o.scanner, Ecosystem: o.ecosystem, Package: o.pkg,
+			Limit: o.limit, Offset: o.offset,
+		})
+		if err != nil {
+			return err
+		}
+		if o.json {
+			return writeStoreJSON(w, vs)
+		}
+		for _, v := range vs {
+			fixed := v.FixedVersion
+			if fixed == "" {
+				fixed = "no fix recorded"
+			}
+			// The scanner is named because each one records its own finding: two rows for one advisory are two reports of it, not a duplicate.
+			if _, err := fmt.Fprintf(w, "[%s] %s  %s %s  fix: %s  (%s via %s)\n",
+				terminalSafe(severityLabel(v.Severity)), terminalSafe(v.Advisory),
+				terminalSafe(v.Package), terminalSafe(v.PackageVersion),
+				terminalSafe(fixed), terminalSafe(v.Asset), terminalSafe(v.Scanner)); err != nil {
+				return err
+			}
+		}
+		if len(vs) == 0 {
+			_, err = fmt.Fprintln(w, "No matching advisories.")
+		}
+		return err
+	case "surface":
+		if len(rest) != 0 {
+			return errors.New("store surface takes no arguments")
+		}
+		records, err := ws.Store.Surfaces(ctx, engagement.SurfaceFilter{
+			Asset: o.asset, Kind: o.kind, Name: o.name, Limit: o.limit, Offset: o.offset,
+		})
+		if err != nil {
+			return err
+		}
+		if o.json {
+			return writeStoreJSON(w, records)
+		}
+		for _, r := range records {
+			line := fmt.Sprintf("[%s] %s  %s  (%s)",
+				terminalSafe(r.Kind), terminalSafe(r.Name), terminalSafe(r.Value), terminalSafe(r.Asset))
+			if r.Gap != "" {
+				line += "\n   gap: " + terminalSafe(capRunes(r.Gap, 160))
+			}
+			if _, err := fmt.Fprintln(w, line); err != nil {
+				return err
+			}
+		}
+		if len(records) == 0 {
+			_, err = fmt.Fprintln(w, "No matching surface records.")
+		}
+		return err
 	case "add", "review":
 		if len(rest) != 0 {
 			return errors.New("store add and review take flags only")
@@ -597,4 +676,12 @@ func runStoreTo(ctx context.Context, args []string, w io.Writer, model toolLoopM
 		return nil
 	}
 	return errors.New("store action unavailable")
+}
+
+// severityLabel renders an unrated advisory as "unknown" rather than a blank cell.
+func severityLabel(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	return s
 }

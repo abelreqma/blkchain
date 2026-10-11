@@ -196,6 +196,8 @@ type Result struct {
 	Dependencies  []Dependency   `json:"dependencies"`
 	Gaps          []Gap          `json:"gaps"`
 	Formatted     []byte         `json:"formatted,omitempty"`
+	// AST is the serialized syntax tree, present when Input.KeepAST was set.
+	AST *AST `json:"ast,omitempty"`
 }
 type Dependency struct {
 	URL        string   `json:"url,omitempty"`

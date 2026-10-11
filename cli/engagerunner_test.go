@@ -38,7 +38,7 @@ func TestEngageRunnerCleanupFailureIsReportedAndRetried(t *testing.T) {
 }
 
 func TestEngageWorkerHasNoHostAccess(t *testing.T) {
-	args := engageWorkerArgs("worker", "guard", "sha256:"+strings.Repeat("a", 64), "", nil)
+	args := engageWorkerArgs("worker", "guard", "sha256:"+strings.Repeat("a", 64), "", "", nil)
 	s := strings.Join(args, " ")
 	for _, want := range []string{"--read-only", "--cap-drop ALL", "--security-opt no-new-privileges", "--user 1000:1000", "--network container:guard", "--pids-limit", "--memory", "--tmpfs"} {
 		if !strings.Contains(s, want) {
@@ -69,7 +69,7 @@ func TestEngageWorkerPinsHostsFromPrivateReadOnlyFile(t *testing.T) {
 	if info.Mode().Perm() != 0700 {
 		t.Fatalf("host pin directory mode=%v", info.Mode())
 	}
-	args := strings.Join(engageWorkerArgs("worker", "guard", "sha256:"+strings.Repeat("a", 64), path, nil), " ")
+	args := strings.Join(engageWorkerArgs("worker", "guard", "sha256:"+strings.Repeat("a", 64), path, "", nil), " ")
 	if !strings.Contains(args, "--mount type=bind,src="+path+",dst=/etc/hosts,readonly") {
 		t.Fatalf("worker did not mount only its generated host pins: %s", args)
 	}
@@ -273,7 +273,7 @@ func TestWildcardRunUsesActionScopedGuardAndCleansUp(t *testing.T) {
 	}
 	parent := &engageRunner{slots: make(chan struct{}, 1)}
 	plan := engageEgressPlan{Dynamic: true, IPs: []string{"10.20.0.6"}, Hosts: []string{"10.20.0.6 api.example.test"}}
-	result, outputs := parent.RunScoped(context.Background(), []pipelineStage{{Binary: "curl", Args: []string{"http://api.example.test/"}}}, "task", 1024, time.Second, plan, policy)
+	result, outputs := parent.RunScoped(context.Background(), []pipelineStage{{Binary: "curl", Args: []string{"http://api.example.test/"}}}, "task", 1024, time.Second, plan, policy, false, nil)
 	if result.Err != nil || result.Output != "observed" || len(outputs) != 1 || !removed["worker"] || !removed["guard"] {
 		t.Fatalf("scoped run result=%+v outputs=%+v removed=%v", result, outputs, removed)
 	}
@@ -289,7 +289,7 @@ func TestWildcardRunRejectsClosedParent(t *testing.T) {
 	}
 	parent := &engageRunner{closed: true, slots: make(chan struct{}, 1)}
 	plan := engageEgressPlan{Dynamic: true, IPs: []string{"10.20.0.6"}}
-	result, _ := parent.RunScoped(context.Background(), []pipelineStage{{Binary: "curl", Args: []string{"http://api.example.test/"}}}, "task", 1024, time.Second, plan, secgate.DefaultPolicy())
+	result, _ := parent.RunScoped(context.Background(), []pipelineStage{{Binary: "curl", Args: []string{"http://api.example.test/"}}}, "task", 1024, time.Second, plan, secgate.DefaultPolicy(), false, nil)
 	if result.Err == nil || called {
 		t.Fatalf("closed runner launched an action: err=%v called=%v", result.Err, called)
 	}
@@ -307,7 +307,7 @@ func TestWildcardRunReportsGuardCleanupFailure(t *testing.T) {
 	}
 	parent := &engageRunner{slots: make(chan struct{}, 1)}
 	plan := engageEgressPlan{Dynamic: true, IPs: []string{"10.20.0.6"}}
-	result, outputs := parent.RunScoped(context.Background(), []pipelineStage{{Binary: "curl", Args: []string{"http://api.example.test/"}}}, "task", 1024, time.Second, plan, secgate.DefaultPolicy())
+	result, outputs := parent.RunScoped(context.Background(), []pipelineStage{{Binary: "curl", Args: []string{"http://api.example.test/"}}}, "task", 1024, time.Second, plan, secgate.DefaultPolicy(), false, nil)
 	if len(outputs) != 1 || !strings.Contains(result.Output, "partial") || result.Err == nil || !strings.Contains(result.Err.Error(), "cleanup refused") {
 		t.Fatalf("cleanup failure or partial output lost: result=%+v outputs=%+v", result, outputs)
 	}
@@ -394,11 +394,11 @@ func TestWildcardActionRunnerLiveBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, stages := runner.RunScoped(ctx, []pipelineStage{{Binary: "curl", Args: []string{"--max-time", "5", "http://api.example.test:8080/"}}}, "wildcard", 65536, 8*time.Second, plan, roe.Policy)
+	result, stages := runner.RunScoped(ctx, []pipelineStage{{Binary: "curl", Args: []string{"--max-time", "5", "http://api.example.test:8080/"}}}, "wildcard", 65536, 8*time.Second, plan, roe.Policy, false, nil)
 	if result.Err != nil || len(stages) != 1 || stages[0].ExitCode != 0 || !strings.Contains(result.Output, "wildcard-fixture-ok") {
 		t.Fatalf("pinned wildcard command failed: result=%+v stages=%+v", result, stages)
 	}
-	result, stages = runner.RunScoped(ctx, []pipelineStage{{Binary: "curl", Args: []string{"--connect-timeout", "2", "--max-time", "3", "http://" + blockedIP + ":8080/"}}}, "wildcard", 65536, 5*time.Second, plan, roe.Policy)
+	result, stages = runner.RunScoped(ctx, []pipelineStage{{Binary: "curl", Args: []string{"--connect-timeout", "2", "--max-time", "3", "http://" + blockedIP + ":8080/"}}}, "wildcard", 65536, 5*time.Second, plan, roe.Policy, false, nil)
 	if len(stages) != 1 || (result.Err == nil && stages[0].ExitCode == 0) || strings.Contains(result.Output, "blocked-fixture") {
 		t.Fatalf("action guard reached another IP: result=%+v stages=%+v", result, stages)
 	}
@@ -406,7 +406,7 @@ func TestWildcardActionRunnerLiveBoundary(t *testing.T) {
 
 func TestEngageRawWorkerAddsOnlyRawSocketCapability(t *testing.T) {
 	image := "sha256:" + strings.Repeat("a", 64)
-	raw := strings.Join(engageRawWorkerArgs("rawworker", "guard", image, "", nil), " ")
+	raw := strings.Join(engageRawWorkerArgs("rawworker", "guard", image, "", "", nil), " ")
 	// Raw sockets need a root process: Docker exposes no ambient capability and
 	// no-new-privileges blocks the file-capability route, so an unprivileged
 	// process keeps an empty effective set however the capability is added.
@@ -427,7 +427,7 @@ func TestEngageRawWorkerAddsOnlyRawSocketCapability(t *testing.T) {
 		}
 	}
 	// The general worker keeps its unprivileged identity and gains nothing.
-	general := strings.Join(engageWorkerArgs("worker", "guard", image, "", nil), " ")
+	general := strings.Join(engageWorkerArgs("worker", "guard", image, "", "", nil), " ")
 	if strings.Contains(general, "NET_RAW") {
 		t.Fatalf("general worker gained NET_RAW: %s", general)
 	}
@@ -444,8 +444,8 @@ func TestBothWorkerPoolsPinHostsReadOnly(t *testing.T) {
 	image := "sha256:" + strings.Repeat("a", 64)
 	want := "--mount type=bind,src=/tmp/pins/hosts,dst=/etc/hosts,readonly"
 	for name, args := range map[string][]string{
-		"general": engageWorkerArgs("worker", "guard", image, "/tmp/pins/hosts", nil),
-		"raw":     engageRawWorkerArgs("rawworker", "guard", image, "/tmp/pins/hosts", nil),
+		"general": engageWorkerArgs("worker", "guard", image, "/tmp/pins/hosts", "", nil),
+		"raw":     engageRawWorkerArgs("rawworker", "guard", image, "/tmp/pins/hosts", "", nil),
 	} {
 		if s := strings.Join(args, " "); !strings.Contains(s, want) {
 			t.Errorf("%s worker does not mount the host pins read-only: %s", name, s)
@@ -637,8 +637,8 @@ func TestOwnerAliveOnlyReportsAbsentForNoSuchProcess(t *testing.T) {
 // reaper able to tell a leftover from a live run's container.
 func TestRunnerContainersCarryTheOwnerLabel(t *testing.T) {
 	for _, args := range [][]string{
-		engageWorkerArgs("w", "guard", "image", "", nil),
-		engageRawWorkerArgs("w", "guard", "image", "", nil),
+		engageWorkerArgs("w", "guard", "image", "", "", nil),
+		engageRawWorkerArgs("w", "guard", "image", "", "", nil),
 	} {
 		joined := strings.Join(args, " ")
 		if !strings.Contains(joined, "--label "+runnerOwnerLabel+"="+strconv.Itoa(os.Getpid())) {

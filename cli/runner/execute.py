@@ -21,6 +21,7 @@ if not 1 <= len(stages) <= 3 or not 1 <= limit <= 67108864 or not 1 <= timeout <
 # authenticate. The names are validated here rather than trusted, and a declared
 # name that is unset in this container contributes nothing. Validation runs before
 # the scratch home is created so a rejected request leaves nothing behind.
+VULN_DB_MOUNT = "/opt/vulndb"
 declared = request.get("env") or []
 if not isinstance(declared, list) or len(declared) > 64:
     raise ValueError("invalid declared environment")
@@ -34,7 +35,11 @@ for name in declared:
         command_env[name] = os.environ[name]
 home = tempfile.mkdtemp(prefix="home-", dir="/work")
 # The fixed base is applied last, so a declaration cannot redirect PATH or HOME.
-command_env.update({"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home, "LANG": "C"})
+command_env.update({"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home, "LANG": "C",
+                    "GRYPE_CHECK_FOR_APP_UPDATE": "false", "GRYPE_DB_AUTO_UPDATE": "false"})
+command_env["OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"] = os.path.join(VULN_DB_MOUNT, "osv")
+grype_db = os.path.join(VULN_DB_MOUNT, "grype")
+command_env["GRYPE_DB_CACHE_DIR"] = grype_db
 lock = threading.Lock()
 used = 0
 results = [{"stdout": bytearray(), "stderr": bytearray(), "dropped": 0, "exit_code": -1} for _ in stages]

@@ -54,3 +54,10 @@ gdb
 john
 py3-impacket
 socat
+
+# dependency and image vulnerability scanning
+# trivy is deliberately absent: it has no Alpine package on either
+# architecture. cli/vulnscan.go still parses its JSON, so a report produced
+# elsewhere can be imported.
+grype
+osv-scanner

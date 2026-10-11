@@ -409,6 +409,81 @@ func TestWebSessionEnvBoundariesAndExportConfinement(t *testing.T) {
 	}
 }
 
+func TestWebExportBundleIncludesTemplatesAndRefreshes(t *testing.T) {
+	ws, err := engagement.OpenWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	ctx := context.Background()
+	op := webanalysis.Operation{
+		ID: webanalysis.ID("export-op-1"), Origin: "https://example.com",
+		Path: "/api/one", Method: "GET", Protocol: "http",
+	}
+	if err := ws.Store.PutWeb(ctx, "operation", op.ID, "", op); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := ws.Store.WebSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := webWriteExports(ctx, ws, snapshot, ""); err != nil {
+		t.Fatal(err)
+	}
+	readBundle := func() webanalysis.Snapshot {
+		t.Helper()
+		body, err := os.ReadFile(filepath.Join(webBundleDir(ws.EvidenceDir()), "snapshot.json.gz"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := webanalysis.GunzipBytes(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got webanalysis.Snapshot
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := readBundle(); len(got.Exports) != 1 || got.Exports[0].Operation != op.ID {
+		t.Fatalf("first bundle exports = %+v", got.Exports)
+	}
+	op2 := webanalysis.Operation{
+		ID: webanalysis.ID("export-op-2"), Origin: "https://example.com",
+		Path: "/api/two", Method: "GET", Protocol: "http",
+	}
+	if err := ws.Store.PutWeb(ctx, "operation", op2.ID, "", op2); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = ws.Store.WebSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := webWriteExports(ctx, ws, snapshot, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := readBundle(); len(got.Exports) != 2 || len(got.Operations) != 2 {
+		t.Errorf("refreshed bundle holds %d exports and %d operations", len(got.Exports), len(got.Operations))
+	}
+}
+
+func TestWebExportFileAcceptsAnIdenticalLargeFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "template.json")
+	body := []byte(`{"body":"` + strings.Repeat("x", 33<<20) + `"}`)
+	if err := webExportFile(path, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := webExportFile(path, body); err != nil {
+		t.Fatalf("identical large export failed: %v", err)
+	}
+	changed := append([]byte(nil), body...)
+	changed[len(changed)-2] = 'y'
+	if err := webExportFile(path, changed); err == nil {
+		t.Error("a different large export was accepted at the same path")
+	}
+}
+
 func TestWebStructuredReplayEncodingAndBodies(t *testing.T) {
 	op := webanalysis.Operation{Origin: "https://fixture.test", Path: "/api/{id}", Query: "q={term}", Method: "POST", Protocol: "http", ContentType: "application/json", Parameters: []webanalysis.Parameter{{Name: "count", Field: "body.count", Type: "number", Expression: "5"}}}
 	request, e := webReplayRequest(op, map[string]string{"id": "part/a?b", "term": "one&admin=true"})

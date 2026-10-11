@@ -87,7 +87,7 @@ func (e networkExecutor) Run(ctx context.Context, task engagement.Task) (string,
 // embedding dispatch.
 func (e networkExecutor) networkRunReconPhase(ctx context.Context, task engagement.Task, v engagement.Vantage) (string, error) {
 	runTimeout, runCap := resolveRunCaps()
-	execDir, cleanup, err := newExecutorScratchDir(ctx, e.d.WorkDir)
+	execDir, cleanup, err := newExecutorScratchDir(ctx, e.d)
 	if err != nil {
 		return "", err
 	}

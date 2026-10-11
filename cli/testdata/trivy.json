@@ -1,0 +1,105 @@
+{
+ "SchemaVersion": 2,
+ "Trivy": {
+  "Version": "0.75.0"
+ },
+ "CreatedAt": "2026-10-10T19:42:29.923813-07:00",
+ "ArtifactName": "vulnfix",
+ "ArtifactType": "filesystem",
+ "Results": [
+  {
+   "Target": "go.mod",
+   "Class": "lang-pkgs",
+   "Type": "gomod",
+   "Vulnerabilities": [
+    {
+     "VulnerabilityID": "CVE-2024-45337",
+     "VendorIDs": [
+      "GHSA-v778-237x-gjrc",
+      "GO-2024-3321"
+     ],
+     "PkgID": "golang.org/x/crypto@v0.10.0",
+     "PkgName": "golang.org/x/crypto",
+     "PkgIdentifier": {
+      "PURL": "pkg:golang/golang.org/x/crypto@v0.10.0",
+      "UID": "60c1bd3347e8a8e8"
+     },
+     "InstalledVersion": "v0.10.0",
+     "FixedVersion": "0.31.0",
+     "Status": "fixed",
+     "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2024-45337",
+     "DataSource": {
+      "ID": "govulndb",
+      "Name": "The Go Vulnerability Database",
+      "URL": "https://pkg.go.dev/vuln/"
+     },
+     "Fingerprint": "sha256:efed80c4dea8916e1927659e04d2efdb636869bba21c9d208e79ceb67b696453",
+     "Title": "golang.org/x/crypto/ssh: Misuse of ServerConfig.PublicKeyCallback may cause authorization bypass in golang.org/x/crypto",
+     "Description": "Applications and libraries which misuse connection.serverAuthenticate (via callback field ServerConfig.PublicKeyCallback) may be susceptible to an authorization bypass. The documentation for ServerCon",
+     "Severity": "HIGH",
+     "VendorSeverity": {
+      "amazon": 3,
+      "azure": 4,
+      "cbl-mariner": 4,
+      "redhat": 3,
+      "ubuntu": 2
+     },
+     "CVSS": {
+      "redhat": {
+       "V3Vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:N",
+       "V3Score": 8.2
+      }
+     },
+     "PublishedDate": "2024-12-12T02:02:07.97Z",
+     "LastModifiedDate": "2026-06-17T07:54:03.36Z"
+    },
+    {
+     "VulnerabilityID": "CVE-2025-22869",
+     "VendorIDs": [
+      "GO-2025-3487"
+     ],
+     "PkgID": "golang.org/x/crypto@v0.10.0",
+     "PkgName": "golang.org/x/crypto",
+     "PkgIdentifier": {
+      "PURL": "pkg:golang/golang.org/x/crypto@v0.10.0",
+      "UID": "60c1bd3347e8a8e8"
+     },
+     "InstalledVersion": "v0.10.0",
+     "FixedVersion": "0.35.0",
+     "Status": "fixed",
+     "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2025-22869",
+     "DataSource": {
+      "ID": "govulndb",
+      "Name": "The Go Vulnerability Database",
+      "URL": "https://pkg.go.dev/vuln/"
+     },
+     "Fingerprint": "sha256:5fa2fc818828aca2b409002b979ff9ded0f6bde07372f508a827b7d6a095c0e2",
+     "Title": "golang.org/x/crypto/ssh: Denial of Service in the Key Exchange of golang.org/x/crypto/ssh",
+     "Description": "SSH servers which implement file transfer protocols are vulnerable to a denial of service attack from clients which complete the key exchange slowly, or not at all, causing pending content to be read ",
+     "Severity": "HIGH",
+     "CweIDs": [
+      "CWE-770"
+     ],
+     "VendorSeverity": {
+      "alma": 3,
+      "amazon": 3,
+      "azure": 3,
+      "cbl-mariner": 3,
+      "oracle-oval": 3,
+      "redhat": 3,
+      "rocky": 3,
+      "ubuntu": 2
+     },
+     "CVSS": {
+      "redhat": {
+       "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+       "V3Score": 7.5
+      }
+     },
+     "PublishedDate": "2025-02-26T08:14:24.997Z",
+     "LastModifiedDate": "2026-06-17T08:50:40.113Z"
+    }
+   ]
+  }
+ ]
+}

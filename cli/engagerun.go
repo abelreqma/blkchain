@@ -244,7 +244,7 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 			return "", err
 		}
 	}
-	runtime := &engageRuntime{runner: runner, trace: trace, policy: roe.Policy, cancel: cancel}
+	runtime := &engageRuntime{runner: runner, trace: trace, store: ws.Store, policy: roe.Policy, cancel: cancel, staged: newVulnScanQueue()}
 	ctx = context.WithValue(ctx, engageRuntimeKey{}, runtime)
 	var failureMu sync.Mutex
 	var writeFailure error

@@ -44,6 +44,8 @@ const (
 	// check passes on the host operand and FileAccessViolation does not cover cat
 	// or grep.
 	reachLocal
+	// reachScratch addresses no network destination either, but its own audited rule confines its paths to the scratch working directory, so the EXTERNAL profile can run it from a pivot with no scope target.
+	reachScratch
 )
 
 // rawNeed is whether a tool needs CAP_NET_RAW, which only the raw-socket worker
@@ -208,7 +210,7 @@ var toolCatalog = []tool{
 	// Web and TLS.
 	{
 		Binary: "curl", Package: "curl", Tier: tierEnum,
-		Personas:  []string{"recon", "web", "ad", "cloud", "k8s", "container", "ai-security", "generic"},
+		Personas:  []string{"recon", "web", "ad", "cloud", "k8s", "container", "ai-security", "vuln-analysis", "generic"},
 		Probe:     []string{"--version"},
 		ProbeWant: "curl 8",
 	},
@@ -237,6 +239,22 @@ var toolCatalog = []tool{
 		Probe:     []string{"--version"},
 		ProbeWant: "jq-1",
 		Note:      "a jq stage addresses no host, and the external profile denies a command with no verifiable target, so parsing a cloud or cluster response through jq works only in a local-scope engagement",
+	},
+
+	// Dependency and image vulnerability scanning: each reads a staged path and addresses no network destination.
+	{
+		Binary: "osv-scanner", Package: "osv-scanner", Tier: tierEnum, Reach: reachScratch,
+		Personas:  []string{"vuln-analysis"},
+		Probe:     []string{"--version"},
+		ProbeWant: "osv-scanner version",
+		Note:      "scan a lockfile, SBOM, or directory the executor staged; --offline-vulnerabilities uses a cached database, because the runner has no route to the OSV API",
+	},
+	{
+		Binary: "grype", Package: "grype", Tier: tierEnum, Reach: reachScratch,
+		Personas:  []string{"vuln-analysis"},
+		Probe:     []string{"version"},
+		ProbeWant: "grype",
+		Note:      "scan a dir:, file:, sbom: or oci-archive: source the executor staged; the registry-resolving schemes are denied, and the match database must already be cached",
 	},
 
 	// Binary and host analysis. Every one of these reads a path rather than a
@@ -425,6 +443,8 @@ var unavailableTools = map[string]string{
 	"onesixtyone": "no Alpine package on either architecture; snmpwalk with an explicit community string covers SNMP enumeration",
 	"dnsrecon":    "the Alpine package imports the stamina module, which has no Alpine package, so the tool fails at startup; dig, host and nslookup cover DNS enumeration",
 	"hashcat":     "needs an OpenCL runtime the image does not carry; john covers offline cracking",
+	"trivy":       "no Alpine package on either architecture; grype and osv-scanner cover image and dependency scanning, and cli/vulnscan.go parses trivy JSON so a report produced elsewhere can be imported",
+	"syft":        "an SBOM generator rather than a scanner: grype reads the same sources directly, so the extra stage buys nothing",
 	// Named by the per-finding exploit-tier catalog in exploitallow.go, which
 	// predates the image work. None is installed, so none can run.
 	"searchsploit": "part of exploitdb, which has no Alpine package on either architecture; kb_answer covers exploit lookup",
@@ -465,6 +485,18 @@ func catalogPackages() []string {
 		}
 		seen[t.Package] = true
 		out = append(out, t.Package)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// scratchReachBinaries returns the binaries that address no network destination but confine their paths to the scratch directory, which the gate permits with no scope target.
+func scratchReachBinaries() []string {
+	var out []string
+	for _, t := range toolCatalog {
+		if t.Reach == reachScratch {
+			out = append(out, t.Binary)
+		}
 	}
 	sort.Strings(out)
 	return out

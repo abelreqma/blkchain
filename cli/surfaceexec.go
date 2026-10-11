@@ -63,11 +63,9 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 		return fmt.Sprintf("executor: task %s surface %q is not reachable at the current vantage %q; advance the vantage first", task.ID, task.Surface, v), nil
 	}
 
-	// Recon-phase tasks run the code-orchestrated tier ladder when the loop
-	// is enabled and the command path is available. The generic loop below still
-	// serves every other phase and the no-gate path, so non-recon behavior is
-	// unchanged.
-	if e.d.ReconTiers && task.Phase == engagement.PhaseRecon && e.d.Gate != nil && e.d.Runs != nil {
+	// Recon-phase tasks other than vulnerability analysis run the tier ladder
+	// when the loop and command path are available.
+	if e.d.ReconTiers && task.Phase == engagement.PhaseRecon && task.Kind != "vuln-analysis" && e.d.Gate != nil && e.d.Runs != nil {
 		return e.runReconPhase(ctx, task)
 	}
 
@@ -84,6 +82,7 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 	reg := tooldef.NewRegistry()
 
 	activeTask := func() string { return task.ID }
+	prefetch := ""
 	tools := []tooldef.Tool{
 		newKBSearchTool(e.d.RC, e.d.Cfg),
 		newKBAnswerTool(e.d.RC, e.d.Cfg, !e.d.Prefs.Web),
@@ -93,11 +92,18 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 	}
 	if e.d.Gate != nil && e.d.Runs != nil {
 		runTimeout, runCap := resolveRunCaps()
-		execDir, cleanup, err := newExecutorScratchDir(ctx, e.d.WorkDir)
+		execDir, cleanup, err := newExecutorScratchDir(ctx, e.d)
 		if err != nil {
 			return "", err
 		}
 		defer cleanup()
+		if task.Kind == "vuln-analysis" {
+			var fetched bool
+			prefetch, fetched = autoFetchVulnMaterial(ctx, e.d, task, execDir, runCap, runTimeout)
+			if prefetch != "" && !fetched {
+				return prefetch, nil
+			}
+		}
 		// Stamp the task's engagement context so the gate tiers each run_command
 		// for its phase (exploit/post-ex require an armed task and force per-action
 		// confirmation). secgate mirrors engagement's Phase/Surface by string value.
@@ -132,6 +138,9 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 		return "", err
 	}
 	human := effectiveEngagePrompt(e.d.Gate, genericTaskPrompt(proj, task))
+	if prefetch != "" {
+		human += "\n\n" + prefetch
+	}
 	msgs := []llms.MessageContent{
 		{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(dom.Prompt)}},
 		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(human)}},

@@ -14,7 +14,7 @@ import (
 
 type planTaskArgs struct {
 	ID         string   `json:"id" desc:"stable task id, e.g. t1"`
-	Kind       string   `json:"kind,omitempty" desc:"task kind or domain, e.g. recon, web, ad, cloud"`
+	Kind       string   `json:"kind,omitempty" desc:"task kind or domain; use vuln-analysis for dependency or image CVE scans"`
 	Target     string   `json:"target,omitempty" desc:"the in-scope target the task acts on"`
 	Objective  string   `json:"objective,omitempty" desc:"what the task should achieve"`
 	DoneWhen   string   `json:"done_when,omitempty" desc:"the observable condition that completes the task"`

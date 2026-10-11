@@ -211,6 +211,12 @@ func migrate(db *sql.DB) error {
 	if _, err := tx.Exec(actionIndexSchema); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(vulnSchema); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(surfaceSchema); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`INSERT OR IGNORE INTO meta (k, v) VALUES ('revision', '0')`); err != nil {
 		return err
 	}
