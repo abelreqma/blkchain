@@ -2,7 +2,7 @@
 name = "blkchain"
 version = "0.1.0"
 description = "Local offensive-security hybrid agentic RAG (Apple Silicon / oMLX)."
-requires-python = "==3.12.14"
+requires-python = ">=3.12,<3.13"
 dependencies = [
   # chunking (the only LangChain package used; pulls langchain-core only)
   "langchain-text-splitters==1.1.2",
