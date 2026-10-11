@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -62,6 +63,10 @@ func ExtractTargetSet(c Command) (hosts []string, nets []*net.IPNet, ok bool) {
 		h, good := impacketTargets(c.Args)
 		return h, nil, good
 	}
+	if vulnScannerBinaries[strings.ToLower(name)] {
+		// The operand is a source specifier (dir:, sbom:, a lockfile path), which the token reader would read as host:port; the empty set is verified, not unknown.
+		return nil, nil, true
+	}
 	if strings.EqualFold(name, "socat") {
 		// socat addresses its destination as TYPE:host:port, which the generic
 		// token reader cannot separate from an address option.
@@ -77,10 +82,37 @@ func ExtractTargetSet(c Command) (hosts []string, nets []*net.IPNet, ok bool) {
 		// sent to that resolver, not a connection target.
 		e.skipNames = hasAtServer(c.Args)
 	}
-	for _, a := range c.Args {
+	lower := strings.ToLower(name)
+	for i, a := range c.Args {
+		if outputPathValue(lower, c.Args, i) {
+			continue
+		}
 		e.arg(a)
 	}
 	return e.out, e.nets, e.ok
+}
+
+// outputPathFlags lists, per binary, the flags whose value is a local output path the tool never connects to; FileAccessViolation still bounds the path.
+var outputPathFlags = map[string][]string{
+	"curl": {
+		"-o", "--output", "-D", "--dump-header", "-c", "--cookie-jar",
+		"--output-dir", "--trace", "--trace-ascii", "--stderr", "--libcurl",
+		"--etag-save",
+	},
+	"osv-scanner": {"--output", "--output-file"},
+	"grype":       {"--file"},
+}
+
+// outputPathValue reports whether args[i] is the value of an output-path flag, in the separate-argument or =value form.
+func outputPathValue(name string, args []string, i int) bool {
+	flags := outputPathFlags[name]
+	if len(flags) == 0 || i < 0 || i >= len(args) {
+		return false
+	}
+	if n, _, hasEq := strings.Cut(args[i], "="); hasEq && slices.Contains(flags, n) {
+		return true
+	}
+	return i > 0 && slices.Contains(flags, args[i-1])
 }
 
 type extractor struct {

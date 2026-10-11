@@ -57,7 +57,7 @@ var containerLadder = reconLadder{
 
 // containerPersonaPrompt is the dedicated container/Kubernetes persona. A
 // Kind="container" task resolves to this persona; Kind="k8s" uses the shared one.
-const containerPersonaPrompt = executorPreamble + "Domain: Kubernetes and container compromise. Map exposed API, kubelet, etcd, and runtime surfaces, then identify the active identity and enumerate namespace, workload, service-account, and RBAC permissions. Use curl, nmap, and kubectl with the API endpoint named as --server; kubectl is exploit-tier, so it runs only from an armed task, and its exec, run, attach, debug, cp, port-forward and proxy verbs are denied. docker and crictl are host runtimes and are not in the worker. Trace each permission or workload setting to the shortest path toward workload control, node access, credential access, or cluster-admin. At an external vantage, prioritize exposed control-plane and anonymous access. From an in-cluster foothold, prioritize service-account token permissions, privileged workloads, hostPath/host-namespace mounts, and escape paths. Use route_skill with domain \"k8s\" and kb_search to choose a technique that fits the observed configuration. Recon records exact requests, responses, identity, and permission evidence; exploit/post-ex tasks validate the boundary crossing through run_command under the current execution policy. Create a basis_ids-linked task for each distinct escalation step. Redact secrets in evidence and capture only the minimum proof needed."
+const containerPersonaPrompt = executorPreamble + "Domain: Kubernetes and container compromise. Map exposed API, kubelet, etcd, and runtime surfaces, then identify the active identity and enumerate namespace, workload, service-account, and RBAC permissions. Use curl, nmap, and kubectl with the API endpoint named as --server; kubectl is exploit-tier, so it runs only from an armed task, and its exec, run, attach, debug, cp, port-forward and proxy verbs are denied. docker and crictl are host runtimes and are not in the worker. For dependency and container-image CVE work, create a vuln-analysis task with plan_add and basis_ids set to this task; that persona owns the scanners and the advisory records. Trace each permission or workload setting to the shortest path toward workload control, node access, credential access, or cluster-admin. At an external vantage, prioritize exposed control-plane and anonymous access. From an in-cluster foothold, prioritize service-account token permissions, privileged workloads, hostPath/host-namespace mounts, and escape paths. Use route_skill with domain \"k8s\" and kb_search to choose a technique that fits the observed configuration. Recon records exact requests, responses, identity, and permission evidence; exploit/post-ex tasks validate the boundary crossing through run_command under the current execution policy. Create a basis_ids-linked task for each distinct escalation step. Redact secrets in evidence and capture only the minimum proof needed."
 
 func init() {
 	registerExecutor(engagement.SurfaceContainer, func(d engageDeps) surfaceExecutor {
@@ -91,8 +91,9 @@ func containerDomainFor(kind string) domain {
 // lifecycle and the generic fallback loop). It mirrors genericExecutor.Run's
 // vantage reachability check for the recon path, since Go embedding has no virtual
 // dispatch (the embedded Run would otherwise call the generic recon driver).
+// Vulnerability analysis uses the generic loop so it can fetch and scan material.
 func (e containerExecutor) Run(ctx context.Context, task engagement.Task) (string, error) {
-	if e.d.ReconTiers && task.Phase == engagement.PhaseRecon && e.d.Gate != nil && e.d.Runs != nil {
+	if e.d.ReconTiers && task.Phase == engagement.PhaseRecon && task.Kind != "vuln-analysis" && e.d.Gate != nil && e.d.Runs != nil {
 		v, err := e.d.Store.Vantage(ctx)
 		if err != nil {
 			return fmt.Sprintf("executor: task %s could not read the engagement vantage: %v", task.ID, err), nil
@@ -155,7 +156,7 @@ func containerTierPrompt(task engagement.Task, asset string, tier reconTier, sel
 // re-read here.
 func (e containerExecutor) containerRunReconPhase(ctx context.Context, task engagement.Task, v engagement.Vantage) (string, error) {
 	runTimeout, runCap := resolveRunCaps()
-	execDir, cleanup, err := newExecutorScratchDir(ctx, e.d.WorkDir)
+	execDir, cleanup, err := newExecutorScratchDir(ctx, e.d)
 	if err != nil {
 		return "", err
 	}

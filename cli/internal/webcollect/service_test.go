@@ -350,3 +350,147 @@ func TestRelativeAPICallsUseDocumentBaseAndImportsUseModuleBase(t *testing.T) {
 		t.Fatal(paths)
 	}
 }
+
+// With KeepAST set, each parsed unit's syntax tree is stored as an artifact whose body round-trips back into a tree.
+func TestCollectStoresSyntaxTrees(t *testing.T) {
+	routes := map[string]string{
+		"/":       "<script src='/app.js'></script>",
+		"/app.js": "const base = '/api';\nasync function load(id) { return fetch(base + '/items/' + id); }\n",
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, ok := routes[r.URL.Path]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, ".js") {
+			w.Header().Set("Content-Type", "application/javascript")
+		} else {
+			w.Header().Set("Content-Type", "text/html")
+		}
+		fmt.Fprint(w, body)
+	}))
+	defer server.Close()
+	store := fixtureStore(t)
+	svc := New(store, fixtureBroker(server), nil)
+	svc.KeepAST = true
+	svc.DiscoveryAllowed = func(u string) bool { return strings.HasPrefix(u, server.URL+"/") }
+	if _, err := svc.Collect(context.Background(), []string{server.URL + "/"}, Options{Role: "reader", MaxDepth: 4}); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := store.WebSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trees []webanalysis.AST
+	for _, a := range snap.Artifacts {
+		if a.Kind != webanalysis.ASTArtifactKind {
+			continue
+		}
+		body, err := store.WebBlob(a.Hash)
+		if err != nil {
+			t.Fatalf("tree blob %s: %v", a.Hash, err)
+		}
+		tree, err := webanalysis.UnmarshalAST(body)
+		if err != nil {
+			t.Fatalf("tree blob %s: %v", a.Hash, err)
+		}
+		trees = append(trees, tree)
+		if !a.Complete {
+			t.Errorf("a complete tree was stored as incomplete: %s", a.Hash)
+		}
+	}
+	if len(trees) == 0 {
+		t.Fatal("no syntax tree was stored")
+	}
+	units := map[string]bool{}
+	for _, u := range snap.Units {
+		units[u.ID] = true
+	}
+	found := false
+	for _, tree := range trees {
+		if !units[tree.Unit] {
+			t.Errorf("tree names unit %q, which is not in the snapshot", tree.Unit)
+		}
+		if root, ok := tree.Root(); !ok || root.Type != "program" {
+			t.Errorf("tree for %s has root %+v", tree.Unit, root)
+		}
+		if len(tree.Find("call_expression")) > 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no stored tree holds the call the units' analysis read")
+	}
+}
+
+// Without KeepAST no tree is stored, so the default collection does not carry the extra bodies.
+func TestCollectStoresNoSyntaxTreeByDefault(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		fmt.Fprint(w, "fetch('/api/x')")
+	}))
+	defer server.Close()
+	store := fixtureStore(t)
+	svc := New(store, fixtureBroker(server), nil)
+	svc.DiscoveryAllowed = func(u string) bool { return strings.HasPrefix(u, server.URL+"/") }
+	if _, err := svc.Collect(context.Background(), []string{server.URL + "/"}, Options{Role: "reader"}); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := store.WebSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range snap.Artifacts {
+		if a.Kind == webanalysis.ASTArtifactKind {
+			t.Errorf("a syntax tree was stored without KeepAST: %s", a.Hash)
+		}
+	}
+}
+
+func TestAnalyzeStoredAddsSyntaxTreeForExistingUnit(t *testing.T) {
+	store := fixtureStore(t)
+	body := []byte("fetch('/api/items')")
+	a, err := store.SaveWebArtifact(context.Background(), webanalysis.Artifact{
+		Kind: "script", URL: "https://example.com/app.js", Complete: true,
+	}, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := webanalysis.SourceUnit{
+		ID: webanalysis.ID(a.ID, "0", ""), Artifact: a.ID, Hash: a.Hash,
+		URL: a.URL, Language: "javascript", Kind: a.Kind, Parse: "ok",
+	}
+	if err := store.PutWeb(context.Background(), "unit", unit.ID, "", unit); err != nil {
+		t.Fatal(err)
+	}
+	svc := New(store, nil, nil)
+	svc.KeepAST = true
+	for i := 0; i < 2; i++ {
+		if err := svc.AnalyzeStored(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap, err := store.WebSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trees []webanalysis.AST
+	for _, artifact := range snap.Artifacts {
+		if artifact.Kind != webanalysis.ASTArtifactKind {
+			continue
+		}
+		blob, err := store.WebBlob(artifact.Hash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tree, err := webanalysis.UnmarshalAST(blob)
+		if err != nil {
+			t.Fatal(err)
+		}
+		trees = append(trees, tree)
+	}
+	if len(trees) != 1 || trees[0].Unit != unit.ID || len(trees[0].Find("call_expression")) != 1 {
+		t.Errorf("stored trees = %+v, want one tree for the existing unit", trees)
+	}
+}

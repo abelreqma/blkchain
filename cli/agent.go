@@ -87,10 +87,13 @@ func hermesBinAvailable() bool {
 
 // --- gateway client ---
 
-// hermesAvailable probes GET {url}/health with the Bearer header and a short
+// hermesAvailable probes the authenticated detailed-health route with a short
 // timeout. A reachable, authorized gateway returns 200.
 func hermesAvailable(ctx context.Context) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, hermesAPIURL()+"/health", nil)
+	if hermesAPIKey() == "" {
+		return false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, hermesAPIURL()+"/health/detailed", nil)
 	if err != nil {
 		return false
 	}

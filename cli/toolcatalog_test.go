@@ -11,11 +11,7 @@ import (
 	"blkchain/cli/internal/secgate"
 )
 
-// infrastructurePackages are packages.list entries that provide no
-// model-runnable binary, so the catalog does not claim them: bash and python3
-// are denied interpreters that the runner itself uses (execute.py runs the
-// worker's commands), iptables writes the guard's firewall, and openssh-client
-// is the foothold carrier.
+// infrastructurePackages are packages.list entries that provide no model-runnable binary, so the catalog does not claim them: bash and python3 are denied interpreters that the runner itself uses (execute.py runs the worker's commands), iptables writes the guard's firewall, and openssh-client is the foothold carrier.
 var infrastructurePackages = map[string]string{
 	"bash":           "the runner's own shell; the classifier denies it as a command",
 	"python3":        "runs execute.py, the worker's command shim; the classifier denies it as a command",
@@ -41,10 +37,7 @@ func readPackagesList(t *testing.T) []string {
 	return out
 }
 
-// TestCatalogPackagesMatchPackagesList asserts both directions: a catalog tool
-// cannot name a package the image does not install, and a package cannot be
-// installed without a catalog entry or a recorded infrastructure reason. The
-// second direction is what stops the image growing tools no persona can use.
+// TestCatalogPackagesMatchPackagesList asserts both directions: a catalog tool cannot name a package the image does not install, and a package cannot be installed without a catalog entry or a recorded infrastructure reason. The second direction is what stops the image growing tools no persona can use.
 func TestCatalogPackagesMatchPackagesList(t *testing.T) {
 	declared := readPackagesList(t)
 	for _, p := range catalogPackages() {
@@ -63,9 +56,7 @@ func TestCatalogPackagesMatchPackagesList(t *testing.T) {
 	}
 }
 
-// TestEveryCatalogToolHasAnAuditRecord asserts no tool can sit in the catalog
-// without its flag surface either audited or the outstanding audit written
-// down. It is what keeps the pending work visible instead of forgotten.
+// TestEveryCatalogToolHasAnAuditRecord asserts no tool can sit in the catalog without its flag surface either audited or the outstanding audit written down. It is what keeps the pending work visible instead of forgotten.
 func TestEveryCatalogToolHasAnAuditRecord(t *testing.T) {
 	for _, tl := range toolCatalog {
 		note, _ := auditStatus(tl.Binary)
@@ -90,17 +81,12 @@ func TestEveryCatalogToolHasAnAuditRecord(t *testing.T) {
 	}
 }
 
-// TestExternalAllowlistCarriesOnlyAuditedNetworkTools asserts the allowlist
-// contract: an entry authorizes a binary's whole flag surface, so only an
-// audited tool may be on it, and only one that addresses a network destination.
-// Both tiers belong on it, because this list is the gate's reachability control
-// and not its autonomy control; TestExploitPhaseAlwaysConfirms covers the
-// control that actually keeps an exploit tool attended.
+// TestExternalAllowlistCarriesOnlyAuditedNetworkTools asserts the allowlist contract: an entry authorizes a binary's whole flag surface, so only an audited tool may be on it, and only one that addresses a network destination. Both tiers belong on it, because this list is the gate's reachability control and not its autonomy control; TestExploitPhaseAlwaysConfirms covers the control that actually keeps an exploit tool attended.
 func TestExternalAllowlistCarriesOnlyAuditedNetworkTools(t *testing.T) {
 	al := secgate.NewAllowlist(externalEngageAllowlist()...)
 	for _, tl := range toolCatalog {
 		_, audited := auditStatus(tl.Binary)
-		want := tl.Reach == reachExternal && audited
+		want := (tl.Reach == reachExternal || tl.Reach == reachScratch) && audited
 		if got := al.Permits(tl.Binary); got != want {
 			t.Errorf("allowlist permits %s = %t, want %t (tier=%d reach=%d audited=%t)",
 				tl.Binary, got, want, tl.Tier, tl.Reach, audited)
@@ -108,11 +94,29 @@ func TestExternalAllowlistCarriesOnlyAuditedNetworkTools(t *testing.T) {
 	}
 }
 
-// TestExploitPhaseAlwaysConfirms pins the control that keeps an exploit-tier
-// tool attended. It is the phase, not the allowlist: an exploit or post-ex
-// command is confirmed whatever the mode, while a recon command on an audited
-// enum tool runs unattended in Auto. Keeping exploit tools off the allowlist
-// instead would make them unreachable rather than merely attended.
+// A scratch-reach tool is on the external allowlist, so a pivot can run it; a local-reach tool is not, which keeps the file-disclosure path closed.
+func TestScratchReachToolsAreOnTheExternalAllowlistAndLocalOnesAreNot(t *testing.T) {
+	al := secgate.NewAllowlist(externalEngageAllowlist()...)
+	scratch := scratchReachBinaries()
+	if len(scratch) == 0 {
+		t.Fatal("the catalog declares no scratch-reach tool, so this test proves nothing")
+	}
+	for _, b := range scratch {
+		if !al.Permits(b) {
+			t.Errorf("scratch-reach %s must be on the external allowlist", b)
+		}
+		if _, audited := auditStatus(b); !audited {
+			t.Errorf("scratch-reach %s reaches the allowlist without a recorded audit", b)
+		}
+	}
+	for _, b := range localReachBinaries() {
+		if al.Permits(b) {
+			t.Errorf("local-reach %s must not be on the external allowlist", b)
+		}
+	}
+}
+
+// TestExploitPhaseAlwaysConfirms pins the control that keeps an exploit-tier tool attended. It is the phase, not the allowlist: an exploit or post-ex command is confirmed whatever the mode, while a recon command on an audited enum tool runs unattended in Auto. Keeping exploit tools off the allowlist instead would make them unreachable rather than merely attended.
 func TestExploitPhaseAlwaysConfirms(t *testing.T) {
 	if len(exploitToolBinaries()) == 0 {
 		t.Fatal("the catalog declares no exploit-tier tool, so this test proves nothing")
@@ -165,9 +169,7 @@ func TestExploitPhaseAlwaysConfirms(t *testing.T) {
 	}
 }
 
-// TestExploitToolsAreInTheExploitTierCatalog asserts the second allowlist an
-// exploit command must pass: the executor's own per-finding catalog. A tool
-// missing from it is denied even when armed and confirmed.
+// TestExploitToolsAreInTheExploitTierCatalog asserts the second allowlist an exploit command must pass: the executor's own per-finding catalog. A tool missing from it is denied even when armed and confirmed.
 func TestExploitToolsAreInTheExploitTierCatalog(t *testing.T) {
 	task := engagement.Task{ID: "t1", Kind: "exploit", Phase: engagement.PhaseExploit, Objective: "validate the finding"}
 	for _, b := range exploitToolBinaries() {
@@ -183,11 +185,7 @@ func TestExploitToolsAreInTheExploitTierCatalog(t *testing.T) {
 	}
 }
 
-// TestLocalReachToolsStayOffTheExternalAllowlist pins two controls at once. The
-// external profile denies a command with no verifiable target, so a tool with no
-// network destination could never run there anyway; and keeping read utilities
-// off the list closes the file-disclosure path, where an in-scope host operand
-// passes the scope check while a file operand is read.
+// TestLocalReachToolsStayOffTheExternalAllowlist pins two controls at once. The external profile denies a command with no verifiable target, so a tool with no network destination could never run there anyway; and keeping read utilities off the list closes the file-disclosure path, where an in-scope host operand passes the scope check while a file operand is read.
 func TestLocalReachToolsStayOffTheExternalAllowlist(t *testing.T) {
 	al := secgate.NewAllowlist(externalEngageAllowlist()...)
 	local := localReachBinaries()
@@ -201,10 +199,71 @@ func TestLocalReachToolsStayOffTheExternalAllowlist(t *testing.T) {
 	}
 }
 
-// TestPersonaPromptsAvoidUnusableTools asserts no persona is told to run a tool
-// the image cannot run, or one that is present but must not be used. Every name
-// checked here is a distinctive token, so a match is a real instruction rather
-// than an English word.
+// The personas that meet dependency and image material point at the one persona that owns the scanners, and none of them describes the scanners itself.
+func TestScannerGuidanceLivesInOnePersona(t *testing.T) {
+	referring := map[string]string{
+		"k8s":             domains["k8s"].Prompt,
+		"target-analysis": domains["target-analysis"].Prompt,
+		"container":       containerPersonaPrompt,
+	}
+	for name, prompt := range referring {
+		if prompt == "" {
+			t.Fatalf("persona %q has no prompt", name)
+		}
+		if !strings.Contains(prompt, "vuln-analysis") {
+			t.Errorf("the %s prompt does not point at the vuln-analysis persona", name)
+		}
+		for _, binary := range scratchReachBinaries() {
+			if strings.Contains(prompt, binary) {
+				t.Errorf("the %s prompt describes %s itself; that guidance belongs to vuln-analysis only", name, binary)
+			}
+		}
+	}
+	owner := domains["vuln-analysis"].Prompt
+	if owner == "" {
+		t.Fatal("the vuln-analysis persona is not registered")
+	}
+	for _, binary := range scratchReachBinaries() {
+		if !strings.Contains(owner, binary) {
+			t.Errorf("the vuln-analysis prompt does not name %s", binary)
+		}
+	}
+	if !strings.Contains(owner, "store vulns") {
+		t.Error("the vuln-analysis prompt does not say how to read the stored advisories")
+	}
+	if !strings.Contains(owner, "code-owned") || !strings.Contains(owner, "read-only cache") {
+		t.Error("the vuln-analysis prompt does not describe automatic offline scans")
+	}
+}
+
+// A vuln-analysis task derives a surface the external profile can run, so the persona works from a pivot rather than only under a local scope.
+func TestVulnAnalysisKindDerivesAnExternalProfileSurface(t *testing.T) {
+	task := engagement.Task{ID: "v1", Kind: "vuln-analysis", Target: "image.tar",
+		Objective: "scan the staged image", DoneWhen: "advisories recorded", Status: engagement.StatusTodo}
+	ws, err := engagement.OpenWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	if _, err := ws.Store.Apply(engagement.Delta{Kind: "plan", Detail: "seed", Upserts: []engagement.Task{task}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ws.Store.GetTask("v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Surface == engagement.SurfaceLocal {
+		t.Error("a vuln-analysis task derives the local surface, which needs a local scope directive")
+	}
+	if got.Phase != engagement.PhaseRecon {
+		t.Errorf("phase = %q, want recon", got.Phase)
+	}
+	if domainForTask(got).Name != "vuln-analysis" {
+		t.Errorf("the task resolves to persona %q", domainForTask(got).Name)
+	}
+}
+
+// TestPersonaPromptsAvoidUnusableTools asserts no persona is told to run a tool the image cannot run, or one that is present but must not be used. Every name checked here is a distinctive token, so a match is a real instruction rather than an English word.
 func TestPersonaPromptsAvoidUnusableTools(t *testing.T) {
 	for name, d := range domains {
 		for binary, reason := range unavailableTools {
@@ -231,9 +290,7 @@ func TestPersonaPromptsAvoidUnusableTools(t *testing.T) {
 	}
 }
 
-// TestPersonaPromptsAvoidUnauditedTools asserts no persona is told to run a tool
-// whose flag surface is not audited yet. Such a tool is off the allowlist, so
-// naming it would produce a command the gate denies.
+// TestPersonaPromptsAvoidUnauditedTools asserts no persona is told to run a tool whose flag surface is not audited yet. Such a tool is off the allowlist, so naming it would produce a command the gate denies.
 func TestPersonaPromptsAvoidUnauditedTools(t *testing.T) {
 	for binary := range pendingAudits {
 		tl, ok := toolFor(binary)
@@ -251,9 +308,7 @@ func TestPersonaPromptsAvoidUnauditedTools(t *testing.T) {
 	}
 }
 
-// TestCatalogIsInternallyConsistent asserts the catalog itself is well formed: no
-// duplicate binary, every tool claimed by at least one persona, and every
-// persona named by a tool is a registered domain.
+// TestCatalogIsInternallyConsistent asserts the catalog itself is well formed: no duplicate binary, every tool claimed by at least one persona, and every persona named by a tool is a registered domain.
 func TestCatalogIsInternallyConsistent(t *testing.T) {
 	seen := map[string]bool{}
 	for _, tl := range toolCatalog {
@@ -265,9 +320,7 @@ func TestCatalogIsInternallyConsistent(t *testing.T) {
 			t.Errorf("%s is catalogued but no persona claims it", tl.Binary)
 		}
 		for _, p := range tl.Personas {
-			// containerPersona is deliberately not in the domains map: registering it
-			// would make route_skill treat "container" as a persona name and stop the
-			// container keyword resolving to the k8s skill bucket.
+			// containerPersona is deliberately not in the domains map: registering it would make route_skill treat "container" as a persona name and stop the container keyword resolving to the k8s skill bucket.
 			if _, ok := domains[p]; !ok && p != containerPersona.Name {
 				t.Errorf("%s names persona %q, which is not a registered domain", tl.Binary, p)
 			}
@@ -275,10 +328,7 @@ func TestCatalogIsInternallyConsistent(t *testing.T) {
 	}
 }
 
-// TestRawSocketRouting is two-sided: a tool that needs CAP_NET_RAW routes to the
-// raw worker, and everything else stays in the general unprivileged worker. The
-// routing reads the catalog and argv only, so no prompt or corpus text can move
-// a command into the privileged worker.
+// TestRawSocketRouting is two-sided: a tool that needs CAP_NET_RAW routes to the raw worker, and everything else stays in the general unprivileged worker. The routing reads the catalog and argv only, so no prompt or corpus text can move a command into the privileged worker.
 func TestRawSocketRouting(t *testing.T) {
 	raw := []struct {
 		binary string
@@ -324,9 +374,7 @@ func TestRawSocketRouting(t *testing.T) {
 	}
 }
 
-// ambiguousToolNames are catalog binaries whose name is also an ordinary English
-// word in persona prose ("the file", "a host", "mount points"), so a substring
-// match on them proves nothing. Every other catalog name is a distinctive token.
+// ambiguousToolNames are catalog binaries whose name is also an ordinary English word in persona prose ("the file", "a host", "mount points"), so a substring match on them proves nothing. Every other catalog name is a distinctive token.
 var ambiguousToolNames = map[string]bool{
 	"file": true, "host": true, "mount": true, "stat": true,
 	"id": true, "ps": true, "nm": true, "nc": true,
@@ -334,11 +382,7 @@ var ambiguousToolNames = map[string]bool{
 	"strings": true,
 }
 
-// TestPromptToolMentionsAreCataloguedAndAudited is the strongest enforceable
-// direction of the wiring contract: wherever a persona prompt names a tool by a
-// distinctive token, that tool must be catalogued for that persona and its flag
-// surface must be audited. Without this a prompt can drift back into naming a
-// tool the gate refuses.
+// TestPromptToolMentionsAreCataloguedAndAudited is the strongest enforceable direction of the wiring contract: wherever a persona prompt names a tool by a distinctive token, that tool must be catalogued for that persona and its flag surface must be audited. Without this a prompt can drift back into naming a tool the gate refuses.
 func TestPromptToolMentionsAreCataloguedAndAudited(t *testing.T) {
 	prompts := map[string]string{containerPersona.Name: containerPersona.Prompt}
 	for name, d := range domains {
@@ -368,10 +412,7 @@ func TestPromptToolMentionsAreCataloguedAndAudited(t *testing.T) {
 	t.Logf("checked %d prompt tool mentions", checked)
 }
 
-// TestExploitTierCatalogNamesOnlyUsableTools closes the loop the other way:
-// every tool the per-finding exploit-tier catalog names must be installed and
-// audited, or recorded as unavailable with the reason. That catalog predates the
-// image work and named five tools, none of which was installed.
+// TestExploitTierCatalogNamesOnlyUsableTools closes the loop the other way: every tool the per-finding exploit-tier catalog names must be installed and audited, or recorded as unavailable with the reason. That catalog predates the image work and named five tools, none of which was installed.
 func TestExploitTierCatalogNamesOnlyUsableTools(t *testing.T) {
 	task := engagement.Task{ID: "t1", Kind: "exploit", Phase: engagement.PhaseExploit}
 	named := map[string]bool{}
@@ -400,6 +441,31 @@ func TestExploitTierCatalogNamesOnlyUsableTools(t *testing.T) {
 		}
 		if !exploitToolPermitted(task, tl.Binary) {
 			t.Errorf("%s is in the catalog map but exploitToolPermitted refuses it, which means the key casing is wrong", tl.Binary)
+		}
+	}
+}
+
+// Every persona the catalog assigns a scanner to is told the scanner exists, so a reachable tool is not one the model never learns about.
+func TestScannerPersonasNameTheScanners(t *testing.T) {
+	for _, tl := range toolCatalog {
+		if tl.Reach != reachScratch {
+			continue
+		}
+		for _, persona := range tl.Personas {
+			prompt := domains[persona].Prompt
+			if persona == "container" {
+				prompt = containerPersonaPrompt
+			}
+			if prompt == "" {
+				t.Errorf("persona %q has no prompt, so %s is unreachable to the model", persona, tl.Binary)
+				continue
+			}
+			if !strings.Contains(prompt, tl.Binary) {
+				t.Errorf("persona %q does not name %s", persona, tl.Binary)
+			}
+		}
+		if len(tl.Personas) != 1 || tl.Personas[0] != "vuln-analysis" {
+			t.Errorf("%s is assigned to %v; the scanners belong to the one vuln-analysis persona", tl.Binary, tl.Personas)
 		}
 	}
 }

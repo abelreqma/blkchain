@@ -44,6 +44,9 @@ func runWebWorker() error {
 
 var webParserSlot = make(chan struct{}, 1)
 
+// webWorkerResultLimit bounds the analysis result the worker may return.
+const webWorkerResultLimit = 16 << 20
+
 func webParseWorker(ctx context.Context, in webanalysis.Input) (webanalysis.Result, error) {
 	var out webanalysis.Result
 	if len(in.Source) > webanalysis.MaxSource {
@@ -69,7 +72,7 @@ func webParseWorker(ctx context.Context, in webanalysis.Input) (webanalysis.Resu
 	cmd.Env = []string{"GOMEMLIMIT=128MiB", "GOMAXPROCS=1", "PATH=/usr/bin:/bin"}
 	cmd.Dir = os.TempDir()
 	cmd.Stdin = bytes.NewReader(data)
-	stdout, stderr := &webLimitedBuffer{limit: 16 << 20}, &webLimitedBuffer{limit: 4096}
+	stdout, stderr := &webLimitedBuffer{limit: webWorkerResultLimit}, &webLimitedBuffer{limit: 4096}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err = cmd.Run(); err != nil {
 		return out, errors.New("parser worker failed or exceeded time/output limit")

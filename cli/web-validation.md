@@ -159,3 +159,42 @@ Final validation passed with `go test -race -p 1 ./... -v -count=1 -timeout 5m`,
 specified above. The full provisioned run passes all three native browser
 acceptance tests. `go vet ./...` and all 277 Python tests pass. The final browser
 restart check confirms internal CDP HTTP 200 and a working viewer handshake.
+
+## External surface and advisory validation
+
+Validation date: 2026-10-11, America/Los_Angeles. This section covers the
+uncommitted `feat/external-surface-and-cve-scan` worktree at `0018ca1`; it does
+not revise the 2026-10-05 results above.
+
+The feature runner built locally. Setup populated ten OSV ecosystem archives and
+a valid Grype database. The databases were mounted read-only for the engagement.
+The recursive offline OSV command was killed with 512 MiB and 1 GiB container
+limits, then completed at 2 GiB against the fixture's npm lockfile. The general
+worker now has a 2 GiB limit; the raw-socket worker remains at 256 MiB. This
+measurement covers the npm fixture, not every ecosystem or archive size.
+
+A controlled Docker HTTP fixture served a `package-lock.json` containing
+`lodash` 4.17.20. The local model planned a `vuln-analysis` task. On dispatch,
+the feature binary fetched the exact file through the RoE gate with HTTP 200.
+The workspace persisted five OSV and five Grype advisory rows, representing
+five distinct advisory ids, with no scanner gaps. The run paused at its bounded
+round cap with the task active. The rows prove package/version matches in the
+fixture; they do not establish code-path reachability, attacker impact, or a
+confirmed vulnerability in another host.
+
+The macOS host could not reach the fixture's Docker bridge address for the
+host-side surface sweep, although the isolated worker could fetch it. That
+sweep recorded a coverage gap. A separate loopback fixture passed the external
+surface recording test. The operator host remained excluded by the runner's
+scope pinning; this validation did not weaken that boundary or test an external
+production host.
+
+Hermes gateway authentication returned 401 without the key and 200 with the
+configured key on `/health/detailed`. The feature client's readiness test now
+rejects a missing or incorrect key and uses the CLI fallback. This validation
+did not run a full authenticated Hermes conversation.
+
+The full Go and race suites, `go vet`, CI-pinned Staticcheck, the Python suite
+(296 tests, one skip), Ruff, build, `gofmt`, and `git diff --check` passed locally.
+The default suites use fixtures; the live scanner result above required the
+provisioned Docker runner, warmed cache, local model, and controlled target.

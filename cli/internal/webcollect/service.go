@@ -45,11 +45,13 @@ type Service struct {
 	DiscoveryAllowed     func(string) bool
 	MaxArtifactBytes     int
 	AccountArtifactBytes func(int) error
-	mu                   sync.Mutex
-	pending              []frontier
-	seen                 map[string]bool
-	coverage             webanalysis.Coverage
-	task                 string
+	// KeepAST stores each unit's serialized syntax tree as an artifact.
+	KeepAST  bool
+	mu       sync.Mutex
+	pending  []frontier
+	seen     map[string]bool
+	coverage webanalysis.Coverage
+	task     string
 }
 
 func New(st *engagement.Store, b *webacquire.Broker, p Parser) *Service {
@@ -410,13 +412,19 @@ func (s *Service) analyze(ctx context.Context, a webanalysis.Artifact, body []by
 		}
 	}
 	unit := webanalysis.SourceUnit{ID: webanalysis.ID(a.ID, fmt.Sprint(offset), name), Artifact: a.ID, Hash: a.Hash, DocumentURL: a.DocumentURL, URL: a.FinalURL, Name: name, Language: lang, Kind: a.Kind, Offset: offset}
-	result, err := s.Parse(ctx, webanalysis.Input{Unit: unit, Source: body, Role: a.Role, Historical: a.CapturedAt != ""})
+	result, err := s.Parse(ctx, webanalysis.Input{
+		Unit: unit, Source: body, Role: a.Role,
+		Historical: a.CapturedAt != "", KeepAST: s.KeepAST,
+	})
 	if err != nil {
 		unit.Parse = "failed"
 		_ = s.Store.PutWeb(ctx, "unit", unit.ID, s.task, unit)
 		return err
 	}
 	if err = s.persist(ctx, result); err != nil {
+		return err
+	}
+	if err = s.saveSyntaxTree(ctx, a, result.AST); err != nil {
 		return err
 	}
 	if len(result.Formatted) > 0 {
@@ -443,6 +451,25 @@ func (s *Service) analyze(ctx context.Context, a webanalysis.Artifact, body []by
 	}
 	return nil
 }
+
+// saveSyntaxTree stores one unit's tree as a gzipped artifact body, recording a gap rather than failing when it is too large to store.
+func (s *Service) saveSyntaxTree(ctx context.Context, a webanalysis.Artifact, tree *webanalysis.AST) error {
+	if tree == nil {
+		return nil
+	}
+	body, err := webanalysis.MarshalAST(*tree)
+	if err != nil {
+		s.gap("syntax-tree", a.URL, err.Error())
+		return nil
+	}
+	_, err = s.Store.SaveWebArtifact(ctx, webanalysis.Artifact{
+		ID: webanalysis.ID("syntax-tree", tree.Unit), Kind: webanalysis.ASTArtifactKind,
+		URL: a.URL, Role: a.Role,
+		Complete: !tree.Truncated, Parents: []string{a.ID}, CapturedAt: a.CapturedAt,
+	}, body)
+	return err
+}
+
 func (s *Service) persist(ctx context.Context, r webanalysis.Result) error {
 	records := []struct {
 		k, id string
@@ -511,7 +538,10 @@ func (s *Service) AnalyzeStored(ctx context.Context) error {
 		if e != nil {
 			return e
 		}
-		result, e := s.Parse(ctx, webanalysis.Input{Unit: u, Source: b, Role: a.Role, Historical: a.CapturedAt != ""})
+		result, e := s.Parse(ctx, webanalysis.Input{
+			Unit: u, Source: b, Role: a.Role,
+			Historical: a.CapturedAt != "", KeepAST: s.KeepAST,
+		})
 		if e != nil {
 			s.gap("parser", a.URL, e.Error())
 			if ctx.Err() != nil {
@@ -520,6 +550,9 @@ func (s *Service) AnalyzeStored(ctx context.Context) error {
 			continue
 		}
 		if e = s.persist(ctx, result); e != nil {
+			return e
+		}
+		if e = s.saveSyntaxTree(ctx, a, result.AST); e != nil {
 			return e
 		}
 		for _, gap := range result.Gaps {

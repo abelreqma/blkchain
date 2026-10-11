@@ -75,6 +75,13 @@ var writeFlags = map[string][]string{
 	// aws writes through --outfile and reads a CA bundle; its cli-input flags are
 	// denied outright because they supply every other parameter from a file.
 	"aws": {"--outfile", "--ca-bundle"},
+	// osv-scanner writes reports and reads scan inputs named by these flags.
+	"osv-scanner": {
+		"--output", "--output-file", "--lockfile", "-L", "--sbom", "-S",
+		"--archive", "--manifest", "--experimental-exclude",
+	},
+	// grype writes through --file and reads --vex and --exclude.
+	"grype": {"--file", "--vex", "--exclude"},
 }
 
 // dataFlags maps a binary base name to the flags whose value may carry an
@@ -156,6 +163,10 @@ var shortArgLetters = map[string]string{
 	"klist": "cke",
 	// jq: -f takes the filter file.
 	"jq": "f",
+	// osv-scanner (urfave/cli): the value-taking short flags.
+	"osv-scanner": "LSfo",
+	// grype (pflag): the value-taking short flags.
+	"grype": grypeArgLetters,
 }
 
 // abbrevMin lists binaries whose long options accept unambiguous prefixes

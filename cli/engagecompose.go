@@ -67,12 +67,13 @@ func buildEngageGate(ws *engagement.Workspace, scope *secgate.Scope, mode secgat
 			}
 			return nil
 		}(),
-		Mode:      mode,
-		Scope:     scope,
-		Allow:     allow,
-		Confirm:   confirm,
-		Approvals: approvals,
-		Audit:     audit,
+		Mode:          mode,
+		Scope:         scope,
+		Allow:         allow,
+		NoDestination: secgate.NewAllowlist(scratchReachBinaries()...),
+		Confirm:       confirm,
+		Approvals:     approvals,
+		Audit:         audit,
 		Protected: []string{
 			filepath.Join(ws.Dir, "engagement.db"),
 			filepath.Join(ws.Dir, "audit.jsonl"),

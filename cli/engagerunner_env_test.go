@@ -37,7 +37,7 @@ func TestWorkerArgsAndLauncherRequestAgreeOnDeclaredNames(t *testing.T) {
 	names := []string{"DEPLOY_TOKEN", "SSH_AUTH_SOCK"}
 	r := &engageRunner{foothold: &footholdTransport{env: names}}
 
-	args := engageWorkerArgs("blk-worker-test", "guard", "image", "", r.footholdEnvNames())
+	args := engageWorkerArgs("blk-worker-test", "guard", "image", "", "", r.footholdEnvNames())
 	forwarded := map[string]bool{}
 	for i, a := range args {
 		if a == "--env" && i+1 < len(args) && !strings.Contains(args[i+1], "=") {
@@ -69,10 +69,31 @@ func TestWorkerArgsAndLauncherRequestAgreeOnDeclaredNames(t *testing.T) {
 // Nothing but the declared names crosses, so a worker with no foothold carries no
 // name-only --env argument at all.
 func TestWorkerWithoutFootholdForwardsNoNames(t *testing.T) {
-	args := engageWorkerArgs("blk-worker-test", "guard", "image", "", (&engageRunner{}).footholdEnvNames())
+	args := engageWorkerArgs("blk-worker-test", "guard", "image", "", "", (&engageRunner{}).footholdEnvNames())
 	for i, a := range args {
 		if a == "--env" && i+1 < len(args) && !strings.Contains(args[i+1], "=") {
 			t.Errorf("unexpected forwarded name %q", args[i+1])
+		}
+	}
+}
+
+func TestGeneralWorkerMemoryFitsOfflineOSV(t *testing.T) {
+	for _, tc := range []struct {
+		raw  bool
+		want string
+	}{
+		{false, "2g"},
+		{true, "256m"},
+	} {
+		args := workerArgs("worker", "guard", "image", "", "", nil, tc.raw)
+		var got string
+		for i := range args {
+			if args[i] == "--memory" && i+1 < len(args) {
+				got = args[i+1]
+			}
+		}
+		if got != tc.want {
+			t.Errorf("raw=%t memory=%q, want %q", tc.raw, got, tc.want)
 		}
 	}
 }

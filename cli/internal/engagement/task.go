@@ -124,6 +124,7 @@ var surfaceForKindMap = map[string]Surface{
 	"ai":              SurfaceAISecurity,
 	"local":           SurfaceLocal,
 	"target-analysis": SurfaceLocal,
+	"vuln-analysis":   SurfaceContainer,
 	"exploit-dev":     SurfaceLocal,
 	"wifi":            SurfaceNetwork,
 	"recon":           SurfaceNetwork,

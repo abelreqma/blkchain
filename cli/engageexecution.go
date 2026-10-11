@@ -1,12 +1,14 @@
 package main
 
 import (
+	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/promptguard"
 	"blkchain/cli/internal/secgate"
 	"context"
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"time"
 )
@@ -15,8 +17,11 @@ type engageRuntimeKey struct{}
 type engageRuntime struct {
 	runner *engageRunner
 	trace  *actionTranscript
+	store  *engagement.Store
 	policy *secgate.Policy
 	cancel context.CancelFunc
+	// staged records the scannable material each worker working directory holds.
+	staged *vulnScanQueue
 }
 
 func runtimeFor(ctx context.Context) *engageRuntime {
@@ -59,8 +64,11 @@ func recordEngageDenial(ctx context.Context, c secgate.Command, reason string) {
 // the action executes: a declared foothold covers a surface set, and an action on
 // a covered surface runs on the foothold instead of in the sandbox worker.
 type actionOrigin struct {
-	TaskID  string
-	Surface secgate.Surface
+	TaskID         string
+	Surface        secgate.Surface
+	SkipVulnIngest bool
+	UseRawWorker   bool
+	RequireHTTP200 bool
 }
 
 func runAuthorized(ctx context.Context, g *secgate.Gate, bin string, args []string, dir string, limit int, timeout time.Duration, origin actionOrigin) runResult {
@@ -75,6 +83,21 @@ func runAuthorizedPipeline(ctx context.Context, g *secgate.Gate, stages []pipeli
 		return execPipeline(ctx, stages, dir, limit, timeout)
 	}
 	return runIsolatedAction(ctx, g, stages, dir, limit, timeout, origin)
+}
+
+func stagesSucceeded(result runResult, outputs []isolatedStageResult, origin actionOrigin) bool {
+	if result.Err != nil || result.TimedOut || len(outputs) == 0 {
+		return false
+	}
+	if origin.RequireHTTP200 && (len(outputs) != 1 || strings.TrimSpace(outputs[0].Stdout) != "200") {
+		return false
+	}
+	for _, output := range outputs {
+		if output.ExitCode != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // footholdStages rewrites authorized stages to run on the foothold. The rewrite
@@ -167,7 +190,25 @@ func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineSt
 			g.Audit("deny:scope-recheck", strings.Join(commands, " | ")+" :: "+planErr.Error())
 		}
 	} else {
-		result, outputs = r.runner.RunScoped(ctx, exec, dir, limit, timeout, plan, g.Policy)
+		beforeClose := func(worker *engageRunner, action runResult, stagesOut []isolatedStageResult) {
+			if r.staged == nil || r.store == nil || origin.TaskID == "" || ctx.Err() != nil || !stagesSucceeded(action, stagesOut, origin) {
+				return
+			}
+			r.staged.note(dir, origin.TaskID, stages)
+			scoped := *r
+			scoped.runner = worker
+			scanCtx := context.WithValue(ctx, engageRuntimeKey{}, &scoped)
+			runStagedVulnScans(scanCtx, vulnScanDeps{Gate: g, Store: r.store}, r.staged, dir)
+		}
+		result, outputs = r.runner.RunScoped(ctx, exec, dir, limit, timeout, plan, g.Policy, origin.UseRawWorker, beforeClose)
+	}
+	if len(stages) == 1 && len(outputs) == 1 && result.Err != nil && !result.TimedOut {
+		scanner := strings.ToLower(stages[0].Binary)
+		if slices.Contains(vulnScanners(), scanner) && outputs[0].Dropped == 0 &&
+			vulnScanResultBearing(scanner, outputs[0].ExitCode) && scanProducedReport(scanner, outputs[0].Stdout) &&
+			result.Err.Error() == fmt.Sprintf("exit status %d", outputs[0].ExitCode) {
+			result.Err = nil
+		}
 	}
 	status := "complete"
 	if planErr != nil {
@@ -179,9 +220,15 @@ func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineSt
 	} else if result.Err != nil {
 		status = "failed"
 	}
+	// Material a command writes lives in the worker's tmpfs, so it is noted here and scanned before that worker is released.
+	if status == "complete" && !plan.Dynamic && destination == "" && stagesSucceeded(result, outputs, origin) {
+		r.staged.note(dir, origin.TaskID, stages)
+	}
 	if len(outputs) == 0 {
 		outputs = []isolatedStageResult{{Stderr: result.Output, ExitCode: -1}}
 	}
+	result.ExitCode = outputs[len(outputs)-1].ExitCode
+	result.Stdout = outputs[len(outputs)-1].Stdout
 	for index, output := range outputs {
 		if claimErr := g.ClaimPolicyBytes(len(output.Stdout) + len(output.Stderr)); claimErr != nil {
 			r.cancel()
@@ -203,6 +250,25 @@ func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineSt
 		if err := r.trace.record(rec); err != nil {
 			r.cancel()
 			result.Err = err
+			continue
+		}
+		if origin.SkipVulnIngest || r.store == nil || origin.TaskID == "" || index >= len(stages) {
+			continue
+		}
+		scanner := strings.ToLower(stages[index].Binary)
+		if !slices.Contains(vulnScanners(), scanner) {
+			continue
+		}
+		if status != "complete" || output.Dropped != 0 || !vulnScanResultBearing(scanner, output.ExitCode) || !scanProducedReport(scanner, output.Stdout) {
+			_ = r.store.Audit("vulnscan", "scan-gap", origin.TaskID+" "+scanner+": no complete scanner report")
+			continue
+		}
+		task, err := r.store.GetTask(origin.TaskID)
+		if err == nil {
+			_, err = ingestVulnOutput(ctx, r.store, task, scanner, output.Stdout)
+		}
+		if err != nil {
+			_ = r.store.Audit("vulnscan", "ingest-failed", origin.TaskID+" "+scanner+": "+capRunes(err.Error(), 300))
 		}
 	}
 	return result

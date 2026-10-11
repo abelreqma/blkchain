@@ -31,6 +31,7 @@ bd5b81144fae5788bee0ed5ed11b4abfbf752b661c065f332283b0a3fb0cce5e https://dl-cdn.
 d8981e56b4c16722424ef642313bb710e42cc7181f204e14856a1f21887adf17 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/gdbm-1.26-r0.apk
 dc1b69ae15ad58a9f933b750fd4463defc32f7467f1ce9b57d80f893a6635377 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/gmp-6.3.0-r4.apk
 fe6373105d41819118717a1512a791685f3b429193b043430b8875c935b54fb6 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/gnutls-3.8.13-r0.apk
+2f7cd6bf2562146bd6e016cedb69a32db8326c297cd969b0b4bf1c06558c85e8 https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/grype-0.104.1-r6.apk
 1a072bb4a9a036a7fc239a94f9e691df059cecfbd92f2058bf4f261cc6636e00 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/icu-data-en-76.1-r1.apk
 652915ddcaa46370bc5e0cade07b80497feddd85a4ac5631d9d0f82e1227e897 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/icu-libs-76.1-r1.apk
 23aa1819e5e9acd6393de443c1a46643fec285ef89087b0cd9c50e04dd172fc0 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/iptables-1.8.11-r1.apk
@@ -117,6 +118,7 @@ ead551111e60e44331b485e67c90e1a77c80e2ab659d7b8bd20677c2318527d0 https://dl-cdn.
 c221efc67cae60fc325ebce7cea2de68dbcc159478e668aa5c7074c13ae6d520 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/openssh-client-default-10.2_p1-r0.apk
 bed00eeec4f8aa00328cd023ff4a6df4e60cac0b65253328532d74b96097d5dc https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/openssh-keygen-10.2_p1-r0.apk
 b7e30bda67ab5eeadf45ebb1e745f3ca685a84b89477ae8b487bc7c5275fd27e https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/openssl-3.5.9-r0.apk
+5c7b753080959af8e95f2ef7beb5ec75205c7555d3b0ac2a5f443fb6b6199b6e https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/osv-scanner-2.1.0-r9.apk
 741bb41164a8a5aa2924f40c8be58c3092a822fa76d80e9afb45d056be88a5c7 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/p11-kit-0.26.2-r0.apk
 858fae68445547f092e361925cedb344b7a0fd27eec1f652e5ba29a72f796942 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/popt-1.19-r4.apk
 8cf40a2d7c415628a8a75abf8139c4c96abfeba7aaf69bda8b2af47726cc15c7 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/protobuf-c-1.5.2-r2.apk

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"blkchain/cli/internal/engagement"
 	"blkchain/cli/internal/secgate"
 	"context"
 	"net"
@@ -106,6 +107,66 @@ func TestWildcardCommandUsesActionGuardAndRecordsEvidence(t *testing.T) {
 	data, readErr := os.ReadFile(filepath.Join(workspace, "actions.jsonl"))
 	if result.Err != nil || result.Output != "wildcard-evidence" || !created || !removed || shared || readErr != nil || !strings.Contains(string(data), "wildcard-evidence") {
 		t.Fatalf("wildcard action result=%+v created=%v removed=%v shared=%v transcript=%q read=%v", result, created, removed, shared, data, readErr)
+	}
+}
+
+func TestWildcardStagedScanRunsBeforeActionWorkerCloses(t *testing.T) {
+	roe, err := ParseRoE(strings.NewReader("## In Scope\n*.example.test\n## Allowed Actions\ncommand\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &secgate.Gate{Mode: secgate.Auto, Scope: roe.Scope, Policy: roe.Policy,
+		Allow:         secgate.NewAllowlist("curl", "osv-scanner", "grype"),
+		NoDestination: secgate.NewAllowlist("osv-scanner", "grype")}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	store := scanFixtureStore(t)
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "actions.jsonl"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	trace := newActionTranscript(workspace, "off", "worker", 20, 1<<20, nil)
+	previous := newEngageRunnerForRun
+	t.Cleanup(func() { newEngageRunnerForRun = previous })
+	scannerRuns, closed := 0, false
+	newEngageRunnerForRun = func(context.Context, *RoE) (*engageRunner, error) {
+		return &engageRunner{guard: "action-guard", workers: map[string]string{},
+			remove: func(context.Context, string) error { closed = true; return nil },
+			runFn: func(_ context.Context, stages []pipelineStage, _ string, _ int, _ time.Duration) (runResult, []isolatedStageResult) {
+				switch stages[0].Binary {
+				case "curl":
+					return runResult{Output: "downloaded"}, []isolatedStageResult{{Stdout: "downloaded", ExitCode: 0}}
+				case "osv-scanner":
+					scannerRuns++
+					out := string(readFixture(t, "osv-scanner.json"))
+					return runResult{Output: out}, []isolatedStageResult{{Stdout: out, ExitCode: 1}}
+				case "grype":
+					scannerRuns++
+					out := `{"matches": [], "descriptor": {"name": "grype"}}`
+					return runResult{Output: out}, []isolatedStageResult{{Stdout: out, ExitCode: 0}}
+				}
+				t.Fatalf("unexpected action %s", stages[0].Binary)
+				return runResult{}, nil
+			}}, nil
+	}
+	parent := &engageRunner{slots: make(chan struct{}, 1), resolve: func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("10.20.0.6")}}, nil
+	}}
+	ctx := context.WithValue(context.Background(), engageRuntimeKey{}, &engageRuntime{
+		runner: parent, trace: trace, store: store, policy: roe.Policy, cancel: func() {}, staged: newVulnScanQueue(),
+	})
+	result := runAuthorized(ctx, g, "curl", []string{"-o", "go.mod", "http://api.example.test/go.mod"}, t.TempDir(), 1<<20, time.Second,
+		actionOrigin{TaskID: "v1", Surface: secgate.SurfaceContainer})
+	if result.Err != nil || scannerRuns != 2 || !closed {
+		t.Fatalf("action=%+v scanner runs=%d worker closed=%v", result, scannerRuns, closed)
+	}
+	rows, err := store.Vulns(context.Background(), engagement.VulnFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("wildcard action closed its worker before scanning staged material")
 	}
 }
 

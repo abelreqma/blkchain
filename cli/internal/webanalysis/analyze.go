@@ -24,6 +24,8 @@ type Input struct {
 	Source     []byte     `json:"source"`
 	Role       string     `json:"role"`
 	Historical bool       `json:"historical"`
+	// KeepAST serializes the syntax tree the analysis ran on into Result.AST.
+	KeepAST bool `json:"keep_ast,omitempty"`
 }
 type value struct {
 	text   string
@@ -97,6 +99,17 @@ func Analyze(ctx context.Context, in Input) (Result, error) {
 	a.out.Findings = Technology(in.Unit, in.Source, nil)
 	if in.Unit.Parse == "partial" {
 		a.gap("parser errors; partial syntax coverage")
+	}
+	if in.KeepAST {
+		tree, serr := SerializeAST(in.Unit, in.Source, tree.RootNode())
+		if serr != nil {
+			a.gap("syntax tree not serialized: " + serr.Error())
+		} else {
+			a.out.AST = &tree
+			if tree.Truncated {
+				a.gap(tree.Gap)
+			}
+		}
 	}
 	env := &lexical{vars: map[string]*symbol{}, functionScope: true}
 	if err = a.hoistVariables(tree.RootNode(), env, 0); err != nil {

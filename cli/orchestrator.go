@@ -113,15 +113,21 @@ func markTaskActive(task engagement.Task) engagement.Task {
 // no eviction, so an engagement whose executors did not release would refuse
 // every command once it filled. Owning the release here keeps it off each
 // executor's list of things to remember.
-func newExecutorScratchDir(ctx context.Context, root string) (dir string, cleanup func(), err error) {
-	if root == "" {
+func newExecutorScratchDir(ctx context.Context, d engageDeps) (dir string, cleanup func(), err error) {
+	scan := func(dir string) {
+		if r := runtimeFor(ctx); r != nil {
+			runStagedVulnScans(ctx, vulnScanDeps{Gate: d.Gate, Store: d.Store}, r.staged, dir)
+		}
+	}
+	if d.WorkDir == "" {
 		return "", func() { releaseEngageWorker(ctx, "") }, nil
 	}
-	dir, err = os.MkdirTemp(root, "exec-")
+	dir, err = os.MkdirTemp(d.WorkDir, "exec-")
 	if err != nil {
 		return "", func() {}, err
 	}
 	return dir, func() {
+		scan(dir)
 		releaseEngageWorker(ctx, dir)
 		os.RemoveAll(dir)
 	}, nil
@@ -431,7 +437,19 @@ func runOrchestrator(ctx context.Context, d engageDeps, goal string) (final stri
 	}
 	caps := engageLoopCaps()
 	finalized := false
-	caps.Progress = func(ctx context.Context) (string, error) { return engagementProgress(ctx, d.Store) }
+	// Every recon task naming a web origin is swept here, so the observations do not depend on the model dispatching an executor.
+	sweeps := newSurfaceSweepQueue()
+	var sweepDeps surfaceSweepDeps
+	if d.Gate != nil {
+		sweepDeps = surfaceSweepDeps{Broker: newWebBroker(d.Gate, func() bool { return false }), Store: d.Store}
+		removeSweeps := d.Store.AddOnApply(sweeps.observe)
+		defer removeSweeps()
+	}
+	// The sweep's result stays out of the return value: Progress is the loop's idle signal, and a sweep must not read as progress.
+	caps.Progress = func(ctx context.Context) (string, error) {
+		runPendingSurfaceSweeps(ctx, sweepDeps, sweeps)
+		return engagementProgress(ctx, d.Store)
+	}
 	caps.Finalize = func(ctx context.Context, reason string) (string, error) {
 		if err := consumeEngageWork(ctx); err != nil {
 			return "", err

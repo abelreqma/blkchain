@@ -1,16 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -436,6 +440,7 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 	defer cancel()
 	svc := webcollect.New(ws.Store, newWebBroker(gate, armed), webParseWorker)
+	svc.KeepAST = true
 	if command == "import" && gate.Policy != nil {
 		svc.AccountArtifactBytes = gate.ClaimPolicyBytes
 	}
@@ -467,6 +472,7 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 			}
 			found = true
 			collector := webcollect.New(ws.Store, svc.Broker, webParseWorker)
+			collector.KeepAST = true
 			collector.DiscoveryAllowed = svc.DiscoveryAllowed
 			collector.SetTask(o.task)
 			headers, e := webRoleHeaders(r)
@@ -602,6 +608,9 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 	output = webView(snap, o.view, interactive, width)
 	if command == "export" {
 		output += "Export directory: " + webanalysis.SafeText(filepath.Join(ws.EvidenceDir(), "web", "exports")) + "\n"
+		if o.operation == "" {
+			output += "Bundle directory: " + webanalysis.SafeText(webBundleDir(ws.EvidenceDir())) + "\n"
+		}
 	}
 	return output, nil
 }
@@ -641,9 +650,32 @@ func webWriteExports(ctx context.Context, ws *engagement.Workspace, s webanalysi
 		if e = ws.Store.PutWeb(ctx, "export", op.ID, "", t); e != nil {
 			return e
 		}
+		updated := false
+		for i := range s.Exports {
+			if s.Exports[i].Operation == op.ID {
+				s.Exports[i] = t
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			s.Exports = append(s.Exports, t)
+		}
 	}
 	if !found {
 		return errors.New("operation not found")
+	}
+	if only != "" {
+		return nil
+	}
+	sort.Slice(s.Exports, func(i, j int) bool { return s.Exports[i].Operation < s.Exports[j].Operation })
+	trees, treeGaps := webBundleTrees(ws, s)
+	bundle, e := webanalysis.BuildBundle(s, trees, treeGaps...)
+	if e != nil {
+		return e
+	}
+	if _, e = writeWebBundle(webBundleDir(ws.EvidenceDir()), bundle); e != nil {
+		return e
 	}
 	return nil
 }
@@ -669,8 +701,19 @@ func webExportFile(path string, data []byte) error {
 		if e != nil || !st.Mode().IsRegular() {
 			return errors.New("invalid export file")
 		}
-		b, e := webReadFile(path, 32<<20)
-		if e != nil || webanalysis.Hash(b) != webanalysis.Hash(data) {
+		existing, e := os.Open(path)
+		if e != nil {
+			return e
+		}
+		defer existing.Close()
+		opened, e := existing.Stat()
+		if e != nil || !os.SameFile(st, opened) || opened.Size() != int64(len(data)) {
+			return errors.New("export file already exists with different contents")
+		}
+		h := sha256.New()
+		n, e := io.Copy(h, io.LimitReader(existing, int64(len(data))+1))
+		want := sha256.Sum256(data)
+		if e != nil || n != int64(len(data)) || !bytes.Equal(h.Sum(nil), want[:]) {
 			return errors.New("export file already exists with different contents")
 		}
 		return nil

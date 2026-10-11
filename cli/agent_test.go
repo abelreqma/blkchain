@@ -191,3 +191,32 @@ func TestHermesAPIURLDefaultAndOverride(t *testing.T) {
 		t.Errorf("override = %q, want trailing slash trimmed", got)
 	}
 }
+
+func TestHermesAvailableRequiresGatewayAuthentication(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.URL.Path != "/health/detailed" || r.Header.Get("Authorization") != "Bearer correct-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	t.Setenv("HERMES_API_URL", server.URL)
+	for _, tc := range []struct {
+		key  string
+		want bool
+	}{
+		{"", false},
+		{"wrong-key", false},
+		{"correct-key", true},
+	} {
+		t.Setenv("API_SERVER_KEY", tc.key)
+		if got := hermesAvailable(context.Background()); got != tc.want {
+			t.Errorf("key set=%t: gateway available=%t, want %t", tc.key != "", got, tc.want)
+		}
+	}
+}

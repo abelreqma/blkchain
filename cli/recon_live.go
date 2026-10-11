@@ -26,7 +26,7 @@ import (
 // (genericExecutor.Run) has already applied the vantage check.
 func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task) (string, error) {
 	runTimeout, runCap := resolveRunCaps()
-	execDir, cleanup, err := newExecutorScratchDir(ctx, e.d.WorkDir)
+	execDir, cleanup, err := newExecutorScratchDir(ctx, e.d)
 	if err != nil {
 		return "", err
 	}

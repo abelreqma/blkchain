@@ -70,9 +70,12 @@ type runCommandArgs struct {
 // runResult is the captured output of one execution.
 type runResult struct {
 	Output         string
+	Stdout         string
 	TimedOut       bool
 	Err            error
 	EphemeralFiles bool
+	// ExitCode is the last stage's exit status, or -1 when no stage reported one.
+	ExitCode int
 }
 
 // execRunner runs a shell-free command with a timeout and byte cap. Stubbed in tests.

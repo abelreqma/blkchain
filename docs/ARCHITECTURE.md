@@ -128,6 +128,12 @@ Bound requests, output, rate, duration, and total work, and provide a reliable o
 control. Credential use must be limited to the authorized target and must not leak through logs or
 unrelated requests.
 
+External-surface sweeps run from the code-owned queue when a recon task names an HTTP origin. TLS,
+header, cookie, CORS, method, metadata-path, and captured-material subdomain observations cite
+their own evidence. A failed probe records a gap; derived names do not expand scope. The host-side
+broker and the isolated command worker have different network vantage points, so one cannot infer
+the other's reachability from its own response.
+
 ### Specific controls
 
 - The SSRF guard in `index.py` for `blk add <url>` resolves and validates the host once, rejects
@@ -140,6 +146,19 @@ unrelated requests.
   model. Exposing it is a security decision to raise, not to implement quietly.
 - Secrets come from the environment only. Never hardcode or log a token. The local `.env` is
   untracked.
+- A dispatched `vuln-analysis` task with a recognized HTTP or HTTPS manifest URL fetches through
+  the RoE command gate before model execution. The fixed `curl` request has a 10-second and 16 MiB
+  transfer bound, does not follow redirects, and stages material only on HTTP 200. URL credentials,
+  queries, fragments, traversal segments, and unsafe output names are rejected. A denied or failed
+  fetch records a gap. It never permits a target outside the sealed scope.
+- OSV and Grype use databases prepared by `blk engage setup` under the XDG cache directory. Setup
+  may download updates; engagement workers mount the cache read-only and scanners run offline.
+  Scanner output is evidence linked to task and advisory records. A missing database or failed scan
+  records a gap, not a clean result. A package/version match does not establish reachable code or
+  attacker impact.
+- Hermes gateway readiness uses bearer-authenticated `/health/detailed`. A missing or rejected
+  `API_SERVER_KEY` selects the Hermes CLI fallback; public `/health` does not establish client
+  access. The gateway setup writes its private key file but does not export the key to the client.
 - Pin dependencies. Python dependencies are `==` pinned in `pyproject.toml`. Model downloads are
   pinned to a revision in the README. The Qdrant image is pinned to a digest.
 - The corpus is adversarial: it holds payloads, prompt-injection strings, and special tokens. Local
@@ -159,6 +178,9 @@ unrelated requests.
 
 ## Runtime behavior
 
+- General command workers have a 2 GiB memory limit for offline OSV databases; raw-socket workers
+  remain at 256 MiB. Both retain CPU, process, scratch, output, and duration bounds. RoE parallelism
+  defaults to one and may be raised only within the policy limit.
 - MLX inference is serialized. `embed_server` runs all inference under a single lock and sub-batches
   forward passes. Do not add concurrent MLX calls.
 - `embed_server` releases the Metal cache after large index-time batches. Do not clear the LLM cache
@@ -211,6 +233,9 @@ those pins move by hand.
 The default suites are hermetic. Opt-in browser, runner, MCP, and local-model integration tests
 require provisioned services or containers and are gated behind environment variables. Add a
 regression test with every fix, in the file that matches its area.
+The default scanner tests check routing, authorization, parsing, and persistence with fixtures.
+A live scan also needs the runner image, a complete local database cache, and a controlled target;
+passing fixture tests alone does not prove that those external dependencies are ready.
 
 ## Evaluation
 

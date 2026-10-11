@@ -22,6 +22,13 @@ func openStore(t *testing.T) *engagement.Store {
 	return s
 }
 
+func TestPlanAddKindNamesVulnerabilityAnalysis(t *testing.T) {
+	field, ok := reflect.TypeOf(planTaskArgs{}).FieldByName("Kind")
+	if !ok || !strings.Contains(field.Tag.Get("desc"), "vuln-analysis") {
+		t.Fatal("plan_add kind does not identify the dependency scanner task")
+	}
+}
+
 func TestPlanAddCreatesTask(t *testing.T) {
 	st := openStore(t)
 	tool := newPlanAddTool(st)

@@ -31,6 +31,7 @@ func TestUntrustedInputPromptFloor(t *testing.T) {
 		"summarizeInstruction":           summarizeInstruction,
 		"aiSecDomainPrompt":              aiSecDomainPrompt,
 		"containerPersonaPrompt":         containerPersonaPrompt,
+		"vulnPersonaPrompt":              vulnPersonaPrompt,
 		"personaPrompt":                  personaPrompt(""),
 		"exploitSystemPromptForTask":     exploitSystemPromptForTask(engagement.Task{}),
 	}

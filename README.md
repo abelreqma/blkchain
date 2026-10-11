@@ -4,16 +4,16 @@ blkChain is a security research and authorized assessment framework. It combines
 
 Use it to research techniques, understand an application's exposed sources and traffic, run scoped assessment tasks, and inspect the evidence behind a conclusion.
 
-Start with the [complete setup guide](#complete-setup-guide). For an existing installation, see [answer modes](#research-and-answer-modes), [web analysis](#web-application-analysis), and the [engagement store](#engagement-store-and-findings).
+Start with the [complete setup guide](#complete-setup-guide). For an existing installation, see [answer modes](#research-and-answer-modes), [external surface and advisory scans](#external-surface-and-advisory-scans), [web analysis](#web-application-analysis), and the [engagement store](#engagement-store-and-findings).
 
 ## Capabilities
 
 | Area | Current implementation |
 | --- | --- |
 | Security research | Local dense and BM25 retrieval, RRF fusion, cross-encoder reranking, source filters, bounded answers, specialist prompts, and optional public web research. |
-| Assessment orchestration | Task dependencies, specialized executors, Auto and Safe modes, operator-defined rules of engagement, isolated runners, action capture, stop, and resume. |
+| Assessment orchestration | Task dependencies, specialized executors, Auto and Safe modes, operator-defined rules of engagement, isolated runners, external-surface sweeps, offline dependency scans, action capture, stop, and resume. |
 | Web application analysis | Source and traffic collection, JavaScript and source-map analysis, API operation reconstruction, role sessions, workers, cached responses, WebSockets, and scoped replay. |
-| Engagement evidence | SQLite tasks, exact quotes, action records, coverage records, finding review states, provenance relationships, and local answers citing selected records. |
+| Engagement evidence | SQLite tasks, exact quotes, action records, surface observations, scanner advisories, coverage records, finding review states, provenance relationships, and local answers citing selected records. |
 | Operator interfaces | Keyboard-driven terminal UI, plain REPL, history, draft editing, context attachments, queued questions, source inspection, model controls, and service diagnostics. |
 | Integration | Native MCP tools and schema-validated JSON generation through the same Go implementation. |
 
@@ -63,6 +63,34 @@ The harness stores tasks, dependencies, provenance, exact evidence quotes, actio
 | Container | Container and Kubernetes task paths through specialized reconnaissance and shared execution. |
 | AI application | Endpoint and model discovery, capability checks, and evidence-derived follow-on candidates. |
 
+### External surface and advisory scans
+
+A recon task naming an HTTP or HTTPS origin queues bounded checks for TLS, response headers,
+cookies, CORS, allowed methods, metadata paths, and subdomain names derived from captured
+material. The checks use the engagement gate and store each observation with its evidence.
+Unreachable origins and incomplete checks remain coverage gaps.
+
+A dispatched `vuln-analysis` task can fetch an in-scope lockfile, manifest, SBOM, or image archive
+when its target is an HTTP or HTTPS URL ending in a recognized filename. The code uses a fixed
+`curl` command through the RoE gate, accepts only HTTP 200, does not follow redirects, and limits
+the response to 16 MiB and 10 seconds. URLs with credentials, queries, fragments, path traversal,
+or unsafe output filenames are not fetched automatically. A successful fetch triggers offline
+OSV and Grype scans in the isolated worker. A model-issued `curl -o` fetch of recognized material
+also triggers those scans. Scanner databases come from `blk engage setup`; workers mount them
+read-only and do not update them during an engagement.
+
+```sh
+blk engage --roe ROE.md --workspace ./assessment \
+  "Create a vuln-analysis task for https://staging.example.test/package-lock.json and report version-match advisories"
+blk store vulns --workspace ./assessment --package lodash --limit 20
+blk store surface --workspace ./assessment --kind tls-protocol --limit 20
+```
+
+Advisory records name the scanner, package, installed and fixed versions, asset, and exact source
+evidence. Two scanners can report the same advisory as separate records. A version match is a lead;
+code-path reachability and impact require separate validation before a finding is confirmed.
+Scanner failures and missing databases are recorded as gaps, not clean results.
+
 ### Foothold execution
 
 An optional RoE `Foothold` declaration names a host the operator already controls and the surfaces that execute there. Supported carriers include SSH and an operator-supplied command prefix. Credentials can be supplied through named environment references. The declaration, covered surfaces, and target scope are sealed into the policy.
@@ -100,6 +128,8 @@ blk store list
 blk store show --workspace ./assessment
 blk store records --workspace ./assessment --kind evidence --limit 20
 blk store findings --workspace ./assessment --status validated
+blk store vulns --workspace ./assessment --scanner osv-scanner --limit 20
+blk store surface --workspace ./assessment --kind tls-protocol --limit 20
 blk store ask --workspace ./assessment "Which observations remain unvalidated?"
 blk store --interactive --workspace ./assessment
 ```
@@ -107,6 +137,11 @@ blk store --interactive --workspace ./assessment
 The default catalog lists workspaces under the blkChain configuration directory. Use `--workspace` for a workspace stored elsewhere, or `--id` to select a catalog entry.
 
 Findings have explicit `lead`, `observed`, `validated`, and `dismissed` states. Detector and parsed records start as leads. Operator `add` and `review` actions persist conclusions and review events. Validated findings require exact evidence IDs belonging to the selected task.
+
+`store vulns` lists scanner-reported advisories with `--advisory`, `--package`, `--ecosystem`,
+`--scanner`, `--asset`, `--severity`, and pagination filters. `store surface` lists external
+observations with `--kind`, `--name`, `--asset`, and pagination filters. Neither command turns a
+version match or a surface observation into a validated finding.
 
 `store ask` uses a loopback model endpoint and a bounded selection of engagement records. Answers cite supplied `[R1]` references and flag partial selection. When synthesis fails or references are invalid, it returns selected records for inspection. It does not run assessment tools or web search.
 
@@ -534,19 +569,21 @@ explains server fields and tool selection.
 Verify the integration:
 
 ```sh
+hermes --version
 blk doctor
 blk ask "Use kb_search to explain contextual output encoding from my local notes"
 ```
 
-`doctor` should recognize the Hermes CLI and the enabled blkChain MCP entry. The default answer
-should use Hermes and retrieve from the connected knowledge base.
+`hermes --version` checks that the installed launcher runs; `doctor` checks that it is on `PATH`
+and that the blkChain MCP entry is enabled. The default answer should use Hermes and retrieve from
+the connected knowledge base.
 
 For streaming gateway turns in the interactive UI, run these commands in a terminal with the native
 API key exported:
 
 ```sh
 blk gateway --setup-only
-export API_SERVER_KEY="$OMLX_API_KEY"
+export API_SERVER_KEY="${OMLX_API:-${OMLX_API_KEY:-}}"
 export HERMES_API_URL=http://127.0.0.1:8642
 blk gateway
 ```
@@ -554,13 +591,15 @@ blk gateway
 `blk gateway` configures the API server in Hermes's private environment file, preserving unrelated
 settings, then runs the gateway in the foreground. The two keys it writes there are
 `API_SERVER_ENABLED` and `API_SERVER_KEY`; both belong to Hermes, and blk keeps a backup when a
-value changes. In the terminal running `blk`, export `API_SERVER_KEY` with the same value and use
-the same `HERMES_API_URL`. The client uses the gateway when available and can use the Hermes CLI
-fallback otherwise. `blk up` does not start Hermes.
+value changes. It does not export the key into the client terminal. In the terminal running `blk`,
+export `API_SERVER_KEY` with the same value and use the same `HERMES_API_URL`. The interactive
+client checks the authenticated `/health/detailed` route. A missing or rejected key makes it use
+the Hermes CLI fallback. Public `/health` alone does not establish client access. Check
+`hermes gateway status` for the running process. `blk up` does not start Hermes.
 
 ### 9. Provision the isolated command runner
 
-Build the runner after Docker is available:
+Build the runner and warm its scanner databases after Docker is available:
 
 ```sh
 blk engage setup
@@ -568,8 +607,20 @@ blk help engage
 ```
 
 The build uses the embedded Dockerfile, a digest-pinned base, and architecture-specific package
-locks with verified download hashes. Re-run setup after rebuilding blk when the runner assets change.
-Verify packaged tool availability with the local image check:
+locks with verified download hashes. Setup then downloads OSV archives for Go, npm, PyPI, Maven,
+crates.io, RubyGems, Packagist, NuGet, Alpine, and Debian, and asks Grype to update its database.
+It needs outbound HTTPS, a writable cache, and several GiB of free disk. The cache is
+`$XDG_CACHE_HOME/blkchain/vulndb` when `XDG_CACHE_HOME` is set, otherwise
+`~/.cache/blkchain/vulndb`. Setup prints the path it uses. Re-run setup after rebuilding blk when
+runner assets change, or when you need fresh scanner data.
+
+Check setup output for `scanner database update failed`; the command's exit status alone does not
+prove every database was warmed. A failed download leaves a gap for scans that need it; rerun setup
+until it reports no download failure. Engagement workers mount the cache read-only and scan
+offline. The general worker is limited to 2 GiB of memory so it can
+load the OSV database. The raw-socket worker stays at 256 MiB. Both keep CPU, process, scratch,
+output, duration, and RoE parallelism limits. Verify packaged tool availability with the local
+image check:
 
 ```sh
 (cd cli && BLKCHAIN_ENGAGE_DOCKER_E2E=1 go test -run '^TestCatalogToolsRunInTheImage$' -v -count=1 -timeout 10m .)
@@ -726,6 +777,7 @@ commands. Once Hermes is configured, the default mode uses its backend.
 | Preferences and default engagements | `~/.config/blkchain/`, or `XDG_CONFIG_HOME` |
 | Conversation history and sessions | `~/.local/share/blk/`, or `XDG_DATA_HOME` |
 | Command runner | Built by `blk engage setup`; engagement workers are managed by the harness. |
+| Scanner database cache | `$XDG_CACHE_HOME/blkchain/vulndb`, or `~/.cache/blkchain/vulndb` when unset. |
 | Browser container | `docker start blk-web-browser` / `docker stop blk-web-browser` |
 | Native chat server | Its own foreground terminal or provider's service manager. |
 | Hermes gateway | Its own foreground terminal; `blk gateway` configures and starts it. |
@@ -761,6 +813,9 @@ CVE lookups. Hermes provider and tool permissions are configured separately.
 | Chat returns 401 or an unknown-model error | Supply the server's actual API key and use an ID returned by its `/v1/models` endpoint. |
 | A default answer cannot start | Configure Hermes or select native routing with `--agent auto` / `/agent auto`. |
 | The gateway is unauthorized | Export the same `API_SERVER_KEY` used by the gateway in the client terminal. |
+| The gateway responds at `/health` but the client uses the CLI | Check `API_SERVER_KEY` in the client terminal; blk requires authenticated `/health/detailed`. Confirm the launcher with `hermes --version`. |
+| An offline scanner reports a database gap | Run `blk engage setup`, check its output for update failures, and ensure the printed cache path is readable by Docker workers. |
+| A feature binary reads another checkout's configuration | Set `BLKCHAIN_ROOT` to the intended worktree before running that binary. |
 | Browser provisioning is rejected | Check all driver exports, archive/launcher hashes, the read-only package mount, and the required container settings. |
 
 ## Ingestion and data handling

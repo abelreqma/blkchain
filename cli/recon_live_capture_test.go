@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 
 	"blkchain/cli/internal/engagement"
@@ -56,6 +57,21 @@ func TestCaptureTierEvidenceBackstopRecordsWhenModelDidnt(t *testing.T) {
 	if len(ev) != 1 || ev[0] != "Nmap scan report for 10.0.0.5\n8080/tcp open http nginx 1.25.5" {
 		// No-fabrication: the recorded quote is the captured output verbatim.
 		t.Fatalf("recorded evidence = %v, want the captured command output verbatim", ev)
+	}
+}
+
+func TestCaptureTierEvidenceDoesNotImportTargetReportText(t *testing.T) {
+	e := captureDeps(t)
+	e.d.Runs.Add("t1", string(readFixture(t, "osv-scanner.json")))
+	if _, err := e.captureTierEvidence("t1", "web", "h", "liveness", nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := e.d.Store.Vulns(context.Background(), engagement.VulnFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("target-controlled command output created scanner advisories: %+v", rows)
 	}
 }
 

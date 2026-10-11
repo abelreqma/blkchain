@@ -1,6 +1,11 @@
 package main
 
-import "blkchain/cli/internal/engagement"
+import (
+	"strings"
+
+	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/webacquire"
+)
 
 // webexec.go is the web-surface executor: a WSTG-aligned recon tier ladder
 // for the web surface, registered through the shared seams (registerExecutor,
@@ -69,4 +74,20 @@ func init() {
 		return webExecutor{genericExecutor{d: d}}
 	})
 	registerLadder(engagement.SurfaceWeb, webLadder)
+}
+
+// surfaceOriginFor renders a task target as the origin to sweep, and "" for a target that is not a host or URL.
+func surfaceOriginFor(target string) string {
+	t := strings.TrimSpace(target)
+	if t == "" {
+		return ""
+	}
+	if !strings.Contains(t, "://") {
+		t = "https://" + t
+	}
+	u, err := webacquire.URL(t)
+	if err != nil {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
