@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"net/netip"
 	"regexp"
 	"strings"
@@ -41,6 +40,7 @@ type enabledRoutes struct {
 var arithmeticPattern = regexp.MustCompile(`^[0-9.+\-*/%^()\s]+[=?]?\s*$`)
 
 var numberToken = regexp.MustCompile(`[0-9.]+`)
+var chatToolRequestPattern = regexp.MustCompile(`(?i)^\s*(?:(?:please|can you|could you)\s+)?(?:read|open|run|execute|send|fetch|navigate|scan|probe|inspect|investigate|test|use)\b`)
 
 var targetAddressPattern = regexp.MustCompile(`(?i)(?:[a-z][a-z0-9+.-]*://|\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.[a-z]{2,}\b|\blocalhost\b|\b[a-z][a-z0-9-]*:[0-9]{2,5}\b|\[[0-9a-f:]+\](?::[0-9]+)?|\b[a-z0-9._-]+@[a-z0-9._-]+\b)`)
 var targetContextPattern = regexp.MustCompile(`(?i)\b(?:my|our|this)\s+(?:[a-z0-9-]+\s+)?(?:host|server|domain|cluster|tenant|app|application|environment|foothold|account|project|network|vpc|subscription|realm|asset|instance|service)\b|\b(?:foothold|internal|private|staging|production|dc[0-9]+|srv[0-9]+|host[0-9]+)\b`)
@@ -101,15 +101,12 @@ func routeGuard(question string) (kind routeKind, forced bool) {
 	return routeSkip, false
 }
 
-// routeSystemPrompt is the one-word classifier instruction shared by the ask
-// path. It states which sources are available so the model does not pick a
-// disabled route.
+// routeSystemPrompt is the one-word classifier instruction shared by the ask path.
 const routeSystemPrompt = "You decide how to handle the user's message in an offensive-security assistant. " +
 	"Reply with ONLY one word, no punctuation: " +
 	"SKIP if it is general knowledge, pure reasoning, math, or chit-chat that needs no security corpus; " +
-	"ADVISE if the user wants interactive, step-by-step operational help running or planning an attack against a " +
-	"specific target or from a foothold they describe (escalating privileges, exploiting a found service, walking " +
-	"through an engagement, deciding the next action); " +
+	"ADVISE if the user wants you to use a tool, including reading a file or taking an engagement action, or wants step-by-step operational help against a " +
+	"specific target or from a foothold they describe (scanning, sending a request, escalating privileges, exploiting a service, or deciding the next action); " +
 	"GROUND for anything else that needs grounded security facts, including explaining a concept, technique, or a " +
 	"single question. When unsure, answer GROUND."
 
@@ -267,13 +264,10 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 	if _, err := parseAnswerAgent(opts.Agent); err != nil {
 		return "", nil, false, nil, 0, "", err
 	}
-	keepLocal := opts.WebFirst && !opts.WebOnly && questionHasTargetDetails(question)
+	keepLocal := opts.WebFirst && !opts.WebOnly && (questionHasTargetDetails(question) || len(chatTargetEntries(question, opts.History)) > 0)
 	if keepLocal {
 		opts.NoWeb = true
 		enabled.Web = false
-		if !enabled.Local {
-			return "", nil, false, nil, 0, "", errors.New("web search skipped for target details; enable local retrieval")
-		}
 	}
 	// Compress carried-back conversation memory once, before any dispatch, so a
 	// long session stays within budget by condensing older turns rather than
@@ -292,8 +286,12 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 		if err != nil {
 			return "", nil, false, nil, 0, "", err
 		}
-		kind, _ := routeQuery(ctx, l, cfg, question, enabled)
-		if kind == routeAdvise && opts.WebFirst && enabled.Web && !opts.NoWeb {
+		kind := routeAdvise
+		toolRequest := chatToolRequestPattern.MatchString(question)
+		if !toolRequest && (enabled.Local || enabled.Web || len(chatTargetEntries(question, opts.History)) == 0) {
+			kind, _ = routeQuery(ctx, l, cfg, question, enabled)
+		}
+		if kind == routeAdvise && opts.WebFirst && enabled.Web && !opts.NoWeb && !toolRequest {
 			kind = routeGround
 		}
 		if keepLocal && kind == routeSkip {
@@ -313,10 +311,8 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 			ans, tokens, derr := directAnswer(ctx, cfg, question, opts)
 			return ans, []citation{}, false, []retrieval.Result{}, tokens, "skip", derr
 		}
-		if kind == routeAdvise && enabled.Local {
-			// Engagement-shaped turn: run the ungated, tool-using advisor
-			// (route_skill + kb_search, no host execution). cat may be nil, which
-			// only disables the route_skill playbook lookup.
+		if kind == routeAdvise {
+			// Tool-using native chat shares this path across interactive and CLI turns.
 			opts.llm = l
 			cat, _ := loadEngageCatalog()
 			ans, tokens, aerr := adviseLoop(ctx, l, rc, cfg, cat, question, opts)

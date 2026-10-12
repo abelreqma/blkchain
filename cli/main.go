@@ -549,6 +549,11 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 			WebFirst: webFirst,
 			WebOnly:  o.web,
 			History:  history,
+			Stage: func(stage string) {
+				if strings.HasPrefix(stage, "tool ") {
+					fmt.Fprintln(os.Stderr, sanitizeTerminal(stage))
+				}
+			},
 			Persona: func(domain string) {
 				fmt.Println(Meta.Render("answering as " + personaLabel(domain)))
 			},

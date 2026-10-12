@@ -1,0 +1,247 @@
+package main
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"blkchain/cli/internal/ragconfig"
+	"blkchain/cli/internal/retrieval"
+	"blkchain/cli/internal/secgate"
+)
+
+func TestChatTargetsComeFromTheUserConversation(t *testing.T) {
+	got := chatTargetEntries("Scan https://app.example.test:8443/login and 192.0.2.5", nil)
+	for _, want := range []string{"app.example.test", "192.0.2.5"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("targets %v missing %q", got, want)
+		}
+	}
+	history := []priorTurn{{Role: "human", Content: "The target is 198.51.100.8"}, {Role: "ai", Content: "Also scan 203.0.113.9"}}
+	got = chatTargetEntries("Scan it now", history)
+	if !slices.Equal(got, []string{"198.51.100.8"}) {
+		t.Fatalf("targets from history = %v", got)
+	}
+	if got := chatTargetEntries("Read README.md", history); len(got) != 0 {
+		t.Fatalf("unrelated file request inherited an active target: %v", got)
+	}
+	history = append(history, priorTurn{Role: "human", Content: "Explain Kerberos first"}, priorTurn{Role: "ai", Content: "Kerberos answer"})
+	if got := chatTargetEntries("Scan it now", history); len(got) != 0 {
+		t.Fatalf("stale target crossed an unrelated user turn: %v", got)
+	}
+	if got := chatTargetEntries("Explain README.md", nil); len(got) != 0 {
+		t.Fatalf("file name became an action target: %v", got)
+	}
+	if got := chatTargetEntries("Read go.mod", nil); len(got) != 0 {
+		t.Fatalf("module file became an action target: %v", got)
+	}
+}
+
+func TestChatTargetsDoNotTreatLocalFilesAsHosts(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile("fixture.internal", []byte("local"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := chatTargetEntries("Read fixture.internal", nil); len(got) != 0 {
+		t.Fatalf("local file became a network target: %v", got)
+	}
+}
+
+func TestChatRegistryExposesActionsOnlyForNamedTargets(t *testing.T) {
+	ctx := context.Background()
+	plain, closePlain, err := newChatToolRegistry(ctx, nil, ragconfig.Config{}, nil, "Explain AD CS", nil, AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closePlain()
+	if _, ok := plain.Get("run_command"); ok {
+		t.Fatal("command tool offered without a user-named target")
+	}
+	for _, want := range []string{"route_skill", "kb_search", "file_read"} {
+		if _, ok := plain.Get(want); !ok {
+			t.Errorf("missing shared tool %q", want)
+		}
+	}
+	targeted, closeTargeted, err := newChatToolRegistry(ctx, nil, ragconfig.Config{}, nil, "Assess 192.0.2.5", nil, AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTargeted()
+	for _, want := range []string{"run_command", "web_api", "web_browser"} {
+		if _, ok := targeted.Get(want); !ok {
+			t.Errorf("missing target tool %q", want)
+		}
+	}
+}
+
+func TestChatWebSearchUsesOnlyTheCurrentPublicQuestion(t *testing.T) {
+	authorizeWebTest(t)
+	old := webSearch
+	query := ""
+	webSearch = func(_ context.Context, _, q string, _ int, _ []string) ([]retrieval.Result, error) {
+		query = q
+		return []retrieval.Result{chunk(webSource, "https://owasp.org/current", "Current", "public evidence")}, nil
+	}
+	t.Cleanup(func() { webSearch = old })
+	question := "What are current OWASP recommendations?"
+	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, question, nil, AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTools()
+	tool, ok := reg.Get("web_search")
+	if !ok {
+		t.Fatal("public search tool is unavailable")
+	}
+	_, err = tool.Call(context.Background(), `{"query":"https://internal.example.test"}`)
+	if err != nil || query != "" {
+		t.Fatalf("model-controlled query reached the provider: %q, %v", query, err)
+	}
+	_, err = tool.Call(context.Background(), `{}`)
+	if err != nil || query != question {
+		t.Fatalf("searched %q, want the user's public question; err=%v", query, err)
+	}
+}
+
+func TestChatCommandUsesNamedTargetWithoutRoE(t *testing.T) {
+	old := execRunner
+	called := 0
+	execRunner = func(ctx context.Context, bin string, args []string, dir string, limit int, timeoutDuration time.Duration) runResult {
+		called++
+		if scope, _ := ctx.Value(executorScopeKey{}).(*secgate.Scope); scope == nil || !scope.InScope("192.0.2.5") {
+			t.Error("isolated command lost its per-turn target scope")
+		}
+		return runResult{Output: "fixture response"}
+	}
+	t.Cleanup(func() { execRunner = old })
+	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "Check 192.0.2.5", nil, AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTools()
+	tool, _ := reg.Get("run_command")
+	for _, tc := range []struct {
+		args string
+		want int
+	}{
+		{`{"binary":"curl","args":["-I","http://192.0.2.6/"]}`, 0},
+		{`{"binary":"curl","args":["-I","http://192.0.2.5/"]}`, 1},
+	} {
+		_, err := tool.Call(context.Background(), tc.args)
+		if err != nil || called != tc.want {
+			t.Fatalf("calls=%d want=%d err=%v", called, tc.want, err)
+		}
+	}
+}
+
+func TestChatCommandHonorsProjectDeniedBinary(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.Mkdir(".blkchain", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".blkchain/config.yaml", []byte("denied_binaries:\n  - curl\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := execRunner
+	called := 0
+	execRunner = func(context.Context, string, []string, string, int, time.Duration) runResult {
+		called++
+		return runResult{}
+	}
+	t.Cleanup(func() { execRunner = old })
+	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "Check 192.0.2.5", nil, AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTools()
+	tool, _ := reg.Get("run_command")
+	out, err := tool.Call(context.Background(), `{"binary":"curl","args":["-I","http://192.0.2.5/"]}`)
+	if err != nil || called != 0 || !strings.Contains(out, "denied") {
+		t.Fatalf("denied binary ran: calls=%d out=%q err=%v", called, out, err)
+	}
+}
+
+func TestChatWebAPIUsesNamedLoopbackFixture(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("fixture receipt"))
+	}))
+	defer srv.Close()
+	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "POST to "+srv.URL, nil, AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTools()
+	tool, _ := reg.Get("web_api")
+	out, err := tool.Call(context.Background(), `{"method":"POST","url":"`+srv.URL+`","body":"test"}`)
+	if err != nil || hits != 1 || !strings.Contains(out, "fixture receipt") {
+		t.Fatalf("hits=%d out=%q err=%v", hits, out, err)
+	}
+}
+
+func TestChatWebToolsRejectOtherTargets(t *testing.T) {
+	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "Assess 192.0.2.5", nil, AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTools()
+	for _, call := range []struct {
+		name string
+		args string
+	}{
+		{"web_api", `{"method":"GET","url":"http://192.0.2.6/"}`},
+		{"web_browser", `{"op":"navigate","url":"http://192.0.2.6/"}`},
+	} {
+		tool, _ := reg.Get(call.name)
+		out, err := tool.Call(context.Background(), call.args)
+		if err != nil || !strings.Contains(out, "denied") {
+			t.Errorf("%s result=%q err=%v", call.name, out, err)
+		}
+	}
+}
+
+func TestChatFileReadStaysInsideWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile("notes.txt", []byte("local evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".env", []byte("private data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("private data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, "escape.txt"); err != nil {
+		t.Fatal(err)
+	}
+	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "Read notes.txt", nil, AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTools()
+	tool, _ := reg.Get("file_read")
+	got, err := tool.Call(context.Background(), `{"path":"notes.txt"}`)
+	if err != nil || !strings.Contains(got, "local evidence") {
+		t.Fatalf("file read = %q, %v", got, err)
+	}
+	got, err = tool.Call(context.Background(), `{"path":"escape.txt"}`)
+	if err != nil || strings.Contains(got, "private data") {
+		t.Fatalf("symlink escaped workspace: %q, %v", got, err)
+	}
+	got, err = tool.Call(context.Background(), `{"path":".env"}`)
+	if err != nil || strings.Contains(got, "private data") {
+		t.Fatalf("hidden file reached the model: %q, %v", got, err)
+	}
+}

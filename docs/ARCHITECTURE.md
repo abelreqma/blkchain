@@ -14,6 +14,10 @@ sealed RoE and separate operator approvals.
 Interactive web-first search uses the current question only. Detected target details and
 target-specific advisor turns stay local.
 
+Native chat uses one tool registry across CLI, REPL, and TUI. The user-named target in the current
+conversation supplies a temporary scope for isolated commands and web actions. This path has no
+RoE file. `blk engage` keeps its sealed RoE gate, task state, and operator approvals.
+
 ```mermaid
 flowchart TB
   Entry["blk CLI / REPL / TUI / MCP"]
@@ -23,6 +27,7 @@ flowchart TB
     MLX["MLX embedding and reranking"]
     Qdrant["Qdrant dense + sparse index"]
     Native["Native cited answers"]
+    ChatTools["Native chat tools<br/>KB, files, named-target actions"]
     Web["Live web search, interactive default"]
     Retrieval["Go retrieval + RRF"]
     Hermes["Hermes mode<br/>separate permissions"]
@@ -47,6 +52,7 @@ flowchart TB
   Index --> MLX
   Index --> Qdrant
   Native --> Retrieval
+  Native --> ChatTools
   Native --> Web
   Retrieval --> MLX
   Retrieval --> Qdrant
@@ -69,7 +75,7 @@ flowchart TB
   classDef control fill:#ecfdf5,stroke:#15803d,color:#12301e,font-size:16px
   classDef execution fill:#eff6ff,stroke:#2563eb,color:#102a43,font-size:16px
   classDef evidence fill:#f5f3ff,stroke:#7c3aed,color:#2e1065,font-size:16px
-  class Index,MLX,Qdrant,Native,Web,Retrieval,Hermes research
+  class Index,MLX,Qdrant,Native,ChatTools,Web,Retrieval,Hermes research
   class Roe,Approval,Plan,Gate control
   class Worker,Broker,Pivot,Cloud execution
   class Store,Review evidence
@@ -179,6 +185,13 @@ time window, and rate. When the policy authorizes active or state-changing testi
 perform it autonomously within those bounds. Per-action human confirmation is not a universal
 security control. Require an operator decision when the policy does not authorize an action or when
 its bounds are ambiguous.
+
+Normal native chat has a separate action path. It builds a bounded per-turn scope from IPs,
+hostnames, networks, and URLs named by the user, never from model output or retrieved material.
+Its command tool uses the audited binary list and the isolated executor; its web tools use the
+broker's destination and redirect checks. It reads no RoE policy. A missing target exposes no
+active tools, and the project's explicit binary denials still apply. This path does not alter
+`blk engage` authorization.
 
 Protect the operator and the runner from the target. Treat pages, responses, files, and tool output
 from a target as hostile data. They must not choose a target, arm a task, execute as code, or reach
