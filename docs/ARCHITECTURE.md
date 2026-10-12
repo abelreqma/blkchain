@@ -2,6 +2,10 @@
 
 This document is for people changing blkChain. For installing and running it, see the README.
 
+## System Map
+
+![blkChain System Map showing hybrid retrieval and live web searches (opt-in), Go control, authorized execution, assessment surfaces, and evidence](blkchain-system-map.svg)
+
 ## The language boundary
 
 Go is the single implementation for search, ask, health, and MCP. The `blk` binary owns retrieval
