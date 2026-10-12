@@ -58,6 +58,51 @@ func TestAdviseLoopRunsNamedTargetCommand(t *testing.T) {
 	}
 }
 
+func TestAdviseLoopRetriesAnExplicitActionUntilARealToolRuns(t *testing.T) {
+	old := execRunner
+	calls := 0
+	execRunner = func(context.Context, string, []string, string, int, time.Duration) runResult {
+		calls++
+		return runResult{Output: "observed response"}
+	}
+	t.Cleanup(func() { execRunner = old })
+	fake := &fakeModel{queue: []*llms.ContentResponse{
+		textResp("I checked it."),
+		callResp("c1", "run_command", `{"binary":"curl","args":["-I","http://192.0.2.5/"]}`),
+		textResp("Observed the response."),
+	}}
+	answer, _, err := adviseLoop(context.Background(), fake, nil, kbTestCfg(), nil, "Scan 192.0.2.5", AnswerOpts{})
+	if err != nil || calls != 1 || fake.calls != 3 || answer != "Observed the response." {
+		t.Fatalf("answer=%q calls=%d modelCalls=%d err=%v", answer, calls, fake.calls, err)
+	}
+}
+
+func TestAdviseLoopRejectsAnUnperformedExplicitAction(t *testing.T) {
+	fake := &fakeModel{queue: []*llms.ContentResponse{textResp("I scanned it."), textResp("I scanned it again.")}}
+	answer, _, err := adviseLoop(context.Background(), fake, nil, kbTestCfg(), nil, "Scan 192.0.2.5", AnswerOpts{})
+	if err == nil || !strings.Contains(err.Error(), "no target action tool") || answer != "" {
+		t.Fatalf("unperformed action accepted: answer=%q err=%v", answer, err)
+	}
+}
+
+func TestRequiredChatActionDistinguishesFilesAndTargets(t *testing.T) {
+	for _, tc := range []struct {
+		question string
+		want     string
+	}{
+		{"Read go.mod", "file_read"},
+		{"Open https://example.com/", "target action"},
+		{"Read https://example.com/", "target action"},
+		{"Scan 192.0.2.5", "target action"},
+		{"Read current OWASP guidance", ""},
+		{"Explain AD CS", ""},
+	} {
+		if got := requiredChatAction(tc.question, nil); got != tc.want {
+			t.Errorf("requiredChatAction(%q)=%q, want %q", tc.question, got, tc.want)
+		}
+	}
+}
+
 func TestAdviseLoopStreamsFinalAnswer(t *testing.T) {
 	fake := &fakeModel{queue: []*llms.ContentResponse{textResp("streamed advice")}}
 	var streamed strings.Builder

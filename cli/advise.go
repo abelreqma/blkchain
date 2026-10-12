@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"blkchain/cli/internal/promptguard"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/skillcat"
+	"github.com/tmc/langchaingo/llms"
 )
 
 const (
@@ -25,6 +27,16 @@ const adviseMethodology = offensiveReasoningStandard + "You are a tool-using off
 // adviseSystemPrompt is the advisor system prompt: the offensive-security
 // generalist persona plus the advisory methodology.
 const adviseSystemPrompt = genericPersonaPreamble + "\n\n" + adviseMethodology
+
+func requiredChatAction(question string, history []priorTurn) string {
+	if chatToolRequestPattern.MatchString(question) && len(chatTargetEntries(question, history)) > 0 {
+		return "target action"
+	}
+	if chatFileRequestPattern.MatchString(question) && chatQuestionNamesFile(question) {
+		return "file_read"
+	}
+	return ""
+}
 
 // adviseLoop answers an engagement-shaped turn with the native chat tools.
 func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig.Config, cat *skillcat.Catalog, question string, opts AnswerOpts) (string, int, error) {
@@ -46,6 +58,8 @@ func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig
 	}
 	prompt := personaFor(domain).preamble + "\n\n" + adviseMethodology
 	msgs := messagesWithHistory(prompt, opts.History, human)
+	required := requiredChatAction(question, opts.History)
+	requiredCalled, toolCalls := false, 0
 	observe := engageTelemetryFromContext(ctx)
 	caps := LoopCaps{MaxRounds: adviseMaxRounds, MaxCalls: adviseMaxCalls, Observe: func(action, detail string) error {
 		if observe != nil {
@@ -61,9 +75,30 @@ func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig
 				opts.Stage("tool result: " + detail)
 			}
 		}
+		if action == "tool-call" {
+			toolCalls++
+			if detail == required || required == "target action" && (detail == "run_command" || detail == "web_api" || detail == "web_browser") {
+				requiredCalled = true
+			}
+		}
 		return nil
 	}}
 	final, _, err := runToolLoop(ctx, m, reg, msgs, caps)
+	if err == nil && required != "" && !requiredCalled {
+		if toolCalls < adviseMaxCalls {
+			reminder := "The user requested a tool action, but you did not call the required tool. Call it now using only the user-named target or file. Do not claim the action ran without a tool result."
+			msgs = append(msgs, llms.TextParts(llms.ChatMessageTypeSystem, reminder))
+			caps.MaxRounds = 3
+			caps.MaxCalls = adviseMaxCalls - toolCalls
+			final, _, err = runToolLoop(ctx, m, reg, msgs, caps)
+		}
+		if err == nil && !requiredCalled {
+			if required == "file_read" {
+				return "", 0, errors.New("native chat: requested file read was not performed; no file_read tool call")
+			}
+			return "", 0, errors.New("native chat: requested target action was not performed; no target action tool call")
+		}
+	}
 	// The plain-text REPL and CLI paths render only what reaches opts.Stream, so
 	// emit the final advice there; the TUI and --json use the returned value.
 	if err == nil && final != "" && opts.Stream != nil {
