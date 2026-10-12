@@ -13,7 +13,7 @@ dependencies = [
   "mlx-embeddings==0.1.0",
   "mlx-lm==0.32.0",
   # LLM client (eval judge), tokenization, PDF
-  "openai==3.26.0",
+  "openai==3.26.1",
   "tiktoken==0.14.0",
   "pypdf==6.19.0",
   "requests==2.34.2",
