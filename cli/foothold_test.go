@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -153,6 +155,32 @@ func TestFootholdCommandTransportPassesArgvThrough(t *testing.T) {
 	want := []string{"kubectl", "exec", "-i", "web-0", "--", "grep", "a b"}
 	if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("argv carrier produced %v, want %v", argv, want)
+	}
+}
+
+func TestFootholdDialArgsPinTheRemoteAddress(t *testing.T) {
+	key := writeKeyFile(t)
+	ssh, err := newFootholdTransport(parseFootholdOrFail(t, "10.7.0.7 user=svc key="+key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := ssh.DialArgs("10.7.0.8:8080")
+	if err != nil || len(args) < 4 || args[0] != "ssh" || args[len(args)-3] != "-W" || args[len(args)-2] != "10.7.0.8:8080" || args[len(args)-1] != "svc@10.7.0.7" {
+		t.Fatalf("SSH dial argv = %v, err=%v", args, err)
+	}
+	command, err := newFootholdTransport(parseFootholdOrFail(t, "10.7.0.7 transport=command exec=kubectl exec -i fixture --"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err = command.DialArgs("10.7.0.8:8080")
+	want := []string{"kubectl", "exec", "-i", "fixture", "--", "ncat", "10.7.0.8", "8080"}
+	if err != nil || !slices.Equal(args, want) {
+		t.Fatalf("command dial argv = %v, want %v, err=%v", args, want, err)
+	}
+	for _, invalid := range []string{"hostname:80", "10.8.0.1:0", "10.8.0.1:65536", "10.8.0.1:80;id"} {
+		if _, err := command.DialArgs(invalid); err == nil {
+			t.Errorf("invalid dial address %q accepted", invalid)
+		}
 	}
 }
 
@@ -340,6 +368,97 @@ func TestPivotDestination(t *testing.T) {
 	}
 	if got := pivotDestination(&secgate.Gate{Policy: secgate.DefaultPolicy()}, withCarrier, secgate.SurfaceLocal); got != "" {
 		t.Errorf("destination without a declaration = %q, want the sandbox", got)
+	}
+}
+
+func TestCloudCredentialStagesUseApprovedRemoteFile(t *testing.T) {
+	for _, tc := range []struct {
+		provider string
+		binary   string
+		file     string
+		want     string
+	}{
+		{"aws", "aws", "/srv/creds/aws", "AWS_SHARED_CREDENTIALS_FILE=/srv/creds/aws"},
+		{"gcp", "gcloud", "/srv/creds/gcp.json", "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=/srv/creds/gcp.json"},
+	} {
+		stages := cloudCredentialStages([]pipelineStage{{Binary: tc.binary, Args: []string{"list"}}}, secgate.CloudIdentity{Provider: tc.provider, CredentialFile: tc.file})
+		if len(stages) != 1 || stages[0].Binary != "/usr/bin/env" || !slices.Contains(stages[0].Args, "-i") ||
+			!slices.Contains(stages[0].Args, "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin") || !slices.Contains(stages[0].Args, tc.want) {
+			t.Errorf("%s stages = %+v", tc.provider, stages)
+		}
+	}
+}
+
+func TestApprovedCloudCommandsRunThroughFoothold(t *testing.T) {
+	key := writeKeyFile(t)
+	roe, err := ParseRoE(strings.NewReader("## In Scope\n203.0.113.10\n\n## Foothold\n203.0.113.10 user=svc key=" + key + " surfaces=cloud-aws,cloud-gcp\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, err := newFootholdTransport(roe.Policy.Foothold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &secgate.Gate{Mode: secgate.Auto, Scope: roe.Scope, Policy: roe.Policy, Allow: secgate.NewAllowlist(),
+		CloudIdentities: map[secgate.Surface]secgate.CloudIdentity{
+			secgate.SurfaceCloudAWS: {Provider: "aws", CredentialFile: "/srv/keys/aws"},
+			secgate.SurfaceCloudGCP: {Provider: "gcp", CredentialFile: "/srv/keys/gcp.json"},
+		}}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	trace := newActionTranscript(workspace, "off", roe.Policy.RunnerID, 10, 65536, nil)
+	if err := os.WriteFile(filepath.Join(workspace, "actions.jsonl"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var seen [][]pipelineStage
+	runner := &engageRunner{workers: map[string]string{}, foothold: transport,
+		runFn: func(_ context.Context, stages []pipelineStage, _ string, _ int, _ time.Duration) (runResult, []isolatedStageResult) {
+			seen = append(seen, stages)
+			return runResult{Output: "ok"}, []isolatedStageResult{{Stdout: "ok"}}
+		}}
+	ctx := context.WithValue(context.Background(), engageRuntimeKey{}, &engageRuntime{runner: runner, trace: trace, policy: roe.Policy, cancel: func() {}})
+	for _, tc := range []struct {
+		binary, want string
+		surface      secgate.Surface
+		args         []string
+	}{
+		{"aws", "AWS_SHARED_CREDENTIALS_FILE=/srv/keys/aws", secgate.SurfaceCloudAWS, []string{"sts", "get-caller-identity"}},
+		{"gcloud", "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=/srv/keys/gcp.json", secgate.SurfaceCloudGCP, []string{"projects", "list"}},
+	} {
+		result := runAuthorized(ctx, g, tc.binary, tc.args, "task", 65536, time.Second, actionOrigin{TaskID: tc.binary, Surface: tc.surface})
+		if result.Err != nil {
+			t.Fatalf("%s command failed: %v", tc.binary, result.Err)
+		}
+		stage := seen[len(seen)-1][0]
+		if stage.Binary != "ssh" || !strings.Contains(stage.Args[len(stage.Args)-1], tc.want) {
+			t.Errorf("%s carrier = %+v", tc.binary, stage)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(workspace, "actions.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"aws":    secgate.Signature(secgate.Command{Binary: "aws", Args: []string{"sts", "get-caller-identity"}}),
+		"gcloud": secgate.Signature(secgate.Command{Binary: "gcloud", Args: []string{"projects", "list"}}),
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var record actionRecord
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.Status != "complete" {
+			continue
+		}
+		if record.Destination != "203.0.113.10" || record.Command != want[record.Task] {
+			t.Errorf("cloud action recorded wrong destination or command: %+v", record)
+		}
+		delete(want, record.Task)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing cloud action records: %v", want)
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -135,8 +136,8 @@ func TestVantageAdvanceFromUnsetSeedsNewlyReachableSurfaces(t *testing.T) {
 	}
 
 	adID := reconTaskID("10.0.0.5") + "-" + string(engagement.SurfaceAD)
-	if _, err := st.GetTask(adID); err != nil {
-		t.Fatalf("ad recon task not seeded: %v", err)
+	if _, err := st.GetTask(adID); !errors.Is(err, engagement.ErrNotFound) {
+		t.Fatalf("external AD surface should not be seeded again: %v", err)
 	}
 }
 

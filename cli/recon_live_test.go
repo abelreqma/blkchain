@@ -19,6 +19,22 @@ import (
 // the separate per-tier tool loops and the grader call that share one model.
 type reconLiveModel struct{}
 
+type adReconPromptModel struct{ sawAD bool }
+
+func (m *adReconPromptModel) GenerateContent(ctx context.Context, msgs []llms.MessageContent, opts ...llms.CallOption) (*llms.ContentResponse, error) {
+	for _, msg := range msgs {
+		if msg.Role != llms.ChatMessageTypeSystem {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if text, ok := part.(llms.TextContent); ok && strings.Contains(text.Text, "Domain: Active Directory") {
+				m.sawAD = true
+			}
+		}
+	}
+	return (reconLiveModel{}).GenerateContent(ctx, msgs, opts...)
+}
+
 func (reconLiveModel) GenerateContent(_ context.Context, msgs []llms.MessageContent, _ ...llms.CallOption) (*llms.ContentResponse, error) {
 	for _, m := range msgs {
 		if m.Role != llms.ChatMessageTypeHuman {
@@ -88,6 +104,33 @@ func TestRunReconPhaseDrivesLadderAndPersistsCoverage(t *testing.T) {
 	}
 	if rows[0].Dimensions["hosts"] != engagement.ReconCovered {
 		t.Fatalf("hosts dimension = %q, want covered (a tier ran and recorded evidence)", rows[0].Dimensions["hosts"])
+	}
+}
+
+func TestADReconTierUsesADPersona(t *testing.T) {
+	model := &adReconPromptModel{}
+	d := testDeps(t, model)
+	d.ReconTiers = true
+	d.Gate = autoGate(t)
+	d.Runs = NewRunOutputs()
+	withStubExec(t, func(_ context.Context, _ string, _ []string, _ string, _ int, _ time.Duration) runResult {
+		return runResult{Output: "389/tcp open ldap"}
+	})
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{
+		ID: "t1", Kind: "recon", Target: "10.0.0.5", Objective: "enumerate LDAP",
+		Status: engagement.StatusTodo, Phase: engagement.PhaseRecon, Surface: engagement.SurfaceAD,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := d.Store.GetTask("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (genericExecutor{d: d}).Run(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	if !model.sawAD {
+		t.Fatal("AD recon tier used the generic recon persona")
 	}
 }
 

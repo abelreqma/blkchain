@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	tea "github.com/charmbracelet/bubbletea"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +20,63 @@ import (
 	"testing"
 	"time"
 )
+
+func TestWebBrokerUsesAttachedFootholdTransport(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("internal fixture"))
+	}))
+	defer server.Close()
+	scope, err := secgate.ParseScope(strings.NewReader("127.0.0.1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &secgate.Gate{Mode: secgate.Auto, Scope: scope, Policy: secgate.DefaultPolicy(),
+		AttachedFoothold: &secgate.Foothold{Host: "127.0.0.1", Surfaces: []secgate.Surface{secgate.SurfaceWeb}}}
+	if err := gate.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var dials atomic.Int32
+	var pinned string
+	runner := &engageRunner{foothold: &footholdTransport{name: "command"},
+		dialFn: func(ctx context.Context, address string) (net.Conn, error) {
+			dials.Add(1)
+			if strings.HasPrefix(address, "10.7.0.7:") {
+				pinned = address
+				address = strings.TrimPrefix(server.URL, "http://")
+			}
+			return (&net.Dialer{}).DialContext(ctx, "tcp", address)
+		}}
+	ctx := context.WithValue(context.Background(), engageRuntimeKey{}, &engageRuntime{runner: runner, policy: gate.Policy})
+	broker := newWebBroker(gate, nil)
+	response, err := broker.Fetch(ctx, webacquire.Request{URL: server.URL})
+	if err != nil || string(response.Body) != "internal fixture" || dials.Load() != 1 {
+		t.Fatalf("attached web request did not use carrier: response=%+v dials=%d err=%v", response, dials.Load(), err)
+	}
+	if _, err := broker.Fetch(context.Background(), webacquire.Request{URL: server.URL}); err == nil || dials.Load() != 1 {
+		t.Fatalf("web request without runtime used carrier: dials=%d err=%v", dials.Load(), err)
+	}
+	pivot, err := scope.WithApprovedPrivateNetworks([]string{"10.7.0.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate.PivotScope = pivot
+	gate.WebLookup = func(host string) ([]net.IP, error) {
+		if host != "app.internal.test" {
+			return nil, errors.New("unexpected host")
+		}
+		return []net.IP{net.ParseIP("10.7.0.7")}, nil
+	}
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Host = net.JoinHostPort("app.internal.test", u.Port())
+	broker = newWebBroker(gate, nil)
+	response, err = broker.Fetch(ctx, webacquire.Request{URL: u.String()})
+	if err != nil || string(response.Body) != "internal fixture" || dials.Load() != 2 || !strings.HasPrefix(pinned, "10.7.0.7:") {
+		t.Fatalf("internal hostname missed pinned carrier: response=%+v dials=%d pinned=%q err=%v", response, dials.Load(), pinned, err)
+	}
+}
 
 func TestWebTranscriptModesThroughDispatch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,6 +160,9 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 	if err != nil {
 		return "", err
 	}
+	if roe.Policy.Foothold != nil && roe.Policy.Foothold.Transport == "raw-session" {
+		return "", errors.New("raw sessions require operator attachment after access evidence")
+	}
 	if metadata.PolicyHash != "" && metadata.PolicyHash != roe.Policy.Hash {
 		return "", errors.New("engage: resumed ROE policy differs from the checkpoint; start a new engagement")
 	}
@@ -196,6 +200,39 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 	} else if err := verifyEngagePolicy(filepath.Join(wsDir, "policy.json"), roe.Policy.Canonical); err != nil {
 		return "", err
 	}
+	var ws *engagement.Workspace
+	var attachment *attachedFoothold
+	var attachedCarrier *secgate.Foothold
+	var attachedTask engagement.Task
+	if o.resume != "" {
+		lease, lockErr := acquireEngageLock(wsDir)
+		if lockErr != nil {
+			return "", lockErr
+		}
+		defer lease.Close()
+		ws, err = engagement.OpenWorkspace(wsDir)
+		if err != nil {
+			return "", err
+		}
+		defer ws.Close()
+		attachment, err = readAttachedFoothold(ws.Dir)
+		if err != nil {
+			return "", err
+		}
+		if attachment != nil {
+			if roe.Policy.Foothold != nil {
+				return "", errors.New("engage: attached foothold conflicts with declared foothold")
+			}
+			scope, scopeErr := attachedFootholdScope(roe, ws.Dir)
+			if scopeErr != nil {
+				return "", scopeErr
+			}
+			attachedCarrier, attachedTask, err = validateAttachedFoothold(ws.Store, scope, attachment, ws.Dir, roe.Policy.Hash)
+			if err != nil {
+				return "", err
+			}
+		}
+	}
 	scratch, err := os.MkdirTemp("", "blkengage-")
 	if err != nil {
 		return "", err
@@ -205,7 +242,15 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 			retErr = errors.Join(retErr, fmt.Errorf("engage: scratch cleanup failed: %w", err))
 		}
 	}()
-	runner, err := newEngageRunnerForRun(ctx, roe)
+	runnerRoE := roe
+	if attachedCarrier != nil {
+		copyRoE := *roe
+		copyPolicy := *roe.Policy
+		copyPolicy.Foothold = attachedCarrier
+		copyRoE.Policy = &copyPolicy
+		runnerRoE = &copyRoE
+	}
+	runner, err := newEngageRunnerForRun(ctx, runnerRoE)
 	if err != nil {
 		return "", err
 	}
@@ -214,16 +259,61 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 			retErr = errors.Join(retErr, fmt.Errorf("engage: isolated runner cleanup failed: %w", err))
 		}
 	}()
-	ws, err := engagement.OpenWorkspace(wsDir)
-	if err != nil {
-		return "", err
+	if ws == nil {
+		ws, err = engagement.OpenWorkspace(wsDir)
+		if err != nil {
+			return "", err
+		}
+		defer ws.Close()
+		lease, lockErr := acquireEngageLock(ws.Dir)
+		if lockErr != nil {
+			return "", lockErr
+		}
+		defer lease.Close()
 	}
-	defer ws.Close()
-	lease, err := acquireEngageLock(ws.Dir)
-	if err != nil {
-		return "", err
+	var pivotScope *secgate.Scope
+	var approvedNetworks []approvedNetwork
+	var cloudIdentities map[secgate.Surface]secgate.CloudIdentity
+	if o.resume != "" {
+		approvedNetworks, err = readApprovedNetworks(ws.Dir)
+		if err != nil {
+			return "", err
+		}
+		if len(approvedNetworks) > 0 {
+			if runner.foothold == nil {
+				return "", errors.New("approved networks require a declared or attached foothold")
+			}
+			networks := make([]string, 0, len(approvedNetworks))
+			for _, record := range approvedNetworks {
+				networks = append(networks, record.CIDR)
+			}
+			pivotScope, err = roe.Scope.WithApprovedPrivateNetworks(networks)
+			if err != nil {
+				return "", err
+			}
+		}
+		identities, err := readApprovedCloudIdentities(ws.Dir)
+		if err != nil {
+			return "", err
+		}
+		for _, identity := range identities {
+			surface, _ := cloudApprovalSurface(identity.Provider)
+			if runner.foothold == nil || !runnerRoE.Policy.Foothold.Covers(surface) {
+				return "", errors.New("approved cloud identity requires a covered foothold surface")
+			}
+			found, err := cloudApprovalHasEvidence(ws.Store, identity)
+			if err != nil {
+				return "", err
+			}
+			if !found {
+				return "", fmt.Errorf("approved cloud identity evidence %d is missing", identity.EvidenceID)
+			}
+			if cloudIdentities == nil {
+				cloudIdentities = map[secgate.Surface]secgate.CloudIdentity{}
+			}
+			cloudIdentities[surface] = identity
+		}
 	}
-	defer lease.Close()
 	trace := newActionTranscript(ws.Dir, o.transcript, roe.Policy.RunnerID, roe.Policy.MaxActions, roe.Policy.TotalBytes, input.Output)
 	trace.onStore = func(data []byte) error { return ws.Store.RecordActionDocument(context.Background(), data) }
 	trace.otherRunner = "web-broker"
@@ -269,6 +359,31 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 			recordWriteFailure("audit queue", errors.New("action transcript queue is full"))
 		}
 	})
+	gate.PivotScope = pivotScope
+	gate.AttachedFoothold = attachedCarrier
+	gate.CloudIdentities = cloudIdentities
+	if runner.foothold != nil && pivotScope != nil && gate.EffectiveFoothold().Covers(secgate.SurfaceWeb) {
+		gate.WebLookup = func(host string) ([]net.IP, error) {
+			lookupCtx, cancelLookup := context.WithTimeout(ctx, 5*time.Second)
+			defer cancelLookup()
+			ips, outputBytes, lookupErr := runner.LookupFootholdHost(lookupCtx, host)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			for _, ip := range ips {
+				if !pivotScope.PivotWebAddressAllowed(host, ip) {
+					return nil, errors.New("foothold hostname resolves outside approved scope")
+				}
+			}
+			if claimErr := gate.ClaimPolicyBytes(outputBytes); claimErr != nil {
+				return nil, claimErr
+			}
+			if gate.Audit != nil {
+				gate.Audit("web-pivot-resolve", host+" -> "+fmt.Sprint(ips))
+			}
+			return ips, nil
+		}
+	}
 	// The carrier is a binary that runs inside the worker, so it clears the same
 	// reachability allowlist as any other command. Without this check an RoE
 	// could nominate any binary in the image as its carrier.
@@ -334,6 +449,11 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 	defer finishAudit()
 	stopWatcher := watchEngageStop(ctx, ws.Dir, cancel)
 	defer stopWatcher()
+	if attachedCarrier != nil {
+		if err = probeAttachedFoothold(ctx, gate, scratch); err != nil {
+			return "", err
+		}
+	}
 	if input.Model == nil && input.Run == nil {
 		input.Model, err = newOMLX(input.Cfg, o.model)
 		if err != nil {
@@ -361,6 +481,9 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 		input.Asker = askuser.AutoAsker{}
 	}
 	deps := buildEngageDeps(input.Model, input.RC, input.Cfg, input.Prefs, ws.Store, gate, scratch, input.Catalog, input.Asker, input.Confirm, input.Progress)
+	if _, ok := cloudIdentities[secgate.SurfaceCloudGCP]; ok {
+		deps.ExploitTools = append(deps.ExploitTools, "gcloud")
+	}
 	toolHelp, closeHelp := openToolHelpCache()
 	defer closeHelp()
 	deps.ToolHelp = toolHelp
@@ -376,6 +499,27 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 		}
 	} else if err = reopenInterruptedTasks(ctx, ws.Store); err != nil {
 		return "", err
+	}
+	if attachedCarrier != nil {
+		vantage, vErr := ws.Store.Vantage(ctx)
+		if vErr != nil {
+			return "", vErr
+		}
+		if vantage == engagement.VantageExternalUnauth || vantage == engagement.VantageExternalAuth {
+			if err = advanceVantage(ctx, ws.Store, engagement.VantageInternalFoothold, attachedCarrier.Host, attachedTask.ID); err != nil {
+				return "", err
+			}
+		}
+	}
+	if len(approvedNetworks) > 0 && gate.EffectiveFoothold().Covers(secgate.SurfaceNetwork) {
+		if err = seedApprovedNetworkTasks(ctx, ws.Store, approvedNetworks, attachedTask.ID); err != nil {
+			return "", err
+		}
+	}
+	if len(cloudIdentities) > 0 {
+		if err = seedApprovedCloudTasks(ctx, ws.Store, cloudIdentities); err != nil {
+			return "", err
+		}
 	}
 	if err = rw.Flush("in-progress"); err != nil {
 		return "", err

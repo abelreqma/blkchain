@@ -2,9 +2,33 @@ package secgate
 
 import (
 	"context"
+	"net"
 	"net/url"
 	"strings"
 )
+
+func (g *Gate) pivotWeb(c Command) bool {
+	return c.Surface == SurfaceWeb && g != nil && g.PivotScope != nil && g.execOffHost(c)
+}
+
+func (g *Gate) pivotWebHostCandidate(scope *Scope, host string) bool {
+	if !g.pivotWeb(Command{Surface: SurfaceWeb}) || net.ParseIP(host) != nil || !isHostname(host) {
+		return false
+	}
+	for _, matcher := range scope.out {
+		if matcher.matches(host) {
+			return false
+		}
+	}
+	return true
+}
+
+func (g *Gate) webAddressAllowed(scope *Scope, host string, ip net.IP) bool {
+	if g.pivotWeb(Command{Surface: SurfaceWeb}) {
+		return scope.PivotWebAddressAllowed(host, ip)
+	}
+	return scope.WebAddressAllowed(host, ip)
+}
 
 // browser.go adds the single-gate authorization entrypoints for browser
 // automation and API testing. Both are target-touching actions but neither is a subprocess, so they
@@ -159,7 +183,8 @@ func (g *Gate) authorizeWebAction(ctx context.Context, c Command) Decision {
 // (AuthorizeWebRedirect). An empty or absent scope in Auto, without the explicit
 // override, is denied; otherwise the URL host is extracted and must be InScope.
 func (g *Gate) webScopeCheck(c Command) Decision {
-	emptyScope := g.Scope == nil || g.Scope.Empty()
+	scope := g.scopeFor(c)
+	emptyScope := scope == nil || scope.Empty()
 	if emptyScope {
 		return g.deny("scope", c, "web actions require an explicit non-empty network scope", "")
 	}
@@ -171,7 +196,7 @@ func (g *Gate) webScopeCheck(c Command) Decision {
 		return g.deny("scope", c, "web action url has no verifiable host to scope-check", "")
 	}
 	for _, t := range targets {
-		if !g.Scope.InScope(t) {
+		if !scope.InScope(t) && !g.pivotWebHostCandidate(scope, t) {
 			return g.deny("scope", c, "web action target out of scope: "+t, "")
 		}
 	}

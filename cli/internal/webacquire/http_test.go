@@ -68,6 +68,31 @@ func TestPinnedRequestChecksHostnameWithAddress(t *testing.T) {
 		t.Fatalf("redirect to another hostname at the same IP was accepted: requests=%d err=%v", reached.Load(), err)
 	}
 }
+
+func TestCustomDialRunsOnlyAfterScopeCheck(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("pivoted"))
+	}))
+	defer server.Close()
+	broker := fixtureBroker()
+	broker.Policy.Resolve = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("127.0.0.1")}, nil
+	}
+	var dials atomic.Int32
+	broker.Policy.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		dials.Add(1)
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	broker.Policy.IPAllowed = func(string, net.IP) bool { return false }
+	if _, err := broker.Fetch(context.Background(), Request{URL: server.URL}); err == nil || dials.Load() != 0 {
+		t.Fatalf("out-of-scope request reached custom dial: dials=%d err=%v", dials.Load(), err)
+	}
+	broker.Policy.IPAllowed = func(string, net.IP) bool { return true }
+	response, err := broker.Fetch(context.Background(), Request{URL: server.URL})
+	if err != nil || !response.Complete || string(response.Body) != "pivoted" || dials.Load() != 1 {
+		t.Fatalf("scoped custom dial failed: response=%+v dials=%d err=%v", response, dials.Load(), err)
+	}
+}
 func TestCompressedBombCancellationAndBudget(t *testing.T) {
 	var z bytes.Buffer
 	gz := gzip.NewWriter(&z)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -11,18 +12,22 @@ import (
 
 // Gate composes every security layer. It performs no execution.
 type Gate struct {
-	Policy         *Policy
-	policyCount    int
-	policyBytes    int64
-	policyDeadline time.Time
-	mu             sync.Mutex // serializes Authorize and Start: the Episode budget and Approvals are shared state
-	Mode           Mode
-	Scope          *Scope                      // may be nil in Safe; must be non-nil and non-empty in Auto
-	Allow          *Allowlist                  // nil permits nothing (fail closed)
-	Confirm        Confirmer                   // used in Safe; nil denies in Safe
-	Approvals      *SessionApprovals           // nil remembers no repeats
-	Episode        *Episode                    // nil gets a default-caps episode
-	Audit          func(action, detail string) // nil is a no-op
+	Policy           *Policy
+	policyCount      int
+	policyBytes      int64
+	policyDeadline   time.Time
+	mu               sync.Mutex // serializes Authorize and Start: the Episode budget and Approvals are shared state
+	Mode             Mode
+	Scope            *Scope // may be nil in Safe; must be non-nil and non-empty in Auto
+	PivotScope       *Scope
+	AttachedFoothold *Foothold
+	WebLookup        func(string) ([]net.IP, error)
+	CloudIdentities  map[Surface]CloudIdentity
+	Allow            *Allowlist                  // nil permits nothing (fail closed)
+	Confirm          Confirmer                   // used in Safe; nil denies in Safe
+	Approvals        *SessionApprovals           // nil remembers no repeats
+	Episode          *Episode                    // nil gets a default-caps episode
+	Audit            func(action, detail string) // nil is a no-op
 
 	Protected []string
 	Scratch   string
@@ -236,6 +241,7 @@ func (g *Gate) ConfirmCommand(ctx context.Context, c Command) Decision {
 // passed; the command is NOT yet confirmed and no "allow" is audited. It touches
 // only g.mu-protected state (the Episode budget and the audit log).
 func (g *Gate) checkLocked(c Command) Decision {
+	scope := g.scopeFor(c)
 	// 1. caps and circuit breaker. An RoE policy owns the engagement's budget and
 	// its own input, action, denial and scope layers; it ADDS to the structural
 	// command layers below rather than replacing them. A sealed policy authorizes
@@ -253,6 +259,11 @@ func (g *Gate) checkLocked(c Command) Decision {
 	// split. Arming never relaxes it.
 	if deniedByConfig(c.Binary, g.ConfigDenied) {
 		return g.deny("config-denylist", c, "binary "+c.Binary+" is denied by .blkchain/config.yaml", "")
+	}
+	if g.cloudIdentityCommand(c) {
+		if reason := cloudIdentityViolation(c); reason != "" {
+			return g.deny("cloud-identity", c, reason, "")
+		}
 	}
 	// Phase tier: exploit and post-ex require an armed task, in both profiles
 	// and both modes. Arming is a precondition the operator sets; it never relaxes
@@ -298,18 +309,18 @@ func (g *Gate) checkLocked(c Command) Decision {
 		}
 		// A local command has no remote target to scope. A scope that also lists
 		// in-scope network targets still scopes a command that names one.
-		if !g.Scope.Empty() {
+		if !scope.Empty() || g.execOffHost(c) {
 			targets, nets, ok := ExtractTargetSet(c)
 			if !ok {
 				return g.deny("scope", c, "command has an unverifiable target (cannot confirm it is in scope)", "")
 			}
 			for _, tgt := range targets {
-				if !g.Scope.InScope(tgt) {
+				if !scope.InScope(tgt) {
 					return g.deny("scope", c, "target out of scope: "+tgt, "")
 				}
 			}
 			for _, n := range nets {
-				if !g.Scope.NetworkInScope(n) {
+				if !scope.NetworkInScope(n) {
 					return g.deny("scope", c, "network out of scope: "+n.String(), "")
 				}
 			}
@@ -326,11 +337,11 @@ func (g *Gate) checkLocked(c Command) Decision {
 			return g.deny("classifier", c, d.Reason, d.Suggestion)
 		}
 		// 3. binary allowlist
-		if g.Allow == nil || !g.Allow.Permits(c.Binary) {
+		if (g.Allow == nil || !g.Allow.Permits(c.Binary)) && !g.cloudIdentityCommand(c) {
 			return g.deny("allowlist", c, fmt.Sprintf("binary %q is not on the allowlist", c.Binary), "")
 		}
 		// 4. scope.
-		emptyScope := g.Scope == nil || g.Scope.Empty()
+		emptyScope := scope == nil || scope.Empty()
 		switch {
 		case g.Mode == Auto && emptyScope && !g.AutoScopeOverride:
 			// Auto without a usable scope is denied even if Start was skipped.
@@ -358,22 +369,22 @@ func (g *Gate) checkLocked(c Command) Decision {
 			if a, bad := gluedShortFlag(c.Args, ""); bad {
 				return g.deny("scope", c, "no scope defined; a glued or bundled short flag may hide a target that cannot be confirmed in scope: "+a, "")
 			}
-		case g.Scope != nil:
+		case scope != nil:
 			targets, nets, ok := ExtractTargetSet(c)
 			if !ok {
 				return g.deny("scope", c, "command has an unverifiable target (cannot confirm it is in scope)", "")
 			}
 			// For a binary audited as addressing no destination, no target is the expected result rather than one the extractor missed.
-			if len(targets) == 0 && len(nets) == 0 && !g.noDestination(c.Binary) {
+			if len(targets) == 0 && len(nets) == 0 && !g.noDestination(c.Binary) && !g.cloudIdentityCommand(c) {
 				return g.deny("scope", c, "no verifiable target to check against the scope", "")
 			}
 			for _, tgt := range targets {
-				if !g.Scope.InScope(tgt) {
+				if !scope.InScope(tgt) {
 					return g.deny("scope", c, "target out of scope: "+tgt, "")
 				}
 			}
 			for _, n := range nets {
-				if !g.Scope.NetworkInScope(n) {
+				if !scope.NetworkInScope(n) {
 					return g.deny("scope", c, "network out of scope: "+n.String(), "")
 				}
 			}

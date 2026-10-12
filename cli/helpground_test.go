@@ -29,6 +29,24 @@ func TestPolicyHelpGroundingUsesRunnerImageIdentity(t *testing.T) {
 	}
 }
 
+func TestCloudFootholdHelpCacheUsesApprovalIdentity(t *testing.T) {
+	p := secgate.DefaultPolicy()
+	p.Foothold = &secgate.Foothold{Host: "203.0.113.10", Surfaces: []secgate.Surface{secgate.SurfaceCloudAWS}}
+	g := &secgate.Gate{Policy: p, CloudIdentities: map[secgate.Surface]secgate.CloudIdentity{
+		secgate.SurfaceCloudAWS: {Provider: "aws", CredentialFile: "/srv/keys/aws", At: "2026-10-11T00:00:00Z"},
+	}}
+	hg := newTaskGrounder(&stubCache{data: map[string]toolInterface{}}, g, t.TempDir(), secgate.Command{Surface: secgate.SurfaceCloudAWS})
+	got := hg.ResolveVersion("aws")
+	if got == defaultRunnerTag() || !strings.Contains(got, p.Foothold.Host) {
+		t.Fatalf("cloud help cache used the runner image: %q", got)
+	}
+	g.CloudIdentities[secgate.SurfaceCloudAWS] = secgate.CloudIdentity{Provider: "aws", At: "2026-10-12T00:00:00Z"}
+	other := newTaskGrounder(&stubCache{data: map[string]toolInterface{}}, g, t.TempDir(), secgate.Command{Surface: secgate.SurfaceCloudAWS})
+	if other.ResolveVersion("aws") == got {
+		t.Fatal("new approval reused the old foothold help cache")
+	}
+}
+
 func TestIsHelpSideEffectMatchesBaseName(t *testing.T) {
 	helpSideEffectBinaries["dangertool"] = true
 	t.Cleanup(func() { delete(helpSideEffectBinaries, "dangertool") })

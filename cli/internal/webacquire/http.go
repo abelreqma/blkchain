@@ -40,6 +40,7 @@ type Policy struct {
 	Authorize     func(context.Context, Request) error
 	IPAllowed     func(string, net.IP) bool
 	Resolve       func(context.Context, string) ([]net.IP, error)
+	DialContext   func(context.Context, string, string) (net.Conn, error)
 	MaxBodyBytes  int
 	MaxTotalBytes int
 	MaxRequests   int
@@ -49,6 +50,13 @@ type Broker struct {
 	Policy                     Policy
 	mu                         sync.Mutex
 	requests, bytes, wireBytes int
+}
+
+func (b *Broker) dial(ctx context.Context, network, address string) (net.Conn, error) {
+	if b.Policy.DialContext != nil {
+		return b.Policy.DialContext(ctx, network, address)
+	}
+	return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, address)
 }
 
 func (b *Broker) Usage() (int, int) { b.mu.Lock(); defer b.mu.Unlock(); return b.requests, b.bytes }
@@ -270,7 +278,7 @@ func (b *Broker) Once(ctx context.Context, r Request) (Response, error) {
 	}
 	pinned := net.JoinHostPort(ips[0].String(), port)
 	tr := &http.Transport{Proxy: nil, DisableCompression: true, DisableKeepAlives: true, MaxResponseHeaderBytes: 64 << 10, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 15 * time.Second, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: u.Hostname()}, DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, pinned)
+		return b.dial(ctx, network, pinned)
 	}}
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

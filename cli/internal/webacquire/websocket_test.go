@@ -122,6 +122,36 @@ func TestWebSocketPinnedAddressChecksHostname(t *testing.T) {
 		t.Fatal("WebSocket accepted another hostname at the same IP")
 	}
 }
+
+func TestWebSocketCustomDialHonorsScope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(w, r, nil)
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer server.Close()
+	target := "ws" + strings.TrimPrefix(server.URL, "http") + "/stream"
+	broker := wsBroker()
+	broker.Policy.Resolve = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("127.0.0.1")}, nil
+	}
+	var dials atomic.Int32
+	broker.Policy.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		dials.Add(1)
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	broker.Policy.IPAllowed = func(string, net.IP) bool { return false }
+	if _, _, err := broker.OpenWebSocket(context.Background(), target, nil, nil); err == nil || dials.Load() != 0 {
+		t.Fatalf("out-of-scope socket reached custom dial: dials=%d err=%v", dials.Load(), err)
+	}
+	broker.Policy.IPAllowed = func(string, net.IP) bool { return true }
+	socket, response, err := broker.OpenWebSocket(context.Background(), target, nil, nil)
+	if err != nil || response.Status != http.StatusSwitchingProtocols || dials.Load() != 1 {
+		t.Fatalf("scoped socket dial failed: response=%+v dials=%d err=%v", response, dials.Load(), err)
+	}
+	socket.Close()
+}
 func TestWebSocketLimitsRedirectsAndTLSVerification(t *testing.T) {
 	var reached atomic.Int32
 	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached.Add(1) }))

@@ -26,8 +26,11 @@ Describe the authorized engagement here.
 ## In Scope
 <!-- hosts, IPs, or CIDRs allowed, one per line, e.g. 10.0.0.0/24
 
-     An internal address - loopback, RFC1918 private, or link-local - is allowed
-     only by its own explicit IP or CIDR line here, e.g. 127.0.0.1 or 10.0.0.0/8.
+     An internal address needs its own IP or CIDR line here. After access
+     exposes a private network, stop the run and approve its CIDR with
+     blk engage approve-network --workspace DIR CIDR before resuming. That
+     approval applies only to commands carried through a foothold. Attach a
+     gained session with blk engage attach-foothold before resuming.
      A hostname line does NOT authorize the address it resolves to, so listing
      "localhost" leaves 127.0.0.1 out of scope. This is deliberate: a name that
      resolves inward must not reach an internal service by accident. -->
@@ -62,9 +65,24 @@ Describe the authorized engagement here.
 
        10.0.0.9 transport=command exec=kubectl exec -i web-0 --
 
+     transport=raw-session is available only as an attachment after access
+     evidence, using a private workspace record for a retained loopback POSIX
+     shell. transport=msf-rpc uses an active Metasploit command
+     shell through a loopback MessagePack service and a password environment
+     variable. transport=http-form sends a POST command field to an IP URL
+     through the guarded worker. These three transports cannot carry web TCP
+     streams. See the README for their entry formats.
+
      surfaces= selects which surfaces pivot; the default is local. Commands run
      on the foothold are outside the runner's network guard, so scope is enforced
      by the command gate alone and every such action records its destination.
+     Select web to carry browser and API requests through the foothold. SSH
+     forwards the checked TCP stream; a command carrier needs ncat on the host.
+     cloud-aws and cloud-gcp may be selected when the corresponding provider CLI
+     and credential file are present on the foothold. Approve each identity from
+     recorded evidence before using that CLI. Approval permits RoE-authorized
+     provider operations with that credential file; the CLI cannot prove that
+     every operation stays in the identity's home account or project.
 
      On a pivoted surface this host's PATH and symlinks no longer describe the file
      a command names, so a target-analysis task must name its inspection tool by

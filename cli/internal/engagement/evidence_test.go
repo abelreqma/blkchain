@@ -173,6 +173,25 @@ func TestEvidenceRowsForReturnsIDsAndQuotes(t *testing.T) {
 	}
 }
 
+func TestHasEvidenceRowBindsTaskAndID(t *testing.T) {
+	s := openTemp(t)
+	seedAB(t, s)
+	id, err := s.RecordEvidence("A", "credential source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		task string
+		id   int64
+		want bool
+	}{{"A", id, true}, {"B", id, false}, {"A", id + 1, false}} {
+		got, err := s.HasEvidenceRow(tc.task, tc.id)
+		if err != nil || got != tc.want {
+			t.Errorf("HasEvidenceRow(%q, %d) = %t, %v; want %t", tc.task, tc.id, got, err, tc.want)
+		}
+	}
+}
+
 func TestEvidenceRowsForEmpty(t *testing.T) {
 	s := openTemp(t)
 	seedAB(t, s)

@@ -62,6 +62,18 @@ func runEngage(args []string) error {
 			return runWebAnalysis(args[1:])
 		case "arm":
 			return runEngageArm(args[1:])
+		case "approve-network":
+			return runEngageApproveNetwork(args[1:])
+		case "attach-foothold":
+			return runEngageAttachFoothold(args[1:])
+		case "listen-shell":
+			return runEngageListenShell(args[1:])
+		case "close-shell":
+			return runEngageCloseShell(args[1:])
+		case "sessiond":
+			return runEngageSessionDaemon(args[1:])
+		case "approve-cloud-identity":
+			return runEngageApproveCloudIdentity(args[1:])
 		case "resume":
 			return runEngageResume(args[1:])
 		case "setup":

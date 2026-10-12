@@ -67,6 +67,10 @@ func TestBuildEngageGateOneCompositionRoot(t *testing.T) {
 		ws.Dir + "/checkpoint.json",
 		ws.Dir + "/ROE.md",
 		ws.Dir + "/scope.txt",
+		approvedNetworksPath(ws.Dir),
+		approvedCloudIdentitiesPath(ws.Dir),
+		attachedFootholdPath(ws.Dir),
+		rawSessionRecordPath(ws.Dir),
 	}
 	for _, gate := range []*secgate.Gate{extGate, localGate} {
 		if len(gate.Protected) != len(want) {

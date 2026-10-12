@@ -19,9 +19,8 @@ import (
 // A declared foothold is internal access the operator asserts, the same kind of
 // assertion as a local scope, so it starts the engagement at internal-foothold
 // and the surfaces that vantage reaches are open from the first task. An
-// engagement with no foothold still advances through advanceVantage when an
-// exploit yields access; it simply has no carrier, so those tasks run in the
-// sandbox worker and record that as their destination.
+// engagement with no foothold stays at external-unauth until a carrier is
+// available; exploit output alone does not establish one.
 func seedVantageFor(scope *secgate.Scope, foothold *secgate.Foothold) engagement.Vantage {
 	if foothold != nil {
 		return engagement.VantageInternalFoothold

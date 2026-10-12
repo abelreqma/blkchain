@@ -259,9 +259,9 @@ func commandSpecs() []cmdSpec {
 		{
 			name: "engage", args: "<goal...>", group: hgEngage,
 			desc: "plan and run a gated, multi-step assessment",
-			long: "Runs an engagement under one operator policy that sets target scope, actions, caps, and an isolated runner. " +
-				"Auto runs permitted actions without per-action approval; --safe asks for interactive approval. " +
-				"The workspace records policy, evidence, transcripts, and reports, and --resume continues interrupted work under the same policy. " +
+			long: "Runs an engagement under one operator policy that sets target scope, actions, caps, and an isolated runner; Auto runs permitted actions and --safe asks for interactive approval. " +
+				"The workspace records policy, evidence, transcripts, and reports; --resume continues interrupted work under the same policy. " +
+				"Use blk engage approve-network --workspace DIR CIDR for a discovered private network, blk engage attach-foothold for an evidenced SSH, command, raw, Metasploit RPC, or HTTP form session, blk engage listen-shell and close-shell for a retained loopback raw shell, and blk engage approve-cloud-identity for an evidenced credential file on a foothold. " +
 				"Use blk engage setup to warm the offline OSV and Grype databases; a dispatched vuln-analysis task can fetch a recognized in-scope manifest URL and store scanner advisories as leads.",
 			flags: func(fs *flag.FlagSet) { defineEngageFlags(fs, &engageOpts{}) },
 			examples: []string{

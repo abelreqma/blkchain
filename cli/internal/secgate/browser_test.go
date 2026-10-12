@@ -215,3 +215,78 @@ func TestPolicyWebActionsConsumeTheSharedRateWindow(t *testing.T) {
 		t.Fatalf("web rate window ignored: %+v", second)
 	}
 }
+
+func TestAttachedFootholdWebScopeRequiresApprovedNetwork(t *testing.T) {
+	base, err := ParseScope(strings.NewReader("203.0.113.10\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pivot, err := base.WithApprovedPrivateNetworks([]string{"10.7.0.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &Gate{Mode: Auto, Scope: base, PivotScope: pivot, Policy: DefaultPolicy(),
+		AttachedFoothold: &Foothold{Host: "203.0.113.10", Surfaces: []Surface{SurfaceWeb}}}
+	if err := gate.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		name string
+		run  func() Decision
+	}{
+		{"api", func() Decision {
+			return gate.AuthorizeAPIRequest(context.Background(), APIRequest{Method: "GET", URL: "http://10.7.0.7/"})
+		}},
+		{"browser", func() Decision {
+			return gate.AuthorizeBrowser(context.Background(), BrowserAction{URL: "http://10.7.0.7/"})
+		}},
+		{"redirect", func() Decision { return gate.AuthorizeWebRedirect("http://10.7.0.7/next") }},
+	} {
+		if decision := check.run(); !decision.Allowed {
+			t.Errorf("approved private %s denied: %s", check.name, decision.Reason)
+		}
+	}
+	if decision := gate.AuthorizeAPIRequest(context.Background(), APIRequest{Method: "GET", URL: "http://10.8.0.7/"}); decision.Allowed {
+		t.Fatal("unapproved private address was allowed")
+	}
+	gate.AttachedFoothold = nil
+	if decision := gate.AuthorizeAPIRequest(context.Background(), APIRequest{Method: "GET", URL: "http://10.7.0.7/"}); decision.Allowed {
+		t.Fatal("private address remained allowed without the foothold")
+	}
+}
+
+func TestPivotWebHostnameUsesFootholdResolutionAndApprovedCIDR(t *testing.T) {
+	base, err := ParseScope(strings.NewReader("203.0.113.10\n!blocked.internal.test\n!10.7.0.9\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pivot, err := base.WithApprovedPrivateNetworks([]string{"10.7.0.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &Gate{Mode: Auto, Scope: base, PivotScope: pivot, Policy: DefaultPolicy(),
+		AttachedFoothold: &Foothold{Host: "203.0.113.10", Surfaces: []Surface{SurfaceWeb}}}
+	gate.WebLookup = func(host string) ([]net.IP, error) {
+		if host == "app.internal.test" {
+			return []net.IP{net.ParseIP("10.7.0.7")}, nil
+		}
+		return []net.IP{net.ParseIP("10.7.0.9")}, nil
+	}
+	if err := gate.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if decision := gate.AuthorizeAPIRequest(context.Background(), APIRequest{Method: "GET", URL: "https://app.internal.test/"}); !decision.Allowed {
+		t.Fatalf("approved internal hostname denied: %s", decision.Reason)
+	}
+	for _, target := range []string{"https://blocked.internal.test/", "https://other.internal.test/"} {
+		if decision := gate.AuthorizeWebRedirect(target); decision.Allowed {
+			t.Fatalf("excluded or out-of-scope resolution allowed: %s", target)
+		}
+	}
+	gate.WebLookup = func(string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("10.7.0.7"), net.ParseIP("10.8.0.7")}, nil
+	}
+	if decision := gate.AuthorizeBrowser(context.Background(), BrowserAction{URL: "https://app.internal.test/"}); decision.Allowed {
+		t.Fatal("mixed approved and unapproved DNS answers were accepted")
+	}
+}

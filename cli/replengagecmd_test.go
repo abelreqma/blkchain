@@ -99,6 +99,54 @@ func TestEngageDispatchStartsTurn(t *testing.T) {
 	}
 }
 
+func TestTUIEngageApprovalUsesOperatorCommandPath(t *testing.T) {
+	m := newTestModel(t)
+	next, cmd := m.dispatchInput("/engage approve-network")
+	m = next.(model)
+	if !m.working || m.engageIntake != nil || cmd == nil {
+		t.Fatal("network approval entered the model engagement path")
+	}
+	msg, ok := engageApprovalCmd([]string{"approve-network"})().(engageApprovalDoneMsg)
+	if !ok || msg.err == nil {
+		t.Fatalf("approval command did not validate its arguments: %+v", msg)
+	}
+	next, cmd = m.Update(engageApprovalDoneMsg{kind: "approve-network"})
+	if next.(model).working || cmd == nil || !strings.Contains(fmt.Sprint(cmd()), "approve-network saved") {
+		t.Fatal("approval completion did not return to the TUI")
+	}
+}
+
+func TestEngageApprovalArgsPreserveQuotedPaths(t *testing.T) {
+	args, err := engageApprovalArgs(`approve-cloud-identity --workspace "/tmp/assessment one" --file '/srv/credential files/gcp.json'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"approve-cloud-identity", "--workspace", "/tmp/assessment one", "--file", "/srv/credential files/gcp.json"}
+	if len(args) != len(want) {
+		t.Fatalf("args = %v", args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d] = %q, want %q", i, args[i], want[i])
+		}
+	}
+	if _, err := engageApprovalArgs(`approve-network --workspace "/tmp/incomplete`); err == nil {
+		t.Fatal("unfinished quote was accepted")
+	}
+}
+
+func TestAttachFootholdUsesOperatorCommandPath(t *testing.T) {
+	m := newTestModel(t)
+	next, cmd := m.dispatchInput(`/engage attach-foothold --entry '10.7.0.7 transport=command surfaces=local,network,web,ad,container,cloud-aws,cloud-gcp exec=kubectl exec -i fixture --'`)
+	if !next.(model).working || next.(model).engageIntake != nil || cmd == nil {
+		t.Fatal("foothold attachment entered the model engagement path")
+	}
+	args, err := engageApprovalArgs(`attach-foothold --entry '10.7.0.7 transport=command surfaces=local,network,web,ad,container,cloud-aws,cloud-gcp exec=kubectl exec -i fixture --'`)
+	if err != nil || len(args) != 3 || args[0] != "attach-foothold" || args[1] != "--entry" || !strings.HasSuffix(args[2], "exec -i fixture --") {
+		t.Fatalf("attachment args = %v, err=%v", args, err)
+	}
+}
+
 // buildReplEngageRun captures the goal and the session autonomy mode and builds
 // the deps without error.
 func TestBuildReplEngageRun(t *testing.T) {

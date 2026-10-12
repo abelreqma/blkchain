@@ -6,14 +6,12 @@ import (
 )
 
 func TestVantageReaches(t *testing.T) {
-	// Externally reachable surfaces open at any vantage; local and ad require an
-	// internal foothold. cloud (and its per-CSP variants), container, and
-	// ai-security are external per the operator's taxonomy decision.
+	// AD discovery can target exposed services from an external vantage.
 	external := []Surface{
 		SurfaceNetwork, SurfaceWeb, SurfaceCloud, SurfaceCloudAWS,
-		SurfaceCloudGCP, SurfaceCloudAzure, SurfaceContainer, SurfaceAISecurity,
+		SurfaceCloudGCP, SurfaceCloudAzure, SurfaceContainer, SurfaceAISecurity, SurfaceAD,
 	}
-	internalOnly := []Surface{SurfaceLocal, SurfaceAD}
+	internalOnly := []Surface{SurfaceLocal}
 
 	ext := VantageExternalUnauth
 	for _, s := range external {

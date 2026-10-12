@@ -63,7 +63,7 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 		}
 	}
 
-	dom := domainFor(task.Kind)
+	dom := domainForTask(task)
 
 	// Corpus technique advisor for correlation, read-only; nil when retrieval is
 	// unavailable (the pure-catalog path). Built once and shared across tiers so

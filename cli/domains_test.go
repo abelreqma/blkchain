@@ -183,6 +183,7 @@ func TestDomainForTaskFallsBackToSurface(t *testing.T) {
 	}{
 		{"web exploit", engagement.Task{Kind: "exploit", Surface: engagement.SurfaceWeb}, "web"},
 		{"ad exploit", engagement.Task{Kind: "exploit", Surface: engagement.SurfaceAD}, "ad"},
+		{"ad recon", engagement.Task{Kind: "recon", Surface: engagement.SurfaceAD}, "ad"},
 		{"cloud aws exploit", engagement.Task{Kind: "exploit", Surface: engagement.SurfaceCloudAWS}, "cloud"},
 		{"container exploit", engagement.Task{Kind: "exploit", Surface: engagement.SurfaceContainer}, "container"},
 		{"ai exploit", engagement.Task{Kind: "exploit", Surface: engagement.SurfaceAISecurity}, "ai-security"},
