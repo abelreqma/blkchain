@@ -58,7 +58,7 @@ The harness stores tasks, dependencies, provenance, exact evidence quotes, actio
 | Network | Tiered asset and service discovery, fingerprinting, finding parsers, and evidence-linked candidate tasks. |
 | Web | HTTP and browser collection, source analysis, role-aware observations, and replay through the scoped broker. |
 | Local | Identity, privilege, permission, capability, scheduled-task, and service enumeration; focused executable inspection. Without a declared foothold, local work describes the isolated runner. |
-| Active Directory | Domain discovery and anonymous, authenticated, and finding-driven task paths using the shared gated tools. Requires an appropriate access vantage. |
+| Active Directory | External discovery and enumeration of exposed directory services, with authenticated and finding-driven task paths using shared gated tools. |
 | Cloud | AWS, Azure, and GCP reconnaissance ladders over shared gated tools. |
 | Container | Container and Kubernetes task paths through specialized reconnaissance and shared execution. |
 | AI application | Endpoint and model discovery, capability checks, and evidence-derived follow-on candidates. |
@@ -93,9 +93,64 @@ Scanner failures and missing databases are recorded as gaps, not clean results.
 
 ### Foothold execution
 
-An optional RoE `Foothold` declaration names a host the operator already controls and the surfaces that execute there. Supported carriers include SSH and an operator-supplied command prefix. Credentials can be supplied through named environment references. The declaration, covered surfaces, and target scope are sealed into the policy.
+An optional RoE `Foothold` declaration names a host the operator already controls and the surfaces that execute there. Declared carriers include SSH, an operator-supplied command prefix, a Metasploit RPC command-shell session, and an HTTP form shell. A retained raw shell can only be attached after access evidence is recorded. Credentials come from named environment references. A RoE declaration, its covered surfaces, and target scope are sealed into the policy.
 
-Commands on those surfaces execute on the declared foothold. The runner filters its connection to the foothold, the command gate applies scope checks, and actions record their execution destination.
+Commands on covered surfaces execute on the foothold. The command gate applies scope checks, and actions record their execution destination. The runner filters SSH, command, and HTTP form connections to the foothold. Raw sessions use a loopback control connection and require a verified attachment. Metasploit RPC uses a loopback service and checks the active session peer.
+
+For access gained during an engagement, record the session as evidence on an armed exploit task. Stop the run, approve any discovered private CIDR, attach an execution carrier, then resume. The attached host must be an IP in the original RoE or an approved private CIDR. SSH and command attachments cover local, network, web, AD, container, AWS, and GCP surfaces. Raw, Metasploit RPC, and HTTP form attachments cover command surfaces; they cannot carry the binary TCP stream required by the web broker. Resume probes the carrier with `true` before it opens local tasks. The command-carrier probe checks execution, while the operator vouches for the remote endpoint.
+
+Private networks learned after access do not need to be guessed in the initial RoE. Approve each discovered private CIDR. The approval applies only to actions carried through a declared or attached foothold; direct worker requests retain the initial scope. When the foothold covers web, the browser and API broker validates every request, redirect, and subresource against approved addresses and opens the TCP stream through the carrier. Hostname URLs require `getent ahosts` on the foothold; every returned address must be approved. SSH uses its stream forwarder; a command carrier needs `ncat` on the foothold for web traffic. Resume seeds a recon task for each approved CIDR when the foothold covers the network surface.
+
+```sh
+blk engage stop --workspace ./assessment
+blk engage approve-network --workspace ./assessment 10.20.30.0/24
+blk engage attach-foothold --workspace ./assessment --task exploit-1 --evidence 42 \
+  --entry '10.20.30.7 transport=ssh user=svc key=$FOOTHOLD_KEY knownhosts=$FOOTHOLD_KNOWN_HOSTS surfaces=local,network,web,ad,container,cloud-aws,cloud-gcp'
+blk engage resume --workspace ./assessment
+```
+
+Set `FOOTHOLD_KEY` and `FOOTHOLD_KNOWN_HOSTS` to paths of operator-owned files before attaching. For a non-SSH session with a reusable execution command, use `transport=command ... exec=COMMAND ARG...` in the same `--entry` value. The carrier binary must be allowed by the external runner policy and its network endpoint must be in the original scope or the approved foothold IP. A `kubectl exec` carrier also needs its API endpoint in that scope.
+
+For a raw POSIX shell, start a listener before the shell connects. The listener binds only to `127.0.0.1`, stays alive when the engagement stops, and expires with the engagement wall budget. After the shell connects, attach its workspace record to the exploit evidence and resume. Use a host IP from the original scope or an approved private CIDR in the attachment entry. The local listener does not accept a shell from a remote test host until an operator supplies an authorized route to loopback.
+
+```sh
+blk engage listen-shell --workspace ./assessment
+blk engage stop --workspace ./assessment
+blk engage attach-foothold --workspace ./assessment --task exploit-1 --evidence 42 \
+  --entry '127.0.0.1 transport=raw-session session=/absolute/path/to/assessment/raw-session.json surfaces=local,network,ad,container,cloud-aws,cloud-gcp'
+blk engage resume --workspace ./assessment
+blk engage close-shell --workspace ./assessment
+```
+
+The raw broker retains one shell connection. It wraps authorized argv in a POSIX command, bounds output and time, and drops the shell after a failed or incomplete receipt. `close-shell` stops the broker; if the process has died, it removes the stale record. The workspace record contains a control token and must remain private.
+
+Metasploit RPC supports active command-shell sessions through its [versioned MessagePack API](https://docs.rapid7.com/metasploit/rpc-api/). Keep the RPC server running on loopback across stop and resume. Set the named password environment variable before attaching. blkChain checks that the session is a shell and that its reported target host or tunnel peer matches the approved foothold IP. The adapter serializes commands, tracks the shell read pointer, and requires a command receipt. It does not use Meterpreter console sessions.
+
+```sh
+blk engage attach-foothold --workspace ./assessment --task exploit-1 --evidence 42 \
+  --entry '10.20.30.7 transport=msf-rpc rpc=http://127.0.0.1:55552/api/1.0 session=7 user=msf passenv=MSF_RPC_PASSWORD surfaces=local,network,ad,container,cloud-aws,cloud-gcp'
+```
+
+An HTTP form shell must accept a POST field containing a POSIX shell command and return its raw output. The URL must use the approved foothold IP and an explicit port. `headerenv=` optionally names an environment variable containing one complete authorization header, such as `Authorization: Bearer ...`; blkChain provisions it as a private file in the guarded worker. The adapter disables redirects and proxies, URL-encodes the command field, and requires a command receipt. Other web-shell request formats require a command carrier wrapper.
+
+```sh
+blk engage attach-foothold --workspace ./assessment --task exploit-1 --evidence 42 \
+  --entry '10.20.30.7 transport=http-form url=https://10.20.30.7:8443/shell.php param=cmd headerenv=WEB_SHELL_AUTH surfaces=local,network,ad,container,cloud-aws,cloud-gcp'
+```
+
+In the REPL or TUI, replace `blk engage` with `/engage` for the same approval, attachment, and resume commands.
+
+For AWS or GCP credentials found on the foothold, include `cloud-aws` or `cloud-gcp` in a declared foothold's `surfaces=` list. An attached foothold covers both. Record the credential source as task evidence, then approve the provider and its absolute credential file path on the foothold. The approval file stores the path and evidence ID, not the credential contents. The foothold must provide `aws` or `gcloud`, respectively. A raw credential captured only in command output needs a credential file on the foothold before this path can use it.
+
+```sh
+blk engage approve-cloud-identity --workspace ./assessment \
+  --provider aws --file /srv/keys/aws --task cloud-1 --evidence 42
+blk engage resume --workspace ./assessment
+```
+
+In the REPL or TUI, prefix the cloud approval command with `/engage` instead of `blk engage`.
+
+The approval permits provider CLI commands on the matching foothold surface under the RoE action and task gates. Recon accepts bounded read-only provider forms; other operations require an armed exploit or post-ex task. It does not prove that every provider operation stays in one account or project. AWS profile and endpoint overrides and GCP identity overrides remain denied. Provider commands start with a clean environment and a fixed `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` path on the foothold. AWS uses the approved shared credentials file with other configuration and metadata credentials disabled. GCP uses the approved credential file override. The action transcript records the original command and the foothold destination.
 
 ## Web application analysis
 
