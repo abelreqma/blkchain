@@ -75,6 +75,12 @@ func (f fakeSearcher) Search(context.Context, string, int, map[string]any) ([]re
 	return f.results, nil
 }
 
+type failingSearcher struct{}
+
+func (failingSearcher) Search(context.Context, string, int, map[string]any) ([]retrieval.Result, error) {
+	return nil, errors.New("local index unavailable")
+}
+
 // fakeLLM serves a loopback OpenAI-compatible endpoint. Non-streaming chat
 // calls (grading) get the next entry of grades (the last one repeats);
 // streaming calls get streamText.
@@ -210,8 +216,9 @@ func TestAnswerLoopWebOffMakesNoWebCall(t *testing.T) {
 	var stages []string
 	rc := fakeSearcher{[]retrieval.Result{chunk("wstg", "a.md", "s", "text")}}
 	_, _, usedWeb, _, _, err := AnswerLoop(context.Background(), rc, answerCfg(2), "CVE-2024-1234 poc", AnswerOpts{
-		NoWeb: true,
-		Stage: func(s string) { stages = append(stages, s) },
+		NoWeb:    true,
+		WebFirst: true,
+		Stage:    func(s string) { stages = append(stages, s) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1019,6 +1026,104 @@ func authorizeWebTest(t *testing.T) {
 	p.Web = true
 	if err := savePrefs(p); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPrimarySearchDomainsFollowNamedAuthorities(t *testing.T) {
+	cases := []struct {
+		question string
+		want     []string
+	}{
+		{"What does OWASP recommend for prompt injection?", []string{"owasp.org"}},
+		{"Compare Microsoft and CISA guidance", []string{"learn.microsoft.com", "msrc.microsoft.com", "cisa.gov"}},
+		{"How does AWS IAM work?", []string{"docs.aws.amazon.com"}},
+		{"What changed in Kubernetes RBAC?", []string{"kubernetes.io"}},
+		{"What are modern AI red teaming techniques?", nil},
+	}
+	for _, tc := range cases {
+		if got := primarySearchDomains(tc.question); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%q: domains=%v, want %v", tc.question, got, tc.want)
+		}
+	}
+}
+
+func TestAnswerLoopWebFirstSearchesBeforeSufficientLocal(t *testing.T) {
+	authorizeWebTest(t)
+	srv := fakeLLM(t, []string{`{"sufficient":true,"use_web":false}`}, "Current answer [1] [2].")
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	old := webSearch
+	webCalls := 0
+	webSearch = func(_ context.Context, _, query string, _ int, _ []string) ([]retrieval.Result, error) {
+		webCalls++
+		if query != "current AI red teaming techniques" {
+			t.Errorf("web query = %q", query)
+		}
+		return []retrieval.Result{chunk(webSource, "https://example.com/current", "Current", "current evidence")}, nil
+	}
+	t.Cleanup(func() { webSearch = old })
+	var stages []string
+	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "older evidence")}}
+	_, _, usedWeb, results, _, err := AnswerLoop(context.Background(), local, answerCfg(1), "current AI red teaming techniques", AnswerOpts{
+		WebFirst: true,
+		Preface:  "private target marker",
+		History:  []priorTurn{{Role: "human", Content: "earlier private host 10.0.0.7"}},
+		Stage:    func(stage string) { stages = append(stages, stage) },
+	})
+	if err != nil || webCalls != 1 || !usedWeb || len(results) != 2 || results[0].Payload.Source != webSource {
+		t.Fatalf("calls=%d usedWeb=%v results=%+v err=%v", webCalls, usedWeb, results, err)
+	}
+	if len(stages) < 2 || stages[0] != stageWeb || stages[1] != stageRetrieving {
+		t.Fatalf("web did not precede local retrieval: %v", stages)
+	}
+}
+
+func TestAnswerLoopWebFirstDoesNotAnswerWhenLiveSearchFails(t *testing.T) {
+	authorizeWebTest(t)
+	old := webSearch
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		return nil, errors.New("provider unavailable")
+	}
+	t.Cleanup(func() { webSearch = old })
+	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "older evidence")}}
+	answer, _, usedWeb, _, _, err := AnswerLoop(context.Background(), local, answerCfg(1), "current version", AnswerOpts{WebFirst: true})
+	if err == nil || !strings.Contains(err.Error(), "live web search") || answer != "" || usedWeb {
+		t.Fatalf("answer=%q usedWeb=%v err=%v", answer, usedWeb, err)
+	}
+}
+
+func TestAnswerLoopWebFirstUsesLiveEvidenceWhenLocalIndexFails(t *testing.T) {
+	authorizeWebTest(t)
+	srv := fakeLLM(t, []string{`{"sufficient":true,"use_web":false}`}, "Current answer [1].")
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	old := webSearch
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		return []retrieval.Result{chunk(webSource, "https://example.com/current", "Current", "live evidence")}, nil
+	}
+	t.Cleanup(func() { webSearch = old })
+	answer, _, usedWeb, results, _, err := AnswerLoop(context.Background(), failingSearcher{}, answerCfg(1), "current guidance", AnswerOpts{WebFirst: true})
+	if err != nil || !usedWeb || len(results) != 1 || results[0].Payload.Source != webSource || !strings.Contains(answer, "Current answer") {
+		t.Fatalf("answer=%q usedWeb=%v results=%+v err=%v", answer, usedWeb, results, err)
+	}
+}
+
+func TestAnswerLoopWebFirstKeepsLiveEvidenceAheadOfLocalRewrite(t *testing.T) {
+	authorizeWebTest(t)
+	srv := fakeLLM(t, []string{
+		`{"sufficient":false,"rewrite":"refined","use_web":false}`,
+		`{"sufficient":true,"use_web":false}`,
+	}, "Current answer [1].")
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	old := webSearch
+	calls := 0
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		calls++
+		return []retrieval.Result{chunk(webSource, "https://example.com/current", "Current", "live evidence")}, nil
+	}
+	t.Cleanup(func() { webSearch = old })
+	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "older evidence")}}
+	_, _, usedWeb, results, _, err := AnswerLoop(context.Background(), local, answerCfg(2), "current guidance", AnswerOpts{WebFirst: true})
+	if err != nil || calls != 1 || !usedWeb || len(results) != 2 || results[0].Payload.Source != webSource {
+		t.Fatalf("calls=%d usedWeb=%v results=%+v err=%v", calls, usedWeb, results, err)
 	}
 }
 

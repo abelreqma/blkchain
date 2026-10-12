@@ -2,20 +2,14 @@ package main
 
 import (
 	"strings"
+	"unicode"
 
 	"blkchain/cli/internal/retrieval"
 )
 
-// personas.go routes every grounded chat answer to an offensive-security expert
-// persona chosen from what retrieval returned, and falls back to an explicit
-// generalist persona (never a bland assistant) when no domain is clear - so a
-// persona is invoked on EVERY answer. A persona is a detailed, domain-tailored
-// expert PREAMBLE plus the shared answerConstraints (llm.go): the expertise voice
-// changes, the grounding/citation/payload-generation/no-fabrication/untrusted
-// rules stay identical. This is the ASK/answer path only; it is deliberately
-// separate from the engage executor prompts (domains.go / *exec.go), which are
-// execution agents ("you are EXECUTING... run_command") and would be the wrong
-// framing for a chat answer. Domain selection is a metadata token tally, no LLM.
+// Answer personas follow the question first, then retrieved metadata when the
+// question is ambiguous. They share the answer constraints and remain separate
+// from engagement execution prompts.
 type persona struct {
 	label    string   // cue shown to the operator ("answering as <label>")
 	preamble string   // offensive-security expert framing, prepended to answerConstraints
@@ -123,6 +117,60 @@ var personas = map[string]persona{
 // first domain to reach the top count wins, so more specific domains that share
 // tokens with a broader one are listed before it (k8s before cloud).
 var domainOrder = []string{"cve", "ad", "ai", "supply", "api", "web", "k8s", "cloud", "linux", "windows", "wireless", "binexp", "network", "mobile", "recon"}
+
+var questionAliases = map[string][]string{
+	"ad":      {"ad cs"},
+	"ai":      {"ai", "llm", "artificial intelligence"},
+	"api":     {"api", "graphql"},
+	"binexp":  {"binary exploitation", "memory corruption"},
+	"cloud":   {"aws", "iam", "ec2"},
+	"k8s":     {"kubectl", "pod security"},
+	"linux":   {"linux"},
+	"network": {"network", "nmap", "port scan"},
+	"windows": {"windows"},
+}
+
+func normalizedDomainText(value string) string {
+	fields := strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	return " " + strings.Join(fields, " ") + " "
+}
+
+func domainFromQuestion(question string) string {
+	if cveQueryPattern.MatchString(question) {
+		return "cve"
+	}
+	hay := normalizedDomainText(question)
+	best, bestN := "", 0
+	for _, domain := range domainOrder {
+		seen := map[string]bool{}
+		count := 0
+		for _, signals := range [][]string{personas[domain].signals, questionAliases[domain]} {
+			for _, signal := range signals {
+				needle := normalizedDomainText(signal)
+				if needle == "  " || seen[needle] {
+					continue
+				}
+				seen[needle] = true
+				if strings.Contains(hay, needle) {
+					count++
+				}
+			}
+		}
+		if count > bestN {
+			best, bestN = domain, count
+		}
+	}
+	return best
+}
+
+func domainForAnswer(question string, results []retrieval.Result) string {
+	if domain := domainFromQuestion(question); domain != "" {
+		return domain
+	}
+	return domainFromResults(results)
+}
 
 // domainFromResults selects CVE research for an NVD record. Otherwise it tallies
 // domain signals per chunk and returns the most common domain, or "" when none match.

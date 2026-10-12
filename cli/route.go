@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"net/netip"
 	"regexp"
 	"strings"
 
@@ -14,7 +16,7 @@ import (
 // route.go is the adaptive-retrieval router for the ask path: cheap
 // deterministic guardrails, then a one-word model classifier, decide per query
 // whether to skip retrieval (answer from the model) or ground it (AnswerLoop).
-// Grounding reuses AnswerLoop unchanged; web escalation stays inside it.
+// Grounding uses AnswerLoop for live search and local retrieval.
 
 // routeKind is the router's decision.
 type routeKind int
@@ -39,6 +41,26 @@ type enabledRoutes struct {
 var arithmeticPattern = regexp.MustCompile(`^[0-9.+\-*/%^()\s]+[=?]?\s*$`)
 
 var numberToken = regexp.MustCompile(`[0-9.]+`)
+
+var targetAddressPattern = regexp.MustCompile(`(?i)(?:[a-z][a-z0-9+.-]*://|\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.[a-z]{2,}\b|\blocalhost\b|\b[a-z][a-z0-9-]*:[0-9]{2,5}\b|\[[0-9a-f:]+\](?::[0-9]+)?|\b[a-z0-9._-]+@[a-z0-9._-]+\b)`)
+var targetContextPattern = regexp.MustCompile(`(?i)\b(?:my|our|this)\s+(?:[a-z0-9-]+\s+)?(?:host|server|domain|cluster|tenant|app|application|environment|foothold|account|project|network|vpc|subscription|realm|asset|instance|service)\b|\b(?:foothold|internal|private|staging|production|dc[0-9]+|srv[0-9]+|host[0-9]+)\b`)
+var targetSecretPattern = regexp.MustCompile(`(?i)\b(?:api[_-]?key|token|password|passwd|secret|authorization|credential|host|server|target)\s*[:=]\s*\S+|\b(?:api[_-]?key|token|password|passwd|secret|credential)\s+(?:is|was)\s+\S+|\bbearer\s+[a-z0-9._~-]{8,}\b`)
+
+func questionHasTargetDetails(question string) bool {
+	if targetAddressPattern.MatchString(question) || targetContextPattern.MatchString(question) || targetSecretPattern.MatchString(question) {
+		return true
+	}
+	for _, field := range strings.Fields(question) {
+		field = strings.Trim(field, `[](){}<>"'.,;!?`)
+		if _, err := netip.ParseAddr(field); err == nil {
+			return true
+		}
+		if _, err := netip.ParsePrefix(field); err == nil {
+			return true
+		}
+	}
+	return false
+}
 
 // operandOperator matches an operator that sits between two operands. A '-'
 // tight between two digits ("2024-01-15", "2024-1234") is not counted, since it
@@ -151,16 +173,15 @@ const directAnswerConstraints = offensiveReasoningStandard + "Answer the user's 
 	"and do not fabricate CVE identifiers, " +
 	"version numbers, or statistics."
 
-// directAnswerSystemPrompt is the skip-path system prompt. directAnswer does no
-// retrieval, so it always uses the offensive-security generalist persona plus the
-// own-knowledge constraints - a persona is invoked on the skip path too.
+// directAnswerSystemPrompt is the generic skip-path prompt used by prompt checks.
+// directAnswer selects a question specialist when one is clear.
 const directAnswerSystemPrompt = genericPersonaPreamble + directAnswerConstraints
 
 // directAnswer answers question with a single streamed model call and no
 // retrieval. It is the skip route's handler. It mirrors AnswerLoop's streaming
 // and sampling so the ask path renders identically, minus the sources.
 func directAnswer(ctx context.Context, cfg ragconfig.Config, question string, opts AnswerOpts) (string, int, error) {
-	domain, err := answerAgentDomain(opts.Agent, "")
+	domain, err := answerAgentDomain(opts.Agent, domainFromQuestion(question))
 	if err != nil {
 		return "", 0, err
 	}
@@ -246,6 +267,14 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 	if _, err := parseAnswerAgent(opts.Agent); err != nil {
 		return "", nil, false, nil, 0, "", err
 	}
+	keepLocal := opts.WebFirst && !opts.WebOnly && questionHasTargetDetails(question)
+	if keepLocal {
+		opts.NoWeb = true
+		enabled.Web = false
+		if !enabled.Local {
+			return "", nil, false, nil, 0, "", errors.New("web search skipped for target details; enable local retrieval")
+		}
+	}
 	// Compress carried-back conversation memory once, before any dispatch, so a
 	// long session stays within budget by condensing older turns rather than
 	// dropping them. Shared by the CLI, REPL, and TUI (all reach here through
@@ -264,6 +293,15 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 			return "", nil, false, nil, 0, "", err
 		}
 		kind, _ := routeQuery(ctx, l, cfg, question, enabled)
+		if kind == routeAdvise && opts.WebFirst && enabled.Web && !opts.NoWeb {
+			kind = routeGround
+		}
+		if keepLocal && kind == routeSkip {
+			kind = routeGround
+		}
+		if kind == routeSkip && opts.WebFirst && enabled.Web && !opts.NoWeb && !isPureArithmetic(question) {
+			kind = routeGround
+		}
 		if kind == routeSkip && enabled.Local && !isPureArithmetic(question) {
 			// Do not answer ungrounded until the local LLM confirms the corpus
 			// cannot ground it; if it can, ground instead.

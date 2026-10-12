@@ -23,8 +23,10 @@ func TestCLIAgentFlagReachesAllAskOutputModes(t *testing.T) {
 	previous := adaptiveAnswerFn
 	t.Cleanup(func() { adaptiveAnswerFn = previous })
 	var choices []string
+	var webFirst []bool
 	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
 		choices = append(choices, opts.Agent)
+		webFirst = append(webFirst, opts.WebFirst)
 		if opts.Persona != nil {
 			opts.Persona("cloud")
 		}
@@ -51,6 +53,11 @@ func TestCLIAgentFlagReachesAllAskOutputModes(t *testing.T) {
 			t.Fatalf("CLI lost choice: %q", choice)
 		}
 	}
+	for _, enabled := range webFirst {
+		if enabled {
+			t.Fatal("one-shot CLI unexpectedly enabled interactive web-first routing")
+		}
+	}
 }
 
 func TestPlainAgentSelectionAndAutoReachNativeAnswers(t *testing.T) {
@@ -62,8 +69,10 @@ func TestPlainAgentSelectionAndAutoReachNativeAnswers(t *testing.T) {
 	previous := adaptiveAnswerFn
 	t.Cleanup(func() { adaptiveAnswerFn = previous })
 	var choices []string
+	var webFirst []bool
 	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
 		choices = append(choices, opts.Agent)
+		webFirst = append(webFirst, opts.WebFirst)
 		if opts.Stream != nil {
 			opts.Stream([]byte("fixture answer"))
 		}
@@ -91,6 +100,11 @@ func TestPlainAgentSelectionAndAutoReachNativeAnswers(t *testing.T) {
 	if len(choices) != 3 || choices[0] != "cloud" || choices[1] != "cloud" || choices[2] != "" {
 		t.Fatalf("plain selection differs from CLI: %v", choices)
 	}
+	for i, enabled := range webFirst {
+		if !enabled {
+			t.Errorf("plain turn %d did not request web-first research", i)
+		}
+	}
 }
 
 func TestTUIAgentChoiceCapturedByAnswerCommand(t *testing.T) {
@@ -103,8 +117,10 @@ func TestTUIAgentChoiceCapturedByAnswerCommand(t *testing.T) {
 	previous := adaptiveAnswerFn
 	t.Cleanup(func() { adaptiveAnswerFn = previous })
 	var choice string
+	var webFirst bool
 	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
 		choice = opts.Agent
+		webFirst = opts.WebFirst
 		return "fixture answer", nil, false, nil, 1, "skip", nil
 	}
 	cmd := m.streamCmd(context.Background(), "a question", "", m.turnStart, false)
@@ -112,6 +128,9 @@ func TestTUIAgentChoiceCapturedByAnswerCommand(t *testing.T) {
 	cmd()
 	if choice != "cloud" {
 		t.Fatalf("active command lost its captured specialist: %q", choice)
+	}
+	if !webFirst {
+		t.Fatal("TUI turn did not request web-first research")
 	}
 }
 

@@ -460,10 +460,10 @@ func runAsk(args []string) error {
 // askWith runs `blk ask` with args. rc is a long-lived retrieval client to
 // reuse, such as the plain REPL's; nil makes one for this call and closes it.
 func askWith(rc *retrieval.Client, history []priorTurn, args []string) (string, error) {
-	return askWithPreface(rc, history, args, "")
+	return askWithPreface(rc, history, args, "", false)
 }
 
-func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, preface string, observed ...*callMetrics) (string, error) {
+func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, preface string, webFirst bool, observed ...*callMetrics) (string, error) {
 	ctx, metrics := withCallMetrics(context.Background())
 	if len(observed) > 0 && observed[0] != nil {
 		metrics = observed[0]
@@ -542,12 +542,13 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		var full strings.Builder
 		p := loadPrefs()
 		_, cits, usedWeb, _, _, _, err := adaptiveAnswerFn(ctx, rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{
-			Agent:   agent,
-			Stream:  newAskStream(os.Stdout, &full),
-			Preface: preface,
-			NoWeb:   !p.Web,
-			WebOnly: o.web,
-			History: history,
+			Agent:    agent,
+			Stream:   newAskStream(os.Stdout, &full),
+			Preface:  preface,
+			NoWeb:    !p.Web,
+			WebFirst: webFirst,
+			WebOnly:  o.web,
+			History:  history,
 			Persona: func(domain string) {
 				fmt.Println(Meta.Render("answering as " + personaLabel(domain)))
 			},
@@ -574,7 +575,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 	model := resolveModel(cfg)
 	p := loadPrefs()
 	actualAgent := "general"
-	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(ctx, rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Agent: agent, Model: model, NoWeb: !p.Web, WebOnly: o.web, History: history, Preface: preface, Persona: func(domain string) { actualAgent = answerAgentName(domain) }})
+	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(ctx, rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Agent: agent, Model: model, NoWeb: !p.Web, WebFirst: webFirst, WebOnly: o.web, History: history, Preface: preface, Persona: func(domain string) { actualAgent = answerAgentName(domain) }})
 	if errors.Is(err, ErrNoResults) {
 		return "", reportNoResults(os.Stderr, *jsonOut, model)
 	}

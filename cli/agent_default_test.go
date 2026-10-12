@@ -32,7 +32,7 @@ func isolatedHermesExecutable(t *testing.T) {
 	t.Setenv("HERMES_HOME", t.TempDir())
 }
 
-func TestUnselectedInteractiveDefaultIsHermes(t *testing.T) {
+func TestUnselectedInteractiveDefaultIsNativeAuto(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
 	isolatedHermesExecutable(t)
@@ -43,7 +43,7 @@ func TestUnselectedInteractiveDefaultIsHermes(t *testing.T) {
 	if m.rc != nil {
 		defer m.rc.Close()
 	}
-	if m.mode != "agent" || !strings.Contains(m.answerAgentStatus(), "Hermes") {
+	if m.mode != "rag" || !m.prefs.Web || !strings.Contains(m.answerAgentStatus(), "Auto") {
 		t.Fatalf("unselected backend is %q: %s", m.mode, m.answerAgentStatus())
 	}
 	if err := m.selectAnswerAgent("auto"); err != nil {
@@ -83,7 +83,7 @@ func TestNativeOutputRequiresExplicitAgent(t *testing.T) {
 	}
 }
 
-func TestPlainDefaultHermesThenExplicitNative(t *testing.T) {
+func TestPlainDefaultNativeThenExplicitHermes(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
 	isolatedHermesExecutable(t)
@@ -99,7 +99,7 @@ func TestPlainDefaultHermesThenExplicitNative(t *testing.T) {
 		return "native-fixture", nil, false, nil, 1, "skip", nil
 	}
 	input := filepath.Join(t.TempDir(), "input")
-	if err := os.WriteFile(input, []byte("first question\n/agent auto\nsecond question\n/quit\n"), 0600); err != nil {
+	if err := os.WriteFile(input, []byte("first question\n/mode\nsecond question\n/quit\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	file, err := os.Open(input)
@@ -117,5 +117,8 @@ func TestPlainDefaultHermesThenExplicitNative(t *testing.T) {
 	})
 	if calls != 1 || !strings.Contains(out, "hermes-default-fixture") || !strings.Contains(out, "native-fixture") {
 		t.Fatalf("plain default/override diverged: calls=%d out=%q", calls, out)
+	}
+	if !loadPrefs().Web {
+		t.Fatal("plain REPL did not enable web on the fresh profile")
 	}
 }

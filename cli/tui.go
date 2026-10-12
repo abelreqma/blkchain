@@ -667,7 +667,7 @@ func initialModel() model {
 		keys:             defaultKeys(),
 		history:          hist,
 		histIdx:          len(hist),
-		mode:             "agent",
+		mode:             "rag",
 		engageMode:       secgate.Auto,
 		engageTranscript: "important",
 		sess:             sess,
@@ -675,7 +675,7 @@ func initialModel() model {
 		sessTitle:        title,
 		reasoning:        "medium",
 		ambient:          ambient,
-		prefs:            loadPrefs(),
+		prefs:            loadInteractivePrefs(),
 		cfg:              cfg,
 		rc:               rc,
 		liveCache:        &liveCache{},
@@ -2691,12 +2691,13 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 		streamed := false
 		p := loadPrefs()
 		full, cits, usedWeb, results, tokens, _, err := adaptiveAnswerFn(ctx, rc, cfg, question, askRoutes(p), force, AnswerOpts{
-			Agent:   m.answerAgent,
-			Model:   turnModel,
-			Preface: preface,
-			NoWeb:   !p.Web,
-			WebOnly: webOnly,
-			History: m.conversationHistory(),
+			Agent:    m.answerAgent,
+			Model:    turnModel,
+			Preface:  preface,
+			NoWeb:    !p.Web,
+			WebFirst: !force,
+			WebOnly:  webOnly,
+			History:  m.conversationHistory(),
 			Persona: func(domain string) {
 				if prog != nil {
 					prog.Send(personaMsg(domain))
@@ -3260,9 +3261,7 @@ func (m model) statusLine() string {
 	case m.health != nil:
 		retrieval = append(retrieval, "rerank down")
 	}
-	// web is off by default (offline-by-default), so it follows the rag switch's
-	// discipline: the segment is shown only when web search is actually in use,
-	// naming the active provider, and nothing is added in the common off case.
+	// Show the selected web provider when native web search is enabled.
 	if seg, ok := webStatusSegment(activeWebProvider(), m.prefs.Web); ok {
 		retrieval = append(retrieval, seg)
 	}
@@ -3814,7 +3813,7 @@ func helpResponse(arg string, width int) string {
 		}
 		text := " " + H2.Render(usage) + "\n" + wrapIndent(c.desc, 3, width)
 		examples := map[string]string{
-			"agent":   "Hermes is the default. /agent NAME selects native answers; /agent auto selects native dynamic routing. Available: " + strings.Join(answerAgentNames(), ", ") + ". /mode switches back to Hermes; /hermes calls it for one turn.",
+			"agent":   "Native auto is the interactive default. /agent NAME selects a specialist; /agent auto restores dynamic routing. Available: " + strings.Join(answerAgentNames(), ", ") + ". /mode switches between native and Hermes; /hermes calls Hermes for one turn.",
 			"context": "/context add PATH|URL; /context preview N; /context remove N; /context clear. Links are references, not fetched content.",
 			"queue":   "/queue list; /queue edit N; /queue remove N; /queue pause; /queue resume; /queue clear.",
 			"attach":  "/attach PATH or /attach URL prepares the next question. With no argument, the TUI opens a file picker.",

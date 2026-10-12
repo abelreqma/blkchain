@@ -39,6 +39,31 @@ func TestRouteGuard(t *testing.T) {
 	}
 }
 
+func TestQuestionHasTargetDetails(t *testing.T) {
+	for _, question := range []string{
+		"Check https://app.example.test/admin",
+		"What can I do with 10.0.0.7?",
+		"Can I reach [2001:db8::7]?",
+		"Can I reach [2001:db8::7]:443?",
+		"Use localhost:8000 for this test",
+		"The shell is root@dc01",
+		"Is dc01.corp.local vulnerable?",
+		"Use token=fixture-value for this request",
+		"The password is fixture-value",
+		"What should I do on my foothold?",
+		"How is our AWS account configured?",
+	} {
+		if !questionHasTargetDetails(question) {
+			t.Errorf("did not keep %q local", question)
+		}
+	}
+	for _, question := range []string{"What is the current Kubernetes release?", "Does CVE-2024-1234 have an advisory?", "How does Kerberos delegation work?"} {
+		if questionHasTargetDetails(question) {
+			t.Errorf("blocked public research for %q", question)
+		}
+	}
+}
+
 func TestIsPureArithmetic(t *testing.T) {
 	yes := []string{"2+2", "10 * (3 - 1)", "42 / 7 =", "3.5 + 1", "(10-4)/2="}
 	no := []string{
@@ -222,6 +247,20 @@ func TestDirectAnswerStreamsWithoutRetrieval(t *testing.T) {
 	}
 }
 
+func TestDirectAnswerAutoUsesQuestionSpecialist(t *testing.T) {
+	srv := fakeLLM(t, nil, "Advice")
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "m")
+	var domain string
+	_, _, err := directAnswer(context.Background(), kbTestCfg(), "How does Kerberos delegation work?", AnswerOpts{
+		Agent:   "auto",
+		Persona: func(selected string) { domain = selected },
+	})
+	if err != nil || domain != "ad" {
+		t.Fatalf("domain=%q err=%v", domain, err)
+	}
+}
+
 func TestAdaptiveAnswerSkipStaysSkipWhenCorpusInsufficient(t *testing.T) {
 	// Router says SKIP; validation retrieves and the grader says the corpus is
 	// not sufficient, so it stays skip and answers ungrounded.
@@ -335,6 +374,95 @@ func TestAdaptiveAnswerForceBypassesRouter(t *testing.T) {
 	}
 	if rs.query != "anything" {
 		t.Errorf("force must call Search, got %q", rs.query)
+	}
+}
+
+func TestAdaptiveAnswerWebFirstDoesNotSkipLiveResearch(t *testing.T) {
+	authorizeWebTest(t)
+	srv := fakeLLM(t, []string{"SKIP", `{"sufficient":true,"use_web":false}`}, "Current answer [1].")
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	old := webSearch
+	calls := 0
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		calls++
+		return []retrieval.Result{chunk(webSource, "https://example.com/current", "Current", "live evidence")}, nil
+	}
+	t.Cleanup(func() { webSearch = old })
+	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "older evidence")}}
+	_, _, usedWeb, _, _, route, err := adaptiveAnswer(context.Background(), local, answerCfg(1), "current AI red teaming", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
+	if err != nil || route != "web" || !usedWeb || calls != 1 {
+		t.Fatalf("route=%q usedWeb=%v calls=%d err=%v", route, usedWeb, calls, err)
+	}
+}
+
+func TestAdaptiveAnswerWebFirstSkipsPureArithmetic(t *testing.T) {
+	authorizeWebTest(t)
+	srv := fakeLLM(t, nil, "4")
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	old := webSearch
+	calls := 0
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		calls++
+		return nil, nil
+	}
+	t.Cleanup(func() { webSearch = old })
+	_, _, usedWeb, _, _, route, err := adaptiveAnswer(context.Background(), nil, answerCfg(1), "2+2", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
+	if err != nil || route != "skip" || usedWeb || calls != 0 {
+		t.Fatalf("route=%q usedWeb=%v calls=%d err=%v", route, usedWeb, calls, err)
+	}
+}
+
+func TestAdaptiveAnswerKeepsTargetDetailsOutOfWebSearch(t *testing.T) {
+	authorizeWebTest(t)
+	srv := fakeLLM(t, []string{"GROUND", `{"sufficient":true,"use_web":true}`}, "Local answer [1].")
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	old := webSearch
+	calls := 0
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		calls++
+		return nil, nil
+	}
+	t.Cleanup(func() { webSearch = old })
+	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "local evidence")}}
+	_, _, usedWeb, _, _, _, err := adaptiveAnswer(context.Background(), local, answerCfg(1), "Assess my host 10.0.0.7", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
+	if err != nil || usedWeb || calls != 0 {
+		t.Fatalf("usedWeb=%v calls=%d err=%v", usedWeb, calls, err)
+	}
+}
+
+func TestAdaptiveAnswerKeepsTargetAdvisorTurnsLocal(t *testing.T) {
+	authorizeWebTest(t)
+	srv := fakeLLM(t, []string{"ADVISE", "local advice"}, "")
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	old := webSearch
+	calls := 0
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		calls++
+		return nil, nil
+	}
+	t.Cleanup(func() { webSearch = old })
+	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "local evidence")}}
+	answer, _, usedWeb, _, _, _, err := adaptiveAnswer(context.Background(), local, answerCfg(1), "Walk me through a penetration test for my internal host", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
+	if err != nil || usedWeb || calls != 0 || !strings.Contains(answer, "local advice") {
+		t.Fatalf("answer=%q usedWeb=%v calls=%d err=%v", answer, usedWeb, calls, err)
+	}
+}
+
+func TestAdaptiveAnswerSearchesWebForPublicAdvice(t *testing.T) {
+	authorizeWebTest(t)
+	srv := fakeLLM(t, []string{"ADVISE", `{"sufficient":true,"use_web":false}`}, "Current advice [1].")
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	old := webSearch
+	calls := 0
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		calls++
+		return []retrieval.Result{chunk(webSource, "https://example.com/current", "Current", "live evidence")}, nil
+	}
+	t.Cleanup(func() { webSearch = old })
+	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "older evidence")}}
+	_, _, usedWeb, _, _, route, err := adaptiveAnswer(context.Background(), local, answerCfg(1), "How should I assess AD CS safely?", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
+	if err != nil || route != "web" || !usedWeb || calls != 1 {
+		t.Fatalf("route=%q usedWeb=%v calls=%d err=%v", route, usedWeb, calls, err)
 	}
 }
 

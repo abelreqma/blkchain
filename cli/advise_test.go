@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"blkchain/cli/internal/retrieval"
 	"github.com/tmc/langchaingo/llms"
 )
 
@@ -57,6 +58,34 @@ func TestAdviseLoopFiresGenericPersonaCue(t *testing.T) {
 	}
 	if domain != "" {
 		t.Errorf("advise persona domain = %q, want generic (empty)", domain)
+	}
+}
+
+func TestAdviseLoopAutoUsesQuestionSpecialist(t *testing.T) {
+	fake := &fakeModel{queue: []*llms.ContentResponse{textResp("advice")}}
+	var domain string
+	_, _, err := adviseLoop(context.Background(), fake, nil, kbTestCfg(), nil, "How should I inspect AD CS templates?", AnswerOpts{
+		Agent:   "auto",
+		Persona: func(selected string) { domain = selected },
+	})
+	if err != nil || domain != "ad" {
+		t.Fatalf("domain=%q err=%v", domain, err)
+	}
+}
+
+func TestAdviseLoopKeepsTargetDetailsLocal(t *testing.T) {
+	authorizeWebTest(t)
+	old := webSearch
+	calls := 0
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		calls++
+		return nil, nil
+	}
+	t.Cleanup(func() { webSearch = old })
+	fake := &fakeModel{queue: []*llms.ContentResponse{textResp("advice")}}
+	_, _, err := adviseLoop(context.Background(), fake, nil, kbTestCfg(), nil, "How should I assess my host 10.0.0.7?", AnswerOpts{WebFirst: true})
+	if err != nil || calls != 0 {
+		t.Fatalf("calls=%d err=%v", calls, err)
 	}
 }
 

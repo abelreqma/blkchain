@@ -42,12 +42,12 @@ type searcher interface {
 	Search(ctx context.Context, query string, topK int, filter map[string]any) ([]retrieval.Result, error)
 }
 
-// webSearch is the web fallback, a variable so tests do not touch the network.
+// webSearch is the native web search, a variable so tests do not touch the network.
 // It selects the configured provider and applies the automatic fallback.
 var webSearch = dispatchWebSearch
 
-// rag.go is the bounded RAG answer loop (AnswerLoop): retrieve, grade
-// sufficiency, optionally web-search or rewrite-and-re-retrieve, then stream a
+// rag.go is the bounded RAG answer loop (AnswerLoop): optionally search live
+// sources first, retrieve, grade sufficiency, rewrite if needed, then stream a
 // grounded, cited synthesis. AnswerLoop is the only path that RETRIEVES and
 // grades; its synthesis tail is the shared `synthesize` primitive, which
 // SynthesizeFromResults (the /generate entry) also calls to answer over
@@ -122,6 +122,63 @@ func cveResearch(ctx context.Context, cfg ragconfig.Config, question string, sta
 	return append(nvdResults, webResults...), nil
 }
 
+func primarySearchDomains(question string) []string {
+	hay := normalizedDomainText(question)
+	hints := []struct {
+		name    string
+		domains []string
+	}{
+		{"owasp", []string{"owasp.org"}},
+		{"microsoft", []string{"learn.microsoft.com", "msrc.microsoft.com"}},
+		{"azure", []string{"learn.microsoft.com"}},
+		{"cisa", []string{"cisa.gov"}},
+		{"aws", []string{"docs.aws.amazon.com"}},
+		{"gcp", []string{"cloud.google.com"}},
+		{"google cloud", []string{"cloud.google.com"}},
+		{"kubernetes", []string{"kubernetes.io"}},
+		{"k8s", []string{"kubernetes.io"}},
+		{"nist", []string{"nist.gov"}},
+		{"mitre", []string{"mitre.org"}},
+	}
+	var domains []string
+	seen := map[string]bool{}
+	for _, hint := range hints {
+		if !strings.Contains(hay, normalizedDomainText(hint.name)) {
+			continue
+		}
+		for _, domain := range hint.domains {
+			if !seen[domain] {
+				domains = append(domains, domain)
+				seen[domain] = true
+			}
+		}
+	}
+	return domains
+}
+
+func liveWebResults(ctx context.Context, cfg ragconfig.Config, question string, stage func(string)) ([]retrieval.Result, error) {
+	var (
+		results []retrieval.Result
+		err     error
+	)
+	if cveQueryPattern.MatchString(question) {
+		results, err = cveResearch(ctx, cfg, question, stage)
+	} else {
+		stage(stageWeb)
+		results, err = webSearch(ctx, tavilyKey(), question, cfg.TavilyMaxResults, primarySearchDomains(question))
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errors.New("live web search unavailable; retry or use /web off for an offline answer")
+	}
+	if len(results) == 0 {
+		return nil, errors.New("live web search found no results; retry or use /web off for an offline answer")
+	}
+	return results, nil
+}
+
 // nextAction is the pure loop-control decision, extracted so it can be unit
 // tested without any LLM or network dependency. The loop wants the web when the
 // grader asks for it, the query looks like a CVE or PoC question, or retrieval
@@ -146,8 +203,8 @@ func nextAction(g grade, hasWeb, looksCVE bool, results int) string {
 // Model is the chat model for the grade and the answer ("" resolves one, see
 // resolveModel). Stage, when set, is called as the loop enters each phase (see
 // the stage constants); nil is a no-op. It runs on the AnswerLoop goroutine.
-// NoWeb turns the web-search fallback off (the /models web switch): the loop
-// then rewrites and re-retrieves where it would have searched the web.
+// NoWeb turns native web search off. WebFirst requires a live search before
+// synthesis and reports an error rather than returning an unverified current answer.
 // NoLocal disables local KB retrieval (the /models rag switch off). The loop
 // never calls rc.Search; grounding comes from web only. When false (default),
 // AnswerLoop behavior is unchanged.
@@ -161,6 +218,7 @@ type AnswerOpts struct {
 	Persona      func(domain string)
 	WebOnly      bool
 	NoWeb        bool
+	WebFirst     bool
 	NoLocal      bool
 	SearchTopK   int
 	SearchFilter map[string]any
@@ -238,6 +296,9 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 	if _, err := parseAnswerAgent(opts.Agent); err != nil {
 		return "", nil, false, nil, 0, err
 	}
+	if opts.WebFirst && !opts.WebOnly && questionHasTargetDetails(question) {
+		opts.NoWeb = true
+	}
 	stage := func(name string) {
 		if opts.Stage != nil {
 			opts.Stage(name)
@@ -271,6 +332,16 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 		return answer, cits, true, results, tokens, err
 	}
 
+	var externalResults []retrieval.Result
+	if opts.WebFirst && !opts.NoWeb {
+		externalResults, err = liveWebResults(ctx, cfg, question, stage)
+		if err != nil {
+			return "", nil, false, nil, 0, err
+		}
+		results = append(results, externalResults...)
+		usedWeb = true
+	}
+
 	topK := cfg.TopK
 	if opts.SearchTopK > 0 {
 		topK = opts.SearchTopK
@@ -280,9 +351,14 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 		// History-aware first retrieval: a follow-up carries the prior user
 		// question so it retrieves the right chunks. Grading/synthesis still use
 		// the raw question below.
-		results, err = rc.Search(ctx, retrievalQuery(opts.History, question), topK, opts.SearchFilter)
-		if err != nil {
-			return "", nil, false, nil, 0, err
+		localResults, searchErr := rc.Search(ctx, retrievalQuery(opts.History, question), topK, opts.SearchFilter)
+		if searchErr != nil {
+			if !usedWeb {
+				return "", nil, false, nil, 0, searchErr
+			}
+			opts.NoLocal = true
+		} else {
+			results = append(results, localResults...)
 		}
 	}
 
@@ -299,8 +375,7 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 	_, webAvail := webProvider(tavilyKey())
 	hasWeb := webAvail && !opts.NoWeb && loadPrefs().Web
 	looksCVE := looksLikeCVEorPoC(question)
-	var externalResults []retrieval.Result
-	if cveQueryPattern.MatchString(question) && hasWeb {
+	if cveQueryPattern.MatchString(question) && hasWeb && !usedWeb {
 		externalResults, err = cveResearch(ctx, cfg, question, stage)
 		if err != nil {
 			return "", nil, false, results, 0, err
@@ -360,7 +435,7 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 			}
 			retried, rerr := rc.Search(ctx, searchQuery, topK, opts.SearchFilter)
 			if rerr == nil && len(retried) > 0 {
-				if len(externalResults) > 0 && externalResults[0].Payload.Source == nvdSource {
+				if opts.WebFirst || len(externalResults) > 0 && externalResults[0].Payload.Source == nvdSource {
 					results = append(append([]retrieval.Result{}, externalResults...), retried...)
 				} else {
 					results = append(retried, externalResults...)
@@ -396,12 +471,12 @@ func synthesize(ctx context.Context, l toolLoopModel, cfg ragconfig.Config, ques
 
 	stage(stageAnswering)
 
-	// Pick the domain-expert persona from what retrieval returned, and announce
+	// Pick the domain-expert persona from the question or retrieved metadata, and announce
 	// it (cue) before streaming. Generic (empty) uses the default persona
 	// without a cue. All personas share answerConstraints, so grounding,
 	// citations, payload generation, and embedded-instruction handling are
 	// identical regardless of persona.
-	domain, err := answerAgentDomain(opts.Agent, domainFromResults(chunks))
+	domain, err := answerAgentDomain(opts.Agent, domainForAnswer(question, chunks))
 	if err != nil {
 		return "", nil, 0, err
 	}

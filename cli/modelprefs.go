@@ -9,7 +9,7 @@ import (
 )
 
 // modelprefs.go is the saved model settings behind /models: which chat models
-// the model picker hides, and whether the reranker and the web-search fallback
+// the model picker hides, and whether the reranker and native web search
 // run. It lives in a small JSON file beside the history file. It never holds a
 // secret.
 
@@ -27,8 +27,24 @@ type modelPrefs struct {
 	Viz         bool     `json:"viz"`
 }
 
-// defaultPrefs requires explicit permission for web search.
+// defaultPrefs leaves non-interactive web search disabled until the operator enables it.
 func defaultPrefs() modelPrefs { return modelPrefs{Rerank: true, Web: false, Rag: true, Viz: true} }
+
+func loadInteractivePrefs() modelPrefs {
+	p := loadPrefs()
+	path, err := prefsPath()
+	if err != nil {
+		return p
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		return p
+	}
+	p.Web = true
+	if savePrefs(p) != nil {
+		return loadPrefs()
+	}
+	return p
+}
 
 // prefsPath is models.json in the config directory the CLI already uses for the
 // saved project root and the history, created private if needed.

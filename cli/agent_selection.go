@@ -107,7 +107,7 @@ func (m model) answerAgentStatus() string {
 	}
 	selected := answerAgentLabel(choice) + suffix
 	if m.mode == "agent" {
-		selected = "Hermes (default)"
+		selected = "Hermes"
 		if plCurrentTier() != plASCII {
 			selected = "\U0001f4ac " + selected
 		}

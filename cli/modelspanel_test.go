@@ -753,7 +753,7 @@ func TestModelsArgsKeepsAToggleMadeWhileInFlight(t *testing.T) {
 	// The panel's next toggle keeps the command's change too.
 	m = selectRow(t, m, "web search")
 	m, _ = step(t, m, keySpace)
-	if p := loadPrefs(); !p.Web || !p.isHidden("qwen-a") || p.Rerank {
+	if p := loadPrefs(); p.Web || !p.isHidden("qwen-a") || p.Rerank {
 		t.Errorf("after the next toggle, on disk = %+v", p)
 	}
 }

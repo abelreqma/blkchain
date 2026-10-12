@@ -4,12 +4,15 @@ This document is for people changing blkChain. For installing and running it, se
 
 ## System Map
 
-![blkChain System Map showing hybrid retrieval and live web searches (opt-in), Go control, authorized execution, assessment surfaces, and evidence](blkchain-system-map.svg)
+![blkChain System Map showing hybrid retrieval and live web searches by default in interactive mode, Go control, authorized execution, assessment surfaces, and evidence](blkchain-system-map.svg)
 
 ### Runtime flow
 
 Research citations inform candidate techniques but never authorize an action. The Go gate uses the
 sealed RoE and separate operator approvals.
+
+Interactive web-first search uses the current question only. Detected target details and
+target-specific advisor turns stay local.
 
 ```mermaid
 flowchart TB
@@ -20,7 +23,7 @@ flowchart TB
     MLX["MLX embedding and reranking"]
     Qdrant["Qdrant dense + sparse index"]
     Native["Native cited answers"]
-    Web["Live web search, opt-in"]
+    Web["Live web search, interactive default"]
     Retrieval["Go retrieval + RRF"]
     Hermes["Hermes mode<br/>separate permissions"]
   end

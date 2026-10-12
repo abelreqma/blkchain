@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -37,6 +38,54 @@ func TestDomainFromResultsPicksMajorityDomain(t *testing.T) {
 		if got := domainFromResults(c.res); got != c.want {
 			t.Errorf("%s: domainFromResults = %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+func TestDomainFromQuestionUsesTheRequestedSpecialty(t *testing.T) {
+	cases := []struct{ question, want string }{
+		{"What are current AI red teaming techniques?", "ai"},
+		{"How does Kerberos delegation work in Active Directory?", "ad"},
+		{"Can this GraphQL API expose another user's object?", "api"},
+		{"How do AWS IAM roles cross accounts?", "cloud"},
+		{"What does Kubernetes RBAC permit here?", "k8s"},
+		{"How can I test an SSRF endpoint?", "web"},
+		{"Does CVE-2024-1234 affect this build?", "cve"},
+		{"Can GitHub Actions pull request triggers expose a release token?", "supply"},
+		{"Which sudo rule permits this Linux privilege escalation?", "linux"},
+		{"Can a Windows service load a writable DLL?", "windows"},
+		{"Does WPA3 SAE permit this wireless attack?", "wireless"},
+		{"How do I prove control of a ROP chain?", "binexp"},
+		{"Is LLMNR relay viable on this network?", "network"},
+		{"Can an Android deep link bypass authorization?", "mobile"},
+		{"How should I enumerate subdomains during recon?", "recon"},
+		{"Write an email to the team", ""},
+	}
+	for _, tc := range cases {
+		if got := domainFromQuestion(tc.question); got != tc.want {
+			t.Errorf("%q: domain=%q, want %q", tc.question, got, tc.want)
+		}
+	}
+}
+
+func TestQuestionDomainOutranksUnrelatedRetrievedMetadata(t *testing.T) {
+	webResults := []retrieval.Result{pchunk("skills", "offensive-sqli/SKILL.md")}
+	if got := domainForAnswer("How does Kerberos delegation work?", webResults); got != "ad" {
+		t.Errorf("question domain = %q, want ad", got)
+	}
+	if got := domainForAnswer("Tell me more", []retrieval.Result{pchunk("skills", "offensive-linux-privesc/SKILL.md")}); got != "linux" {
+		t.Errorf("metadata fallback = %q, want linux", got)
+	}
+}
+
+func TestGroundedAutoPersonaUsesQuestionBeforeMetadata(t *testing.T) {
+	srv := fakeLLM(t, nil, "Answer [1].")
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	var selected string
+	_, _, _, err := SynthesizeFromResults(context.Background(), kbTestCfg(), "How does Kerberos delegation work?", []retrieval.Result{
+		pchunk("skills", "offensive-sqli/SKILL.md"),
+	}, AnswerOpts{Agent: "auto", Persona: func(domain string) { selected = domain }})
+	if err != nil || selected != "ad" {
+		t.Fatalf("selected=%q err=%v", selected, err)
 	}
 }
 
@@ -117,6 +166,9 @@ func TestAnswerPromptsShareOperationalStandard(t *testing.T) {
 		prompt := personaPrompt(domain)
 		if !strings.Contains(prompt, offensiveReasoningStandard) {
 			t.Errorf("grounded persona %q lost the operational standard", domain)
+		}
+		if !strings.Contains(prompt, "time-sensitive claims") {
+			t.Errorf("grounded persona %q lost the freshness standard", domain)
 		}
 		if !strings.Contains(prompt, promptguard.UntrustedInputClause) {
 			t.Errorf("grounded persona %q lost the input boundary", domain)

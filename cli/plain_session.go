@@ -128,7 +128,7 @@ func plainAsk(m *model, mode, query string, c *replClient, history []priorTurn, 
 		args = []string{"--web", query}
 	}
 	args = append([]string{"--agent", c.agent}, args...)
-	return askWithPreface(rc, history, args, preface, c.metrics)
+	return askWithPreface(rc, history, args, preface, !force, c.metrics)
 }
 
 func plainEditor(before string) (string, error) {

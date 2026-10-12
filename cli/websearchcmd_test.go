@@ -17,7 +17,7 @@ func TestWebCommandPermissionAndProvider(t *testing.T) {
 	isolateUserDirs(t)
 	t.Setenv(webProviderEnv, "")
 	if defaultPrefs().Web || loadPrefs().Web {
-		t.Fatal("fresh install authorizes web")
+		t.Fatal("fresh non-interactive profile authorizes web")
 	}
 	var err error
 	out := captureStdout(t, func() { err = runWeb([]string{"on"}) })

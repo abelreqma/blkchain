@@ -63,8 +63,8 @@ func replPrompt() string {
 // modes. It keeps the last search results so `open N` can open the N-th hit.
 func plainREPL() error {
 	var last []retrieval.Result
-	mode := "agent"
-	pm := model{cfg: loadConfig(), mode: mode, hist: histstore.OpenDefault(), engageMode: secgate.Auto, engageTranscript: "important", ta: textarea.New()}
+	mode := "rag"
+	pm := model{cfg: loadConfig(), mode: mode, prefs: loadInteractivePrefs(), hist: histstore.OpenDefault(), engageMode: secgate.Auto, engageTranscript: "important", ta: textarea.New()}
 	pm.sess, _ = newSession()
 	pm.ambient, _ = loadInitContext()
 	if pm.hist != nil {

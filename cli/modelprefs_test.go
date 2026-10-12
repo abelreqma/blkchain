@@ -122,6 +122,23 @@ func TestPrefsLoadRejectsOversizeAndSymlink(t *testing.T) {
 	}
 }
 
+func TestInteractivePrefsEnableWebOnFreshProfile(t *testing.T) {
+	isolateUserDirs(t)
+	if p := loadInteractivePrefs(); !p.Web || !loadPrefs().Web {
+		t.Fatalf("fresh interactive profile did not persist web on: %+v", p)
+	}
+}
+
+func TestInteractivePrefsPreserveSavedWebOff(t *testing.T) {
+	isolateUserDirs(t)
+	if err := savePrefs(defaultPrefs()); err != nil {
+		t.Fatal(err)
+	}
+	if p := loadInteractivePrefs(); p.Web || loadPrefs().Web {
+		t.Fatalf("saved web off was overridden: %+v", p)
+	}
+}
+
 func TestPrefsHiddenToggle(t *testing.T) {
 	var p modelPrefs
 	p = p.withHidden("a", true)

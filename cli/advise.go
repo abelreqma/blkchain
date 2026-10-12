@@ -41,7 +41,7 @@ const adviseSystemPrompt = genericPersonaPreamble + "\n\n" + adviseMethodology
 // skill). It returns the final advice and a zero token count (the loop does not
 // report completion tokens).
 func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig.Config, cat *skillcat.Catalog, question string, opts AnswerOpts) (string, int, error) {
-	domain, err := answerAgentDomain(opts.Agent, "")
+	domain, err := answerAgentDomain(opts.Agent, domainFromQuestion(question))
 	if err != nil {
 		return "", 0, err
 	}

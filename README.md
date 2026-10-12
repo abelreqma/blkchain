@@ -23,7 +23,7 @@ The research index combines dense embeddings and BM25 sparse vectors in Qdrant. 
 
 The native answer loop grades source sufficiency, can rewrite the query, and synthesizes an answer from bounded source passages. It supports conversation context, specialist prompts, streaming, per-call usage metrics, and an explicit no-results response. Exact-CVE research can add NVD details and public research when web permission is enabled.
 
-Default answers use Hermes. Select native routing explicitly when you want blkChain's local answer loop or structured answer output:
+Bare `blk` starts the REPL or TUI in native auto mode. It selects a research specialist from the question, then retrieved metadata when the question is ambiguous. Interactive factual and advisory turns search live public sources before answering when web is enabled. One-shot `blk ask QUESTION` still uses Hermes unless `--agent` selects native routing:
 
 | Entry point | Behavior |
 | --- | --- |
@@ -35,9 +35,9 @@ Default answers use Hermes. Select native routing explicitly when you want blkCh
 | `blk search --json QUERY` | Returns ranked chunks without answer synthesis. |
 | `blk ask --agent auto --json QUESTION` | Returns structured native answer output, citations, results, and available call metrics. |
 
-`--json` and `--sources` on `ask` require an explicit native `--agent` selection. In the interactive session, `/agent auto` or `/agent NAME` selects native answers; `/mode` switches between native answers and Hermes. Research specialists change answer guidance. Engagement executors are selected separately from task kind and surface.
+`--json` and `--sources` on `ask` require an explicit native `--agent` selection. In the interactive session, `/agent NAME` selects a native specialist, `/agent auto` restores dynamic selection, and `/mode` switches between native answers and Hermes. Research specialists change answer guidance. Engagement executors are selected separately from task kind and surface.
 
-Native web research is off by default. `blk web on` permits it and `blk web off` revokes it. Providers include DuckDuckGo and Tavily; Tavily reads `TAVILY_API_KEY` or `TAVILY_SETUP_TOKEN`. Use `blk web provider duckduckgo`, `blk web provider tavily`, or `blk web provider auto` to choose a provider. Permission and provider settings persist locally. A research query can leave the machine when web research is enabled.
+A fresh REPL/TUI profile enables native web research on first launch. Native one-shot CLI and MCP calls do not enable it automatically. An existing saved `web off` remains off until `blk web on` enables it. `blk web off` disables future native searches. Providers include DuckDuckGo and Tavily; Tavily reads `TAVILY_API_KEY` or `TAVILY_SETUP_TOKEN`. Use `blk web provider duckduckgo`, `blk web provider tavily`, or `blk web provider auto` to choose a provider. Permission and provider settings persist locally. Interactive native turns fail clearly when a required live search is unavailable rather than present local or model knowledge as current. Web-first search sends the current question, never attachments or conversation history. Questions with detected target details and target-specific advisor turns stay local; explicit `/web search` sends the query the operator enters.
 
 Hermes has its own provider, tools, permissions, and conversation state. Native web settings and engagement Safe/Auto settings do not control Hermes's own tool execution.
 
@@ -247,7 +247,7 @@ provides schema-validated JSON generation.
 | `blkchain/` | Python MLX embedding/reranking service, offline ingestion/indexing, and evaluation harnesses. |
 | Qdrant | Persistent dense and sparse index. |
 | OpenAI-compatible LLM endpoint | Separately managed native answer and engagement inference. |
-| Hermes | Separately configured agent backend for default conversational turns. |
+| Hermes | Separately configured backend for default one-shot `blk ask` and optional interactive turns. |
 
 Go owns query-time retrieval, answering, engagement execution, and MCP. Python serves the MLX models
 and builds the index offline. Models and corpus content are supplied by the operator.
@@ -260,8 +260,8 @@ retrieval path, the engagement harness, or the embedding service.
 ## Complete setup guide
 
 This guide targets macOS on Apple Silicon. Run the core steps first to get local retrieval and
-native answers working. Add Hermes for default conversational turns, the command runner for
-engagements, and the browser container for runtime web collection.
+native answers working. Add Hermes for default one-shot `blk ask` or optional interactive turns. Add the
+command runner for engagements and the browser container for runtime web collection.
 
 | Component | Required for |
 | --- | --- |
@@ -573,7 +573,7 @@ Use a tool-calling model and a supporting server configuration for engagement or
 
 ### 8. Set up Hermes and connect the knowledge base
 
-Hermes provides the default conversational backend. Install it using the
+Hermes provides the default backend for one-shot `blk ask` and an optional interactive mode. Install it using the
 [official quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/).
 This CLI installer is pinned to a source commit and verified before execution:
 
@@ -630,7 +630,7 @@ blk ask "Use kb_search to explain contextual output encoding from my local notes
 ```
 
 `hermes --version` checks that the installed launcher runs; `doctor` checks that it is on `PATH`
-and that the blkChain MCP entry is enabled. The default answer should use Hermes and retrieve from
+and that the blkChain MCP entry is enabled. This one-shot answer should use Hermes and retrieve from
 the connected knowledge base.
 
 For streaming gateway turns in the interactive UI, run these commands in a terminal with the native
@@ -822,8 +822,8 @@ blk ask --agent auto --rag "Explain contextual output encoding"
 blk doctor
 ```
 
-Start bare `blk` to open the terminal UI. `/agent auto` selects native research and `/help` lists
-commands. Once Hermes is configured, the default mode uses its backend.
+Start bare `blk` to open the terminal UI in native auto mode. `/agent NAME` selects a specialist,
+`/mode` switches to Hermes, and `/help` lists commands.
 
 | Data or process | Location or control |
 | --- | --- |
@@ -841,9 +841,9 @@ commands. Once Hermes is configured, the default mode uses its backend.
 again. `blk engage stop --workspace PATH` requests an engagement stop. Keep evidence directories
 when they are needed for review or resume.
 
-#### Optional public research
+#### Public web research
 
-Enable native web research explicitly when you want it:
+Fresh REPL/TUI profiles enable web on first launch. For native one-shot CLI or MCP use, enable it explicitly. Select a provider or change the saved switch:
 
 ```sh
 blk web provider duckduckgo
@@ -866,7 +866,7 @@ CVE lookups. Hermes provider and tool permissions are configured separately.
 | The embedding service does not become ready | Check configured model paths and `blk logs embed_server`; confirm the weights finished downloading. |
 | Retrieval has no results | Check `blk sources --json`, corpus paths, collection name, and the completed indexing output. |
 | Chat returns 401 or an unknown-model error | Supply the server's actual API key and use an ID returned by its `/v1/models` endpoint. |
-| A default answer cannot start | Configure Hermes or select native routing with `--agent auto` / `/agent auto`. |
+| A default answer cannot start | For bare `blk`, check `blk health --json` and `blk web status`; for one-shot `blk ask`, configure Hermes or select `--agent auto`. |
 | The gateway is unauthorized | Export the same `API_SERVER_KEY` used by the gateway in the client terminal. |
 | The gateway responds at `/health` but the client uses the CLI | Check `API_SERVER_KEY` in the client terminal; blk requires authenticated `/health/detailed`. Confirm the launcher with `hermes --version`. |
 | An offline scanner reports a database gap | Run `blk engage setup`, check its output for update failures, and ensure the printed cache path is readable by Docker workers. |
