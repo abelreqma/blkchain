@@ -108,25 +108,49 @@ Protect the operator and the runner from the target. Treat pages, responses, fil
 from a target as hostile data. They must not choose a target, arm a task, execute as code, or reach
 operator files, credentials, local services, or unrelated network destinations. Enforce scope at the
 network boundary as well as in the application, including on DNS resolution, redirects, and
-subresources. A private or internal address is allowed only when the policy includes its own IP or
-CIDR entry: a hostname entry does not authorize the address it resolves to. An empty or ambiguous
-scope fails closed.
+subresources. A private or internal address needs its own IP or CIDR entry, or an operator-approved
+private CIDR discovered after foothold access. A hostname entry does not authorize the address it
+resolves to. An empty or ambiguous scope fails closed.
 
 The declared foothold is the one deliberate exception to the network half, and it is bounded. A
 command carried to an operator-declared foothold runs on a host whose egress is not ours to filter,
-so its scope is enforced by the command gate alone. The carrier still runs inside the guarded
-worker, the foothold's own address must be in scope and is pinned into the guard's accept list, the
+so its scope is enforced by the command gate alone. SSH, command, and HTTP form carriers run inside
+the guarded worker, whose firewall pins the foothold address. Raw shells use a local loopback broker,
+and Metasploit RPC uses a local loopback service. Every foothold address must be in scope. The
 declaration is sealed into the policy so a resume with a different foothold is refused, the surface
 of a task decides whether it pivots so no model or corpus text can move execution, and every pivoted
-action records its destination. One consequence runs the other way: this host's PATH and symlinks
-describe this host, so a check that establishes a file's identity by resolving a path cannot speak
-for a file on the foothold. Such a check compares lexically for a pivoted command and fails closed
+action records its destination. Approved private CIDRs are held separately from the sealed RoE and
+apply only to foothold-covered surfaces. They do not expand the worker's direct network guard. On
+the web surface, the host-side broker validates every request and redirect against the pivot scope,
+resolves hostnames through the foothold, and dials the checked IP through the carrier. Exploit output
+alone cannot advance an external vantage to an internal
+foothold. An operator may attach a carrier to an evidenced armed exploit task after approving its
+private network. Resume validates the attachment, pins its IP in the guard, probes execution through
+the carrier, and only then advances the vantage. SSH and command carriers may cover the web surface.
+Raw, Metasploit RPC, and HTTP form carriers cover command surfaces only. A raw shell attachment uses
+a private workspace record and a separate loopback broker process. It retains one POSIX shell across
+stop and resume until the engagement wall budget expires. Metasploit RPC uses a loopback MessagePack
+service, checks the session peer against the approved foothold IP, and reads one command-shell
+session with a sequence pointer. The HTTP form carrier sends a bounded POST through the guarded
+worker to the approved IP and requires a command receipt. These three carriers do not provide the
+binary TCP stream used by the web broker. One consequence runs the other way:
+this host's PATH and symlinks describe this host, so a check that establishes a file's identity by
+resolving a path cannot speak for a file on the foothold. Such a check compares lexically for a
+pivoted command and fails closed
 on a spelling it cannot resolve. Do not widen this exception to a destination the operator did not
 declare.
 
+AWS and GCP provider CLI commands require a separate operator approval tied to engagement evidence
+and a credential file path on a foothold that covers the matching cloud surface. The approval does
+not copy secret bytes into the workspace. The command gate authorizes the provider command before
+the carrier adds a clean environment and the credential file override. The runner cannot verify the file's contents or
+identity on the remote host; the operator approves that source and the RoE governs its use.
+
 Bound requests, output, rate, duration, and total work, and provide a reliable operator stop
-control. Credential use must be limited to the authorized target and must not leak through logs or
-unrelated requests.
+control. Credential use must not leak through logs or unrelated requests. An operator-approved
+cloud credential source permits provider operations under the RoE action and task gates. Recon
+accepts only audited read-only forms; other operations require an armed exploit or post-ex task.
+The CLI cannot prove that every provider operation stays in one account or project.
 
 External-surface sweeps run from the code-owned queue when a recon task names an HTTP origin. TLS,
 header, cookie, CORS, method, metadata-path, and captured-material subdomain observations cite
