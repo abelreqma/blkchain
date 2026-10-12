@@ -22,8 +22,8 @@ func init() {
 // cloudGCPLadder refines the generic cloud ladder's metadata/IAM tier for GCP: the
 // metadata server (metadata.google.internal / 169.254.169.254, token endpoint for
 // service-account credential theft) and GCS for storage exposure, probed within
-// scope with the allowlisted curl (the gcloud CLI is not allowlisted). Built on
-// already-allowlisted tools.
+// scope with the allowlisted curl. An approved identity separately enables
+// gcloud on the declared foothold.
 var cloudGCPLadder = reconLadder{
 	{Index: 0, Name: "public-asset-discovery", Dimensions: []string{"cloud-assets"}},
 	{Index: 1, Name: "service-endpoint-fingerprint", Dimensions: []string{"cloud-endpoints", "cloud-services"}},

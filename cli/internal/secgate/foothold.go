@@ -2,6 +2,9 @@ package secgate
 
 import (
 	"fmt"
+	"net"
+	"net/url"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,16 +21,22 @@ import (
 // The declaration is authorization data, not execution machinery. It is parsed
 // and validated here and consumed by the transport registry in the CLI.
 type Foothold struct {
-	Host       string    `json:"host"`
-	Transport  string    `json:"transport"`
-	User       string    `json:"user,omitempty"`
-	Port       int       `json:"port,omitempty"`
-	Key        string    `json:"key,omitempty"`
-	KnownHosts string    `json:"known_hosts,omitempty"`
-	Env        []string  `json:"env,omitempty"`
-	Exec       []string  `json:"exec,omitempty"`
-	Quote      string    `json:"quote"`
-	Surfaces   []Surface `json:"surfaces"`
+	Host        string    `json:"host"`
+	Transport   string    `json:"transport"`
+	User        string    `json:"user,omitempty"`
+	Port        int       `json:"port,omitempty"`
+	Key         string    `json:"key,omitempty"`
+	KnownHosts  string    `json:"known_hosts,omitempty"`
+	Session     string    `json:"session,omitempty"`
+	RPC         string    `json:"rpc,omitempty"`
+	PasswordEnv string    `json:"password_env,omitempty"`
+	URL         string    `json:"url,omitempty"`
+	Param       string    `json:"param,omitempty"`
+	HeaderEnv   string    `json:"header_env,omitempty"`
+	Env         []string  `json:"env,omitempty"`
+	Exec        []string  `json:"exec,omitempty"`
+	Quote       string    `json:"quote"`
+	Surfaces    []Surface `json:"surfaces"`
 }
 
 // Quoting selects how a carrier receives the command.
@@ -50,12 +59,11 @@ const (
 // this set is a parse error, so a typo fails the engagement closed rather than
 // silently selecting a default carrier.
 //
-//	ssh     : an SSH client invocation, key or password authentication
-//	command : an operator-supplied argv prefix that already reaches the
-//	          foothold, such as "kubectl exec -i web-0 --" or
-//	          "docker exec -i app". The carrier is whatever the operator's
-//	          access actually is; its leading binary is still gate-checked.
-func FootholdTransports() []string { return []string{"command", "ssh"} }
+// SSH and command carriers can carry web streams. Raw, Metasploit RPC, and HTTP
+// form carriers carry command output only.
+func FootholdTransports() []string {
+	return []string{"command", "http-form", "msf-rpc", "raw-session", "ssh"}
+}
 
 func knownFootholdTransport(name string) bool {
 	for _, t := range FootholdTransports() {
@@ -69,7 +77,7 @@ func knownFootholdTransport(name string) bool {
 // footholdSurfaces is the set a foothold may cover. It is the surface set whose
 // commands describe the machine they execute on, plus the surfaces whose
 // in-cluster or on-host half needs a real foothold to mean anything.
-var footholdSurfaces = []Surface{SurfaceLocal, SurfaceAD, SurfaceContainer, SurfaceNetwork}
+var footholdSurfaces = []Surface{SurfaceLocal, SurfaceAD, SurfaceContainer, SurfaceNetwork, SurfaceWeb, SurfaceCloudAWS, SurfaceCloudGCP}
 
 func knownFootholdSurface(s Surface) bool {
 	for _, k := range footholdSurfaces {
@@ -97,10 +105,20 @@ func FootholdSurfaces() []string {
 // A declared foothold carries commands on the surfaces it covers to that host, so
 // this host's PATH and symlinks stop describing what a path in the command names.
 func (g *Gate) execOffHost(c Command) bool {
-	if g == nil || g.Policy == nil {
-		return false
+	return g.EffectiveFoothold().Covers(c.Surface)
+}
+
+func (g *Gate) EffectiveFoothold() *Foothold {
+	if g == nil {
+		return nil
 	}
-	return g.Policy.Foothold.Covers(c.Surface)
+	if g.AttachedFoothold != nil {
+		return g.AttachedFoothold
+	}
+	if g.Policy != nil {
+		return g.Policy.Foothold
+	}
+	return nil
 }
 
 func (f *Foothold) Covers(s Surface) bool {
@@ -158,6 +176,18 @@ func ParseFoothold(entry string) (*Foothold, error) {
 			f.Key = value
 		case "knownhosts":
 			f.KnownHosts = value
+		case "session":
+			f.Session = value
+		case "rpc":
+			f.RPC = value
+		case "passenv":
+			f.PasswordEnv = value
+		case "url":
+			f.URL = value
+		case "param":
+			f.Param = value
+		case "headerenv":
+			f.HeaderEnv = value
 		case "env":
 			for _, name := range strings.Split(value, ",") {
 				name = strings.TrimSpace(name)
@@ -250,7 +280,7 @@ func (f *Foothold) validate() error {
 		if f.Key == "" {
 			return fmt.Errorf("secgate: foothold transport ssh requires key=")
 		}
-		if len(f.Exec) > 0 {
+		if len(f.Exec) > 0 || f.Session != "" || f.RPC != "" || f.PasswordEnv != "" || f.URL != "" || f.Param != "" || f.HeaderEnv != "" {
 			return fmt.Errorf("secgate: foothold transport ssh does not take exec=")
 		}
 		if f.Quote != "" && f.Quote != QuoteShell {
@@ -270,11 +300,68 @@ func (f *Foothold) validate() error {
 		if strings.ContainsAny(f.Exec[0], `/\`) {
 			return fmt.Errorf("secgate: foothold exec must begin with a bare binary name, got %q", f.Exec[0])
 		}
-		if f.Key != "" || f.KnownHosts != "" || f.User != "" || f.Port != 0 {
+		if f.Key != "" || f.KnownHosts != "" || f.Session != "" || f.User != "" || f.Port != 0 ||
+			f.RPC != "" || f.PasswordEnv != "" || f.URL != "" || f.Param != "" || f.HeaderEnv != "" {
 			return fmt.Errorf("secgate: foothold transport command takes only exec=, env=, and surfaces=")
 		}
+	case "raw-session":
+		if !filepath.IsAbs(f.Session) || filepath.Clean(f.Session) != f.Session || filepath.Base(f.Session) != "raw-session.json" {
+			return fmt.Errorf("secgate: raw-session transport requires an absolute session= record path")
+		}
+		if f.Key != "" || f.KnownHosts != "" || f.User != "" || f.Port != 0 || len(f.Exec) != 0 || len(f.Env) != 0 || f.Quote != "" ||
+			f.RPC != "" || f.PasswordEnv != "" || f.URL != "" || f.Param != "" || f.HeaderEnv != "" {
+			return fmt.Errorf("secgate: raw-session transport takes only session= and surfaces=")
+		}
+		f.Quote = QuoteArgv
+	case "msf-rpc":
+		if f.User == "" || f.Session == "" || f.RPC == "" || !isEnvName(f.PasswordEnv) || parseFootholdIP(f.Host) == "" || f.Key != "" || f.KnownHosts != "" ||
+			f.Port != 0 || len(f.Exec) != 0 || len(f.Env) != 0 || f.URL != "" || f.Param != "" || f.HeaderEnv != "" || f.Quote != "" || f.Covers(SurfaceWeb) {
+			return fmt.Errorf("secgate: msf-rpc requires rpc=, session=, user=, and passenv= only")
+		}
+		if n, err := strconv.Atoi(f.Session); err != nil || n < 1 {
+			return fmt.Errorf("secgate: msf-rpc session must be a positive number")
+		}
+		u, err := url.Parse(f.RPC)
+		if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/api/1.0" ||
+			!validRPCLoopback(u.Hostname(), u.Port()) {
+			return fmt.Errorf("secgate: msf-rpc requires a loopback /api/1.0 URL")
+		}
+		f.Quote = QuoteArgv
+	case "http-form":
+		if f.URL == "" || f.Param == "" || f.Key != "" || f.KnownHosts != "" || f.User != "" || f.Port != 0 || f.Session != "" ||
+			f.RPC != "" || f.PasswordEnv != "" || len(f.Exec) != 0 || len(f.Env) != 0 || f.Quote != "" || f.Covers(SurfaceWeb) {
+			return fmt.Errorf("secgate: http-form requires url= and param=, without web surface")
+		}
+		u, err := url.Parse(f.URL)
+		if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
+			net.ParseIP(u.Hostname()) == nil || u.Hostname() != f.Host || u.Port() == "" || !isFormParam(f.Param) ||
+			f.HeaderEnv != "" && !isEnvName(f.HeaderEnv) {
+			return fmt.Errorf("secgate: http-form requires an IP URL on the foothold and a simple parameter name")
+		}
+		if port, err := strconv.Atoi(u.Port()); err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("secgate: http-form URL requires a valid port")
+		}
+		f.Quote = QuoteArgv
 	}
 	return nil
+}
+
+func validRPCLoopback(host, port string) bool {
+	ip := net.ParseIP(host)
+	n, err := strconv.Atoi(port)
+	return ip != nil && ip.IsLoopback() && err == nil && n > 0 && n <= 65535
+}
+
+func isFormParam(value string) bool {
+	if len(value) == 0 || len(value) > 64 {
+		return false
+	}
+	for _, c := range value {
+		if c != '_' && c != '-' && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // isEnvName reports whether s is a POSIX environment variable name. Only a
@@ -313,10 +400,17 @@ func (f *Foothold) CarrierBinary() string {
 	if f == nil {
 		return ""
 	}
-	if f.Transport == "command" && len(f.Exec) > 0 {
-		return f.Exec[0]
+	switch f.Transport {
+	case "command":
+		if len(f.Exec) > 0 {
+			return f.Exec[0]
+		}
+	case "ssh":
+		return "ssh"
+	case "http-form":
+		return "curl"
 	}
-	return "ssh"
+	return ""
 }
 
 // FootholdInScope reports whether the foothold's host is authorized by scope.

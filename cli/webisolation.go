@@ -112,6 +112,15 @@ func (b *webLimitedBuffer) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 func newWebBroker(g *secgate.Gate, armed webArmedFunc) *webacquire.Broker {
+	scope := (*secgate.Scope)(nil)
+	pivoted := g != nil && g.EffectiveFoothold().Covers(secgate.SurfaceWeb)
+	expanded := pivoted && g.PivotScope != nil
+	if g != nil {
+		scope = g.Scope
+		if expanded {
+			scope = g.PivotScope
+		}
+	}
 	policy := webacquire.Policy{
 		Authorize: func(ctx context.Context, r webacquire.Request) error {
 			if g == nil {
@@ -138,8 +147,39 @@ func newWebBroker(g *secgate.Gate, armed webArmedFunc) *webacquire.Broker {
 			}
 			return nil
 		}, IPAllowed: func(host string, ip net.IP) bool {
-			return g != nil && g.Scope != nil && g.Scope.WebAddressAllowed(host, ip)
+			if expanded {
+				return scope != nil && scope.PivotWebAddressAllowed(host, ip)
+			}
+			return scope != nil && scope.WebAddressAllowed(host, ip)
 		}}
+	if pivoted {
+		if expanded {
+			policy.Resolve = func(_ context.Context, host string) ([]net.IP, error) {
+				if ip := net.ParseIP(host); ip != nil {
+					return []net.IP{ip}, nil
+				}
+				if g.WebLookup == nil {
+					return nil, errors.New("web pivot resolver unavailable")
+				}
+				return g.WebLookup(host)
+			}
+		}
+		policy.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if network != "tcp" && network != "tcp4" && network != "tcp6" {
+				return nil, errors.New("web pivot requires TCP")
+			}
+			host, _, err := net.SplitHostPort(address)
+			ip := net.ParseIP(host)
+			if err != nil || ip == nil || scope == nil || expanded && !scope.PivotWebAddressAllowed(ip.String(), ip) || !expanded && !scope.WebAddressAllowed(ip.String(), ip) {
+				return nil, errors.New("web pivot address outside scope")
+			}
+			r := runtimeFor(ctx)
+			if g.Policy == nil || r == nil || r.runner == nil || r.runner.foothold == nil || r.policy != g.Policy {
+				return nil, errors.New("web pivot runner unavailable")
+			}
+			return r.runner.DialFoothold(ctx, address)
+		}
+	}
 	if g != nil && g.Policy != nil {
 		policy.MaxBodyBytes = g.Policy.OutputBytes
 		policy.MaxTotalBytes = g.Policy.TotalBytes

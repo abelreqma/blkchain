@@ -8,6 +8,12 @@ func (s *Store) HasEvidence(taskID string) (bool, error) {
 	return found != 0, err
 }
 
+func (s *Store) HasEvidenceRow(taskID string, id int64) (bool, error) {
+	var found int
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM evidence WHERE task_id = ? AND id = ?)`, taskID, id).Scan(&found)
+	return found != 0, err
+}
+
 // EvidenceCap is the maximum number of characters (runes) of a quote kept as
 // evidence.
 const EvidenceCap = 4000

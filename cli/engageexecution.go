@@ -112,17 +112,36 @@ func footholdStages(t *footholdTransport, stages []pipelineStage) []pipelineStag
 	return out
 }
 
+func cloudCredentialStages(stages []pipelineStage, identity secgate.CloudIdentity) []pipelineStage {
+	out := make([]pipelineStage, len(stages))
+	for i, stage := range stages {
+		out[i] = stage
+		env := []string{"-i", "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", "HOME=/tmp"}
+		switch {
+		case identity.Provider == "aws" && stage.Binary == "aws":
+			env = append(env, "AWS_SHARED_CREDENTIALS_FILE="+identity.CredentialFile, "AWS_CONFIG_FILE=/dev/null", "AWS_EC2_METADATA_DISABLED=true", "AWS_PAGER=")
+		case identity.Provider == "gcp" && stage.Binary == "gcloud":
+			env = append(env, "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="+identity.CredentialFile, "CLOUDSDK_CORE_DISABLE_PROMPTS=1")
+		default:
+			continue
+		}
+		out[i].Binary = "/usr/bin/env"
+		out[i].Args = append(append(env, stage.Binary), stage.Args...)
+	}
+	return out
+}
+
 // pivotDestination reports the foothold an action on this surface runs on, or ""
-// when it runs in the sandbox worker. The decision is code-derived from the
-// sealed policy and the task's surface; no model or corpus text reaches it.
+// when it runs in the sandbox worker. The decision uses the declared or
+// operator-attached foothold and the task's surface; no model or corpus text reaches it.
 func pivotDestination(g *secgate.Gate, r *engageRuntime, surface secgate.Surface) string {
 	if r == nil || r.runner == nil || r.runner.foothold == nil || g == nil || g.Policy == nil {
 		return ""
 	}
-	if !g.Policy.Foothold.Covers(surface) {
+	if !g.EffectiveFoothold().Covers(surface) {
 		return ""
 	}
-	return g.Policy.Foothold.Host
+	return g.EffectiveFoothold().Host
 }
 
 func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineStage, dir string, limit int, timeout time.Duration, origin actionOrigin) runResult {
@@ -172,10 +191,18 @@ func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineSt
 	// is enforced by the gate alone. Every such action records its destination.
 	destination := pivotDestination(g, r, origin.Surface)
 	exec := stages
+	rawSession := destination != "" && r.runner.foothold.name == "raw-session"
+	msfSession := destination != "" && r.runner.foothold.name == "msf-rpc"
+	httpForm := destination != "" && r.runner.foothold.name == "http-form"
 	var plan engageEgressPlan
 	var planErr error
 	if destination != "" {
-		exec = footholdStages(r.runner.foothold, stages)
+		if identity, ok := g.CloudIdentities[origin.Surface]; ok {
+			exec = cloudCredentialStages(stages, identity)
+		}
+		if !rawSession && !msfSession && !httpForm {
+			exec = footholdStages(r.runner.foothold, exec)
+		}
 		if g.Audit != nil {
 			g.Audit("foothold", "destination="+destination+" transport="+r.runner.foothold.name+" :: "+strings.Join(commands, " | "))
 		}
@@ -189,6 +216,12 @@ func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineSt
 		if g.Audit != nil {
 			g.Audit("deny:scope-recheck", strings.Join(commands, " | ")+" :: "+planErr.Error())
 		}
+	} else if rawSession {
+		result, outputs = runRawSessionStages(ctx, r.runner.foothold.raw, exec, limit, timeout)
+	} else if msfSession {
+		result, outputs = runMSFRPCStages(ctx, r.runner.foothold.msf, exec, limit, timeout)
+	} else if httpForm {
+		result, outputs = runHTTPFormStages(ctx, r.runner, r.runner.foothold.form, exec, dir, limit, timeout, g.Policy, origin.UseRawWorker)
 	} else {
 		beforeClose := func(worker *engageRunner, action runResult, stagesOut []isolatedStageResult) {
 			if r.staged == nil || r.store == nil || origin.TaskID == "" || ctx.Err() != nil || !stagesSucceeded(action, stagesOut, origin) {
@@ -280,7 +313,7 @@ func effectiveEngagePrompt(g *secgate.Gate, prompt string) string {
 	}
 	return prompt + "\n\nOperator rules of engagement (code-enforced policy):\n" + g.Policy.Canonical +
 		"\nCommands run inside the isolated target runner, not on the operator workstation. Use its installed tools and /work for scratch files. The runner has no DNS: every in-scope hostname is pre-resolved in /etc/hosts, and any other lookup is dropped and stalls until the command timeout, so pass -n to nmap and address other tools by a scoped hostname or an IP. Auto performs RoE-authorized actions without approval or arming prompts. Safe approves unapproved actions. Scope, caps, and denials apply in both modes.\n" +
-		footholdPromptClause(g.Policy.Foothold) + promptguard.UntrustedInputClause
+		footholdPromptClause(g.EffectiveFoothold()) + promptguard.UntrustedInputClause
 }
 
 // footholdPromptClause tells the model which surfaces execute on the operator's
@@ -288,8 +321,8 @@ func effectiveEngagePrompt(g *secgate.Gate, prompt string) string {
 // ways that change what a command should look like: the foothold has its own
 // installed tools, its own filesystem, and its own resolver, so the runner's
 // pre-resolved /etc/hosts and its missing DNS do not apply there. The clause is
-// derived from the sealed policy; it states where commands go and never invites
-// the model to choose.
+// derived from the operator's declaration or attachment; it states where
+// commands go and never invites the model to choose.
 func footholdPromptClause(f *secgate.Foothold) string {
 	if f == nil {
 		return ""

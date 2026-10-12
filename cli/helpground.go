@@ -112,6 +112,9 @@ func newTaskGrounder(cache toolHelpCache, g *secgate.Gate, workDir string, cmdCt
 			image = defaultRunnerTag()
 		}
 		version = func(string) string { return image }
+		if identity, ok := g.CloudIdentities[cmdCtx.Surface]; ok && g.EffectiveFoothold().Covers(cmdCtx.Surface) {
+			version = func(string) string { return "foothold:" + g.EffectiveFoothold().Host + ":" + identity.At }
+		}
 	}
 	return &helpGrounder{
 		Cache:          cache,

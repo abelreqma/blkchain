@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"blkchain/cli/internal/secgate"
 )
@@ -38,11 +41,17 @@ type footholdTransport struct {
 	quote   string
 	secrets map[string][]byte
 	env     []string
+	raw     *rawSessionRecord
+	msf     *msfRPCTransport
+	form    *httpFormShell
 }
 
 var footholdBuilders = map[string]func(*secgate.Foothold) (*footholdTransport, error){
-	"ssh":     buildFootholdSSH,
-	"command": buildFootholdCommand,
+	"ssh":         buildFootholdSSH,
+	"command":     buildFootholdCommand,
+	"raw-session": buildFootholdRaw,
+	"msf-rpc":     buildFootholdMSFRPC,
+	"http-form":   buildFootholdHTTPForm,
 }
 
 // newFootholdTransport constructs the carrier for a declaration, resolving every
@@ -114,6 +123,20 @@ func buildFootholdCommand(f *secgate.Foothold) (*footholdTransport, error) {
 	}, nil
 }
 
+func buildFootholdRaw(f *secgate.Foothold) (*footholdTransport, error) {
+	record, err := readRawSessionRecord(filepath.Dir(f.Session))
+	if err != nil || record == nil {
+		return nil, fmt.Errorf("raw session broker unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	connected, err := rawBrokerStatus(ctx, record.ControlAddress, record.Token)
+	if err != nil || !connected {
+		return nil, fmt.Errorf("raw session is not connected")
+	}
+	return &footholdTransport{raw: record, secrets: map[string][]byte{}}, nil
+}
+
 // readFootholdFile reads a declared path. A value written as $NAME names an
 // environment variable holding the path, which keeps the operator's filesystem
 // layout out of the sealed policy text and out of the model prompt.
@@ -159,6 +182,31 @@ func (t *footholdTransport) Wrap(argv []string) []string {
 	return append(out, argv...)
 }
 
+func (t *footholdTransport) DialArgs(address string) ([]string, error) {
+	if t == nil {
+		return nil, fmt.Errorf("foothold carrier missing")
+	}
+	host, portText, err := net.SplitHostPort(address)
+	ip := net.ParseIP(host)
+	port, portErr := strconv.Atoi(portText)
+	if err != nil || ip == nil || portErr != nil || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("foothold dial requires an IP and port")
+	}
+	portText = strconv.Itoa(port)
+	switch t.name {
+	case "ssh":
+		if len(t.prefix) < 3 {
+			return nil, fmt.Errorf("SSH carrier is incomplete")
+		}
+		args := append([]string(nil), t.prefix[:len(t.prefix)-2]...)
+		return append(args, "-W", net.JoinHostPort(ip.String(), portText), t.prefix[len(t.prefix)-2]), nil
+	case "command":
+		return t.Wrap([]string{"ncat", ip.String(), portText}), nil
+	default:
+		return nil, fmt.Errorf("foothold carrier cannot open a TCP stream")
+	}
+}
+
 // shellQuoteArgv renders argv as a POSIX shell command line in which every
 // argument is a single literal. Single-quoting makes every byte literal except
 // the single quote itself, which is closed, escaped, and reopened. A remote
@@ -189,7 +237,7 @@ func authorizeFootholdCarrier(g *secgate.Gate, t *footholdTransport) error {
 	if t == nil {
 		return nil
 	}
-	if t.name == "ssh" {
+	if t.name == "ssh" || t.name == "raw-session" || t.name == "msf-rpc" {
 		return nil
 	}
 	if g == nil || g.Allow == nil {

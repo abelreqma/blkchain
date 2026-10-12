@@ -3,8 +3,7 @@ package main
 import "blkchain/cli/internal/engagement"
 
 // adExecutor runs SurfaceAD tasks. It embeds genericExecutor and delegates Run,
-// inheriting unchanged: the vantage reachability check (SurfaceAD requires
-// internal-foothold+), the recon/exploit phase routing, the gate stamping of
+// inheriting unchanged: the vantage reachability check, the recon/exploit phase routing, the gate stamping of
 // Phase/Surface/Armed on every run_command, help-grounding, and code-owned
 // evidence capture. The AD-specific behavior is the registered recon ladder
 // (adLadder) and the existing "ad" persona in domains.go, both keyed by surface so

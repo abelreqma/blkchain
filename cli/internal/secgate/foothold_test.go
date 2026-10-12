@@ -83,7 +83,7 @@ func TestParseFootholdRejects(t *testing.T) {
 		{"empty value", "10.0.0.1 user=", "has an empty value"},
 		{"unknown setting", "10.0.0.1 shell=bash", "unknown foothold setting"},
 		{"unknown transport", "10.0.0.1 transport=telnet user=x key=k", "is not one of"},
-		{"unknown surface", "10.0.0.1 user=x key=k surfaces=web", "is not one of"},
+		{"unknown surface", "10.0.0.1 user=x key=k surfaces=ai-security", "is not one of"},
 		{"bad port", "10.0.0.1 user=x key=k port=70000", "is not 1-65535"},
 		{"bad env name", "10.0.0.1 user=x key=k env=9BAD", "not a valid environment variable name"},
 		{"ssh without user", "10.0.0.1 transport=ssh key=k", "requires user="},
@@ -92,6 +92,12 @@ func TestParseFootholdRejects(t *testing.T) {
 		{"command without exec", "10.0.0.1 transport=command", "requires exec="},
 		{"command with path", "10.0.0.1 transport=command exec=/bin/sh -c", "bare binary name"},
 		{"command with ssh keys", "10.0.0.1 transport=command user=x exec=kubectl", "takes only exec="},
+		{"msf remote RPC", "10.0.0.1 transport=msf-rpc rpc=http://10.0.0.2:55552/api/1.0 session=1 user=msf passenv=MSF_PASS", "loopback"},
+		{"msf bad session", "10.0.0.1 transport=msf-rpc rpc=http://127.0.0.1:55552/api/1.0 session=-1 user=msf passenv=MSF_PASS", "positive number"},
+		{"msf web", "10.0.0.1 transport=msf-rpc rpc=http://127.0.0.1:55552/api/1.0 session=1 user=msf passenv=MSF_PASS surfaces=web", "only"},
+		{"form other host", "10.0.0.1 transport=http-form url=http://10.0.0.2:8080/shell param=cmd", "IP URL"},
+		{"form bad param", "10.0.0.1 transport=http-form url=http://10.0.0.1:8080/shell param=cmd%0a", "simple parameter"},
+		{"form web", "10.0.0.1 transport=http-form url=http://10.0.0.1:8080/shell param=cmd surfaces=web", "without web surface"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -103,6 +109,18 @@ func TestParseFootholdRejects(t *testing.T) {
 				t.Errorf("error = %q, want it to contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestParseSessionFootholdTransports(t *testing.T) {
+	for _, entry := range []string{
+		"10.0.0.1 transport=msf-rpc rpc=http://127.0.0.1:55552/api/1.0 session=7 user=msf passenv=MSF_PASS surfaces=local,network",
+		"10.0.0.1 transport=http-form url=http://10.0.0.1:8080/shell param=cmd headerenv=WEB_AUTH surfaces=local,network",
+	} {
+		f, err := ParseFoothold(entry)
+		if err != nil || !f.Covers(SurfaceNetwork) || f.Covers(SurfaceWeb) {
+			t.Fatalf("session foothold parse=%+v err=%v", f, err)
+		}
 	}
 }
 

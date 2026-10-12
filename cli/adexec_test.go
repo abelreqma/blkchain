@@ -59,12 +59,7 @@ func TestExecutorForADReturnsADExecutor(t *testing.T) {
 	}
 }
 
-// TestADExecutorRefusesOutOfVantage pins that the AD surface is post-foothold:
-// adExecutor refuses an AD task at external-unauth vantage (SurfaceAD is not
-// reachable until internal-foothold), then runs it once the vantage advances.
-// This exercises adExecutor's delegation to the embedded genericExecutor's
-// vantage gate (a custom Run that dropped the delegation would break this).
-func TestADExecutorRefusesOutOfVantage(t *testing.T) {
+func TestADExecutorRunsAtExternalVantage(t *testing.T) {
 	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
 	d.Gate = autoGate(t)
 	d.Runs = NewRunOutputs()
@@ -90,8 +85,8 @@ func TestADExecutorRefusesOutOfVantage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "not reachable at the current vantage") {
-		t.Fatalf("ad task at external-unauth must be refused, got %q", out)
+	if strings.Contains(out, "not reachable at the current vantage") {
+		t.Fatalf("external AD task was refused: %q", out)
 	}
 
 	internal := engagement.VantageInternalFoothold
@@ -107,7 +102,7 @@ func TestADExecutorRefusesOutOfVantage(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(out2, "not reachable at the current vantage") {
-		t.Fatalf("ad task must run after advancing to internal-foothold, got refusal: %q", out2)
+		t.Fatalf("internal AD task was refused: %q", out2)
 	}
 }
 

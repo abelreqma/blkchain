@@ -338,6 +338,18 @@ func (s *Scope) WebAddressAllowed(host string, ip net.IP) bool {
 	return false
 }
 
+func (s *Scope) PivotWebAddressAllowed(host string, ip net.IP) bool {
+	if s == nil || ip == nil || s.IsDirectedBroadcast(ip) || !s.InScope(ip.String()) {
+		return false
+	}
+	for _, matcher := range s.out {
+		if matcher.matches(host) {
+			return false
+		}
+	}
+	return true
+}
+
 // WildcardHost reports whether an allowed hostname matches a wildcard entry.
 func (s *Scope) WildcardHost(host string) bool {
 	if s == nil || !s.InScope(host) {

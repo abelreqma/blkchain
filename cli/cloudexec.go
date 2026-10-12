@@ -35,8 +35,8 @@ func init() {
 // service/endpoint fingerprint -> metadata/IAM probing -> finding-driven. It is
 // built on already-allowlisted tools (curl for endpoint/metadata probing within
 // scope, nmap for service fingerprinting). The per-CSP files refine the
-// metadata/IAM tier with provider-specific coverage dimensions; the CSP CLIs
-// (aws/gcloud/az) are not allowlisted.
+// metadata/IAM tier with provider-specific coverage dimensions. Approved AWS
+// and GCP identities enable provider CLIs on a declared foothold.
 var cloudLadder = reconLadder{
 	{Index: 0, Name: "public-asset-discovery", Dimensions: []string{"cloud-assets"}},
 	{Index: 1, Name: "service-endpoint-fingerprint", Dimensions: []string{"cloud-endpoints", "cloud-services"}},
@@ -151,6 +151,13 @@ func (e cloudExecutor) cloudRunReconPhase(ctx context.Context, task engagement.T
 		human := reconTierPrompt(task, asset, tier, sel)
 		if skew != "" {
 			human = human + "\n" + skew
+		}
+		if identity, ok := e.d.Gate.CloudIdentities[secgate.Surface(task.Surface)]; ok {
+			binary := "aws"
+			if identity.Provider == "gcp" {
+				binary = "gcloud"
+			}
+			human += "\nThe operator approved the " + identity.Provider + " credential file on the foothold. " + binary + " commands on this task surface use that identity."
 		}
 		msgs := []llms.MessageContent{
 			{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(dom.Prompt)}},

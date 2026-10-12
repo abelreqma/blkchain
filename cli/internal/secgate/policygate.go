@@ -41,6 +41,29 @@ func (g *Gate) ClaimPolicyBytes(n int) error {
 	return nil
 }
 
+func (g *Gate) ClaimPolicyAction(action string) error {
+	if g == nil || g.Policy == nil {
+		return fmt.Errorf("engagement policy missing")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.Policy.Allows(action) {
+		return fmt.Errorf("engagement action %s is not allowed", action)
+	}
+	limit := g.Policy.MaxCommands
+	if g.Policy.MaxActions < limit {
+		limit = g.Policy.MaxActions
+	}
+	if !g.policyDeadline.IsZero() && !time.Now().Before(g.policyDeadline) {
+		return fmt.Errorf("engagement deadline reached")
+	}
+	if g.policyCount >= limit {
+		return fmt.Errorf("engagement command or action cap reached")
+	}
+	g.policyCount++
+	return nil
+}
+
 func (g *Gate) RestorePolicyUsage(count int, deadline time.Time, bytes ...int64) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -87,6 +110,7 @@ func (g *Gate) policyApprovalCommand(c Command) Command {
 
 func (g *Gate) checkPolicyLocked(c Command) Decision {
 	p := g.Policy
+	scope := g.scopeFor(c)
 	if g.Scope == nil || (g.Scope.Empty() && !g.Scope.Local()) {
 		return g.deny("scope", c, "ROE.md has no usable scope", "")
 	}
@@ -135,19 +159,19 @@ func (g *Gate) checkPolicyLocked(c Command) Decision {
 	}
 	if targets, nets, ok := ExtractTargetSet(c); ok {
 		for _, target := range targets {
-			if !g.Scope.InScope(target) {
+			if !scope.InScope(target) && !g.pivotWebHostCandidate(scope, target) {
 				return g.deny("scope", c, "target out of scope: "+target, "")
 			}
 		}
 		for _, n := range nets {
-			if !g.Scope.NetworkInScope(n) {
+			if !scope.NetworkInScope(n) {
 				return g.deny("scope", c, "network out of scope: "+n.String(), "")
 			}
 		}
 	} else {
 		return g.deny("scope", c, "unverifiable explicit target", "")
 	}
-	if ip, bad := ScopeViolation(g.Scope, c); bad {
+	if ip, bad := ScopeViolation(scope, c); bad {
 		return g.deny("scope", c, "target out of scope: "+ip, "")
 	}
 	// The rate window is consumed by the shared tail in checkLocked, after the

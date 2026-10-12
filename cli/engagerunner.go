@@ -35,13 +35,15 @@ type engageRunner struct {
 	hostsDir     string
 	hostsFile    string
 	// vulnDB is the operator's provisioned scanner database directory, or "" when none is provisioned.
-	vulnDB   string
-	slots    chan struct{}
-	closed   bool
-	foothold *footholdTransport
-	remove   func(context.Context, string) error
-	resolve  func(context.Context, string) ([]net.IPAddr, error)
-	runFn    func(context.Context, []pipelineStage, string, int, time.Duration) (runResult, []isolatedStageResult)
+	vulnDB     string
+	slots      chan struct{}
+	pivotSlots chan struct{}
+	closed     bool
+	foothold   *footholdTransport
+	remove     func(context.Context, string) error
+	resolve    func(context.Context, string) ([]net.IPAddr, error)
+	runFn      func(context.Context, []pipelineStage, string, int, time.Duration) (runResult, []isolatedStageResult)
+	dialFn     func(context.Context, string) (net.Conn, error)
 }
 
 func engageWorkerArgs(name, guard, image, hostsFile, vulnDB string, env []string) []string {
@@ -374,7 +376,7 @@ func newEngageRunner(ctx context.Context, roe *RoE) (result *engageRunner, err e
 		return err
 	})
 	guardName := runnerName("blk-guard-")
-	r := &engageRunner{image: imageID, workers: map[string]string{}, rawWorkers: map[string]string{}, slots: make(chan struct{}, p.Parallel), foothold: transport, vulnDB: vulnDBCacheDir()}
+	r := &engageRunner{image: imageID, workers: map[string]string{}, rawWorkers: map[string]string{}, slots: make(chan struct{}, p.Parallel), pivotSlots: make(chan struct{}, 8), foothold: transport, vulnDB: vulnDBCacheDir()}
 	ok := false
 	defer func() {
 		if !ok {

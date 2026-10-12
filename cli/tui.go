@@ -1049,6 +1049,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.finish(tea.Println(terminalSafe(strings.TrimRight(msg.output, "\n"))))
 
+	case engageApprovalDoneMsg:
+		m.working = false
+		m.live = ""
+		m.workingVerb = ""
+		if msg.err != nil {
+			return m, m.finish(tea.Println(styleErr(msg.err)))
+		}
+		return m, m.finish(tea.Println("   " + Meta.Render(msg.kind+" saved")))
+
 	case engageDoneMsg:
 		m.working = false
 		if m.cancel != nil {
@@ -2296,6 +2305,17 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		parts := strings.Fields(arg)
 		if len(parts) > 0 && parts[0] == "web" {
 			return m.dispatchWeb(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), "web")), echo)
+		}
+		if isEngageApproval(parts) {
+			args, err := engageApprovalArgs(arg)
+			if err != nil {
+				return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
+			}
+			m.working = true
+			m.tickGen++
+			m.workingVerb = "saving engagement approval" + ellipsis()
+			m.turnStart = time.Now()
+			return m, tea.Batch(tea.Println(echo), m.workTick(), engageApprovalCmd(args))
 		}
 		if strings.TrimSpace(arg) == "resume" || strings.HasPrefix(strings.TrimSpace(arg), "resume ") {
 			workspace := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), "resume"))

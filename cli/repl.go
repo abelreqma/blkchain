@@ -213,6 +213,18 @@ func plainREPL() error {
 				printErr(replWeb(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(rest), "web")), pm.engageMode, pm.engageTranscript))
 				break
 			}
+			if isEngageApproval(parts) {
+				args, err := engageApprovalArgs(rest)
+				if err == nil {
+					err = runEngage(args)
+				}
+				if err != nil {
+					printErr(err)
+				} else {
+					fmt.Println(args[0] + " saved")
+				}
+				break
+			}
 			if strings.HasPrefix(rest, "resume /") || strings.HasPrefix(rest, "resume --workspace /") || strings.HasPrefix(rest, "resume \"") || strings.HasPrefix(rest, "resume --workspace \"") {
 				path := strings.TrimSpace(strings.TrimPrefix(rest, "resume "))
 				path = strings.TrimPrefix(path, "--workspace ")
@@ -521,6 +533,9 @@ func replGroups() []rowGroup {
 		{replGroupEngage, []helpRow{
 			{"/engage [flags] <goal>", replSpecDesc("engage")},
 			{"/engage web <action>", "assess web targets within an engagement"},
+			{"/engage approve-network --workspace DIR CIDR", "approve a discovered foothold network"},
+			{"/engage attach-foothold [flags]", "attach an evidenced execution carrier"},
+			{"/engage approve-cloud-identity [flags]", "approve an evidenced cloud credential file"},
 			{"/store <action>", replSpecDesc("store")},
 			{"/transcript <mode>", "show off, important, or full action output"},
 			{"/safe", "approve engagement actions interactively"},

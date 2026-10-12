@@ -137,19 +137,25 @@ func (b *Broker) OpenWebSocket(ctx context.Context, raw string, headers http.Hea
 	wrap := func(c net.Conn) net.Conn { counted = &socketConn{Conn: c, broker: b}; return counted }
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second, ReadBufferSize: 4096, WriteBufferSize: 4096, Subprotocols: protocols,
 		NetDialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			c, e := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, pinned)
+			c, e := b.dial(ctx, network, pinned)
 			if e != nil {
 				return nil, e
 			}
 			return wrap(c), nil
 		},
 		NetDialTLSContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			d := tls.Dialer{NetDialer: &net.Dialer{Timeout: 10 * time.Second}, Config: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: u.Hostname()}}
-			c, e := d.DialContext(ctx, network, pinned)
+			c, e := b.dial(ctx, network, pinned)
 			if e != nil {
 				return nil, e
 			}
-			return wrap(c), nil
+			tlsConn := tls.Client(c, &tls.Config{MinVersion: tls.VersionTLS12, ServerName: u.Hostname()})
+			handshakeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			if e := tlsConn.HandshakeContext(handshakeCtx); e != nil {
+				_ = c.Close()
+				return nil, e
+			}
+			return wrap(tlsConn), nil
 		},
 	}
 	conn, resp, err := dialer.DialContext(ctx, raw, h)

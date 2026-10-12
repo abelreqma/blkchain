@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -32,6 +33,63 @@ type engageDoneMsg struct {
 	final  string
 	err    error
 	paused bool
+}
+
+type engageApprovalDoneMsg struct {
+	kind string
+	err  error
+}
+
+func isEngageApproval(parts []string) bool {
+	return len(parts) > 0 && (parts[0] == "approve-network" || parts[0] == "approve-cloud-identity" || parts[0] == "attach-foothold" || parts[0] == "listen-shell" || parts[0] == "close-shell")
+}
+
+func engageApprovalArgs(input string) ([]string, error) {
+	var args []string
+	var word strings.Builder
+	var quote rune
+	active, escaped := false, false
+	for _, ch := range input {
+		switch {
+		case escaped:
+			word.WriteRune(ch)
+			escaped = false
+		case ch == '\\' && quote != '\'':
+			escaped = true
+			active = true
+		case quote != 0:
+			if ch == quote {
+				quote = 0
+			} else {
+				word.WriteRune(ch)
+			}
+		case ch == '\'' || ch == '"':
+			quote = ch
+			active = true
+		case unicode.IsSpace(ch):
+			if active {
+				args = append(args, word.String())
+				word.Reset()
+				active = false
+			}
+		default:
+			word.WriteRune(ch)
+			active = true
+		}
+	}
+	if quote != 0 || escaped {
+		return nil, fmt.Errorf("engage approval has an unfinished quote or escape")
+	}
+	if active {
+		args = append(args, word.String())
+	}
+	return args, nil
+}
+
+func engageApprovalCmd(parts []string) tea.Cmd {
+	return func() tea.Msg {
+		return engageApprovalDoneMsg{kind: parts[0], err: runEngage(parts)}
+	}
 }
 
 type engageStatusKey struct{}
