@@ -63,6 +63,12 @@ func TestChatToolsLocalLLME2E(t *testing.T) {
 	if err != nil || requests.Load() <= before {
 		t.Fatalf("native chat did not infer an API action: route=%s requests=%d err=%v", route, requests.Load()-before, err)
 	}
+	before = requests.Load()
+	answer, _, _, _, _, route, err = adaptiveAnswer(ctx, rc, cfg, "What does the endpoint at "+srv.URL+" return right now?", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{Agent: "auto", WebFirst: true})
+	t.Logf("question route=%s requests=%d answer=%q", route, requests.Load()-before, answer)
+	if err != nil || requests.Load() <= before {
+		t.Fatalf("native chat answered a live-target question without inspecting it: route=%s requests=%d err=%v", route, requests.Load()-before, err)
+	}
 	reg, closeTools, err := newChatToolRegistry(ctx, rc, cfg, nil, "Navigate to "+srv.URL, nil, AnswerOpts{})
 	if err != nil {
 		t.Fatal(err)

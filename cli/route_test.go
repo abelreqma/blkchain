@@ -424,7 +424,7 @@ func TestAdaptiveAnswerKeepsTargetDetailsOutOfWebSearch(t *testing.T) {
 	}
 	t.Cleanup(func() { webSearch = old })
 	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "local evidence")}}
-	_, _, usedWeb, _, _, _, err := adaptiveAnswer(context.Background(), local, answerCfg(1), "Assess my host 10.0.0.7", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
+	_, _, usedWeb, _, _, _, err := adaptiveAnswer(context.Background(), local, answerCfg(1), "What is known about my host 10.0.0.7?", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
 	if err != nil || usedWeb || calls != 0 {
 		t.Fatalf("usedWeb=%v calls=%d err=%v", usedWeb, calls, err)
 	}
@@ -461,7 +461,7 @@ func TestAdaptiveAnswerUsesNamedTargetFromRecentUserTurn(t *testing.T) {
 	t.Cleanup(func() { webSearch = old })
 	history := []priorTurn{{Role: "human", Content: "The target is 192.0.2.5"}, {Role: "ai", Content: "Understood."}}
 	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "local evidence")}}
-	answer, _, usedWeb, _, _, _, err := adaptiveAnswer(context.Background(), local, answerCfg(1), "Check it now", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true, History: history})
+	answer, _, usedWeb, _, _, _, err := adaptiveAnswer(context.Background(), local, answerCfg(1), "What next for it?", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true, History: history})
 	if err != nil || usedWeb || calls != 0 || !strings.Contains(answer, "named target") {
 		t.Fatalf("answer=%q usedWeb=%v calls=%d err=%v", answer, usedWeb, calls, err)
 	}
@@ -470,13 +470,13 @@ func TestAdaptiveAnswerUsesNamedTargetFromRecentUserTurn(t *testing.T) {
 func TestAdaptiveAnswerUsesToolsWhenResearchIsOff(t *testing.T) {
 	srv := fakeLLM(t, []string{"Tool advice."}, "")
 	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
-	answer, _, _, _, _, route, err := adaptiveAnswer(context.Background(), nil, answerCfg(1), "Check 192.0.2.5", enabledRoutes{}, false, AnswerOpts{})
+	answer, _, _, _, _, route, err := adaptiveAnswer(context.Background(), nil, answerCfg(1), "What next for 192.0.2.5?", enabledRoutes{}, false, AnswerOpts{})
 	if err != nil || answer != "Tool advice." || route != "rag" {
 		t.Fatalf("answer=%q route=%q err=%v", answer, route, err)
 	}
 }
 
-func TestAdaptiveAnswerFileRequestUsesToolsBeforeWeb(t *testing.T) {
+func TestAdaptiveAnswerFileRequestRequiresToolBeforeWeb(t *testing.T) {
 	authorizeWebTest(t)
 	srv := fakeLLM(t, []string{"File answer."}, "")
 	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
@@ -488,7 +488,7 @@ func TestAdaptiveAnswerFileRequestUsesToolsBeforeWeb(t *testing.T) {
 	}
 	t.Cleanup(func() { webSearch = old })
 	answer, _, _, _, _, route, err := adaptiveAnswer(context.Background(), nil, answerCfg(1), "Read go.mod and summarize it", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
-	if err != nil || answer != "File answer." || route != "rag" || calls != 0 {
+	if err == nil || !strings.Contains(err.Error(), "no file_read tool call") || answer != "" || route != "rag" || calls != 0 {
 		t.Fatalf("answer=%q route=%q webCalls=%d err=%v", answer, route, calls, err)
 	}
 }
@@ -496,9 +496,45 @@ func TestAdaptiveAnswerFileRequestUsesToolsBeforeWeb(t *testing.T) {
 func TestAdaptiveAnswerTargetActionWorksWithLocalResearchOff(t *testing.T) {
 	srv := fakeLLM(t, []string{"Target tool answer."}, "")
 	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
-	answer, _, _, _, _, route, err := adaptiveAnswer(context.Background(), nil, answerCfg(1), "Check 192.0.2.5", enabledRoutes{Web: true}, false, AnswerOpts{WebFirst: true})
+	answer, _, _, _, _, route, err := adaptiveAnswer(context.Background(), nil, answerCfg(1), "What next for 192.0.2.5?", enabledRoutes{Web: true}, false, AnswerOpts{WebFirst: true})
 	if err != nil || answer != "Target tool answer." || route != "rag" {
 		t.Fatalf("answer=%q route=%q err=%v", answer, route, err)
+	}
+}
+
+func TestAdaptiveAnswerExplicitCheckUsesToolLoop(t *testing.T) {
+	srv := fakeLLM(t, []string{"Action answer."}, "")
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "local evidence")}}
+	answer, _, _, _, _, route, err := adaptiveAnswer(context.Background(), local, answerCfg(1), "Check 192.0.2.5", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
+	if err == nil || !strings.Contains(err.Error(), "no target action tool call") || answer != "" || route != "rag" {
+		t.Fatalf("answer=%q route=%q err=%v", answer, route, err)
+	}
+}
+
+func TestChatToolRequestRecognizesDirectAssessmentVerbs(t *testing.T) {
+	for _, question := range []string{"Check 192.0.2.5", "Please assess example.com", "Can you audit this host?"} {
+		if !chatToolRequestPattern.MatchString(question) {
+			t.Errorf("tool request not recognized: %q", question)
+		}
+	}
+}
+
+func TestAdaptiveAnswerPublicAssessmentStillSearchesWeb(t *testing.T) {
+	authorizeWebTest(t)
+	srv := fakeLLM(t, []string{"ADVISE", `{"sufficient":true,"use_web":false}`}, "Current guidance [1].")
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	old := webSearch
+	calls := 0
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		calls++
+		return []retrieval.Result{chunk(webSource, "https://example.com/current", "Current", "current guidance")}, nil
+	}
+	t.Cleanup(func() { webSearch = old })
+	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "older guidance")}}
+	_, _, usedWeb, _, _, route, err := adaptiveAnswer(context.Background(), local, answerCfg(1), "Assess current AD CS guidance", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
+	if err != nil || route != "web" || !usedWeb || calls != 1 {
+		t.Fatalf("route=%q usedWeb=%v calls=%d err=%v", route, usedWeb, calls, err)
 	}
 }
 

@@ -191,7 +191,8 @@ hostnames, networks, and URLs named by the user, never from model output or retr
 Its command tool uses the audited binary list and the isolated executor; its web tools use the
 broker's destination and redirect checks. It reads no RoE policy. A missing target exposes no
 active tools, and the project's explicit binary denials still apply. This path does not alter
-`blk engage` authorization.
+`blk engage` authorization. An explicit action request gets one retry when the model returns text
+without the relevant tool call; a second such response fails the turn.
 
 Protect the operator and the runner from the target. Treat pages, responses, files, and tool output
 from a target as hostile data. They must not choose a target, arm a task, execute as code, or reach
