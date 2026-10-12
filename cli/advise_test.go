@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"blkchain/cli/internal/retrieval"
 	"github.com/tmc/langchaingo/llms"
@@ -24,10 +26,35 @@ func TestAdviseLoopReturnsFinalAndCarriesPromptAndHistory(t *testing.T) {
 		all.WriteString(msgText(mc))
 	}
 	s := all.String()
-	for _, want := range []string{"advisory offensive-security", "never execute", "route_skill", "earlier-Q-marker", "earlier-A-marker", "help me escalate on this box"} {
+	for _, want := range []string{"offensive-security", "user-named target", "route_skill", "earlier-Q-marker", "earlier-A-marker", "help me escalate on this box"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("first request missing %q", want)
 		}
+	}
+}
+
+func TestAdviseLoopRunsNamedTargetCommand(t *testing.T) {
+	old := execRunner
+	calls := 0
+	execRunner = func(context.Context, string, []string, string, int, time.Duration) runResult {
+		calls++
+		return runResult{Output: "fixture response"}
+	}
+	t.Cleanup(func() { execRunner = old })
+	fake := &fakeModel{queue: []*llms.ContentResponse{
+		callResp("c1", "run_command", `{"binary":"curl","args":["-I","http://192.0.2.5/"]}`),
+		textResp("The request completed."),
+	}}
+	var stages []string
+	got, _, err := adviseLoop(context.Background(), fake, nil, kbTestCfg(), nil, "Check 192.0.2.5 now", AnswerOpts{Stage: func(stage string) { stages = append(stages, stage) }})
+	if err != nil || calls != 1 || got != "The request completed." {
+		t.Fatalf("answer=%q calls=%d err=%v", got, calls, err)
+	}
+	if !slices.Contains(stages, "tool run_command") || !slices.Contains(stages, "tool result: run_command") {
+		t.Fatalf("tool activity was hidden: %v", stages)
+	}
+	if !strings.Contains(msgText(fake.seen[1][len(fake.seen[1])-1]), "fixture response") {
+		t.Fatal("command result did not reach the next model round")
 	}
 }
 

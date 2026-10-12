@@ -87,9 +87,9 @@ func applyWebCommand(p modelPrefs, c webCommand) (modelPrefs, string, error) {
 	}
 	switch c.action {
 	case "on":
-		return p, "web on: native answers may search the internet", nil
+		return p, "web on: native public research may search the internet", nil
 	case "off":
-		return p, "web off: native answers do not search the web", nil
+		return p, "web off: public research search disabled; named-target actions remain available", nil
 	default:
 		return p, "web provider " + c.value, nil
 	}
