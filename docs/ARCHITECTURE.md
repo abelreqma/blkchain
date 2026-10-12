@@ -6,6 +6,75 @@ This document is for people changing blkChain. For installing and running it, se
 
 ![blkChain System Map showing hybrid retrieval and live web searches (opt-in), Go control, authorized execution, assessment surfaces, and evidence](blkchain-system-map.svg)
 
+### Runtime flow
+
+Research citations inform candidate techniques but never authorize an action. The Go gate uses the
+sealed RoE and separate operator approvals.
+
+```mermaid
+flowchart TB
+  Entry["blk CLI / REPL / TUI / MCP"]
+
+  subgraph Research["Research and answers"]
+    Index["Python offline ingestion"]
+    MLX["MLX embedding and reranking"]
+    Qdrant["Qdrant dense + sparse index"]
+    Native["Native cited answers"]
+    Web["Live web search, opt-in"]
+    Retrieval["Go retrieval + RRF"]
+    Hermes["Hermes mode<br/>separate permissions"]
+  end
+
+  subgraph Assessment["Authorized assessment"]
+    Roe["Sealed RoE"]
+    Approval["Operator approvals<br/>private CIDR, carrier, cloud identity"]
+    Plan["Task graph<br/>cited techniques are advisory"]
+    Gate["Go gate<br/>scope/IP, action, command, limits"]
+    Worker["Isolated worker<br/>network, AD, local, containers/K8s, AI<br/>offline OSV + Grype"]
+    Broker["Scoped web/API broker<br/>browser traffic + surface checks"]
+    Pivot["Approved foothold command carriers"]
+    Cloud["AWS/GCP CLI on foothold"]
+    Store["Engagement store<br/>SQLite, actions, artifacts"]
+    Review["Findings, coverage, KG, reports"]
+  end
+
+  Entry --> Native
+  Entry --> Hermes
+  Entry --> Plan
+  Index --> MLX
+  Index --> Qdrant
+  Native --> Retrieval
+  Native --> Web
+  Retrieval --> MLX
+  Retrieval --> Qdrant
+  Roe --> Gate
+  Approval --> Gate
+  Plan --> Gate
+  Gate --> Worker
+  Gate --> Broker
+  Gate --> Pivot
+  Pivot --> Cloud
+  Worker --> Store
+  Broker --> Store
+  Pivot --> Store
+  Cloud --> Store
+  Store --> Review
+
+  style Research fill:#f7fffd,stroke:#0f766e,stroke-width:1px
+  style Assessment fill:#f7fdf9,stroke:#15803d,stroke-width:1px
+  classDef research fill:#e6fffb,stroke:#0f766e,color:#123434,font-size:16px
+  classDef control fill:#ecfdf5,stroke:#15803d,color:#12301e,font-size:16px
+  classDef execution fill:#eff6ff,stroke:#2563eb,color:#102a43,font-size:16px
+  classDef evidence fill:#f5f3ff,stroke:#7c3aed,color:#2e1065,font-size:16px
+  class Index,MLX,Qdrant,Native,Web,Retrieval,Hermes research
+  class Roe,Approval,Plan,Gate control
+  class Worker,Broker,Pivot,Cloud execution
+  class Store,Review evidence
+```
+
+Dynamically attached footholds require recorded access evidence. Only SSH and command carriers
+provide the TCP stream used by the internal web broker.
+
 ## The language boundary
 
 Go is the single implementation for search, ask, health, and MCP. The `blk` binary owns retrieval
