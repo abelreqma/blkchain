@@ -226,7 +226,7 @@ func commandSpecs() []cmdSpec {
 			long: "Runs the local MCP server over stdio for any MCP client, not only Hermes. " +
 				"It exposes chat (one agent turn with adaptive routing, the knowledge base, files, terminal, browser and web research, continued by session id); the stateless kb_search and kb_answer; route_skill; engage; kg_query; and read-only session://{id} resources. " +
 				"Engagement calls require an operator-owned RoE file named by BLKCHAIN_MCP_ROE_PATH, and the inline roe must match it. " +
-				"Start qdrant and embed_server for retrieval, the LLM for chat, kb_answer, and engagement, and the isolated runner for engagement.",
+				"Start qdrant and embed_server for retrieval, the LLM for chat, kb_answer, and engagement, and the isolated runner for engagement and for chat's terminal and process actions.",
 			examples: []string{"blk mcp", "blk doctor"},
 			run:      runMCP,
 		},
