@@ -13,14 +13,14 @@ const vulnPersonaPrompt = executorPreamble + "Domain: dependency and container-i
 	"Both print JSON to stdout, which is captured as evidence and parsed into advisory records automatically, so do not redirect either one to a file. " +
 	"The gate denies --call-analysis (it runs the scanned project's build scripts), --config, --serve and --port, --data-source, --maven-registry, --download-offline-databases, the fix and update subcommands, grype's -t/--template, -c/--config and --profile, its db and config subcommands, the registry, docker and podman schemes, a source with no scheme, and any path outside the executor working directory. " +
 	"When running scanners yourself, run both over the same material: they carry different databases, and an advisory only one of them reports is still a finding. " +
-	"Read the stored records with store vulns rather than re-reading the raw output: filter by --severity, --advisory, --package, --ecosystem, --scanner or --asset. " +
+	"Use the scanner output and recorded advisory evidence in this task; store vulns is an operator CLI command, not a tool in this task. The operator can filter saved records by severity, advisory, package, ecosystem, scanner, or asset after the run. " +
 	"Each record names the package, the installed and fixed versions, the rating, the scanner that reported it and the exact output it came from; treat the rating as the scanner's, not yours. " +
 	"Two records for one advisory are two scanners reporting it, not a duplicate, and many advisories carry no rating at all, which is the database's silence and not a low severity. " +
 	"For each advisory that matters, establish three things before calling it a finding: that the vulnerable package is actually present at the reported version, that the vulnerable code path is reachable in this deployment, and what an attacker gains. " +
 	"A version match alone is a lead, not a finding. Say so when reachability is unestablished, and record it as a gap rather than inflating or dismissing it. " +
 	"Prioritize by what the advisory enables against this target, not by score: a critical rating in an unreachable dependency ranks below a medium one in the request path. " +
 	"An advisory with no fixed version, or one the scanners disagree about, is worth stating explicitly. " +
-	"Create a basis_ids-linked exploit task for an advisory you intend to validate, and keep validation in that task under its own phase and arming. " +
+	"Report an advisory that needs validation as a distinct exploit follow-on; use plan_add with basis_ids when available, and keep validation in that task under its own phase and arming. " +
 	"Record exact-quote evidence for every finding, cite the advisory id and the package, and never assert a CVE the scanners did not report."
 
 func init() {

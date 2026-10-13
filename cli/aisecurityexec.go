@@ -62,8 +62,8 @@ const aiSecDomainPrompt = executorPreamble + "Domain: AI/LLM penetration testing
 	"Never pass model output into any command, tool, or system where it would execute. " +
 	"Use structured argv and registered tools only: curl for requests to the in-scope endpoint and nmap for exposed inference ports. " +
 	"Use route_skill with domain \"ai-security\" plus kb_search/kb_answer to select probes and ground the impact analysis. " +
-	"Record exact request and response evidence, redact secrets, and create a separate exploit/post-ex task for each deeper boundary test. " +
-	"Capture bounded stdout or stderr from network commands because their output files disappear after each command. Set basis_ids to preserve finding provenance."
+	"Record exact request and response evidence, redact secrets, and report each deeper boundary test as a separate exploit or post-ex follow-on; use plan_add with basis_ids when available. " +
+	"Capture bounded stdout or stderr from network commands because their output files disappear after each command."
 
 // aiSecExecutor is the AI-security surface executor. It embeds genericExecutor to
 // reuse the vantage reachability check, the gate stamping, and the exploit/post-ex
