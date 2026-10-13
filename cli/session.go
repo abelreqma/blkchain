@@ -52,6 +52,12 @@ const (
 	// maxSessionBytes bounds one transcript file so a runaway session can't grow
 	// without limit (resource-limits). Past this, appendTurn refuses to write.
 	maxSessionBytes = 4 << 20 // 4 MiB
+	// maxSessionRecordBytes bounds one transcript line including its newline. It
+	// is the token cap loadMessages gives its scanner, and a scanner that meets a
+	// longer line fails the whole read, so a record written past this cap would
+	// make the entire transcript unreadable. Writer and reader share the constant
+	// so the two cannot drift.
+	maxSessionRecordBytes = 1 << 20 // 1 MiB
 )
 
 // Turn roles. roleTombstone marks an /undo: on replay it drops the preceding
@@ -65,6 +71,11 @@ const (
 // errSessionFull is returned by appendTurn when the transcript file has reached
 // maxSessionBytes, so the caller can surface a one-line warning and stop.
 var errSessionFull = errors.New("session transcript reached its size cap")
+
+// errSessionRecordTooLarge is returned by appendTurn when one record would
+// exceed maxSessionRecordBytes, so a caller can tell one oversize turn from a
+// transcript that is full (errSessionFull).
+var errSessionRecordTooLarge = errors.New("session turn exceeds the transcript line cap")
 
 // turnRecord is one JSONL line in a session file.
 type turnRecord struct {
@@ -301,7 +312,8 @@ func validSessionID(id string) bool {
 // appendTurn appends one record to the transcript, creating the file on first
 // write, and records the session in the listing so a turn always makes it
 // visible. A user record with no title yet seeds the auto title from its
-// content. It refuses to write past maxSessionBytes (errSessionFull).
+// content. It refuses to write past maxSessionBytes (errSessionFull) and to
+// write a record past maxSessionRecordBytes (errSessionRecordTooLarge).
 //
 // The listing write says nothing is committed yet; the watermark moves only at a
 // commit point. appendTombstone is the variant without it, for the one caller
@@ -350,6 +362,9 @@ func (s *session) appendTombstone(rec turnRecord) error {
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return err
+	}
+	if len(line)+1 > maxSessionRecordBytes {
+		return fmt.Errorf("%w: %d bytes", errSessionRecordTooLarge, len(line)+1)
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -551,7 +566,7 @@ func loadMessages(id string) ([]turnRecord, error) {
 
 	var recs []turnRecord
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	sc.Buffer(make([]byte, 0, 64*1024), maxSessionRecordBytes)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {

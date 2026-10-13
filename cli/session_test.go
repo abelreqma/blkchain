@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"blkchain/cli/internal/histstore"
 )
@@ -196,6 +198,96 @@ func TestAppendTurnSizeCap(t *testing.T) {
 	}
 	if err := s.appendTurn(turnRecord{Role: roleAssistant, Content: "over cap"}); err != errSessionFull {
 		t.Fatalf("appendTurn past cap err = %v, want errSessionFull", err)
+	}
+}
+
+// lineSizedContent returns plain content whose marshalled record is exactly
+// want bytes long, so a test can sit either side of the line cap. rec must
+// carry a timestamp, because appendTombstone fills a zero one in and that
+// changes the length.
+func lineSizedContent(t *testing.T, rec turnRecord, want int) string {
+	t.Helper()
+	n := want
+	for range 8 {
+		rec.Content = strings.Repeat("y", max(n, 0))
+		line, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(line) == want {
+			return rec.Content
+		}
+		n += want - len(line)
+	}
+	t.Fatalf("could not size a record to %d bytes", want)
+	return ""
+}
+
+// One record longer than the reader's line cap would make the whole transcript
+// unreadable, so the writer refuses it, with its own error, and what is already
+// written still reads back.
+func TestAppendTurnRecordLineCap(t *testing.T) {
+	tempSessions(t)
+	s, err := newSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := turnRecord{Role: roleAssistant, TS: time.Now().Unix()}
+
+	rec.Content = lineSizedContent(t, rec, maxSessionRecordBytes-1)
+	atCap := rec.Content
+	if err := s.appendTurn(rec); err != nil {
+		t.Fatalf("a record at the cap was refused: %v", err)
+	}
+
+	rec.Content = lineSizedContent(t, rec, maxSessionRecordBytes)
+	err = s.appendTurn(rec)
+	if !errors.Is(err, errSessionRecordTooLarge) {
+		t.Fatalf("one byte past the cap: err = %v, want errSessionRecordTooLarge", err)
+	}
+	if errors.Is(err, errSessionFull) {
+		t.Fatalf("the oversize record is indistinguishable from a full transcript: %v", err)
+	}
+
+	recs, err := loadMessages(s.id)
+	if err != nil {
+		t.Fatalf("the transcript is no longer readable: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Content != atCap {
+		t.Fatalf("transcript holds %d records, want the one record at the cap", len(recs))
+	}
+}
+
+// Why the writer's cap is the reader's limit: a line one byte past it fails the
+// whole read, not just that record.
+func TestLoadMessagesFailsOnAnOversizeLine(t *testing.T) {
+	tempSessions(t)
+	s, err := newSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.appendTurn(turnRecord{Role: roleUser, Content: "seed"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := turnRecord{Role: roleAssistant, TS: time.Now().Unix()}
+	rec.Content = lineSizedContent(t, rec, maxSessionRecordBytes)
+	line, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(s.filePath(), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if recs, err := loadMessages(s.id); err == nil {
+		t.Fatalf("an oversize line was read back as %d records; the cap is not the reader's limit", len(recs))
 	}
 }
 

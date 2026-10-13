@@ -334,29 +334,18 @@ func TestNativeTurnSerializesTurnsOnOneSession(t *testing.T) {
 func TestNativeTurnReportsPersistenceFailureWithTheAnswer(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
-	// appendTurn refuses only once the transcript is ALREADY at maxSessionBytes
-	// (session.go:344), so grow it through the real path: two turns of a 3 MiB
-	// answer leave the file over the 4 MiB cap, and the third turn's first
-	// append is refused. Writing junk into the file directly would not work:
-	// openSession runs reconcileTranscript, which truncates anything past the
-	// last committed watermark.
-	big := strings.Repeat("y", 3<<20)
+	// An answer whose transcript line would pass maxSessionRecordBytes is refused
+	// by appendTurn, so the turn answers and then fails to persist, which is the
+	// case this test is about: the caller keeps the answer and is told.
+	big := strings.Repeat("y", maxSessionRecordBytes)
 	stubAdaptiveAnswer(t, big, nil)
 
-	first, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q1", SessionID: sessionTargetNew})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q2", SessionID: first.SessionID}); err != nil {
-		t.Fatal(err)
-	}
-
-	res, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q3", SessionID: first.SessionID})
+	res, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q1", SessionID: sessionTargetNew})
 	if err == nil {
 		t.Fatal("a refused transcript write was not reported")
 	}
-	if !errors.Is(err, errSessionFull) {
-		t.Fatalf("error is not the size-cap refusal: %v", err)
+	if !errors.Is(err, errSessionRecordTooLarge) {
+		t.Fatalf("error is not the record-cap refusal: %v", err)
 	}
 	if res.Answer != big {
 		t.Fatalf("the answer was lost when persistence failed: %d bytes", len(res.Answer))
