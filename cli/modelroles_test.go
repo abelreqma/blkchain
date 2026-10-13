@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"syscall"
 	"testing"
 
@@ -99,5 +100,152 @@ func TestFailoverNotEligibleOnARealUnknownModel(t *testing.T) {
 	t.Logf("observed 404 error: %q", callErr.Error())
 	if failoverEligible(callErr) {
 		t.Errorf("a 404 from a real client is eligible: %v", callErr)
+	}
+}
+
+// chainFake answers a fixed script: err[i] for call i, then a reply naming the
+// model it was built for.
+type chainFake struct {
+	id    string
+	errs  []error
+	calls int
+	log   *[]string
+}
+
+func (f *chainFake) GenerateContent(ctx context.Context, msgs []llms.MessageContent, opts ...llms.CallOption) (*llms.ContentResponse, error) {
+	i := f.calls
+	f.calls++
+	*f.log = append(*f.log, f.id)
+	if i < len(f.errs) && f.errs[i] != nil {
+		return nil, f.errs[i]
+	}
+	return &llms.ContentResponse{Choices: []*llms.ContentChoice{{Content: "answered by " + f.id}}}, nil
+}
+
+func TestRoleChainsPutTheConfiguredModelFirstAndTheDefaultBehind(t *testing.T) {
+	cfg := kbTestCfg()
+	cfg.DefaultModel = "fallback"
+	cfg.RouterModel = "small"
+	cfg.AssessmentModel = "big"
+	t.Setenv("OMLX_MODEL", "fallback") // keeps resolveModel off the network
+	router, assessment := roleChains(cfg, "")
+	if got, want := router, []string{"small", "fallback"}; !slices.Equal(got, want) {
+		t.Errorf("router chain: got %v want %v", got, want)
+	}
+	if got, want := assessment, []string{"big", "fallback"}; !slices.Equal(got, want) {
+		t.Errorf("assessment chain: got %v want %v", got, want)
+	}
+}
+
+func TestRoleChainsUnconfiguredIsOneModel(t *testing.T) {
+	cfg := kbTestCfg()
+	cfg.DefaultModel = "only"
+	cfg.RouterModel, cfg.AssessmentModel = "", ""
+	t.Setenv("OMLX_MODEL", "only")
+	router, assessment := roleChains(cfg, "")
+	if got, want := router, []string{"only"}; !slices.Equal(got, want) {
+		t.Errorf("router chain: got %v want %v", got, want)
+	}
+	if got, want := assessment, []string{"only"}; !slices.Equal(got, want) {
+		t.Errorf("assessment chain: got %v want %v", got, want)
+	}
+}
+
+// TestRoleChainsHonorAnExplicitPick is a correctness control, not a nicety: a
+// turn reports the model that answered it, so a named model must not be
+// quietly replaced by another one.
+func TestRoleChainsHonorAnExplicitPick(t *testing.T) {
+	cfg := kbTestCfg()
+	cfg.DefaultModel = "fallback"
+	cfg.RouterModel = "small"
+	cfg.AssessmentModel = "big"
+	t.Setenv("OMLX_MODEL", "fallback")
+	router, assessment := roleChains(cfg, "  picked  ")
+	if got, want := router, []string{"picked"}; !slices.Equal(got, want) {
+		t.Errorf("router chain: got %v want %v", got, want)
+	}
+	if got, want := assessment, []string{"picked"}; !slices.Equal(got, want) {
+		t.Errorf("assessment chain: got %v want %v", got, want)
+	}
+}
+
+func TestRoleChainsDoNotRepeatOneModel(t *testing.T) {
+	cfg := kbTestCfg()
+	cfg.DefaultModel = "same"
+	cfg.RouterModel = "same"
+	cfg.AssessmentModel = ""
+	t.Setenv("OMLX_MODEL", "same")
+	router, _ := roleChains(cfg, "")
+	if got, want := router, []string{"same"}; !slices.Equal(got, want) {
+		t.Errorf("router chain: got %v want %v", got, want)
+	}
+}
+
+func TestModelChainAdvancesOnlyWhenTheModelCouldNotAnswer(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		first     error
+		wantOrder []string
+		wantErr   bool
+	}{
+		{"eligible", errors.New("API returned unexpected status code: 503: down"), []string{"a", "b"}, false},
+		{"not eligible", errors.New("API returned unexpected status code: 404: no such model"), []string{"a"}, true},
+		{"cancelled", context.Canceled, []string{"a"}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var log []string
+			chain := &modelChain{
+				ids: []string{"a", "b"},
+				clients: []toolLoopModel{
+					&chainFake{id: "a", errs: []error{c.first}, log: &log},
+					&chainFake{id: "b", log: &log},
+				},
+			}
+			resp, err := chain.GenerateContent(context.Background(), nil)
+			if c.wantErr {
+				if err == nil {
+					t.Fatal("want an error")
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("GenerateContent: %v", err)
+				}
+				if resp.Choices[0].Content != "answered by b" {
+					t.Errorf("answer: got %q", resp.Choices[0].Content)
+				}
+			}
+			if !slices.Equal(log, c.wantOrder) {
+				t.Errorf("models called: got %v want %v", log, c.wantOrder)
+			}
+		})
+	}
+}
+
+func TestModelChainReturnsTheLastErrorWhenEveryModelFails(t *testing.T) {
+	var log []string
+	down := errors.New("API returned unexpected status code: 503: down")
+	last := errors.New("API returned unexpected status code: 502: also down")
+	chain := &modelChain{
+		ids: []string{"a", "b"},
+		clients: []toolLoopModel{
+			&chainFake{id: "a", errs: []error{down}, log: &log},
+			&chainFake{id: "b", errs: []error{last}, log: &log},
+		},
+	}
+	if _, err := chain.GenerateContent(context.Background(), nil); err != last {
+		t.Errorf("error: got %v want %v", err, last)
+	}
+	if !slices.Equal(log, []string{"a", "b"}) {
+		t.Errorf("models called: got %v", log)
+	}
+}
+
+func TestModelChainPrimaryNamesTheModelTheTurnReports(t *testing.T) {
+	chain := &modelChain{ids: []string{"big", "fallback"}}
+	if got := chain.primary(); got != "big" {
+		t.Errorf("primary: got %q want %q", got, "big")
+	}
+	if got := (&modelChain{}).primary(); got != "" {
+		t.Errorf("empty chain primary: got %q want empty", got)
 	}
 }

@@ -3,10 +3,17 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"regexp"
+	"slices"
 	"strconv"
+	"strings"
 	"syscall"
+
+	"blkchain/cli/internal/ragconfig"
+
+	"github.com/tmc/langchaingo/llms"
 )
 
 // llmStatusPattern matches the status code in the error the OpenAI-compatible
@@ -65,4 +72,96 @@ func failoverEligible(err error) bool {
 		return true
 	}
 	return code == 400 && contextWindowPattern.MatchString(msg)
+}
+
+// modelRole names which of a turn's two kinds of model calls a site makes.
+type modelRole int
+
+const (
+	// roleRouter decides and grades. Its calls are short, deterministic and
+	// frequent: action classification, routing, the corpus check, context
+	// grading and conversation compression.
+	roleRouter modelRole = iota
+	// roleAssessment answers. Its calls carry the turn's reasoning: the direct
+	// answer, the tool loop and grounded synthesis.
+	roleAssessment
+)
+
+// maxChainModels bounds one role's chain.
+const maxChainModels = 4
+
+// roleChains resolves both roles at once, so the fallback model is resolved
+// once per turn rather than once per role (resolveModel may ask the LLM server
+// which models it serves).
+//
+// A model the caller named is the whole chain for both roles. An explicit pick
+// is an instruction, and a turn reports the model that answered it, so
+// answering from a different model would misreport the turn. Otherwise the
+// role's configured model leads and the resolved default follows, so an install
+// that configures neither role behaves exactly as one model does today.
+func roleChains(cfg ragconfig.Config, explicit string) (router, assessment []string) {
+	if id := strings.TrimSpace(explicit); id != "" {
+		return []string{id}, []string{id}
+	}
+	fallback := resolveModel(cfg)
+	return chainFor(cfg.RouterModel, fallback), chainFor(cfg.AssessmentModel, fallback)
+}
+
+// chainFor orders one role's chain: the configured model, then the fallback,
+// with blanks and repeats dropped.
+func chainFor(configured, fallback string) []string {
+	ids := make([]string, 0, 2)
+	for _, id := range []string{configured, fallback} {
+		id = strings.TrimSpace(id)
+		if id == "" || slices.Contains(ids, id) || len(ids) >= maxChainModels {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// modelChain calls one role's models in order, advancing to the next when a
+// call fails for a reason that means the model could not answer (see
+// failoverEligible). A one-model chain behaves exactly as that one client.
+type modelChain struct {
+	ids     []string
+	clients []toolLoopModel
+}
+
+// newModelChain builds a client per id, in order.
+func newModelChain(cfg ragconfig.Config, ids []string) (*modelChain, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no model configured")
+	}
+	clients := make([]toolLoopModel, 0, len(ids))
+	for _, id := range ids {
+		c, err := newOMLX(cfg, id)
+		if err != nil {
+			return nil, err
+		}
+		clients = append(clients, c)
+	}
+	return &modelChain{ids: slices.Clone(ids), clients: clients}, nil
+}
+
+// primary is the id of the model the chain prefers, which is the model a turn
+// reports as having answered it.
+func (c *modelChain) primary() string {
+	if c == nil || len(c.ids) == 0 {
+		return ""
+	}
+	return c.ids[0]
+}
+
+func (c *modelChain) GenerateContent(ctx context.Context, msgs []llms.MessageContent, opts ...llms.CallOption) (*llms.ContentResponse, error) {
+	var resp *llms.ContentResponse
+	var err error
+	for i, m := range c.clients {
+		resp, err = m.GenerateContent(ctx, msgs, opts...)
+		if err == nil || i == len(c.clients)-1 || !failoverEligible(err) {
+			return resp, err
+		}
+	}
+	return resp, err
 }
