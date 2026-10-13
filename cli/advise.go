@@ -152,7 +152,11 @@ func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig
 		}
 		if action == "tool-call" {
 			toolCalls++
-			if detail == required || required == "mcp" && strings.HasPrefix(detail, "mcp__") || required == "target action" && (detail == "run_command" || detail == "web_api" || detail == "web_browser" || detail == "browser_control" || detail == "oob_payload" || detail == "oob_interactions") {
+			// oob_payload counts because registering a payload is the request
+			// that leaves this machine. oob_interactions does not: it reads a
+			// local file and can refuse, so crediting it would let a turn
+			// satisfy an action it never performed.
+			if detail == required || required == "mcp" && strings.HasPrefix(detail, "mcp__") || required == "target action" && (detail == "run_command" || detail == "web_api" || detail == "web_browser" || detail == "browser_control" || detail == "oob_payload") {
 				requiredCalled = true
 			}
 		}

@@ -18,6 +18,7 @@ import (
 // another.
 const oobFakeArgvParse = `#!/bin/sh
 payload_file=""; out_file=""; servers=""; count=1; token=""
+argv="$*"
 while [ $# -gt 0 ]; do
 	case "$1" in
 	-psf) payload_file="$2"; shift 2 ;;
@@ -34,15 +35,16 @@ payload="$id.oast.fixture.test"
 
 // fakeOOBClient writes a stand-in interactsh-client and points
 // BLKCHAIN_OOB_CLIENT at it, so the suite reaches no interactsh server. body is
-// shell run after the argv parse, with $payload_file, $out_file, $servers,
-// $count, $token, $id and $payload set.
-func fakeOOBClient(t *testing.T, body string) {
+// shell run after the argv parse, with $argv holding the whole argv and
+// $payload_file, $out_file, $servers, $count, $token, $id and $payload set.
+func fakeOOBClient(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "interactsh-client")
 	if err := os.WriteFile(path, []byte(oobFakeArgvParse+body), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("BLKCHAIN_OOB_CLIENT", path)
+	t.Setenv(oobClientEnv, path)
+	return path
 }
 
 // oobFakeRecord emits one interaction record, then the payload. The payload is
@@ -144,6 +146,11 @@ func TestOOBPayloadReportsAClientThatCannotRegister(t *testing.T) {
 		if !strings.Contains(out, "could not register to oast.fixture.test") {
 			t.Fatalf("the client's own reason was dropped: %q", out)
 		}
+		// A configured server influences what the client prints, so its output
+		// reaches the model fenced, like interaction data.
+		if !strings.Contains(out, "UNTRUSTED oob BEGIN") || !strings.Contains(out, "UNTRUSTED oob END") {
+			t.Fatalf("the client's output was not wrapped as untrusted: %q", out)
+		}
 	}
 }
 
@@ -170,54 +177,179 @@ func TestOOBInteractionsReportTypeTimestampAndRemoteAddress(t *testing.T) {
 	}
 }
 
-// oobFakeFlood emits more records than either cap allows, with a sentinel
-// record last. The sentinel sits past the byte cap, so it proves the file read
-// is bounded and not only the count.
+// oobFakeFlood emits more records than either cap allows: an oldest sentinel,
+// padded filler that carries the file past the byte cap, and a newest sentinel
+// last. The client appends, so the newest record is the one the operator needs
+// and the oldest is the one a cap may drop.
 const oobFakeFlood = `
 pad=$(printf '%2000s' '' | tr ' ' x)
+printf '{"protocol":"dns","unique-id":"%s","full-id":"%s","remote-address":"203.0.113.1","timestamp":"2026-10-13T12:00:00Z"}\n' "$id" "$id" > "$out_file"
 i=1
 while [ "$i" -le 150 ]; do
 	printf '{"protocol":"dns","unique-id":"%s","full-id":"%s","remote-address":"198.51.100.1","timestamp":"2026-10-13T12:00:00Z","pad":"%s"}\n' "$id" "$id" "$pad" >> "$out_file"
 	i=$((i+1))
 done
-printf '{"protocol":"dns","unique-id":"%s","full-id":"%s","remote-address":"203.0.113.254","timestamp":"2026-10-13T12:00:00Z"}\n' "$id" "$id" >> "$out_file"
+printf '{"protocol":"http","unique-id":"%s","full-id":"%s","remote-address":"203.0.113.254","timestamp":"2026-10-13T12:00:09Z"}\n' "$id" "$id" >> "$out_file"
 printf '%s\n' "$payload" > "$payload_file"
 exec sleep 60
 `
 
-func TestOOBInteractionsHoldTheCountAndByteCaps(t *testing.T) {
+// TestOOBInteractionsKeepTheNewestWithinTheCaps pins which end the caps drop. A
+// detection tool that drops the newest interactions reports a callback that
+// already arrived as absent, so the byte cap reads the tail and the label names
+// the end it dropped.
+func TestOOBInteractionsKeepTheNewestWithinTheCaps(t *testing.T) {
 	t.Setenv("BLKCHAIN_OOB_SERVER", "oast.fixture.test")
 	fakeOOBClient(t, oobFakeFlood)
 	registry, closeTools := oobTargetRegistry(t)
 	defer closeTools()
 	oobCall(t, registry, "oob_payload", `{}`)
 	out := oobCall(t, registry, "oob_interactions", `{}`)
+	if !strings.Contains(out, "203.0.113.254") {
+		t.Fatalf("the newest interaction was not reported: %q", out)
+	}
+	if strings.Contains(out, "203.0.113.1 ") {
+		t.Fatalf("an interaction past the byte cap was read: %q", firstLine(out))
+	}
 	if !strings.HasPrefix(out, "50 out-of-band interactions, older ones not shown") {
-		t.Fatalf("the count cap did not hold: %q", firstLine(out))
+		t.Fatalf("the count cap did not hold, or mislabeled the dropped end: %q", firstLine(out))
 	}
-	if strings.Contains(out, "203.0.113.254") {
-		t.Fatal("a record past the byte cap was read")
+	if strings.Count(out, "198.51.100.1") != oobMaxInteractions-1 {
+		t.Fatalf("reported %d filler records, want %d", strings.Count(out, "198.51.100.1"), oobMaxInteractions-1)
 	}
-	if strings.Count(out, "198.51.100.1") != oobMaxInteractions {
-		t.Fatalf("reported %d records, want %d", strings.Count(out, "198.51.100.1"), oobMaxInteractions)
+	limited := oobCall(t, registry, "oob_interactions", `{"limit":3}`)
+	if !strings.HasPrefix(limited, "3 out-of-band interactions, older ones not shown") || !strings.Contains(limited, "203.0.113.254") {
+		t.Fatalf("a smaller limit dropped the newest records: %q", limited)
 	}
-	if limited := oobCall(t, registry, "oob_interactions", `{"limit":3}`); strings.Count(limited, "198.51.100.1") != 3 {
-		t.Fatalf("the requested limit did not hold: %q", firstLine(limited))
+}
+
+// oobFakeOversized puts a record longer than a scanner's default token limit in
+// front of the records that follow it.
+const oobFakeOversized = `
+pad=$(printf '%100000s' '' | tr ' ' x)
+printf '{"protocol":"dns","unique-id":"%s","full-id":"%s","remote-address":"198.51.100.1","timestamp":"2026-10-13T12:00:00Z","pad":"%s"}\n' "$id" "$id" "$pad" > "$out_file"
+printf '{"protocol":"dns","unique-id":"%s","full-id":"%s","remote-address":"198.51.100.2","timestamp":"2026-10-13T12:00:01Z"}\n' "$id" "$id" >> "$out_file"
+printf '{"protocol":"http","unique-id":"%s","full-id":"%s","remote-address":"203.0.113.254","timestamp":"2026-10-13T12:00:09Z"}\n' "$id" "$id" >> "$out_file"
+printf '%s\n' "$payload" > "$payload_file"
+exec sleep 60
+`
+
+// TestOOBInteractionsSurviveAnOversizedRecord pins that one large interaction,
+// an HTTP callback with a big body, does not end the scan and silently hide
+// every interaction recorded after it.
+func TestOOBInteractionsSurviveAnOversizedRecord(t *testing.T) {
+	t.Setenv("BLKCHAIN_OOB_SERVER", "oast.fixture.test")
+	fakeOOBClient(t, oobFakeOversized)
+	registry, closeTools := oobTargetRegistry(t)
+	defer closeTools()
+	oobCall(t, registry, "oob_payload", `{}`)
+	out := oobCall(t, registry, "oob_interactions", `{}`)
+	if !strings.HasPrefix(out, "3 out-of-band interactions\n") {
+		t.Fatalf("an oversized record cut the scan: %q", firstLine(out))
+	}
+	for _, want := range []string{"198.51.100.1", "198.51.100.2", "203.0.113.254"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("interaction %s was dropped after the oversized record: %q", want, out)
+		}
+	}
+}
+
+// oobFakeTokenCheck refuses to register unless the token arrived in the config
+// file rather than the argv, and reports which way it arrived on the path the
+// tool surfaces.
+const oobFakeTokenCheck = `
+cfg="$(dirname "$payload_file")/client-config.yaml"
+case "$argv" in
+*fixture-oob-token-value*) printf 'the token was in the argv\n' >&2; exit 1 ;;
+esac
+if ! grep -q 'token: "fixture-oob-token-value"' "$cfg"; then
+	printf 'the token was not in the config file\n' >&2; exit 1
+fi
+printf '%s\n' "$payload" > "$payload_file"
+exec sleep 60
+`
+
+// TestOOBTokenReachesTheClientOffTheArgv pins that the token is delivered in an
+// owner-only config file. In the argv it would be readable by any local user
+// from ps for as long as the client runs.
+func TestOOBTokenReachesTheClientOffTheArgv(t *testing.T) {
+	client := fakeOOBClient(t, oobFakeTokenCheck)
+	session, err := newOOBSession(context.Background(), client, []string{"oast.fixture.test"}, "fixture-oob-token-value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.close()
+	payloads, err := session.ensure(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("the client refused the token delivery: %v", err)
+	}
+	if len(payloads) != 1 {
+		t.Fatalf("payloads = %v", payloads)
+	}
+	info, err := os.Stat(session.path(oobClientConfigFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("the config file holding the token is mode %o, want 600", mode)
+	}
+}
+
+func TestOOBTokenShapeIsRefusedBeforeItIsWritten(t *testing.T) {
+	t.Setenv(oobServerEnv, "oast.fixture.test")
+	fakeOOBClient(t, oobFakeRecord)
+	for _, token := range []string{"has space", "has\"quote", "has\\backslash", "has\nnewline", strings.Repeat("x", oobMaxTokenLen+1)} {
+		if oobValidToken(token) {
+			t.Errorf("token %q was accepted for the config file", token)
+		}
+	}
+	for _, token := range []string{"abc123", "a.b-c_d~e+f/g=h:i", strings.Repeat("x", oobMaxTokenLen)} {
+		if !oobValidToken(token) {
+			t.Errorf("a usable token was refused: %q", token)
+		}
+	}
+	t.Setenv(oobTokenEnv, "token with a space")
+	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
+	_, _, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil,
+		"Assess 192.0.2.5", nil, AnswerOpts{requiredAction: "target action"})
+	if err == nil || !strings.Contains(err.Error(), oobTokenEnv) {
+		t.Fatalf("a token that cannot be written safely was accepted: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "token with a space") {
+		t.Fatal("the error repeated the token value")
+	}
+}
+
+// TestOOBEnvironmentIsNeutralizedForTheSuite guards the hermetic floor for this
+// capability. Without it an operator's own interactsh server attaches itself to
+// every test that builds an armed registry.
+func TestOOBEnvironmentIsNeutralizedForTheSuite(t *testing.T) {
+	for _, name := range []string{oobServerEnv, oobClientEnv, oobTokenEnv} {
+		if _, ok := os.LookupEnv(name); ok {
+			t.Errorf("%s is set for the suite; TestMain must clear it", name)
+		}
 	}
 }
 
 // TestOOBLiveLoopbackInteraction runs the real interactsh-client against a
 // loopback interactsh server, triggers an HTTP callback to the payload domain,
-// and requires the interaction to come back. It is gated on BLKCHAIN_OOB_LIVE
-// and refuses a server that is not on loopback, so no interaction data can
-// leave this machine.
+// and requires the interaction to come back. It takes the server from its own
+// gate variable rather than the operator's BLKCHAIN_OOB_SERVER, which TestMain
+// clears to keep the suite hermetic, and it refuses a server that is not on
+// loopback, so no interaction data can leave this machine.
 func TestOOBLiveLoopbackInteraction(t *testing.T) {
-	if os.Getenv("BLKCHAIN_OOB_LIVE") != "1" {
-		t.Skip("set BLKCHAIN_OOB_LIVE=1 with a loopback interactsh server to run this")
+	live := strings.TrimSpace(os.Getenv("BLKCHAIN_OOB_LIVE"))
+	if live == "" {
+		t.Skip("set BLKCHAIN_OOB_LIVE to a loopback interactsh server as host:port to run this")
+	}
+	t.Setenv(oobServerEnv, live)
+	t.Setenv(oobTokenEnv, strings.TrimSpace(os.Getenv("BLKCHAIN_OOB_LIVE_TOKEN")))
+	if client := strings.TrimSpace(os.Getenv("BLKCHAIN_OOB_LIVE_CLIENT")); client != "" {
+		t.Setenv(oobClientEnv, client)
 	}
 	servers, err := oobServers()
 	if err != nil || len(servers) != 1 {
-		t.Fatalf("BLKCHAIN_OOB_SERVER must name one loopback server: %v %v", servers, err)
+		t.Fatalf("BLKCHAIN_OOB_LIVE must name one loopback server: %v %v", servers, err)
 	}
 	host, _, _ := strings.Cut(servers[0], ":")
 	if host != "127.0.0.1" && host != "localhost" {

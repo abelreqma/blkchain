@@ -30,6 +30,7 @@ const (
 	oobLogBytes          = 8 << 10
 	oobFieldRunes        = 96
 	oobMaxHostLen        = 253
+	oobMaxTokenLen       = 512
 	oobPollSeconds       = 5
 	oobPayloadWait       = 45 * time.Second
 	oobPayloadPoll       = 200 * time.Millisecond
@@ -40,6 +41,10 @@ const (
 	oobInteractionsFile = "interactions.jsonl"
 	oobSessionFile      = "session.json"
 	oobClientConfigFile = "client-config.yaml"
+
+	oobServerEnv = "BLKCHAIN_OOB_SERVER"
+	oobClientEnv = "BLKCHAIN_OOB_CLIENT"
+	oobTokenEnv  = "BLKCHAIN_OOB_TOKEN"
 )
 
 // oobServerPattern matches one interactsh server as a hostname or host:port.
@@ -56,7 +61,7 @@ var oobPayloadLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
 // registered, because the client's own default list is a third party and an
 // out-of-band callback carries target information.
 func oobServers() ([]string, error) {
-	raw := strings.TrimSpace(os.Getenv("BLKCHAIN_OOB_SERVER"))
+	raw := strings.TrimSpace(os.Getenv(oobServerEnv))
 	if raw == "" {
 		return nil, nil
 	}
@@ -74,10 +79,26 @@ func oobServers() ([]string, error) {
 	return servers, nil
 }
 
+// oobValidToken reports whether a token can be written into the client's config
+// file as a double-quoted YAML scalar. A character outside printable ASCII, or
+// one that could end that scalar, is refused rather than escaped, so no token
+// value can inject another config key such as a local file to upload.
+func oobValidToken(token string) bool {
+	if token == "" || len(token) > oobMaxTokenLen {
+		return false
+	}
+	for _, r := range token {
+		if r < '!' || r > '~' || r == '"' || r == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
 // oobClientPath resolves the interactsh-client binary: the operator-configured
 // absolute path, else the name on PATH.
 func oobClientPath() (string, error) {
-	if configured := strings.TrimSpace(os.Getenv("BLKCHAIN_OOB_CLIENT")); configured != "" {
+	if configured := strings.TrimSpace(os.Getenv(oobClientEnv)); configured != "" {
 		if !filepath.IsAbs(configured) {
 			return "", fmt.Errorf("BLKCHAIN_OOB_CLIENT must be an absolute path to interactsh-client")
 		}
@@ -185,13 +206,22 @@ func (s *oobSession) close() {
 	_ = os.RemoveAll(s.dir)
 }
 
-// safe removes the token from text that reaches the model or an error.
+// safe removes control characters and the token from text that reaches the
+// model or an error.
 func (s *oobSession) safe(text string) string {
 	text = terminalSafe(text)
 	if s.token != "" {
 		text = strings.ReplaceAll(text, s.token, "[redacted]")
 	}
-	return capRunes(text, oobLogBytes)
+	return text
+}
+
+// clientLog returns the client's own output, bounded and fenced as untrusted. A
+// configured server influences what the client prints, so it reaches the model
+// as data for the same reason interaction data does. The bound is applied before
+// the fence so the closing marker is never the part that gets cut.
+func (s *oobSession) clientLog() string {
+	return secgate.WrapUntrusted("oob", capRunes(s.safe(s.log.String()), oobLogBytes))
 }
 
 // ensure starts the client once and returns its payloads. A later call returns
@@ -202,15 +232,24 @@ func (s *oobSession) ensure(ctx context.Context, count int) ([]string, error) {
 	defer s.mu.Unlock()
 	if s.started.Load() {
 		if len(s.payloads) == 0 {
-			return nil, fmt.Errorf("interactsh-client registered no payload for this session:\n%s", s.safe(s.log.String()))
+			return nil, fmt.Errorf("interactsh-client registered no payload for this session:\n%s", s.clientLog())
 		}
 		return s.payloads, nil
 	}
+	if s.token != "" {
+		// A token in the argv is readable by any local user for the lifetime of
+		// the process, so it is delivered in the client's own config file,
+		// written owner-only inside the run directory. oobValidToken has already
+		// refused anything that could end the YAML scalar.
+		if err := os.WriteFile(s.path(oobClientConfigFile), []byte("token: \""+s.token+"\"\n"), 0o600); err != nil {
+			return nil, err
+		}
+	}
 	// Every value is its own argv element, so none can be read as a flag. The
-	// config path is inside the run directory and does not exist, which keeps
-	// the client's default config file from reintroducing a server, a file
-	// upload or the cloud key path. -auth=false and -duc hold the egress
-	// posture: no projectdiscovery cloud key, no update check.
+	// config path is inside the run directory, holding the token or nothing at
+	// all, which keeps the client's default config file from reintroducing a
+	// server, a file upload or the cloud key path. -auth=false and -duc hold the
+	// egress posture: no projectdiscovery cloud key, no update check.
 	args := []string{
 		"-server", strings.Join(s.servers, ","),
 		"-config", s.path(oobClientConfigFile),
@@ -220,9 +259,6 @@ func (s *oobSession) ensure(ctx context.Context, count int) ([]string, error) {
 		"-json", "-o", s.path(oobInteractionsFile),
 		"-ps", "-psf", s.path(oobPayloadFile),
 		"-sf", s.path(oobSessionFile),
-	}
-	if s.token != "" {
-		args = append(args, "-token", s.token)
 	}
 	command := exec.CommandContext(s.run, s.client, args...)
 	command.Dir = s.dir
@@ -261,7 +297,7 @@ func (s *oobSession) awaitPayloads(ctx context.Context, count int) ([]string, er
 		}
 		select {
 		case <-s.done:
-			return nil, fmt.Errorf("interactsh-client exited before it registered a payload:\n%s", s.safe(s.log.String()))
+			return nil, fmt.Errorf("interactsh-client exited before it registered a payload:\n%s", s.clientLog())
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-deadline.C:
@@ -293,8 +329,8 @@ func (s *oobSession) readPayloads() ([]string, error) {
 	return payloads, nil
 }
 
-// oobReadCapped returns at most limit bytes of path and whether the file holds
-// more than that.
+// oobReadCapped returns at most limit bytes from the start of path and whether
+// the file holds more than that.
 func oobReadCapped(path string, limit int64) ([]byte, bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -309,6 +345,42 @@ func oobReadCapped(path string, limit int64) ([]byte, bool, error) {
 		return data[:limit], true, nil
 	}
 	return data, false, nil
+}
+
+// oobReadTail returns at most limit bytes from the END of path, starting at a
+// record boundary, and whether anything before that was dropped. The client
+// appends, so the newest interactions are at the end and they are the ones that
+// answer whether a target called back; a bounded read from the start would stop
+// reporting new callbacks once the file passed the cap.
+func oobReadTail(path string, limit int64) ([]byte, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	dropped := info.Size() > limit
+	if dropped {
+		if _, err := file.Seek(-limit, io.SeekEnd); err != nil {
+			return nil, false, err
+		}
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit))
+	if err != nil {
+		return nil, false, err
+	}
+	if dropped {
+		// The seek lands inside a record, so discard that partial first line.
+		if cut := bytes.IndexByte(data, '\n'); cut >= 0 {
+			data = data[cut+1:]
+		} else {
+			data = nil
+		}
+	}
+	return data, dropped, nil
 }
 
 // oobInteraction is the subset of an interactsh interaction record the tool
@@ -350,12 +422,16 @@ func oobField(value string) string {
 }
 
 func (s *oobSession) interactions(payload string, limit int) (string, error) {
-	data, truncated, err := oobReadCapped(s.path(oobInteractionsFile), oobInteractionsBytes)
+	data, droppedOlder, err := oobReadTail(s.path(oobInteractionsFile), oobInteractionsBytes)
 	if err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
 	var kept []oobInteraction
 	scanner := bufio.NewScanner(bytes.NewReader(data))
+	// A single interaction record carries its raw request and response, so one
+	// large HTTP callback exceeds a scanner's default token limit. Without this
+	// the scan would stop there and drop every record recorded after it.
+	scanner.Buffer(make([]byte, 0, 64<<10), oobInteractionsBytes)
 	for scanner.Scan() {
 		var record oobInteraction
 		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
@@ -365,9 +441,10 @@ func (s *oobSession) interactions(payload string, limit int) (string, error) {
 			kept = append(kept, record)
 		}
 	}
+	droppedNewer := scanner.Err() != nil
 	if len(kept) > limit {
 		kept = kept[len(kept)-limit:]
-		truncated = true
+		droppedOlder = true
 	}
 	var lines strings.Builder
 	for _, record := range kept {
@@ -375,8 +452,13 @@ func (s *oobSession) interactions(payload string, limit int) (string, error) {
 			record.Timestamp.UTC().Format(time.RFC3339), oobField(record.RemoteAddress), oobField(record.FullID))
 	}
 	note := ""
-	if truncated {
+	switch {
+	case droppedOlder && droppedNewer:
+		note = ", older and newer ones not shown"
+	case droppedOlder:
 		note = ", older ones not shown"
+	case droppedNewer:
+		note = ", newer ones not shown"
 	}
 	return fmt.Sprintf("%d out-of-band interactions%s\n%s", len(kept), note,
 		secgate.WrapUntrusted("oob", lines.String())), nil
@@ -452,7 +534,11 @@ func registerOOBTools(ctx context.Context, registry *tooldef.Registry) (func(), 
 	if err != nil {
 		return func() {}, err
 	}
-	session, err := newOOBSession(ctx, client, servers, os.Getenv("BLKCHAIN_OOB_TOKEN"))
+	token := os.Getenv(oobTokenEnv)
+	if token != "" && !oobValidToken(token) {
+		return func() {}, fmt.Errorf("%s must be 1 to %d printable ASCII characters without a space, a quote or a backslash", oobTokenEnv, oobMaxTokenLen)
+	}
+	session, err := newOOBSession(ctx, client, servers, token)
 	if err != nil {
 		return func() {}, err
 	}
