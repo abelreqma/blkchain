@@ -284,10 +284,11 @@ func TestAcquireChatSlotRefusesACancelledRequest(t *testing.T) {
 func TestMCPChatKeepsTheAnswerWhenPersistenceFails(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
-	// Two turns of a 3 MiB answer push the transcript past maxSessionBytes, so
-	// the third turn's first append is refused after its answer is produced.
-	big := strings.Repeat("y", 3<<20)
-	stubAdaptiveAnswer(t, big, nil)
+	// The first turn opens the session normally. The second answers with a line
+	// past maxSessionRecordBytes, which appendTurn refuses after the answer is
+	// produced.
+	big := strings.Repeat("y", maxSessionRecordBytes)
+	stubAdaptiveAnswer(t, "a recorded answer", nil)
 
 	dir := t.TempDir()
 	writeTestSkill(t, dir, "aaa-web", "---\nname: aaa-web\ndescription: web http attacks\n---\nWEBBODY\n")
@@ -342,11 +343,8 @@ func TestMCPChatKeepsTheAnswerWhenPersistenceFails(t *testing.T) {
 	if id == "" {
 		t.Fatalf("no session id in %v", firstOut)
 	}
-	if second := call(map[string]any{"message": "q2", "session_id": id}); second.IsError {
-		t.Fatalf("second turn failed: %+v", second.Content)
-	}
-
-	third := call(map[string]any{"message": "q3", "session_id": id})
+	stubAdaptiveAnswer(t, big, nil)
+	third := call(map[string]any{"message": "q2", "session_id": id})
 	if third.IsError {
 		t.Fatalf("the answer was returned as a tool error: %+v", third.Content)
 	}
