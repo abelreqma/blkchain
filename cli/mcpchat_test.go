@@ -234,13 +234,70 @@ func TestChatSessionOwnerForgetsTheOldestPastTheCap(t *testing.T) {
 		ids = append(ids, id)
 		owner.own(id)
 	}
-	if owner.owns(ids[0]) {
+	if owner.touch(ids[0]) {
 		t.Fatalf("the oldest id was kept past the cap of %d", mcpChatMaxSessions)
 	}
 	for _, id := range ids[1:] {
-		if !owner.owns(id) {
+		if !owner.touch(id) {
 			t.Fatalf("id %q was forgotten while within the cap", id)
 		}
+	}
+}
+
+// Using a session refreshes it: with the set full, touching the oldest id and
+// then creating one more evicts the least recently used id instead.
+func TestChatSessionOwnerEvictsTheLeastRecentlyUsed(t *testing.T) {
+	owner := newChatSessionOwner()
+	ids := make([]string, 0, mcpChatMaxSessions+1)
+	for i := range mcpChatMaxSessions + 1 {
+		ids = append(ids, fmt.Sprintf("20260101T000000-%06x", i))
+	}
+	for _, id := range ids[:mcpChatMaxSessions] {
+		owner.own(id)
+	}
+	if !owner.touch(ids[0]) {
+		t.Fatal("the oldest id was not owned while the set was full")
+	}
+	owner.own(ids[mcpChatMaxSessions])
+	if owner.touch(ids[1]) {
+		t.Fatalf("id %q was kept although it was the least recently used", ids[1])
+	}
+	if !owner.touch(ids[0]) {
+		t.Fatalf("the recently used id %q was evicted", ids[0])
+	}
+	for _, id := range ids[2:] {
+		if !owner.touch(id) {
+			t.Fatalf("id %q was forgotten while within the cap", id)
+		}
+	}
+}
+
+// A chat turn on a session counts as using it, so a conversation that keeps
+// going outlives newer sessions that are opened and abandoned.
+func TestMCPChatTurnKeepsItsSessionOwned(t *testing.T) {
+	owner := newChatSessionOwner()
+	useDeadServices(t)
+	isolateUserDirs(t)
+	stubAdaptiveAnswer(t, "an answer", nil)
+
+	first, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	filler := make([]string, 0, mcpChatMaxSessions)
+	for i := range mcpChatMaxSessions - 1 {
+		filler = append(filler, fmt.Sprintf("20260101T000000-%06x", i))
+		owner.own(filler[i])
+	}
+	if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q2", SessionID: first.SessionID}); err != nil {
+		t.Fatal(err)
+	}
+	owner.own("20260101T000000-ffffff")
+	if !owner.touch(first.SessionID) {
+		t.Fatal("the session in use was evicted by newer sessions")
+	}
+	if owner.touch(filler[0]) {
+		t.Fatalf("id %q outlived the session in use", filler[0])
 	}
 }
 

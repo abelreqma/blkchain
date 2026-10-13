@@ -75,8 +75,8 @@ func acquireChatSlot(ctx context.Context, slots chan struct{}) (func(), error) {
 }
 
 // mcpChatMaxSessions bounds how many of its own session ids one server tracks.
-// The oldest is forgotten when the cap is reached, so that conversation can no
-// longer be continued while the recent ones can.
+// The least recently used is forgotten when the cap is reached, so that
+// conversation can no longer be continued while the recently used ones can.
 const mcpChatMaxSessions = 128
 
 // errChatForeignSession refuses a chat turn that names a session this server
@@ -109,8 +109,8 @@ func newChatSessionOwner() *chatSessionOwner {
 	return &chatSessionOwner{ids: make(map[string]struct{}, mcpChatMaxSessions)}
 }
 
-// own records a session this server created, forgetting the oldest id once the
-// set is at mcpChatMaxSessions.
+// own records a session this server created, forgetting the least recently used
+// id once the set is at mcpChatMaxSessions.
 func (o *chatSessionOwner) own(id string) {
 	if id == "" {
 		return
@@ -128,11 +128,18 @@ func (o *chatSessionOwner) own(id string) {
 	o.order = append(o.order, id)
 }
 
-func (o *chatSessionOwner) owns(id string) bool {
+// touch reports whether this server created the session, and when it did marks
+// the session as the most recently used.
+func (o *chatSessionOwner) touch(id string) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	_, ok := o.ids[id]
-	return ok
+	if _, ok := o.ids[id]; !ok {
+		return false
+	}
+	if i := slices.Index(o.order, id); i >= 0 {
+		o.order = append(slices.Delete(o.order, i, i+1), id)
+	}
+	return true
 }
 
 // mcpChatIn is chat's tool input. An empty SessionID opens a new session;
@@ -449,7 +456,7 @@ func mcpChatResult(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		return turnResult{}, usageErr("chat: session id exceeds %d bytes", mcpChatMaxSessionID)
 	case selector == sessionTargetNew || selector == sessionTargetLast:
 		return turnResult{}, usageErr("chat: invalid session id")
-	case !owned.owns(selector):
+	case !owned.touch(selector):
 		return turnResult{}, fmt.Errorf("%w: %s", errChatForeignSession, sanitizeTerminal(selector))
 	}
 	ctx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout())
