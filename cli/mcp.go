@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"blkchain/cli/internal/ragconfig"
@@ -70,6 +71,58 @@ func acquireChatSlot(ctx context.Context, slots chan struct{}) (func(), error) {
 	default:
 		return nil, errChatBusy
 	}
+}
+
+// mcpChatMaxSessions bounds how many of its own session ids one server tracks.
+// The oldest is forgotten when the cap is reached, so that conversation can no
+// longer be continued while the recent ones can.
+const mcpChatMaxSessions = 128
+
+// errChatForeignSession refuses a chat turn that names a session this server
+// process did not create. chat writes memory rows the next turn in that session
+// reads back as its own prior turn, so a turn another surface is holding (a TUI,
+// another blk process) must not be appended to from here. Reading any session
+// as a session:// resource is unrestricted.
+var errChatForeignSession = errors.New("chat: session was not created by this server")
+
+// chatSessionOwner is the set of session ids the chat tool created on one
+// server. It lives in memory only, so after a restart no earlier session can be
+// continued: the write side stays with the process that opened the
+// conversation.
+type chatSessionOwner struct {
+	mu    sync.Mutex
+	ids   map[string]struct{}
+	order []string
+}
+
+func newChatSessionOwner() *chatSessionOwner {
+	return &chatSessionOwner{ids: make(map[string]struct{}, mcpChatMaxSessions)}
+}
+
+// own records a session this server created, forgetting the oldest id once the
+// set is at mcpChatMaxSessions.
+func (o *chatSessionOwner) own(id string) {
+	if id == "" {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if _, ok := o.ids[id]; ok {
+		return
+	}
+	if len(o.order) >= mcpChatMaxSessions {
+		delete(o.ids, o.order[0])
+		o.order = o.order[1:]
+	}
+	o.ids[id] = struct{}{}
+	o.order = append(o.order, id)
+}
+
+func (o *chatSessionOwner) owns(id string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	_, ok := o.ids[id]
+	return ok
 }
 
 // mcpChatIn is chat's tool input. An empty SessionID opens a new session;
@@ -276,9 +329,10 @@ func runMCP(_ []string) error {
 func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Catalog) *mcp.Server {
 	v, _, _, _ := versionInfo()
 	s := mcp.NewServer(&mcp.Implementation{Name: "blkchain", Version: v}, nil)
-	// One set of chat slots per server, so a test's server bounds only its own
-	// turns.
+	// One set of chat slots and one owned-session set per server, so a test's
+	// server bounds and owns only its own turns.
 	chatSlots := make(chan struct{}, mcpChatMaxInFlight)
+	owned := newChatSessionOwner()
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "kb_search",
@@ -309,14 +363,14 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "chat",
-		Description: "One turn of the blkChain agent: adaptive routing, the local knowledge base, files, terminal, browser and web research, with the operator's connected MCP servers. Omit session_id to start a conversation, pass the returned session_id back to continue it. Sessions are readable as session://{id} resources; to resume one, read the resource and pass its id back to this tool.",
+		Description: "One turn of the blkChain agent: adaptive routing, the local knowledge base, files, terminal, browser and web research, with the operator's connected MCP servers. Omit session_id to start a conversation, pass the returned session_id back to continue it. Only a session this server process started can be continued: an id from anywhere else, including one this server returned before it was restarted, is refused. Every session is still readable as a session://{id} resource.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpChatIn) (*mcp.CallToolResult, any, error) {
 		release, err := acquireChatSlot(ctx, chatSlots)
 		if err != nil {
 			return nil, nil, err
 		}
 		defer release()
-		res, err := mcpChatResult(ctx, followPrefs(rc, loadPrefs()), cfg, in)
+		res, err := mcpChatResult(ctx, followPrefs(rc, loadPrefs()), cfg, owned, in)
 		if err != nil && strings.TrimSpace(res.Answer) == "" {
 			return nil, nil, err
 		}
@@ -337,7 +391,7 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 	s.AddResourceTemplate(&mcp.ResourceTemplate{
 		URITemplate: sessionResourceScheme + "{id}",
 		Name:        "blkChain session",
-		Description: "A conversation transcript. Read one to resume it: pass its id back to the chat tool.",
+		Description: "A conversation transcript, from any blk surface. Readable whatever created it; only a session this server process started can be continued with the chat tool.",
 		MIMEType:    "application/json",
 	}, sessionResourceHandler)
 	// A template is not listed by resources/list, so the sessions that exist
@@ -364,8 +418,9 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 // mcpChatResult runs one native turn for the chat tool. It is the handler body,
 // factored out so the tests drive it without a live transport. The caller's
 // session id is always an id, never a selector: new and last are rejected so
-// a client cannot attach to whichever session was used most recently.
-func mcpChatResult(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Config, in mcpChatIn) (turnResult, error) {
+// a client cannot attach to whichever session was used most recently, and it
+// must be one this server created (see errChatForeignSession).
+func mcpChatResult(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Config, owned *chatSessionOwner, in mcpChatIn) (turnResult, error) {
 	if len(in.Message) > mcpChatMaxMessage {
 		return turnResult{}, usageErr("chat: message exceeds %d bytes", mcpChatMaxMessage)
 	}
@@ -377,13 +432,17 @@ func mcpChatResult(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		return turnResult{}, usageErr("chat: session id exceeds %d bytes", mcpChatMaxSessionID)
 	case selector == sessionTargetNew || selector == sessionTargetLast:
 		return turnResult{}, usageErr("chat: invalid session id")
+	case !owned.owns(selector):
+		return turnResult{}, fmt.Errorf("%w: %s", errChatForeignSession, sanitizeTerminal(selector))
 	}
-	return runNativeTurn(ctx, rc, cfg, turnRequest{
+	res, err := runNativeTurn(ctx, rc, cfg, turnRequest{
 		Question:  in.Message,
 		SessionID: selector,
 		Agent:     in.Agent,
 		ToolHost:  in.ToolHost,
 	})
+	owned.own(res.SessionID)
+	return res, err
 }
 
 // mcpSearchTopK validates kb_search's input and resolves its effective top_k,

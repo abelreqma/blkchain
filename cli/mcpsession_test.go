@@ -63,11 +63,12 @@ func TestSessionIDFromURIAcceptsWellFormedUnknownID(t *testing.T) {
 }
 
 func TestMCPSessionResourceReturnsTheTranscript(t *testing.T) {
+	owner := newChatSessionOwner()
 	useDeadServices(t)
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "resource answer", nil)
 
-	res, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "resource question"})
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "resource question"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +120,7 @@ func TestMCPSessionResourceRejectsHostileIDs(t *testing.T) {
 }
 
 func TestMCPSessionResourceIsBounded(t *testing.T) {
+	owner := newChatSessionOwner()
 	useDeadServices(t)
 	isolateUserDirs(t)
 	// 20 turns of a 32 KiB answer is about 640 KiB of content, comfortably over
@@ -127,12 +129,12 @@ func TestMCPSessionResourceIsBounded(t *testing.T) {
 	// ever running.
 	stubAdaptiveAnswer(t, strings.Repeat("y", 32<<10), nil)
 
-	res, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q"})
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 19; i++ {
-		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q", SessionID: res.SessionID}); err != nil {
+		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: res.SessionID}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -169,17 +171,18 @@ func TestMCPSessionResourceIsBounded(t *testing.T) {
 // well under the cap still marshal to more than the cap. The bound has to hold
 // on the encoded size.
 func TestMCPSessionResourceBoundHoldsForEscapedContent(t *testing.T) {
+	owner := newChatSessionOwner()
 	useDeadServices(t)
 	isolateUserDirs(t)
 	answer := strings.Repeat(`"`, 80<<10)
 	stubAdaptiveAnswer(t, answer, nil)
 
-	res, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q"})
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q", SessionID: res.SessionID}); err != nil {
+		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: res.SessionID}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -210,11 +213,12 @@ func TestMCPSessionResourceBoundHoldsForEscapedContent(t *testing.T) {
 // One turn larger than the whole cap is cut to fit rather than dropped or
 // returned over the cap, and the cut lands on a rune boundary.
 func TestMCPSessionResourceCutsAnOversizeNewestTurn(t *testing.T) {
+	owner := newChatSessionOwner()
 	useDeadServices(t)
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, strings.Repeat("\u00e9", 300<<10), nil)
 
-	res, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q"})
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,11 +248,12 @@ func TestMCPSessionResourceCutsAnOversizeNewestTurn(t *testing.T) {
 }
 
 func TestMCPServerExposesSessionsAsResources(t *testing.T) {
+	owner := newChatSessionOwner()
 	useDeadServices(t)
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "listed answer", nil)
 
-	first, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "listed question"})
+	first, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "listed question"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +303,7 @@ func TestMCPServerExposesSessionsAsResources(t *testing.T) {
 
 	// A session created after the server started is not enumerated, but the
 	// template still serves it.
-	second, err := mcpChatResult(ctx, nil, loadConfig(), mcpChatIn{Message: "later question"})
+	second, err := mcpChatResult(ctx, nil, loadConfig(), owner, mcpChatIn{Message: "later question"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,6 +326,7 @@ func TestMCPServerExposesSessionsAsResources(t *testing.T) {
 // encoded bytes collapses to empty content, which still satisfies the cap, so
 // each case also requires that most of what fits is kept.
 func TestMCPSessionResourceKeepsContentOfAnEscapedOversizeNewestTurn(t *testing.T) {
+	owner := newChatSessionOwner()
 	for _, tc := range []struct {
 		name    string
 		ch      string
@@ -337,7 +343,7 @@ func TestMCPSessionResourceKeepsContentOfAnEscapedOversizeNewestTurn(t *testing.
 			isolateUserDirs(t)
 			stubAdaptiveAnswer(t, strings.Repeat(tc.ch, tc.size), nil)
 
-			res, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q"})
+			res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"})
 			if err != nil {
 				t.Fatal(err)
 			}

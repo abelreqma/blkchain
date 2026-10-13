@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -14,11 +15,12 @@ import (
 )
 
 func TestMCPChatOpensAndContinuesASession(t *testing.T) {
+	owner := newChatSessionOwner()
 	useDeadServices(t)
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "mcp answer", nil)
 
-	first, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q1"})
+	first, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +33,7 @@ func TestMCPChatOpensAndContinuesASession(t *testing.T) {
 
 	var opts AnswerOpts
 	stubAdaptiveAnswer(t, "mcp second", &opts)
-	second, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q2", SessionID: first.SessionID})
+	second, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q2", SessionID: first.SessionID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,11 +46,12 @@ func TestMCPChatOpensAndContinuesASession(t *testing.T) {
 }
 
 func TestMCPChatSessionIsReadableAsAnOrdinarySession(t *testing.T) {
+	owner := newChatSessionOwner()
 	useDeadServices(t)
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "from mcp", nil)
 
-	res, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q"})
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,21 +68,23 @@ func TestMCPChatSessionIsReadableAsAnOrdinarySession(t *testing.T) {
 }
 
 func TestMCPChatRejectsHostileSessionIDs(t *testing.T) {
+	owner := newChatSessionOwner()
 	useDeadServices(t)
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "unused", nil)
 
-	// Well-formed ids that name no session reach the lookup and fail there.
+	// Well-formed ids this server never created are refused as foreign before
+	// any lookup.
 	for _, id := range []string{"20260101T000000-aaaaaa", "with space"} {
-		_, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q", SessionID: id})
-		if !errors.Is(err, errSessionNotFound) {
-			t.Fatalf("unknown session id %q: error = %v, want session not found", id, err)
+		_, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: id})
+		if !errors.Is(err, errChatForeignSession) {
+			t.Fatalf("unknown session id %q: error = %v, want a foreign-session refusal", id, err)
 		}
 	}
 	// Path-shaped ids must be rejected before the lookup. An error that wraps
 	// errSessionNotFound means the id reached the file-path code.
 	for _, id := range []string{"../../etc/passwd", "a/b", "..", `a\b`} {
-		_, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q", SessionID: id})
+		_, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: id})
 		if err == nil {
 			t.Fatalf("session id %q was accepted", id)
 		}
@@ -90,6 +95,7 @@ func TestMCPChatRejectsHostileSessionIDs(t *testing.T) {
 }
 
 func TestMCPChatSessionIDIsNotASelector(t *testing.T) {
+	owner := newChatSessionOwner()
 	useDeadServices(t)
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "unused", nil)
@@ -97,7 +103,7 @@ func TestMCPChatSessionIDIsNotASelector(t *testing.T) {
 	// A rejected id must not reach the lookup: a not-found error would mean the
 	// length bound or the selector check did not run.
 	for _, id := range []string{sessionTargetNew, sessionTargetLast, strings.Repeat("a", mcpChatMaxSessionID+1)} {
-		_, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q", SessionID: id})
+		_, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: id})
 		if err == nil {
 			t.Fatalf("session id %q was accepted", id)
 		}
@@ -115,39 +121,124 @@ func TestMCPChatSessionIDIsNotASelector(t *testing.T) {
 }
 
 func TestMCPChatRejectsEmptyMessage(t *testing.T) {
+	owner := newChatSessionOwner()
 	useDeadServices(t)
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "unused", nil)
 
 	for _, msg := range []string{"", "   "} {
-		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: msg}); err == nil {
+		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: msg}); err == nil {
 			t.Fatalf("message %q was accepted", msg)
 		}
 	}
 }
 
 func TestMCPChatRejectsOversizeMessage(t *testing.T) {
+	owner := newChatSessionOwner()
 	useDeadServices(t)
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "unused", nil)
 
 	big := strings.Repeat("a", mcpChatMaxMessage+1)
-	if _, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: big}); err == nil {
+	if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: big}); err == nil {
 		t.Fatal("oversize message accepted")
 	}
 }
 
 func TestMCPChatRejectsUnknownAgent(t *testing.T) {
+	owner := newChatSessionOwner()
 	useDeadServices(t)
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "unused", nil)
 
-	_, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q", Agent: "nope"})
+	_, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", Agent: "nope"})
 	if err == nil {
 		t.Fatal("unknown agent accepted")
 	}
 	if !strings.Contains(err.Error(), "agent") {
 		t.Fatalf("error does not name the agent: %v", err)
+	}
+}
+
+// chat continues only what it created: a session another surface opened is
+// refused with its own error class and left untouched, while the server's own
+// session continues, and either one is still readable as a resource.
+func TestMCPChatRefusesASessionItDidNotCreate(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	stubAdaptiveAnswer(t, "an answer", nil)
+
+	elsewhere, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "operator question", SessionID: sessionTargetNew})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := newChatSessionOwner()
+	_, err = mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "planted turn", SessionID: elsewhere.SessionID})
+	if !errors.Is(err, errChatForeignSession) {
+		t.Fatalf("continuing a foreign session: error = %v, want a foreign-session refusal", err)
+	}
+	if errors.Is(err, errSessionNotFound) {
+		t.Fatalf("the refusal is indistinguishable from a missing session: %v", err)
+	}
+	recs, err := loadMessages(elsewhere.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("the refused turn changed the transcript: %+v", recs)
+	}
+
+	own, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q2", SessionID: own.SessionID}); err != nil {
+		t.Fatalf("continuing its own session: %v", err)
+	}
+
+	// Reading stays unrestricted whatever created the session.
+	for _, id := range []string{elsewhere.SessionID, own.SessionID} {
+		if _, err := mcpSessionResource(id); err != nil {
+			t.Fatalf("session %q is not readable as a resource: %v", id, err)
+		}
+	}
+}
+
+// A restarted server owns nothing, so the id it handed out before cannot be
+// continued. That is the cost of keeping the write side in the process that
+// opened the conversation.
+func TestMCPChatOwnedSessionsDoNotSurviveARestart(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	stubAdaptiveAnswer(t, "an answer", nil)
+
+	first, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q2", SessionID: first.SessionID})
+	if !errors.Is(err, errChatForeignSession) {
+		t.Fatalf("after a restart: error = %v, want a foreign-session refusal", err)
+	}
+}
+
+// The owned set is bounded: past mcpChatMaxSessions the oldest id is forgotten
+// and the newest are kept.
+func TestChatSessionOwnerForgetsTheOldestPastTheCap(t *testing.T) {
+	owner := newChatSessionOwner()
+	ids := make([]string, 0, mcpChatMaxSessions+1)
+	for i := range mcpChatMaxSessions + 1 {
+		id := fmt.Sprintf("20260101T000000-%06x", i)
+		ids = append(ids, id)
+		owner.own(id)
+	}
+	if owner.owns(ids[0]) {
+		t.Fatalf("the oldest id was kept past the cap of %d", mcpChatMaxSessions)
+	}
+	for _, id := range ids[1:] {
+		if !owner.owns(id) {
+			t.Fatalf("id %q was forgotten while within the cap", id)
+		}
 	}
 }
 
