@@ -473,10 +473,9 @@ func askWith(rc *retrieval.Client, history []priorTurn, args []string) (string, 
 }
 
 func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, preface string, webFirst bool, browser *chatBrowserState, observed ...*callMetrics) (string, error) {
-	ctx, metrics := withCallMetrics(context.Background())
+	ctx := context.Background()
 	if len(observed) > 0 && observed[0] != nil {
-		metrics = observed[0]
-		ctx = context.WithValue(ctx, metricsKey{}, metrics)
+		ctx = context.WithValue(ctx, metricsKey{}, observed[0])
 	}
 	var o askOpts
 	fs := newFlagSet("ask")
