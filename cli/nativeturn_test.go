@@ -125,3 +125,151 @@ func TestNativeTurnSurfacesRouterError(t *testing.T) {
 		t.Fatal("router error was swallowed")
 	}
 }
+
+func TestNativeTurnNewSessionPersistsTheExchange(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	stubAdaptiveAnswer(t, "persisted answer", nil)
+
+	res, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{
+		Question:  "first question",
+		SessionID: sessionTargetNew,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.SessionID == "" {
+		t.Fatal("a new session turn reported no session id")
+	}
+	recs, err := loadMessages(res.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 2 || recs[0].Role != roleUser || recs[1].Role != roleAssistant {
+		t.Fatalf("transcript = %+v", recs)
+	}
+	if recs[0].Content != "first question" || recs[1].Content != "persisted answer" {
+		t.Fatalf("transcript content = %+v", recs)
+	}
+}
+
+func TestNativeTurnContinuesNamedSessionWithHistory(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	stubAdaptiveAnswer(t, "first answer", nil)
+
+	first, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q1", SessionID: sessionTargetNew})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var opts AnswerOpts
+	stubAdaptiveAnswer(t, "second answer", &opts)
+	second, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q2", SessionID: first.SessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.SessionID != first.SessionID {
+		t.Fatalf("session id changed: %q then %q", first.SessionID, second.SessionID)
+	}
+	if len(opts.History) != 2 {
+		t.Fatalf("history carried into the second turn = %+v", opts.History)
+	}
+	if opts.History[0].Content != "q1" || opts.History[1].Content != "first answer" {
+		t.Fatalf("history content = %+v", opts.History)
+	}
+	recs, err := loadMessages(first.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 4 {
+		t.Fatalf("transcript has %d records, want 4", len(recs))
+	}
+}
+
+func TestNativeTurnLastResolvesTheMostRecentSession(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	stubAdaptiveAnswer(t, "a", nil)
+
+	created, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q1", SessionID: sessionTargetNew})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubAdaptiveAnswer(t, "b", nil)
+	latest, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q2", SessionID: sessionTargetLast})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.SessionID != created.SessionID {
+		t.Fatalf("last resolved %q, want %q", latest.SessionID, created.SessionID)
+	}
+}
+
+func TestNativeTurnLastWithNoSessionsStartsOne(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	stubAdaptiveAnswer(t, "a", nil)
+
+	res, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q", SessionID: sessionTargetLast})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.SessionID == "" {
+		t.Fatal("last with no sessions should start one, got no id")
+	}
+}
+
+func TestNativeTurnRejectsUnknownAndMalformedSessionIDs(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	stubAdaptiveAnswer(t, "unused", nil)
+
+	for _, id := range []string{"20260101T000000-aaaaaa", "with space"} {
+		_, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q", SessionID: id})
+		if !errors.Is(err, errSessionNotFound) {
+			t.Fatalf("unknown session id %q: error = %v, want session not found", id, err)
+		}
+	}
+	for _, id := range []string{"../escape", "a/b", ".."} {
+		_, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q", SessionID: id})
+		if err == nil {
+			t.Fatalf("session id %q was accepted", id)
+		}
+		if errors.Is(err, errSessionNotFound) {
+			t.Fatalf("malformed session id %q reached the lookup instead of being rejected: %v", id, err)
+		}
+	}
+}
+
+func TestNativeTurnReportsPersistenceFailureWithTheAnswer(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	// appendTurn refuses only once the transcript is ALREADY at maxSessionBytes
+	// (session.go:344), so grow it through the real path: two turns of a 3 MiB
+	// answer leave the file over the 4 MiB cap, and the third turn's first
+	// append is refused. Writing junk into the file directly would not work:
+	// openSession runs reconcileTranscript, which truncates anything past the
+	// last committed watermark.
+	big := strings.Repeat("y", 3<<20)
+	stubAdaptiveAnswer(t, big, nil)
+
+	first, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q1", SessionID: sessionTargetNew})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q2", SessionID: first.SessionID}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q3", SessionID: first.SessionID})
+	if err == nil {
+		t.Fatal("a refused transcript write was not reported")
+	}
+	if !errors.Is(err, errSessionFull) {
+		t.Fatalf("error is not the size-cap refusal: %v", err)
+	}
+	if res.Answer != big {
+		t.Fatalf("the answer was lost when persistence failed: %d bytes", len(res.Answer))
+	}
+}
