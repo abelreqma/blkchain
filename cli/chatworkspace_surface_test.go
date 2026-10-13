@@ -69,7 +69,7 @@ func TestChatToolHostSelectionReachesCLIAndTUI(t *testing.T) {
 	}
 	client := &replClient{toolHost: chatToolHostLocal, browserCDP: "http://127.0.0.1:9222"}
 	defer client.close()
-	if _, err := plainAsk(&m, "rag", "question", client, nil, "", false); err != nil || got != chatToolHostLocal || cdp != client.browserCDP {
+	if _, err := plainAsk(&m, "question", client, nil, "", false); err != nil || got != chatToolHostLocal || cdp != client.browserCDP {
 		t.Fatalf("plain host = %q CDP=%q err=%v", got, cdp, err)
 	}
 	if !strings.Contains(helpResponse("tool-host", 100), "tool-host") {

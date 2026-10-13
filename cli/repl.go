@@ -63,8 +63,7 @@ func replPrompt() string {
 // modes. It keeps the last search results so `open N` can open the N-th hit.
 func plainREPL() error {
 	var last []retrieval.Result
-	mode := "rag"
-	pm := model{cfg: loadConfig(), mode: mode, prefs: loadInteractivePrefs(), hist: histstore.OpenDefault(), engageMode: secgate.Auto, engageTranscript: "important", ta: textarea.New()}
+	pm := model{cfg: loadConfig(), prefs: loadInteractivePrefs(), hist: histstore.OpenDefault(), engageMode: secgate.Auto, engageTranscript: "important", ta: textarea.New()}
 	pm.sess, _ = newSession()
 	pm.ambient, _ = loadInitContext()
 	if pm.hist != nil {
@@ -75,8 +74,8 @@ func plainREPL() error {
 	defer rc.close()
 	// convo is the in-process conversation memory for this piped/non-TTY
 	// session: prior user questions and model answers, carried back into each
-	// rag ask so the model remembers the session (the TUI reads the same memory
-	// from the history store). Agent-mode memory lives in the Hermes gateway.
+	// ask so the model remembers the session (the TUI reads the same memory from
+	// the history store).
 	var convo []priorTurn
 	recordConvo := func(q, ans string) {
 		if rc.metrics != nil {
@@ -94,7 +93,7 @@ func plainREPL() error {
 			return
 		}
 		convo = append(convo, priorTurn{Role: "human", Content: q}, priorTurn{Role: "ai", Content: ans})
-		pm.mode, pm.pendingQ, pm.lastAnswer = mode, q, ans
+		pm.pendingQ, pm.lastAnswer = q, ans
 		if err := pm.recordTurn(ans); err != nil {
 			printErr(fmt.Errorf("conversation save failed: %w", err))
 		}
@@ -286,20 +285,12 @@ func plainREPL() error {
 					fmt.Println(note)
 				}
 			}
-		case "mode":
-			if mode == "agent" {
-				mode = "rag"
-			} else {
-				mode = "agent"
-			}
-			fmt.Println(Meta.Render("mode: " + mode))
 		case "agent":
 			if strings.TrimSpace(rest) == "" {
 				fmt.Println(pm.answerAgentStatus())
 			} else if err := pm.selectAnswerAgent(rest); err != nil {
 				printErr(err)
 			} else {
-				mode = pm.mode
 				rc.agent = pm.answerAgent
 				fmt.Println(pm.answerAgentStatus())
 			}
@@ -339,19 +330,18 @@ func plainREPL() error {
 				_ = savePrefs(p)
 				fmt.Println(Meta.Render("rag " + boolOnOff(on)))
 			} else if q != "" {
-				ans, err := plainAsk(&pm, mode, q, &rc, convo, pm.takeContextPreface(q), true)
+				ans, err := plainAsk(&pm, q, &rc, convo, pm.takeContextPreface(q), true)
 				printErr(err)
 				recordConvo(q, ans)
 			} else {
-				mode = "rag"
-				fmt.Println(Meta.Render("mode: rag"))
+				fmt.Println(pm.answerAgentStatus())
 			}
 		case "web":
 			last = replWebSearch(rest, last, rc.agent)
 		case "search", "s":
 			query := rest
 			if !strings.HasPrefix(cmd, "/") && strings.EqualFold(cmd, "search") {
-				ans, err := plainAsk(&pm, mode, line, &rc, convo, pm.takeContextPreface(line), false)
+				ans, err := plainAsk(&pm, line, &rc, convo, pm.takeContextPreface(line), false)
 				printErr(err)
 				recordConvo(line, ans)
 				break
@@ -360,7 +350,7 @@ func plainREPL() error {
 			last = results
 			recordConvo(query, ans)
 		case "ask", "a":
-			ans, err := plainAsk(&pm, mode, rest, &rc, convo, pm.takeContextPreface(rest), false)
+			ans, err := plainAsk(&pm, rest, &rc, convo, pm.takeContextPreface(rest), false)
 			printErr(err)
 			recordConvo(rest, ans)
 		case "hermes":
@@ -372,9 +362,8 @@ func plainREPL() error {
 				printErr(plainSlashError(cmd))
 				break
 			}
-			// Bare input with no recognized verb is an ask (matches the TUI); in
-			// agent mode it runs the hermes agent instead.
-			ans, err := plainAsk(&pm, mode, line, &rc, convo, pm.takeContextPreface(line), false)
+			// Bare input with no recognized verb is an ask (matches the TUI).
+			ans, err := plainAsk(&pm, line, &rc, convo, pm.takeContextPreface(line), false)
 			printErr(err)
 			recordConvo(line, ans)
 		}
@@ -556,7 +545,6 @@ func replGroups() []rowGroup {
 			{"/auto", "run within the active RoE without prompts"},
 		}},
 		{replGroupModes, []helpRow{
-			{"/mode", replSlashDesc("mode")},
 			{"/rag [on|off|question]", replSlashDesc("rag")},
 			{"/agent [auto|name]", replSlashDesc("agent")},
 		}},
