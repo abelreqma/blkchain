@@ -28,7 +28,13 @@ var llmStatusPattern = regexp.MustCompile(`API returned unexpected status code: 
 // does not fit the model's context window. Its status is 400, which is
 // otherwise the request's own fault, so the message is what separates a window
 // that is too small from an argument that is wrong.
-var contextWindowPattern = regexp.MustCompile(`(?i)context_length_exceeded|maximum context length|reduce the length of the messages`)
+//
+// The message is the only signal for this class, so a 400 whose server message
+// echoes request content containing one of these phrases is read as a
+// context-window rejection. That is bounded: a failover on a 400 re-sends a
+// request the server rejected, it does not repeat an action that already took
+// effect.
+var contextWindowPattern = regexp.MustCompile(`(?i)context_length_exceeded|maximum context length is \d+|reduce the length of the messages`)
 
 // failoverEligible reports whether err means the model, rather than the
 // request, could not answer, so the next model in a role's chain is worth
@@ -55,8 +61,20 @@ func failoverEligible(err error) bool {
 	if errors.As(err, &unreachable) {
 		return true
 	}
+	// The blanket net.Error interface is not used: *url.Error satisfies it
+	// whatever it wraps, so it would admit a malformed URL, an unsupported
+	// scheme and a failed certificate verification. Those recur identically on
+	// the next model because every model in a chain uses the same endpoint.
 	var ne net.Error
-	if errors.As(err, &ne) {
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
 		return true
 	}
 	msg := err.Error()

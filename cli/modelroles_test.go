@@ -2,18 +2,43 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 
 	"github.com/tmc/langchaingo/llms"
 )
 
+// httpClientError returns the error net/http hands back for req without any
+// network traffic: the request fails before a connection is attempted.
+func httpClientError(t *testing.T, req *http.Request) error {
+	t.Helper()
+	_, err := http.DefaultClient.Do(req)
+	if err == nil {
+		t.Fatal("expected a client error")
+	}
+	return err
+}
+
 func TestFailoverEligibleRefusesWhatIsNotTheModelsFault(t *testing.T) {
+	_, badURLErr := http.NewRequest(http.MethodGet, "http://127.0.0.1/%zz", nil)
+	if badURLErr == nil {
+		t.Fatal("expected a URL parse error")
+	}
+	ftpReq, err := http.NewRequest(http.MethodGet, "ftp://127.0.0.1/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemeErr := httpClientError(t, ftpReq)
 	cases := []struct {
 		name string
 		err  error
@@ -24,6 +49,12 @@ func TestFailoverEligibleRefusesWhatIsNotTheModelsFault(t *testing.T) {
 		{"plain error", errors.New("scope refused: target outside scope")},
 		{"client status", errors.New("API returned unexpected status code: 404: Model 'x' not found")},
 		{"bad request without a context message", errors.New("API returned unexpected status code: 400: invalid 'temperature'")},
+		{"cancellation inside a url error", &url.Error{Op: "Post", URL: "http://127.0.0.1:8000/v1/chat/completions", Err: context.Canceled}},
+		{"cancellation inside a dial error", &url.Error{Op: "Post", URL: "http://127.0.0.1:8000/v1/chat/completions", Err: &net.OpError{Op: "dial", Net: "tcp", Err: context.Canceled}}},
+		{"malformed url", badURLErr},
+		{"unsupported scheme", schemeErr},
+		{"url error around a plain error", &url.Error{Op: "Post", URL: "http://127.0.0.1:8000/v1/chat/completions", Err: errors.New("plain app error")}},
+		{"certificate verification failure", &url.Error{Op: "Post", URL: "https://127.0.0.1:8000/v1/chat/completions", Err: x509.UnknownAuthorityError{}}},
 	}
 	for _, c := range cases {
 		if failoverEligible(c.err) {
@@ -42,7 +73,11 @@ func TestFailoverEligibleAcceptsAModelThatCouldNotAnswer(t *testing.T) {
 		{"unreachable", &llmUnreachableError{base: "http://127.0.0.1:8000/v1", err: syscall.ECONNREFUSED}},
 		{"server error", errors.New("API returned unexpected status code: 503: upstream unavailable")},
 		{"context window", errors.New("API returned unexpected status code: 400: This model's maximum context length is 4096 tokens")},
-		{"context window by code", errors.New("API returned unexpected status code: 400: {\"code\":\"context_length_exceeded\"}")},
+		// The pinned client keeps only a body's message and type and drops its
+		// code field, so only the message text is ever matched.
+		{"context window by message", errors.New("API returned unexpected status code: 400: request failed with context_length_exceeded for this model")},
+		{"net op error", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("network is unreachable")}},
+		{"dns error", &net.DNSError{Err: "no such host", Name: "model.invalid"}},
 	}
 	for _, c := range cases {
 		if !failoverEligible(c.err) {
@@ -56,7 +91,9 @@ func TestFailoverEligibleAcceptsAModelThatCouldNotAnswer(t *testing.T) {
 // the pinned client actually produces. A format change upstream fails here
 // instead of silently turning failover off.
 func TestFailoverEligibleOnARealServerError(t *testing.T) {
+	var hit atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit.Store(true)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		fmt.Fprint(w, `{"error":{"message":"upstream unavailable","type":"server_error"}}`)
 	}))
@@ -73,6 +110,12 @@ func TestFailoverEligibleOnARealServerError(t *testing.T) {
 		t.Fatal("expected an error from a 503")
 	}
 	t.Logf("observed 503 error: %q", callErr.Error())
+	if !hit.Load() {
+		t.Fatal("the fixture server was never reached")
+	}
+	if !strings.Contains(callErr.Error(), "503") {
+		t.Fatalf("error does not name the 503: %v", callErr)
+	}
 	if !failoverEligible(callErr) {
 		t.Errorf("a 503 from a real client is not eligible: %v", callErr)
 	}
@@ -81,7 +124,9 @@ func TestFailoverEligibleOnARealServerError(t *testing.T) {
 // TestFailoverNotEligibleOnARealUnknownModel is the same path for a 404, which
 // is the request's own fault and must not advance the chain.
 func TestFailoverNotEligibleOnARealUnknownModel(t *testing.T) {
+	var hit atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit.Store(true)
 		w.WriteHeader(http.StatusNotFound)
 		fmt.Fprint(w, `{"error":{"message":"Model 'nope' not found","type":"not_found_error"}}`)
 	}))
@@ -98,6 +143,9 @@ func TestFailoverNotEligibleOnARealUnknownModel(t *testing.T) {
 		t.Fatal("expected an error from a 404")
 	}
 	t.Logf("observed 404 error: %q", callErr.Error())
+	if !hit.Load() {
+		t.Fatal("the fixture server was never reached")
+	}
 	if failoverEligible(callErr) {
 		t.Errorf("a 404 from a real client is eligible: %v", callErr)
 	}
