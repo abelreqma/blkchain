@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
@@ -253,6 +256,77 @@ func TestNativeTurnRejectsUnknownAndMalformedSessionIDs(t *testing.T) {
 		}
 		if errors.Is(err, errSessionNotFound) {
 			t.Fatalf("malformed session id %q reached the lookup instead of being rejected: %v", id, err)
+		}
+	}
+}
+
+// Two turns on one session id run one at a time: the second reads the first's
+// exchange back as memory, both answers come back, and the transcript holds
+// both exchanges as whole user/assistant pairs.
+func TestNativeTurnSerializesTurnsOnOneSession(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	stubAdaptiveAnswer(t, "seed answer", nil)
+	seed, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q0", SessionID: sessionTargetNew})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prev := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = prev })
+	var mu sync.Mutex
+	var read []int
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, question string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		mu.Lock()
+		read = append(read, len(opts.History))
+		mu.Unlock()
+		// Hold the turn open. Overlapping turns would both have read the history
+		// above before either appended to it.
+		time.Sleep(100 * time.Millisecond)
+		return "answer to " + question, []citation{}, false, nil, 1, "rag", nil
+	}
+
+	var wg sync.WaitGroup
+	answers, errs := make([]string, 2), make([]error, 2)
+	for i, q := range []string{"qA", "qB"} {
+		wg.Add(1)
+		go func(i int, q string) {
+			defer wg.Done()
+			res, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: q, SessionID: seed.SessionID})
+			answers[i], errs[i] = res.Answer, err
+		}(i, q)
+	}
+	wg.Wait()
+	for i := range errs {
+		if errs[i] != nil {
+			t.Fatalf("turn %d failed: %v", i, errs[i])
+		}
+		if answers[i] == "" {
+			t.Fatalf("turn %d returned no answer", i)
+		}
+	}
+
+	mu.Lock()
+	lengths := slices.Clone(read)
+	mu.Unlock()
+	slices.Sort(lengths)
+	if !slices.Equal(lengths, []int{2, 4}) {
+		t.Fatalf("the two turns read history of lengths %v, want 2 then 4", lengths)
+	}
+	recs, err := loadMessages(seed.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 6 {
+		t.Fatalf("transcript has %d records, want 6", len(recs))
+	}
+	for i, rec := range recs {
+		want := roleUser
+		if i%2 == 1 {
+			want = roleAssistant
+		}
+		if rec.Role != want {
+			t.Fatalf("record %d role = %q, want %q", i, rec.Role, want)
 		}
 	}
 }

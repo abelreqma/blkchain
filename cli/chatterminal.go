@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"blkchain/cli/internal/secgate"
@@ -63,7 +64,15 @@ func chatRunnerImage(ctx context.Context) (string, error) {
 	return chatDocker(ctx, nil, "image", "inspect", "--format", "{{.Id}}", tag)
 }
 
+// chatContainerMu serializes the inspect-then-run below. The container name is
+// derived from the workspace root, so two turns in one process reach it with the
+// same name: unsynchronized, both miss the inspect and both run, and the loser
+// fails with a name conflict.
+var chatContainerMu sync.Mutex
+
 func ensureChatContainer(ctx context.Context, root string) (string, error) {
+	chatContainerMu.Lock()
+	defer chatContainerMu.Unlock()
 	image, err := chatRunnerImage(ctx)
 	if err != nil {
 		return "", err
