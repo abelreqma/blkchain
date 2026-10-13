@@ -146,6 +146,9 @@ func TestFailoverNotEligibleOnARealUnknownModel(t *testing.T) {
 	if !hit.Load() {
 		t.Fatal("the fixture server was never reached")
 	}
+	if !strings.Contains(callErr.Error(), "404") {
+		t.Fatalf("error does not name the 404: %v", callErr)
+	}
 	if failoverEligible(callErr) {
 		t.Errorf("a 404 from a real client is eligible: %v", callErr)
 	}
@@ -158,12 +161,29 @@ type chainFake struct {
 	errs  []error
 	calls int
 	log   *[]string
+	// stream is delivered to the call's streaming function, when one is set,
+	// before the scripted result.
+	stream string
+	// gotOpts and gotStream describe the options the last call received.
+	gotOpts   int
+	gotStream bool
 }
 
 func (f *chainFake) GenerateContent(ctx context.Context, msgs []llms.MessageContent, opts ...llms.CallOption) (*llms.ContentResponse, error) {
 	i := f.calls
 	f.calls++
 	*f.log = append(*f.log, f.id)
+	var applied llms.CallOptions
+	for _, o := range opts {
+		o(&applied)
+	}
+	f.gotOpts = len(opts)
+	f.gotStream = applied.StreamingFunc != nil
+	if f.stream != "" && applied.StreamingFunc != nil {
+		if err := applied.StreamingFunc(ctx, []byte(f.stream)); err != nil {
+			return nil, err
+		}
+	}
 	if i < len(f.errs) && f.errs[i] != nil {
 		return nil, f.errs[i]
 	}
@@ -295,5 +315,238 @@ func TestModelChainPrimaryNamesTheModelTheTurnReports(t *testing.T) {
 	}
 	if got := (&modelChain{}).primary(); got != "" {
 		t.Errorf("empty chain primary: got %q want empty", got)
+	}
+}
+
+func TestModelChainAnsweredNamesTheModelThatAnswered(t *testing.T) {
+	down := errors.New("API returned unexpected status code: 503: down")
+	var log []string
+	failover := &modelChain{
+		ids: []string{"a", "b"},
+		clients: []toolLoopModel{
+			&chainFake{id: "a", errs: []error{down}, log: &log},
+			&chainFake{id: "b", log: &log},
+		},
+	}
+	if got := failover.answered(); got != "a" {
+		t.Errorf("before any call: got %q want %q", got, "a")
+	}
+	if _, err := failover.GenerateContent(context.Background(), nil); err != nil {
+		t.Fatalf("GenerateContent: %v", err)
+	}
+	if got := failover.answered(); got != "b" {
+		t.Errorf("after failover: got %q want %q", got, "b")
+	}
+	if got := failover.primary(); got != "a" {
+		t.Errorf("primary after failover: got %q want %q", got, "a")
+	}
+
+	first := &modelChain{
+		ids:     []string{"a", "b"},
+		clients: []toolLoopModel{&chainFake{id: "a", log: &log}, &chainFake{id: "b", log: &log}},
+	}
+	if _, err := first.GenerateContent(context.Background(), nil); err != nil {
+		t.Fatalf("GenerateContent: %v", err)
+	}
+	if got := first.answered(); got != "a" {
+		t.Errorf("first model answered: got %q want %q", got, "a")
+	}
+
+	out := &modelChain{ids: []string{"a", "b"}}
+	out.markAnswered(7)
+	if got := out.answered(); got != "a" {
+		t.Errorf("out of range index: got %q want the primary %q", got, "a")
+	}
+	if got := (&modelChain{}).answered(); got != "" {
+		t.Errorf("empty chain: got %q want empty", got)
+	}
+}
+
+func TestModelChainFirstSuccessDoesNotCallTheSecondModel(t *testing.T) {
+	var log []string
+	second := &chainFake{id: "b", log: &log}
+	chain := &modelChain{
+		ids:     []string{"a", "b"},
+		clients: []toolLoopModel{&chainFake{id: "a", log: &log}, second},
+	}
+	if _, err := chain.GenerateContent(context.Background(), nil); err != nil {
+		t.Fatalf("GenerateContent: %v", err)
+	}
+	if second.calls != 0 || !slices.Equal(log, []string{"a"}) {
+		t.Errorf("models called: got %v, second model calls %d", log, second.calls)
+	}
+}
+
+// streamedFailureChain returns a two-model chain whose first model fails with
+// an eligible error after streaming first (when non-empty), the two fakes, the
+// buffer the caller's streaming function appends to, and the call options that
+// carry that function.
+func streamedFailureChain(first string) (*modelChain, *chainFake, *chainFake, *[]byte, []llms.CallOption) {
+	var log []string
+	down := errors.New("API returned unexpected status code: 503: down")
+	a := &chainFake{id: "a", errs: []error{down}, log: &log, stream: first}
+	b := &chainFake{id: "b", log: &log, stream: "second answer"}
+	var got []byte
+	opts := []llms.CallOption{llms.WithStreamingFunc(func(_ context.Context, chunk []byte) error {
+		got = append(got, chunk...)
+		return nil
+	})}
+	chain := &modelChain{ids: []string{"a", "b"}, clients: []toolLoopModel{a, b}}
+	return chain, a, b, &got, opts
+}
+
+func TestModelChainDoesNotFailOverAfterAByteWasStreamed(t *testing.T) {
+	chain, a, b, got, opts := streamedFailureChain("partial")
+	_, err := chain.GenerateContent(context.Background(), nil, opts...)
+	if err == nil {
+		t.Fatal("want the first model's error")
+	}
+	if b.calls != 0 {
+		t.Errorf("second model was called %d times after a byte was streamed", b.calls)
+	}
+	if a.calls != 1 {
+		t.Errorf("first model calls: got %d want 1", a.calls)
+	}
+	if string(*got) != "partial" {
+		t.Errorf("streamed to the caller: got %q want %q", *got, "partial")
+	}
+	if chain.answered() != "a" {
+		t.Errorf("answered after a failed call: got %q", chain.answered())
+	}
+}
+
+func TestModelChainFailsOverWhenNothingWasStreamed(t *testing.T) {
+	chain, _, b, got, opts := streamedFailureChain("")
+	resp, err := chain.GenerateContent(context.Background(), nil, opts...)
+	if err != nil {
+		t.Fatalf("GenerateContent: %v", err)
+	}
+	if b.calls != 1 {
+		t.Errorf("second model calls: got %d want 1", b.calls)
+	}
+	if resp.Choices[0].Content != "answered by b" {
+		t.Errorf("answer: got %q", resp.Choices[0].Content)
+	}
+	if string(*got) != "second answer" {
+		t.Errorf("streamed to the caller: got %q want %q", *got, "second answer")
+	}
+	if chain.answered() != "b" {
+		t.Errorf("answered: got %q want b", chain.answered())
+	}
+}
+
+func TestModelChainInstallsNoStreamWrapperWithoutACallerStream(t *testing.T) {
+	var log []string
+	f := &chainFake{id: "a", log: &log}
+	chain := &modelChain{ids: []string{"a"}, clients: []toolLoopModel{f}}
+	if _, err := chain.GenerateContent(context.Background(), nil, llms.WithMaxTokens(4), llms.WithTemperature(0)); err != nil {
+		t.Fatalf("GenerateContent: %v", err)
+	}
+	if f.gotOpts != 2 || f.gotStream {
+		t.Errorf("without a caller stream: got %d options, stream set %v; want 2, false", f.gotOpts, f.gotStream)
+	}
+	opts := []llms.CallOption{llms.WithMaxTokens(4), llms.WithStreamingFunc(func(context.Context, []byte) error { return nil })}
+	if _, err := chain.GenerateContent(context.Background(), nil, opts...); err != nil {
+		t.Fatalf("GenerateContent: %v", err)
+	}
+	if f.gotOpts != 3 || !f.gotStream {
+		t.Errorf("with a caller stream: got %d options, stream set %v; want 3, true", f.gotOpts, f.gotStream)
+	}
+	if len(opts) != 2 {
+		t.Errorf("caller's option slice was modified: len %d", len(opts))
+	}
+}
+
+func TestModelChainWithNoModelsReturnsAnError(t *testing.T) {
+	var nilChain *modelChain
+	for name, c := range map[string]*modelChain{"nil": nilChain, "empty": {}} {
+		resp, err := c.GenerateContent(context.Background(), nil)
+		if err == nil || resp != nil {
+			t.Errorf("%s chain: got resp %v err %v, want nil response and an error", name, resp, err)
+		}
+	}
+}
+
+func TestModelChainCallsNoModelOnACancelledContext(t *testing.T) {
+	var log []string
+	chain := &modelChain{
+		ids:     []string{"a", "b"},
+		clients: []toolLoopModel{&chainFake{id: "a", log: &log}, &chainFake{id: "b", log: &log}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	resp, err := chain.GenerateContent(ctx, nil)
+	if !errors.Is(err, context.Canceled) || resp != nil {
+		t.Errorf("got resp %v err %v, want nil and context.Canceled", resp, err)
+	}
+	if len(log) != 0 {
+		t.Errorf("models called on a cancelled context: %v", log)
+	}
+}
+
+// cancelFake cancels its context and then fails with an eligible error, the
+// way a parent deadline that fires mid-call does.
+type cancelFake struct {
+	cancel func()
+	log    *[]string
+}
+
+func (f *cancelFake) GenerateContent(ctx context.Context, msgs []llms.MessageContent, opts ...llms.CallOption) (*llms.ContentResponse, error) {
+	*f.log = append(*f.log, "a")
+	f.cancel()
+	return nil, fmt.Errorf("call: %w", context.DeadlineExceeded)
+}
+
+func TestModelChainStopsWhenTheContextDiesBetweenModels(t *testing.T) {
+	var log []string
+	ctx, cancel := context.WithCancel(context.Background())
+	second := &chainFake{id: "b", log: &log}
+	chain := &modelChain{ids: []string{"a", "b"}, clients: []toolLoopModel{&cancelFake{cancel: cancel, log: &log}, second}}
+	if _, err := chain.GenerateContent(ctx, nil); !errors.Is(err, context.Canceled) {
+		t.Errorf("error: got %v want context.Canceled", err)
+	}
+	if second.calls != 0 {
+		t.Errorf("second model called %d times on a dead context", second.calls)
+	}
+}
+
+func TestNewModelChainBuildsOneClientPerIDWithoutNetworkIO(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	cfg := kbTestCfg()
+	ids := []string{"a", "b"}
+	chain, err := newModelChain(cfg, ids)
+	if err != nil {
+		t.Fatalf("newModelChain: %v", err)
+	}
+	if len(chain.clients) != 2 {
+		t.Fatalf("clients: got %d want 2", len(chain.clients))
+	}
+	if got := chain.primary(); got != "a" {
+		t.Errorf("primary: got %q want %q", got, "a")
+	}
+	for i, c := range chain.clients {
+		l, ok := c.(*llmClient)
+		if !ok {
+			t.Fatalf("client %d: got %T want *llmClient", i, c)
+		}
+		if l.model != chain.ids[i] {
+			t.Errorf("client %d model: got %q want %q", i, l.model, chain.ids[i])
+		}
+	}
+	ids[0] = "mutated"
+	if !slices.Equal(chain.ids, []string{"a", "b"}) {
+		t.Errorf("chain ids changed with the input slice: %v", chain.ids)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("construction made %d requests, want 0", n)
+	}
+	if c, err := newModelChain(cfg, nil); err == nil || c != nil {
+		t.Errorf("empty ids: got chain %v err %v, want nil and an error", c, err)
 	}
 }
