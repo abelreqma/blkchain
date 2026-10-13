@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -313,6 +314,108 @@ func TestPlainREPLDoesNotRecordAnErroredTurn(t *testing.T) {
 			recs, _ := loadMessages(meta.ID)
 			t.Fatalf("an errored turn reached the transcript of %s: %+v", meta.ID, recs)
 		}
+	}
+}
+
+// plainAsk reads the saved /models settings on every turn, so toggling the
+// reranker mid-session reaches the cached retrieval client.
+func TestPlainAskFollowsTheCurrentRerankPreference(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	prev := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = prev })
+	var skips []bool
+	adaptiveAnswerFn = func(_ context.Context, rc searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		client, ok := rc.(*retrieval.Client)
+		if !ok {
+			t.Errorf("the turn received %T, want a retrieval client", rc)
+		} else {
+			skips = append(skips, client.SkipRerank)
+		}
+		opts.Stream([]byte("answer"))
+		return "answer", nil, false, nil, 1, "rag", nil
+	}
+
+	prefs := loadPrefs()
+	prefs.Rerank = true
+	if err := savePrefs(prefs); err != nil {
+		t.Fatal(err)
+	}
+	m := model{cfg: loadConfig()}
+	var err error
+	if m.sess, err = newSession(); err != nil {
+		t.Fatal(err)
+	}
+	var rc replClient
+	defer rc.close()
+	captureStdout(t, func() {
+		if _, err := plainAsk(&m, "first question", &rc, nil, "", false); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	prefs.Rerank = false
+	if err := savePrefs(prefs); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() {
+		if _, err := plainAsk(&m, "second question", &rc, nil, "", false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if len(skips) != 2 || skips[0] || !skips[1] {
+		t.Fatalf("rerank skipped per turn = %v, want the second turn to follow the toggle", skips)
+	}
+}
+
+// Finding nothing is not a turn error: the plain turn prints the shared warning
+// on stderr and returns no answer.
+func TestPlainAskReportsNoResults(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	prev := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = prev })
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, _ AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		return "", nil, false, nil, 0, "", ErrNoResults
+	}
+
+	m := model{cfg: loadConfig()}
+	var rc replClient
+	defer rc.close()
+	var answer string
+	var err error
+	stderr := captureStderr(t, func() {
+		captureStdout(t, func() { answer, err = plainAsk(&m, "unanswerable", &rc, nil, "", false) })
+	})
+	if err != nil {
+		t.Fatalf("no results was reported as a turn error: %v", err)
+	}
+	if answer != "" {
+		t.Fatalf("answer = %q, want none", answer)
+	}
+	if !strings.Contains(stderr, "No relevant sources were found") {
+		t.Fatalf("the no-results warning did not reach stderr: %q", stderr)
+	}
+}
+
+// A bare deadline becomes the one-line timeout error with its advice, rather
+// than a raw context message.
+func TestPlainAskMapsABareDeadlineToTheTimeoutError(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	prev := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = prev })
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, _ AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		return "", nil, false, nil, 0, "", fmt.Errorf("synthesis: %w", context.DeadlineExceeded)
+	}
+
+	m := model{cfg: loadConfig()}
+	var rc replClient
+	defer rc.close()
+	var err error
+	captureStdout(t, func() { _, err = plainAsk(&m, "slow question", &rc, nil, "", false) })
+	if !errors.Is(err, errRequestTimeout) {
+		t.Fatalf("error = %v, want the request-timeout error", err)
 	}
 }
 
