@@ -173,6 +173,112 @@ func TestEngageNormalFinalAlsoWritesStructuredAssessment(t *testing.T) {
 	}
 }
 
+func TestEngageFinalReviewCompletesEvidenceBackedTask(t *testing.T) {
+	m := &fakeModel{}
+	d := testDeps(t, m)
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{
+		ID: "t1", Kind: "recon", Status: engagement.StatusActive, DoneWhen: "port 8080 and the HTTP Server header are recorded",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	portID, err := d.Store.RecordEvidence("t1", "8080/tcp open http")
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerID, err := d.Store.RecordEvidence("t1", "Server: fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := reviewOpenTaskFinal(context.Background(), d.Store)
+	if err != nil || !strings.Contains(review, fmt.Sprintf(`"evidence_id":%d`, portID)) || !strings.Contains(review, fmt.Sprintf(`"evidence_id":%d`, headerID)) {
+		t.Fatalf("review=%q err=%v", review, err)
+	}
+	m.queue = []*llms.ContentResponse{
+		textResp("complete"),
+		callResp("c1", "plan_complete", fmt.Sprintf(`{"id":"t1","basis":"port 8080 and the Server header are recorded","evidence_ids":[%d,%d]}`, portID, headerID)),
+		textResp("complete"),
+	}
+	scope, err := secgate.ParseScope(strings.NewReader("local\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := secgate.DefaultPolicy()
+	policy.Allowed = []string{"local"}
+	d.Gate = &secgate.Gate{Mode: secgate.Auto, Scope: scope, Policy: policy}
+	if err := d.Gate.Start(); err != nil {
+		t.Fatal(err)
+	}
+	denied := secgate.Command{Binary: "nmap", Args: []string{"-p-", "10.0.0.5"}}
+	d.Gate.Authorize(context.Background(), denied)
+	d.Gate.Authorize(context.Background(), denied)
+	if d.Gate.PolicyStopReason() == "" {
+		t.Fatal("fixture did not establish a repeated denial")
+	}
+	out, err := runOrchestrator(context.Background(), d, "report the port and header")
+	task, taskErr := d.Store.GetTask("t1")
+	if err != nil || taskErr != nil || out != "complete" || task.Status != engagement.StatusDone || m.calls != 3 {
+		t.Fatalf("out=%q task=%+v calls=%d err=%v/%v", out, task, m.calls, err, taskErr)
+	}
+}
+
+func TestEngageFinalReviewDoesNotLoopWhenModelDeclines(t *testing.T) {
+	m := &fakeModel{queue: []*llms.ContentResponse{textResp("draft"), textResp("still final")}}
+	d := testDeps(t, m)
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{
+		ID: "t1", Kind: "recon", Status: engagement.StatusActive, DoneWhen: "port observed",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Store.RecordEvidence("t1", "port 8080 open"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runOrchestrator(context.Background(), d, "report the port")
+	if err != nil || m.calls != 2 || !strings.Contains(out, "Engagement paused: open tasks remain") {
+		t.Fatalf("out=%q calls=%d err=%v", out, m.calls, err)
+	}
+}
+
+func TestEngageNoProgressReviewsEvidenceBeforeSynthesis(t *testing.T) {
+	t.Setenv("BLKCHAIN_ENGAGE_NO_PROGRESS_ROUNDS", "1")
+	m := &fakeModel{}
+	d := testDeps(t, m)
+	d.Assessment = &engreport.Assessment{}
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{
+		ID: "t1", Kind: "recon", Status: engagement.StatusActive, DoneWhen: "port and Server header recorded",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	portID, err := d.Store.RecordEvidence("t1", "8080/tcp open http")
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerID, err := d.Store.RecordEvidence("t1", "Server: fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.queue = []*llms.ContentResponse{
+		callResp("c1", "missing", "{}"),
+		callResp("c2", "plan_complete", fmt.Sprintf(`{"id":"t1","basis":"the port and header were observed","evidence_ids":[%d,%d]}`, portID, headerID)),
+		textResp(`{"summary":"Port and header observed.","confirmed":["t1: port 8080 and Server header recorded."]}`),
+	}
+	out, err := runOrchestrator(context.Background(), d, "report port and header")
+	task, taskErr := d.Store.GetTask("t1")
+	if err != nil || taskErr != nil || task.Status != engagement.StatusDone || !strings.HasPrefix(out, "Engagement completed after evidence review.") || d.Assessment.StopReason != "evidence review completed" || m.calls != 3 {
+		t.Fatalf("out=%q task=%+v calls=%d err=%v/%v", out, task, m.calls, err, taskErr)
+	}
+}
+
+func TestEngagementTasksClosedRequiresCompletedWork(t *testing.T) {
+	d := testDeps(t, nil)
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{ID: "t1", Kind: "recon", Status: engagement.StatusNA}}}); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := engagementTasksClosed(context.Background(), d.Store)
+	if err != nil || closed {
+		t.Fatalf("all not-applicable tasks counted as completion: closed=%v err=%v", closed, err)
+	}
+}
+
 func TestEngageOrchestratorStopsAfterCommandCapDenial(t *testing.T) {
 	scope, err := secgate.ParseScope(strings.NewReader("local\n"))
 	if err != nil {

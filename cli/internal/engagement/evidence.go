@@ -79,9 +79,10 @@ func (s *Store) EvidenceHighlightsFor(taskID string) ([]EvidenceRow, error) {
 	rows, err := s.db.Query(`SELECT id, quote FROM evidence
 		WHERE task_id = ? AND id IN (
 			(SELECT MAX(id) FROM evidence WHERE task_id = ?),
-			(SELECT MAX(id) FROM evidence WHERE task_id = ? AND quote LIKE '%Server:%')
+			(SELECT MAX(id) FROM evidence WHERE task_id = ? AND quote LIKE '%Server:%'),
+			(SELECT MAX(id) FROM evidence WHERE task_id = ? AND quote LIKE '%/tcp%open%')
 		)
-		ORDER BY id ASC`, taskID, taskID, taskID)
+		ORDER BY id ASC`, taskID, taskID, taskID, taskID)
 	if err != nil {
 		return nil, err
 	}

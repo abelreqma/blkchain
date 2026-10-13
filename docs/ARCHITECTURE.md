@@ -329,6 +329,9 @@ the other's reachability from its own response.
 - The pinned runner includes Nmap's NSE libraries and scripts so bounded service detection can run.
   A network recon task that requests an HTTP banner uses the gated command tool for a bounded HEAD
   request after it observes an open HTTP port; only an exact response line establishes a Server header.
+- Before accepting a model final with active evidence-backed tasks, the orchestrator allows one
+  bounded completion review. A no-progress stop can also review those tasks using only
+  `plan_complete`. A policy command cap ends planning without this review.
 - MLX inference is serialized. `embed_server` runs all inference under a single lock and sub-batches
   forward passes. Do not add concurrent MLX calls.
 - `embed_server` releases the Metal cache after large index-time batches. Do not clear the LLM cache

@@ -320,6 +320,9 @@ func TestPolicyStopsRepeatedIdenticalCommandDenial(t *testing.T) {
 	if d := g.Authorize(context.Background(), cmd); d.Allowed || g.PolicyStopReason() != "repeated identical command denial" {
 		t.Fatalf("repeat denial did not stop planning: %+v stop=%q", d, g.PolicyStopReason())
 	}
+	if d := g.Authorize(context.Background(), Command{Binary: "id"}); !d.Allowed || g.PolicyStopReason() != "" {
+		t.Fatalf("allowed adaptation did not clear the stall: %+v stop=%q", d, g.PolicyStopReason())
+	}
 }
 
 func TestPolicyByteCapSurvivesRestore(t *testing.T) {

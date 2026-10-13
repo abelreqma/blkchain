@@ -511,6 +511,7 @@ func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
 		if !c.InternalProbe {
 			g.lastDenial = ""
 			g.denialRepeats = 0
+			g.policyStall = ""
 		}
 		g.audit(allowAction(c), Signature(c))
 		g.mu.Unlock()
@@ -550,6 +551,7 @@ func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
 	if !run.InternalProbe {
 		g.lastDenial = ""
 		g.denialRepeats = 0
+		g.policyStall = ""
 	}
 	g.audit(allowAction(run), Signature(run))
 	g.mu.Unlock()

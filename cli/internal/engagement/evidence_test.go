@@ -223,6 +223,24 @@ func TestEvidenceHighlightsKeepLatestHeaderAndLatestRow(t *testing.T) {
 	}
 }
 
+func TestEvidenceHighlightsKeepPortAfterLaterTimeout(t *testing.T) {
+	st := openTemp(t)
+	seedAB(t, st)
+	for _, quote := range []string{
+		"8080/tcp open http",
+		"HTTP/1.0 200 OK\nServer: fixture",
+		"Starting Nmap; command timed out",
+	} {
+		if _, err := st.RecordEvidence("A", quote); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := st.EvidenceHighlightsFor("A")
+	if err != nil || len(rows) != 3 || rows[0].Quote != "8080/tcp open http" || !strings.Contains(rows[1].Quote, "Server:") || rows[2].Quote != "Starting Nmap; command timed out" {
+		t.Fatalf("highlights=%v err=%v", rows, err)
+	}
+}
+
 func TestEvidenceForEmpty(t *testing.T) {
 	s := openTemp(t)
 	seedAB(t, s)

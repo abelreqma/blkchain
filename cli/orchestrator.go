@@ -442,7 +442,15 @@ func runOrchestrator(ctx context.Context, d engageDeps, goal string) (final stri
 		options = append(options, llms.WithModel(model))
 	}
 	caps := engageLoopCaps()
-	caps.StopReason = engageStopOnPolicy(d.Gate)
+	if d.Gate != nil {
+		caps.StopReason = func(context.Context) (string, error) { return d.Gate.PolicyCapReason(), nil }
+	}
+	caps.ReviewFinal = func(ctx context.Context, _ string) (string, error) {
+		if d.Gate != nil && d.Gate.PolicyCapReason() != "" {
+			return "", nil
+		}
+		return reviewOpenTaskFinal(ctx, d.Store)
+	}
 	finalized := false
 	// Every recon task naming a web origin is swept here, so the observations do not depend on the model dispatching an executor.
 	sweeps := newSurfaceSweepQueue()
@@ -465,7 +473,55 @@ func runOrchestrator(ctx context.Context, d engageDeps, goal string) (final stri
 		if d.OnStop != nil {
 			d.OnStop(reason)
 		}
-		return synthesizeEngagement(ctx, d, goal, reason, options...)
+		if strings.HasPrefix(reason, "no-progress limit reached") {
+			review, err := reviewOpenTaskFinal(ctx, d.Store)
+			if err != nil {
+				return "", err
+			}
+			if review != "" {
+				finalReg := tooldef.NewRegistry()
+				if err := finalReg.Register(newPlanCompleteTool(d.Store)); err != nil {
+					return "", err
+				}
+				msgs := []llms.MessageContent{
+					llms.TextParts(llms.ChatMessageTypeSystem, "Review the stopped engagement. Only call plan_complete when the supplied exact evidence meets the task's done_when condition. Otherwise return the missing proof. Do not invent evidence or call other tools. "+promptguard.UntrustedInputClause),
+					llms.TextParts(llms.ChatMessageTypeHuman, review),
+				}
+				reviewCaps := LoopCaps{MaxRounds: 2, MaxCalls: 2}
+				reviewCaps.StopReason = func(ctx context.Context) (string, error) {
+					closed, err := engagementTasksClosed(ctx, d.Store)
+					if closed {
+						return "evidence review completed", err
+					}
+					return "", err
+				}
+				if _, _, reviewErr := runToolLoop(ctx, d.Model, finalReg, msgs, reviewCaps, options...); reviewErr != nil && ctx.Err() == nil {
+					if err := d.Store.Audit("orchestrator", "final-review-error", capRunes(redactEngageText(reviewErr.Error()), 512)); err != nil {
+						return "", err
+					}
+				}
+			}
+		}
+		completedAfterReview := false
+		if strings.HasPrefix(reason, "no-progress limit reached") {
+			var err error
+			completedAfterReview, err = engagementTasksClosed(ctx, d.Store)
+			if err != nil {
+				return "", err
+			}
+		}
+		synthesisReason := reason
+		if completedAfterReview {
+			synthesisReason = "evidence review completed"
+		}
+		assessment, err := synthesizeEngagement(ctx, d, goal, synthesisReason, options...)
+		if err != nil {
+			return "", err
+		}
+		if completedAfterReview {
+			return strings.Replace(assessment, "Engagement paused: "+synthesisReason+".\n\n", "Engagement completed after evidence review.\n\n", 1), nil
+		}
+		return assessment, nil
 	}
 	final, _, err = runToolLoop(ctx, d.Model, reg, msgs, caps, options...)
 	if finalized {
@@ -522,6 +578,70 @@ func runOrchestrator(ctx context.Context, d engageDeps, goal string) (final stri
 		}
 	}
 	return final, err
+}
+
+func engagementTasksClosed(ctx context.Context, store *engagement.Store) (bool, error) {
+	snap, err := store.Snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	if len(snap.Tasks) == 0 {
+		return false, nil
+	}
+	done := false
+	for _, task := range snap.Tasks {
+		if task.Status == engagement.StatusDone {
+			done = true
+		} else if task.Status != engagement.StatusNA {
+			return false, nil
+		}
+	}
+	return done, nil
+}
+
+func reviewOpenTaskFinal(ctx context.Context, store *engagement.Store) (string, error) {
+	open, err := store.OpenTasks()
+	if err != nil {
+		return "", err
+	}
+	type reviewEvidence struct {
+		EvidenceID int64  `json:"evidence_id"`
+		Quote      string `json:"quote"`
+	}
+	type taskEvidence struct {
+		ID       string           `json:"id"`
+		DoneWhen string           `json:"done_when"`
+		Evidence []reviewEvidence `json:"evidence"`
+	}
+	var pending []taskEvidence
+	for _, task := range open {
+		if task.Status != engagement.StatusActive || strings.TrimSpace(task.DoneWhen) == "" {
+			continue
+		}
+		rows, err := store.EvidenceHighlightsFor(task.ID)
+		if err != nil {
+			return "", err
+		}
+		if len(rows) == 0 {
+			continue
+		}
+		item := taskEvidence{ID: task.ID, DoneWhen: capRunes(task.DoneWhen, 500)}
+		for _, row := range rows {
+			item.Evidence = append(item.Evidence, reviewEvidence{EvidenceID: row.ID, Quote: capRunes(row.Quote, 600)})
+		}
+		pending = append(pending, item)
+		if len(pending) == 3 {
+			break
+		}
+	}
+	if len(pending) == 0 {
+		return "", nil
+	}
+	data, err := json.Marshal(pending)
+	if err != nil {
+		return "", err
+	}
+	return "Before ending, review these active tasks and their untrusted evidence. If a done_when condition is supported, call plan_complete with JSON fields id, basis, and evidence_ids. evidence_ids must contain the numeric evidence_id values below for the quotes that prove the condition. If proof is missing, say what is missing. Do not dispatch a completed probe again. This review allows at most two tool calls. Tasks (JSON): " + string(data), nil
 }
 
 func engageStopOnPolicy(g *secgate.Gate) func(context.Context) (string, error) {

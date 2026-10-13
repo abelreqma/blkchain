@@ -97,6 +97,32 @@ func TestToolLoopImmediateReply(t *testing.T) {
 	}
 }
 
+func TestToolLoopReviewsFinalOnce(t *testing.T) {
+	m := &fakeModel{queue: []*llms.ContentResponse{textResp("draft"), textResp("final")}}
+	reviews := 0
+	final, rounds, err := runToolLoop(context.Background(), m, newLoopReg(t), userMsgs(), LoopCaps{
+		MaxRounds: 4,
+		ReviewFinal: func(context.Context, string) (string, error) {
+			reviews++
+			return "review open task evidence", nil
+		},
+	})
+	if err != nil || final != "final" || rounds != 2 || reviews != 1 || m.calls != 2 {
+		t.Fatalf("final=%q rounds=%d reviews=%d calls=%d err=%v", final, rounds, reviews, m.calls, err)
+	}
+	seenReview := false
+	for _, message := range m.seen[1] {
+		for _, part := range message.Parts {
+			if text, ok := part.(llms.TextContent); ok && strings.Contains(text.Text, "review open task evidence") {
+				seenReview = true
+			}
+		}
+	}
+	if !seenReview {
+		t.Fatal("second model call did not receive the final review")
+	}
+}
+
 func TestToolLoopRunsTool(t *testing.T) {
 	echo := &fakeTool{name: "echo", fn: func(a string) (string, error) { return "echoed:" + a, nil }}
 	m := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "echo", `{"x":1}`), textResp("final")}}
