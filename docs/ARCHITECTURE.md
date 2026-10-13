@@ -237,12 +237,19 @@ A named target does not prove a service is reachable. Service-specific commands 
 require a code-observed host, transport, port, and execution vantage from the past hour before
 dispatch. Bounded port discovery is the exception that establishes the observation. The dispatcher
 checks the command's connected endpoint, not the model's claimed prerequisite. Only a completed
-Nmap run supplies port states. Masscan output is a candidate until a connect scan validates it;
-ACK, FIN, NULL, Xmas, idle, fragmented, decoy, and source-port scans do not supply positive
-service evidence. TCP `open` permits a protocol check, not a service identity claim. UDP `open` or
-`open|filtered` permits a protocol-correct follow-up; `open|filtered` is not a positive response.
-A completed version scan can promote that same candidate to `open`, but cannot create first
-service evidence.
+Nmap scan supplies scanner-derived port states. Masscan is excluded because its raw Ethernet
+packets bypassed the worker destination guard in a local fixture. ACK, FIN, NULL, Xmas, idle,
+fragmented, and source-port scans do not supply positive service
+evidence. Decoys, source-address spoofing, raw Ethernet, and MAC spoofing are denied because the
+worker cannot constrain their source or destination path. TCP `open` permits a protocol check,
+not a service identity claim. UDP `open` or `open|filtered` permits a protocol-correct follow-up;
+`open|filtered` is not a positive response. A completed version scan can promote that UDP
+candidate to `open`, but cannot create first service evidence.
+A completed source-port SYN scan may create only a candidate for that source port. A direct curl
+GET with `-q` first, no proxy, a single local port, headers, and bounded timeouts can validate the
+candidate. Only a complete final HTTP response promotes that exact source-port route to `open`;
+the ordinary route stays separate. Nping UDP payloads require prior UDP port evidence and never
+promote a service state by packet count alone.
 A later closed result removes the permission. A command that cannot expose its connection route
 fails closed. `curl --http3-only` needs UDP evidence and `--http3` needs TCP and UDP evidence;
 the pinned runner curl currently lacks HTTP/3 support and cannot execute those probes.
@@ -256,7 +263,11 @@ one turn. A web action with no observation performs a scoped TCP connect before 
 A loopback proxy CONNECT is an alternate observation; it does not authorize the worker or web
 broker path.
 Nmap SCTP and IP-protocol scans remain diagnostic and never create TCP or UDP port permission.
-The pinned runner has no `nping`, `ike-scan`, or HTTP/3-capable curl. Large port ranges must be
+The pinned runner permits single-host `nmap -sn` discovery and bounded Nping packet comparisons.
+Nping accepts one literal IP, at most three rounds at one packet per second, one TCP or UDP port,
+and at most 512 hex payload bytes in UDP mode. Its raw modes run with `NET_RAW` after the native
+chat firewall is installed, or in the engagement raw worker. Nping output never creates service
+permission. The runner has no `ike-scan` or HTTP/3-capable curl. Large port ranges must be
 partitioned into scans that finish within the command timeout; no partial result proves a full
 inventory.
 This service check adds to the RoE and network scope controls; it does not expand either one.
