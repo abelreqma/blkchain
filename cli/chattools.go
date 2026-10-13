@@ -340,5 +340,14 @@ func newChatToolRegistry(ctx context.Context, rc searcher, cfg ragconfig.Config,
 			return nil, nil, err
 		}
 	}
-	return reg, func() { closeBrowser(); driver.Close(); _ = os.RemoveAll(scratch); closeMCP() }, nil
+	closeOOB, err := registerOOBTools(ctx, reg)
+	if err != nil {
+		closeOOB()
+		closeBrowser()
+		driver.Close()
+		_ = os.RemoveAll(scratch)
+		closeMCP()
+		return nil, nil, err
+	}
+	return reg, func() { closeOOB(); closeBrowser(); driver.Close(); _ = os.RemoveAll(scratch); closeMCP() }, nil
 }

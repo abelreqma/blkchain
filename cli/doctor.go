@@ -57,7 +57,10 @@ func runDoctor(args []string) error {
 		fmt.Printf("%s hermes CLI not on PATH %s\n", check(false), Meta.Render("(blk hermes / ask --hermes unavailable)"))
 	}
 
-	// 4. Hermes MCP wiring: is the blkchain MCP server registered and enabled?
+	// 4. Out-of-band interaction detection.
+	printDoctorOOB()
+
+	// 5. Hermes MCP wiring: is the blkchain MCP server registered and enabled?
 	cfgPath := hermesConfigPath()
 	present, enabled, python, err := hermesMCPStatus(cfgPath, "blkchain")
 	switch {
@@ -74,6 +77,30 @@ func runDoctor(args []string) error {
 		fmt.Printf("%s blkchain MCP registered + enabled for Hermes\n", check(true))
 	}
 	return nil
+}
+
+// printDoctorOOB prints whether native chat offers the out-of-band tools, and
+// why not when it does not. There is no default interactsh server, so the row
+// names the variable that enables the tools and the alternative that needs no
+// server of your own.
+func printDoctorOOB() {
+	servers, err := oobServers()
+	switch {
+	case err != nil:
+		fmt.Printf("%s out-of-band detection %s\n", check(false), Meta.Render("("+err.Error()+")"))
+		return
+	case len(servers) == 0:
+		fmt.Printf("%s out-of-band detection off %s\n", Meta.Render(Glyph(GlyphWarn)),
+			Meta.Render("(set BLKCHAIN_OOB_SERVER to your own interactsh server; Burp Collaborator stays available through the configured MCP server)"))
+		return
+	}
+	client, err := oobClientPath()
+	if err != nil {
+		fmt.Printf("%s out-of-band detection %s\n", check(false), Meta.Render("("+err.Error()+")"))
+		return
+	}
+	fmt.Printf("%s out-of-band detection via %s %s\n", check(true),
+		Meta.Render(strings.Join(servers, ",")), Meta.Render("("+client+")"))
 }
 
 // printDoctorServices prints doctor's service rows, each hint right under the

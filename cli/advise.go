@@ -152,7 +152,7 @@ func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig
 		}
 		if action == "tool-call" {
 			toolCalls++
-			if detail == required || required == "mcp" && strings.HasPrefix(detail, "mcp__") || required == "target action" && (detail == "run_command" || detail == "web_api" || detail == "web_browser" || detail == "browser_control") {
+			if detail == required || required == "mcp" && strings.HasPrefix(detail, "mcp__") || required == "target action" && (detail == "run_command" || detail == "web_api" || detail == "web_browser" || detail == "browser_control" || detail == "oob_payload" || detail == "oob_interactions") {
 				requiredCalled = true
 			}
 		}
