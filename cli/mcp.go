@@ -35,6 +35,24 @@ type mcpRouteIn struct {
 	Domain string `json:"domain" jsonschema:"an engagement domain (generic, recon, web, ad, cloud, k8s, wifi, exploit-dev) or a kind/vuln-class keyword such as kerberos, xss, or adcs, to route a skill for"`
 }
 
+// Bounds on chat's caller-supplied strings. Generated session ids are well
+// under mcpChatMaxSessionID bytes.
+const (
+	mcpChatMaxMessage   = 256 << 10
+	mcpChatMaxSessionID = 128
+)
+
+// mcpChatIn is chat's tool input. An empty SessionID opens a new session;
+// supplying one continues it. ToolHost accepts local because the server speaks
+// only over stdio, so its client is a local process that already holds the
+// operator's privileges. A network transport would need that revisited.
+type mcpChatIn struct {
+	Message   string `json:"message" jsonschema:"the message for this turn"`
+	SessionID string `json:"session_id,omitempty" jsonschema:"continue this session; omit to start a new one"`
+	Agent     string `json:"agent,omitempty" jsonschema:"native answer specialist name; omit for automatic selection"`
+	ToolHost  string `json:"tool_host,omitempty" jsonschema:"file and terminal host: sandbox (default) or local. local is permitted because this server speaks only over stdio to a local client that already holds the operator's privileges"`
+}
+
 // runMCP starts the MCP stdio server exposing kb_search, kb_answer, and
 // route_skill. It runs in-process against the Go retrieval client and answer
 // loop, so embed_server and Qdrant must be up.
@@ -90,6 +108,17 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
+		Name:        "chat",
+		Description: "One turn of the blkChain agent: adaptive routing, the local knowledge base, files, terminal, browser and web research, with the operator's connected MCP servers. Omit session_id to start a conversation, pass the returned session_id back to continue it.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpChatIn) (*mcp.CallToolResult, any, error) {
+		res, err := mcpChatResult(ctx, followPrefs(rc, loadPrefs()), cfg, in)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, res, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
 		Name:        "route_skill",
 		Description: "Get the playbook for an engagement domain. Provide one domain (generic, recon, web, ad, cloud, k8s, wifi, exploit-dev) or a kind/vuln-class keyword (for example kerberos, xss, adcs); the harness selects the skill deterministically and returns its playbook. You cannot choose a specific skill by name; an unrecognized domain returns the generic playbook or a clear no-skill message.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, in mcpRouteIn) (*mcp.CallToolResult, any, error) {
@@ -100,6 +129,31 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 	registerKGTool(s)
 
 	return s
+}
+
+// mcpChatResult runs one native turn for the chat tool. It is the handler body,
+// factored out so the tests drive it without a live transport. The caller's
+// session id is always an id, never a selector: new and last are rejected so
+// a client cannot attach to whichever session was used most recently.
+func mcpChatResult(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Config, in mcpChatIn) (turnResult, error) {
+	if len(in.Message) > mcpChatMaxMessage {
+		return turnResult{}, usageErr("chat: message exceeds %d bytes", mcpChatMaxMessage)
+	}
+	selector := strings.TrimSpace(in.SessionID)
+	switch {
+	case selector == "":
+		selector = sessionTargetNew
+	case len(selector) > mcpChatMaxSessionID:
+		return turnResult{}, usageErr("chat: session id exceeds %d bytes", mcpChatMaxSessionID)
+	case selector == sessionTargetNew || selector == sessionTargetLast:
+		return turnResult{}, usageErr("chat: invalid session id")
+	}
+	return runNativeTurn(ctx, rc, cfg, turnRequest{
+		Question:  in.Message,
+		SessionID: selector,
+		Agent:     in.Agent,
+		ToolHost:  in.ToolHost,
+	})
 }
 
 // mcpSearchTopK validates kb_search's input and resolves its effective top_k,
