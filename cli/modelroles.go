@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"blkchain/cli/internal/ragconfig"
@@ -142,9 +143,14 @@ func chainFor(configured, fallback string) []string {
 // modelChain calls one role's models in order, advancing to the next when a
 // call fails for a reason that means the model could not answer (see
 // failoverEligible). A one-model chain behaves exactly as that one client.
+//
+// answeredAt is the index of the model whose call last succeeded. Its zero
+// value is index 0, so a chain that has made no call, or whose first model
+// answered, reports the primary.
 type modelChain struct {
-	ids     []string
-	clients []toolLoopModel
+	ids        []string
+	clients    []toolLoopModel
+	answeredAt atomic.Int32
 }
 
 // newModelChain builds a client per id, in order.
@@ -163,8 +169,8 @@ func newModelChain(cfg ragconfig.Config, ids []string) (*modelChain, error) {
 	return &modelChain{ids: slices.Clone(ids), clients: clients}, nil
 }
 
-// primary is the id of the model the chain prefers, which is the model a turn
-// reports as having answered it.
+// primary is the id of the model the chain prefers. It answers unless a call
+// failed over; answered reports the model that did.
 func (c *modelChain) primary() string {
 	if c == nil || len(c.ids) == 0 {
 		return ""
@@ -172,12 +178,60 @@ func (c *modelChain) primary() string {
 	return c.ids[0]
 }
 
+// markAnswered records that the model at index i completed a call.
+func (c *modelChain) markAnswered(i int) {
+	c.answeredAt.Store(int32(i))
+}
+
+// answered is the id of the model whose call last succeeded, which is the model
+// a turn reports as having answered it. It is the primary when no call has
+// succeeded or the recorded index is out of range.
+func (c *modelChain) answered() string {
+	if c == nil {
+		return ""
+	}
+	if i := int(c.answeredAt.Load()); i >= 0 && i < len(c.ids) {
+		return c.ids[i]
+	}
+	return c.primary()
+}
+
+// GenerateContent calls each model in turn until one answers.
+//
+// A failure is not failed over once a byte has reached the caller's streaming
+// function: the next model would stream a second complete answer after the
+// partial one. The failure is returned instead.
 func (c *modelChain) GenerateContent(ctx context.Context, msgs []llms.MessageContent, opts ...llms.CallOption) (*llms.ContentResponse, error) {
+	if c == nil || len(c.clients) == 0 {
+		return nil, errors.New("no model in the chain")
+	}
+	var applied llms.CallOptions
+	for _, o := range opts {
+		o(&applied)
+	}
+	caller := applied.StreamingFunc
 	var resp *llms.ContentResponse
 	var err error
 	for i, m := range c.clients {
-		resp, err = m.GenerateContent(ctx, msgs, opts...)
-		if err == nil || i == len(c.clients)-1 || !failoverEligible(err) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		attempt := opts
+		var delivered atomic.Bool
+		if caller != nil {
+			attempt = append(slices.Clone(opts), llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
+				if len(chunk) > 0 {
+					delivered.Store(true)
+				}
+				return caller(ctx, chunk)
+			}))
+		}
+		resp, err = m.GenerateContent(ctx, msgs, attempt...)
+		if err == nil {
+			c.markAnswered(i)
+			return resp, nil
+		}
+		if i == len(c.clients)-1 || delivered.Load() || !failoverEligible(err) {
 			return resp, err
 		}
 	}
