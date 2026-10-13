@@ -28,16 +28,21 @@ Bare `blk` starts the REPL or TUI in native auto mode. `blk ask QUESTION` also u
 | Entry point | Behavior |
 | --- | --- |
 | `blk ask QUESTION` | Uses native answer routing and selects a research specialist dynamically. |
-| `blk ask --hermes QUESTION` | Runs a Hermes turn using the external Hermes configuration. |
+| `blk ask --session ID QUESTION` | Continues a saved conversation. `ID` is a session id, `new` to start one, or `last` for the most recent. Without `--session`, `ask` is stateless and writes no transcript. |
+| `blk ask --hermes QUESTION` | Runs one legacy Hermes turn using the external Hermes configuration. It writes no session. |
 | `blk ask --agent web QUESTION` | Uses the native web specialist prompt. The specialist name does not itself enable internet access. |
 | `blk ask --rag QUESTION` | Forces the native knowledge-base answer path. |
 | `blk search QUERY` | Synthesizes a native answer grounded in the search results. |
 | `blk search --json QUERY` | Returns ranked chunks without answer synthesis. |
 | `blk ask --json QUESTION` | Returns structured native answer output, citations, results, and available call metrics. |
 
-`--json` and `--sources` work with the default native `ask` path. In the interactive session, `/agent NAME` selects a native specialist, `/agent auto` restores dynamic selection, and `/mode` switches between native answers and Hermes. Research specialists change answer guidance. Engagement executors are selected separately from task kind and surface.
+`--json` and `--sources` work with the default native `ask` path. In the interactive session, `/agent NAME` selects a native specialist and `/agent auto` restores dynamic selection. `/hermes PROMPT` runs one legacy Hermes turn. Research specialists change answer guidance. Engagement executors are selected separately from task kind and surface.
 
-Native chat shares a bounded tool registry across `blk ask`, the REPL, and the TUI. It offers knowledge-base search, playbook routing, file operations, terminal and process control, public web search and extraction, browser control, screenshot analysis, and allowlisted MCP client tools.
+`blk ask`, the plain REPL, the TUI, and the `chat` tool of `blk mcp` run the same native turn. One function resolves the session, loads its history, assembles the answer options, routes the question, records tool actions, and saves the turn, so every surface gets the same routing, tools, and persistence. `--hermes` cannot be combined with `--session`, `--agent`, `--rag`, `--web`, `--json`, or `--sources`.
+
+Each session is one append-only JSONL transcript plus a row in the local history database. Every blk process shares them, and a transcript is reconciled with the database when a session is reopened. A session started over MCP is an ordinary session, so `blk ask --session ID` continues it.
+
+Native chat shares a bounded tool registry across those surfaces. It offers knowledge-base search, playbook routing, file operations, terminal and process control, public web search and extraction, browser control, screenshot analysis, and allowlisted MCP client tools.
 
 File and terminal tools use an empty, persistent Docker sandbox for the current project by default. Use `--tool-host local` for an explicit one-shot local workspace or `/tool-host local` for the interactive session. `file_import` and `file_export` copy only paths named in the current request and never overwrite an existing destination. Text reads are paginated and convert UTF-16, Jupyter notebooks, DOCX, and XLSX to text. Document formats are read-only through the file tools; transfers can carry binary files. Shell processes can continue across chat turns. The sandbox has no network access, so public research and browsing use separate bounded web tools.
 
@@ -63,7 +68,7 @@ MCP client servers are configured in `~/.config/blkchain/mcp-clients.json`, or t
 
 Import the executable into the sandbox before using this stdio example. MCP tool results are treated as untrusted data. The MCP client configuration is separate from the `blk mcp` server.
 
-Hermes has its own provider, tools, permissions, and conversation state. Native web settings and engagement Safe/Auto settings do not control Hermes's own tool execution.
+Hermes is a legacy one-shot, reached through `blk hermes`, `/hermes`, and `blk ask --hermes`. It has its own provider, tools, and permissions, and it writes no blk session. Native web settings and engagement Safe/Auto settings do not control Hermes's own tool execution.
 
 ## Engagement harness
 
@@ -288,8 +293,9 @@ controls, cancellation, and bounded queues.
 | `/agent auto` or `/agent NAME` | Select native answer routing and a research specialist. |
 | `/tool-host sandbox` or `/tool-host local` | Choose where native file and terminal tools run. |
 | `/browser-cdp URL` or `/browser-cdp off` | Explicitly select or clear a loopback signed-in browser source. |
-| `/model` | Select the model and reasoning level for the current answer mode. |
+| `/model` | Select the model and reasoning level. |
 | `/models` | Inspect and administer native chat models, reranking, and web settings. |
+| `/hermes PROMPT` | Run one legacy Hermes turn. It writes no session. |
 | `/attach PATH` or `/context` | Queue, preview, or remove bounded context for the next question. URLs are references and are not fetched. |
 | `/queue` | Review, edit, pause, resume, or remove queued questions in the UI. |
 | `/history`, `/clear`, `/undo` | Inspect or change blk's local conversation state. |
@@ -305,9 +311,14 @@ queues. Model and web preferences, conversation history, and engagement state ar
 | --- | --- |
 | `kb_search` | Ranked local retrieval with source pointers. |
 | `kb_answer` | Bounded native research answers. |
+| `chat` | One agent turn with adaptive routing, the knowledge base, files, terminal, browser and web research, and the allowlisted MCP client tools. Omit `session_id` to start a session and pass the returned id to continue it. |
 | `route_skill` | Deterministic domain-based playbook selection. |
 | `engage` | Run under the operator-approved RoE configured by `BLKCHAIN_MCP_ROE_PATH`. The supplied inline RoE must match that policy. |
 | `kg_query` | Query an engagement's task, asset, and evidence graph. |
+
+`chat` takes an optional `agent` and `tool_host`. `tool_host` is `sandbox` (the default) or `local`. `local` is accepted because the server speaks only stdio, so its client is a local process that already holds the operator's privileges. Every `chat` turn is saved as a session.
+
+The server also serves saved sessions as read-only `session://{id}` resources. A client reads one by id, and the listing covers up to 50 sessions that exist when the server starts. To resume one, pass its id back to `chat`.
 
 MCP engagement defaults to Auto. `confirm=elicit` requires compatible client elicitation support.
 The tool returns workspace, transcript, report, and policy references. `blk analyze --schema NAME`
@@ -321,7 +332,7 @@ provides schema-validated JSON generation.
 | `blkchain/` | Python MLX embedding/reranking service, offline ingestion/indexing, and evaluation harnesses. |
 | Qdrant | Persistent dense and sparse index. |
 | OpenAI-compatible LLM endpoint | Separately managed native answer and engagement inference. |
-| Hermes | Separately configured backend for explicit one-shot and interactive turns. |
+| Hermes | Separately configured legacy backend for explicit one-shot turns. |
 
 Go owns query-time retrieval, answering, engagement execution, and MCP. Python serves the MLX models
 and builds the index offline. Models and corpus content are supplied by the operator.
@@ -334,7 +345,7 @@ retrieval path, the engagement harness, or the embedding service.
 ## Complete setup guide
 
 This guide targets macOS on Apple Silicon. Run the core steps first to get local retrieval and
-native answers working. Add Hermes for optional one-shot or interactive turns. Add the
+native answers working. Add Hermes for the optional legacy one-shot. Add the
 command runner for engagements and the browser container for runtime web collection.
 
 | Component | Required for |
@@ -343,7 +354,7 @@ command runner for engagements and the browser container for runtime web collect
 | Docker Desktop | Qdrant and the isolated execution containers. |
 | Embedder and reranker model files | Local retrieval. |
 | OpenAI-compatible chat server and chat model | Native answers and model-driven engagements. |
-| Hermes | Explicit `blk ask --hermes` and interactive agent mode. |
+| Hermes | Explicit `blk hermes`, `/hermes`, and `blk ask --hermes`. |
 | Pinned Playwright package and browser container | Runtime browser collection. |
 
 Choose a chat model that fits alongside the embedder, reranker, Docker, and the operating system.
@@ -452,7 +463,6 @@ The default endpoint layout is:
 | Qdrant gRPC | `127.0.0.1:6334` |
 | Embedding/reranking | `http://127.0.0.1:8100` |
 | Native chat server | `http://127.0.0.1:8000/v1` |
-| Hermes gateway | `http://127.0.0.1:8642` |
 
 Keep these defaults for the initial setup. To use another embedding endpoint, set
 `BLKCHAIN_EMBED_HOST` and `BLKCHAIN_EMBED_PORT`. These settings configure the Python service,
@@ -477,7 +487,7 @@ the behavior described.
 | `BLKCHAIN_EMBED_CACHE_RELEASE_AFTER` | 64 | Batches processed before the embedding service releases the Metal cache. |
 | `BLKCHAIN_MMDFLUX` | `mmdflux` on `PATH` | Path to the diagram renderer used by the engagement views. |
 | `BLKCHAIN_POWERLINE` | unset | Set to `0` to force plain unicode status separators instead of powerline glyphs. |
-| `HERMES_HOME` | `~/.hermes` | Hermes configuration directory that `blk doctor` and the gateway setup read. |
+| `HERMES_HOME` | `~/.hermes` | Hermes configuration directory that `blk doctor` reads. |
 
 ### 4. Download the pinned models
 
@@ -647,7 +657,7 @@ Use a tool-calling model and a supporting server configuration for engagement or
 
 ### 8. Set up Hermes and connect the knowledge base
 
-Hermes provides an optional backend for one-shot `blk ask --hermes` and interactive agent mode. Install it using the
+Hermes provides an optional legacy backend for one-shot `blk hermes`, `/hermes`, and `blk ask --hermes` turns. Install it using the
 [official quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/).
 This CLI installer is pinned to a source commit and verified before execution:
 
@@ -707,24 +717,7 @@ blk ask --hermes "Use kb_search to explain contextual output encoding from my lo
 and that the blkChain MCP entry is enabled. This one-shot answer should use Hermes and retrieve from
 the connected knowledge base.
 
-For streaming gateway turns in the interactive UI, run these commands in a terminal with the native
-API key exported:
-
-```sh
-blk gateway --setup-only
-export API_SERVER_KEY="${OMLX_API:-${OMLX_API_KEY:-}}"
-export HERMES_API_URL=http://127.0.0.1:8642
-blk gateway
-```
-
-`blk gateway` configures the API server in Hermes's private environment file, preserving unrelated
-settings, then runs the gateway in the foreground. The two keys it writes there are
-`API_SERVER_ENABLED` and `API_SERVER_KEY`; both belong to Hermes, and blk keeps a backup when a
-value changes. It does not export the key into the client terminal. In the terminal running `blk`,
-export `API_SERVER_KEY` with the same value and use the same `HERMES_API_URL`. The interactive
-client checks the authenticated `/health/detailed` route. A missing or rejected key makes it use
-the Hermes CLI fallback. Public `/health` alone does not establish client access. Check
-`hermes gateway status` for the running process. `blk up` does not start Hermes.
+`blk up` does not start Hermes.
 
 ### 9. Provision the isolated command runner
 
@@ -898,7 +891,7 @@ blk doctor
 ```
 
 Start bare `blk` to open the terminal UI in native auto mode. `/agent NAME` selects a specialist,
-`/mode` switches to Hermes, and `/help` lists commands.
+`/hermes PROMPT` runs one legacy Hermes turn, and `/help` lists commands.
 
 | Data or process | Location or control |
 | --- | --- |
@@ -910,7 +903,6 @@ Start bare `blk` to open the terminal UI in native auto mode. `/agent NAME` sele
 | Scanner database cache | `$XDG_CACHE_HOME/blkchain/vulndb`, or `~/.cache/blkchain/vulndb` when unset. |
 | Browser container | `docker start blk-web-browser` / `docker stop blk-web-browser` |
 | Native chat server | Its own foreground terminal or provider's service manager. |
-| Hermes gateway | Its own foreground terminal; `blk gateway` configures and starts it. |
 
 `blk down` stops Qdrant and the embedding service without deleting the index. `blk up` starts them
 again. `blk engage stop --workspace PATH` requests an engagement stop. Keep evidence directories
@@ -942,8 +934,6 @@ CVE lookups. Hermes provider and tool permissions are configured separately.
 | Retrieval has no results | Check `blk sources --json`, corpus paths, collection name, and the completed indexing output. |
 | Chat returns 401 or an unknown-model error | Supply the server's actual API key and use an ID returned by its `/v1/models` endpoint. |
 | A default answer cannot start | Check `blk health --json` and `blk web status` for the native model and retrieval services. |
-| The gateway is unauthorized | Export the same `API_SERVER_KEY` used by the gateway in the client terminal. |
-| The gateway responds at `/health` but the client uses the CLI | Check `API_SERVER_KEY` in the client terminal; blk requires authenticated `/health/detailed`. Confirm the launcher with `hermes --version`. |
 | An offline scanner reports a database gap | Run `blk engage setup`, check its output for update failures, and ensure the printed cache path is readable by Docker workers. |
 | A feature binary reads another checkout's configuration | Set `BLKCHAIN_ROOT` to the intended worktree before running that binary. |
 | Browser provisioning is rejected | Check all driver exports, archive/launcher hashes, the read-only package mount, and the required container settings. |

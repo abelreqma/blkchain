@@ -25,6 +25,9 @@ context and never grants authority.
 
 - Go is the single implementation for search, ask, health and MCP. Python serves the MLX models and
   builds the index offline. Python has no query-time code, and none should be added.
+- `blk ask`, the plain REPL, the TUI and the `chat` tool of `blk mcp` are thin adapters over one turn
+  function, `runNativeTurn` in `cli/nativeturn.go`. Routing, tools, session handling and persistence
+  belong there, not in a surface. Hermes is a legacy one-shot that writes no session.
 - The two cross-language contracts must stay in lockstep. Changing a value in
   `blkchain/contract/rag.json` without updating the compiled-in Go fallback in the same commit fails
   a test that exists to catch exactly that.
