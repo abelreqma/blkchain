@@ -167,7 +167,7 @@ a contract too.
   cwe_class, origin?}}]}`. `origin` is the indexer's provenance tag, present only on content that
   `blk add <url>` fetched, so it is read when present rather than required. The answer path treats
   any non-empty origin as external, so a tag added later cannot default to trusted.
-- `blk ask --json`: requires `--agent`; without it the command is a usage error and exits 2. The
+- `blk ask --json`: `--agent` is optional, and without it the turn selects the specialist itself. The
   payload carries the answer, citations, the web-use flag, the model, the agent, the session id for
   a `--session` turn, per-call LLM metrics, and the results. `untrusted` is true on a web citation
   and omitted on a local one.
