@@ -103,3 +103,26 @@ func TestPlainAskCarriesBrowserCDPToTheTurn(t *testing.T) {
 		}
 	}
 }
+
+func TestTUIStreamCmdCarriesBrowserCDPToTheTurn(t *testing.T) {
+	useDeadServices(t)
+	old := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = old })
+	cdp := "unset"
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		cdp = opts.BrowserCDP
+		return "fixture", nil, false, nil, 0, "skip", nil
+	}
+	m := newKeyModel(t)
+	m.ragModel = "sample-model"
+	for _, endpoint := range []string{"http://127.0.0.1:9333", ""} {
+		m.browserCDP = endpoint
+		cdp = "unset"
+		if done, ok := m.streamCmd(context.Background(), "question", "", m.turnStart, false)().(streamDoneMsg); !ok || done.err != nil {
+			t.Fatalf("turn did not complete: %#v", done)
+		}
+		if cdp != endpoint {
+			t.Fatalf("TUI CDP endpoint = %q, want %q", cdp, endpoint)
+		}
+	}
+}
