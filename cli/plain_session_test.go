@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -258,6 +259,60 @@ func TestPlainAskTurnPersistsThroughRecordTurn(t *testing.T) {
 	replay, err := loadMessages(m.sess.id)
 	if err != nil || len(replay) != 2 || replay[1].Content != answer {
 		t.Fatalf("turn not in the transcript: %v, %v", replay, err)
+	}
+}
+
+// The plain REPL records a completed exchange and not a failed one, matching
+// the other surfaces: the transcript it writes is read back as memory by a
+// later turn in that session.
+func TestPlainREPLDoesNotRecordAnErroredTurn(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	t.Chdir(t.TempDir())
+	prev := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = prev })
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		if opts.Stream != nil {
+			opts.Stream([]byte("partial answer"))
+		}
+		return "partial answer", nil, false, nil, 1, "rag", errors.New("router exploded")
+	}
+
+	input := filepath.Join(t.TempDir(), "input")
+	if err := os.WriteFile(input, []byte("/agent auto\nfailing question\n/quit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	previous := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() { os.Stdin = previous })
+	var stderr string
+	stdout := captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			if err := plainREPL(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	})
+	if !strings.Contains(stdout, "partial answer") {
+		t.Fatalf("the partial answer did not reach the operator: %q", stdout)
+	}
+	if !strings.Contains(stderr, "router exploded") {
+		t.Fatalf("the failure was not reported: %q", stderr)
+	}
+	metas, err := listSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, meta := range metas {
+		if sessionExists(meta.ID) {
+			recs, _ := loadMessages(meta.ID)
+			t.Fatalf("an errored turn reached the transcript of %s: %+v", meta.ID, recs)
+		}
 	}
 }
 

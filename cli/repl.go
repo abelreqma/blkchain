@@ -77,7 +77,12 @@ func plainREPL() error {
 	// ask so the model remembers the session (the TUI reads the same memory from
 	// the history store).
 	var convo []priorTurn
-	recordConvo := func(q, ans string) {
+	// turnErr is the error the answer path returned for this exchange, nil when
+	// the turn finished cleanly. A failed turn stays in this process's memory and
+	// is not recorded: the transcript and the memory rows are read back by a
+	// later turn in this session, on any surface, so a partial answer must not
+	// reach them.
+	recordConvo := func(q, ans string, turnErr error) {
 		if rc.metrics != nil {
 			calls, partial := rc.metrics.snapshot()
 			cost := turnCost{elapsed: time.Since(rc.started), calls: calls, partial: partial}
@@ -94,6 +99,9 @@ func plainREPL() error {
 		}
 		convo = append(convo, priorTurn{Role: "human", Content: q}, priorTurn{Role: "ai", Content: ans})
 		pm.pendingQ, pm.lastAnswer = q, ans
+		if turnErr != nil {
+			return
+		}
 		if err := pm.recordTurn(ans); err != nil {
 			printErr(fmt.Errorf("conversation save failed: %w", err))
 		}
@@ -332,7 +340,7 @@ func plainREPL() error {
 			} else if q != "" {
 				ans, err := plainAsk(&pm, q, &rc, convo, pm.takeContextPreface(q), true)
 				printErr(err)
-				recordConvo(q, ans)
+				recordConvo(q, ans, err)
 			} else {
 				fmt.Println(Meta.Render("rag " + boolOnOff(loadPrefs().Rag)))
 			}
@@ -343,16 +351,16 @@ func plainREPL() error {
 			if !strings.HasPrefix(cmd, "/") && strings.EqualFold(cmd, "search") {
 				ans, err := plainAsk(&pm, line, &rc, convo, pm.takeContextPreface(line), false)
 				printErr(err)
-				recordConvo(line, ans)
+				recordConvo(line, ans, err)
 				break
 			}
 			ans, results := replSearch(query, last, &rc, convo, pm.takeContextPreface(query))
 			last = results
-			recordConvo(query, ans)
+			recordConvo(query, ans, nil)
 		case "ask", "a":
 			ans, err := plainAsk(&pm, rest, &rc, convo, pm.takeContextPreface(rest), false)
 			printErr(err)
-			recordConvo(rest, ans)
+			recordConvo(rest, ans, err)
 		case "hermes":
 			printErr(runHermes([]string{rest}))
 		case "open", "o":
@@ -365,7 +373,7 @@ func plainREPL() error {
 			// Bare input with no recognized verb is an ask (matches the TUI).
 			ans, err := plainAsk(&pm, line, &rc, convo, pm.takeContextPreface(line), false)
 			printErr(err)
-			recordConvo(line, ans)
+			recordConvo(line, ans, err)
 		}
 		// After a turn, print one final DAG block. There is no live bar off a TTY.
 		if eng != nil && loadPrefs().Viz {
