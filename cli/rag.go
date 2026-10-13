@@ -215,7 +215,10 @@ type AnswerOpts struct {
 	// Persona, when set, is called once with the chosen domain KEY (e.g. "ad")
 	// before the answer streams, so the UI can show the cue via personaLabel and
 	// a short status token. It is not called for the generic persona.
-	Persona      func(domain string)
+	Persona func(domain string)
+	// Action, when set, is called once per tool call with the tool's name and
+	// "running" or "done", so a caller can record what a turn actually did.
+	Action       func(tool, status string)
 	WebOnly      bool
 	ToolHost     string
 	BrowserCDP   string

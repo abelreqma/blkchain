@@ -140,6 +140,14 @@ func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig
 				opts.Stage("tool result: " + detail)
 			}
 		}
+		if opts.Action != nil {
+			switch action {
+			case "tool-call":
+				opts.Action(detail, "running")
+			case "tool-result":
+				opts.Action(detail, "done")
+			}
+		}
 		if action == "tool-call" {
 			toolCalls++
 			if detail == required || required == "mcp" && strings.HasPrefix(detail, "mcp__") || required == "target action" && (detail == "run_command" || detail == "web_api" || detail == "web_browser" || detail == "browser_control") {
