@@ -86,6 +86,9 @@ type answerResponse struct {
 	Route           string         `json:"route,omitempty"`
 	LLMCalls        []llmCallStats `json:"llm_calls,omitempty"`
 	LLMCallsPartial bool           `json:"llm_calls_partial,omitempty"`
+	// SessionID names the saved conversation this answer was written to. It is
+	// absent for a stateless ask.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // serviceHealth is one probe of the services an answer needs.
@@ -435,6 +438,7 @@ type askOpts struct {
 	hermes     bool
 	rag        bool
 	web        bool
+	session    string
 	context    multiFlag
 }
 
@@ -452,6 +456,7 @@ func defineAskFlags(fs *flag.FlagSet, o *askOpts) {
 	fs.BoolVar(&o.hermes, "hermes", false, "answer with Hermes")
 	fs.BoolVar(&o.web, "web", false, "search the internet for this answer only")
 	fs.BoolVar(&o.rag, "rag", false, "force a grounded answer from the knowledge base, skipping adaptive routing")
+	fs.StringVar(&o.session, "session", "", "continue a saved conversation: an `ID`, new, or last")
 	fs.Var(&o.context, "context", "attach a file or HTTP(S) `URL` reference (repeatable)")
 }
 
@@ -476,7 +481,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 	var o askOpts
 	fs := newFlagSet("ask")
 	defineAskFlags(fs, &o)
-	if err := parseFlags(fs, reorder(args, map[string]bool{"context": true, "agent": true, "tool-host": true, "browser-cdp": true})); err != nil {
+	if err := parseFlags(fs, reorder(args, map[string]bool{"context": true, "agent": true, "tool-host": true, "browser-cdp": true, "session": true})); err != nil {
 		return "", err
 	}
 	if o.toolHost != chatToolHostSandbox && o.toolHost != chatToolHostLocal {
@@ -488,14 +493,19 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		}
 	}
 	jsonOut, showSources := &o.json, &o.sources
-	agent, err := parseAnswerAgent(o.agent)
-	if err != nil {
+	if _, err := parseAnswerAgent(o.agent); err != nil {
 		return "", usageErr("%s", err)
 	}
-	explicitAgent := false
-	fs.Visit(func(f *flag.Flag) { explicitAgent = explicitAgent || f.Name == "agent" })
+	explicitAgent, sessionRequested := false, false
+	fs.Visit(func(f *flag.Flag) {
+		explicitAgent = explicitAgent || f.Name == "agent"
+		sessionRequested = sessionRequested || f.Name == "session"
+	})
 	if o.hermes && explicitAgent {
 		return "", usageErr("ask: --agent cannot be combined with --hermes")
+	}
+	if o.hermes && sessionRequested {
+		return "", usageErr("ask: --session cannot be combined with --hermes")
 	}
 	if o.hermes && (o.rag || o.web) {
 		return "", usageErr("ask: --hermes cannot be combined with --rag or --web")
@@ -533,11 +543,6 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		return "", runHermes([]string{query})
 	}
 
-	// Conversation memory: the full prior turns are fed to the answer loop so
-	// the model remembers the session and retrieval is history-aware. The shared
-	// answer path (adaptiveAnswer) compresses them to the budget when needed, so
-	// no truncation happens here. Empty history is the stateless single-turn case.
-
 	cfg := loadConfig()
 	if rc == nil && !o.web {
 		c, err := newRetrievalClient(cfg)
@@ -550,73 +555,79 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		rc = followPrefs(rc, loadPrefs())
 	}
 
+	selector := ""
+	if sessionRequested {
+		selector = o.session
+		if strings.TrimSpace(selector) == "" {
+			selector = sessionTargetLast
+		}
+	}
+
+	req := turnRequest{
+		Question:   query,
+		SessionID:  selector,
+		Agent:      o.agent,
+		ToolHost:   o.toolHost,
+		BrowserCDP: o.browserCDP,
+		ForceRag:   o.rag,
+		WebOnly:    o.web,
+		WebFirst:   webFirst,
+		Preface:    preface,
+		History:    history,
+		Browser:    browser,
+	}
+
 	// Only the plain text path streams: --json needs the full struct and
 	// --sources needs the retrieved chunks, neither of which the token stream
 	// carries.
+	var full strings.Builder
 	if !*jsonOut && !*showSources {
 		// Tokens are untrusted LLM output: strip control sequences before they
 		// reach the terminal. termStream holds back a sequence split across tokens.
-		var full strings.Builder
-		p := loadPrefs()
-		_, cits, usedWeb, _, _, _, err := adaptiveAnswerFn(ctx, rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{
-			Agent:      agent,
-			ToolHost:   o.toolHost,
-			Browser:    browser,
-			BrowserCDP: o.browserCDP,
-			Stream:     newAskStream(os.Stdout, &full),
-			Preface:    preface,
-			NoWeb:      !p.Web,
-			WebFirst:   webFirst,
-			WebOnly:    o.web,
-			History:    history,
-			Stage: func(stage string) {
-				if strings.HasPrefix(stage, "tool ") {
-					fmt.Fprintln(os.Stderr, sanitizeTerminal(stage))
-				}
-			},
-			Persona: func(domain string) {
-				fmt.Println(Meta.Render("answering as " + personaLabel(domain)))
-			},
-		})
-		if errors.Is(err, ErrNoResults) {
-			return "", reportNoResults(os.Stderr, false, "")
+		req.Stream = newAskStream(os.Stdout, &full)
+		req.Stage = func(stage string) {
+			if strings.HasPrefix(stage, "tool ") {
+				fmt.Fprintln(os.Stderr, sanitizeTerminal(stage))
+			}
 		}
-		err = timeoutOrErr(err)
+		req.Persona = func(domain string) {
+			fmt.Println(Meta.Render("answering as " + personaLabel(domain)))
+		}
+	}
+
+	res, err := runNativeTurn(ctx, rc, cfg, req)
+	if errors.Is(err, ErrNoResults) {
+		return "", reportNoResults(os.Stderr, *jsonOut, resolveModel(cfg))
+	}
+	err = timeoutOrErr(err)
+
+	if !*jsonOut && !*showSources {
 		if err != nil && full.Len() == 0 {
 			return "", err
 		}
 		if !strings.HasSuffix(full.String(), "\n") {
 			fmt.Println()
 		}
-		printSources(cits, usedWeb, rc != nil && rc.SkipRerank)
+		printSources(res.Citations, res.UsedWeb, rc != nil && rc.SkipRerank)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s stream ended early: %s\n", errMark(), sanitizeTerminal(err.Error()))
 		}
 		return full.String(), nil
 	}
-
-	// Resolve the model once, up front, so the id in the JSON is the id the
-	// answer loop was asked to use.
-	model := resolveModel(cfg)
-	p := loadPrefs()
-	actualAgent := "general"
-	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(ctx, rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Agent: agent, ToolHost: o.toolHost, Browser: browser, BrowserCDP: o.browserCDP, Model: model, NoWeb: !p.Web, WebFirst: webFirst, WebOnly: o.web, History: history, Preface: preface, Persona: func(domain string) { actualAgent = answerAgentName(domain) }})
-	if errors.Is(err, ErrNoResults) {
-		return "", reportNoResults(os.Stderr, *jsonOut, model)
-	}
 	if err != nil {
-		return "", timeoutOrErr(err)
+		return "", err
 	}
 	resp := &answerResponse{
-		Answer:    answer,
-		Citations: cits,
-		UsedWeb:   usedWeb,
-		Model:     model,
-		Agent:     actualAgent,
-		Results:   results,
-		Route:     route,
+		Answer:    res.Answer,
+		Citations: res.Citations,
+		UsedWeb:   res.UsedWeb,
+		Model:     res.Model,
+		Agent:     res.Agent,
+		Results:   res.Results,
+		Route:     res.Route,
+		SessionID: res.SessionID,
 	}
-	resp.LLMCalls, resp.LLMCallsPartial = metrics.snapshot()
+	resp.LLMCalls, resp.LLMCallsPartial = res.Usage.LLMCalls, res.Usage.LLMCallsPartial
 
 	if *jsonOut {
 		return resp.Answer, printJSON(resp)
