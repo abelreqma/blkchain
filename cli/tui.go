@@ -422,16 +422,14 @@ type storeDoneMsg struct {
 type chunkMsg string
 
 // streamDoneMsg is the terminal message of a stream: the full answer, the
-// citations derived from the retrieved chunks (RAG only), and any error. agent
-// marks an agent-mode turn, which renders without a SOURCES block. usedWeb is
-// RAG-only (AnswerLoop's web-search fallback); agent turns leave it false.
+// citations derived from the retrieved chunks, and any error. usedWeb is set
+// when the answer used the web-search fallback.
 type streamDoneMsg struct {
 	full            string
 	citations       []citation
 	usedWeb         bool
 	rerankOff       bool // the reranker was turned off for this answer
 	err             error
-	agent           bool
 	results         []retrieval.Result
 	tokens          int // completion tokens when the transport exposed usage, else 0
 	llmCalls        []llmCallStats
@@ -442,20 +440,6 @@ type streamDoneMsg struct {
 // items queued, the completion handler schedules this so the next queued prompt
 // runs.
 type dequeueMsg struct{}
-
-// Agent-mode streaming messages, pushed into the event loop by
-// the StreamAgent/StreamAgentSubprocess callback via prog.Send. Answer deltas
-// reuse chunkMsg; these carry the non-answer signals.
-type agentToolMsg struct{ verb, tool string } // muted "- running <tool>..." line
-type agentNoteMsg string                      // muted commentary / fallback note line
-type agentModelMsg string                     // model id for the status line
-type agentSessionMsg string                   // gateway session id to cache
-type agentXportMsg string                     // "gateway" | "subprocess" for this turn
-type agentHealthMsg struct {                  // startup/mode-switch agent health
-	gwOK  bool
-	binOK bool
-	model string
-}
 
 // --- model ---
 
@@ -529,8 +513,8 @@ type model struct {
 	engageIntake *engageIntakeFlow
 
 	// Model/reasoning selection from the /model picker. ragModel overrides the
-	// oMLX model in rag mode ("" = default); reasoning is the reasoning-effort
-	// level shown in the status line and sent to the agent gateway.
+	// oMLX model ("" = default); reasoning is the reasoning-effort level shown
+	// in the status line.
 	ragModel  string
 	reasoning string
 
@@ -567,7 +551,7 @@ type model struct {
 	rc    *retrieval.Client
 	rcErr error
 
-	// forceRag makes the next rag-mode turn ground unconditionally (the
+	// forceRag makes the next turn ground unconditionally (the
 	// /rag <question> form). It is a one-shot: consumed and cleared per turn.
 	forceRag bool
 
@@ -589,10 +573,6 @@ type model struct {
 	keyPanel  bool
 	keyScroll int
 
-	// Agent mode. mode is "agent" (default) or "rag"; the agent
-	// fields track the gateway session handle and the health/transport shown in
-	// the status line.
-	mode string
 	// persona is the domain key of the expert that answered the current/last rag
 	// turn (e.g. "ad"), set from a personaMsg; "" for the generic persona. The
 	// status ribbon shows it; it is cleared at the start of each new rag turn.
@@ -605,12 +585,6 @@ type model struct {
 	// ribbon and passed to the shared RoE session.
 	engageMode       secgate.Mode
 	engageTranscript string
-	agentSession     string // cached hermes gateway session id (conversation handle)
-	agentModel       string // display model id, discovered from events / model options
-	agentXport       string // last-used transport: "gateway" | "subprocess"
-	agentGwOK        bool   // gateway /health reachable+authorized
-	agentBinOK       bool   // hermes CLI on PATH (subprocess fallback possible)
-	agentChecked     bool
 }
 
 func initialModel() model {
@@ -666,7 +640,6 @@ func initialModel() model {
 		keys:             defaultKeys(),
 		history:          hist,
 		histIdx:          len(hist),
-		mode:             "rag",
 		engageMode:       secgate.Auto,
 		engageTranscript: "important",
 		sess:             sess,
@@ -709,7 +682,7 @@ func (m model) resolveModel(id string) model {
 		return m
 	}
 	m.resolvedModel = id
-	if p, ok := m.overlay.(modelsPanel); ok && m.mode == "rag" {
+	if p, ok := m.overlay.(modelsPanel); ok {
 		p.active = m.activeModel()
 		m.overlay = p
 	}
@@ -961,33 +934,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			full = live
 		}
 		cost := turnCost{completionTokens: msg.tokens, elapsed: elapsed, calls: msg.llmCalls, partial: msg.llmCallsPartial}
-		if msg.agent {
-			if msg.err != nil && errors.Is(msg.err, context.Canceled) {
-				return m, tea.Println(canceledOutput(full, m.renderWidth()))
-			}
-			m.lastAnswer = full
-			m.openTargets = nil
-			if msg.err != nil {
-				var b strings.Builder
-				if strings.TrimSpace(full) != "" {
-					b.WriteString(formatAgentAnswer(full, elapsed, m.renderWidth()))
-					b.WriteByte('\n')
-				}
-				b.WriteString(styleErr(fmt.Errorf("agent turn ended early: %w", msg.err)))
-				return m, tea.Println(b.String())
-			}
-			if strings.TrimSpace(full) == "" {
-				return m, m.finish(tea.Println("   " + Meta.Render("(agent returned no output)")))
-			}
-			persistenceErr := m.recordTurn(full)
-			m.lastCost, m.lastCostSet = cost, true
-			out := formatAgentAnswer(full, elapsed, m.renderWidth()) + "\n" + costFooter(cost)
-			if persistenceErr != nil {
-				m.queuePaused = true
-				out += "\n" + styleErr(fmt.Errorf("conversation save failed: %w", persistenceErr))
-			}
-			return m, m.finish(tea.Println(out))
-		}
 		if msg.err != nil {
 			if errors.Is(msg.err, context.Canceled) {
 				return m, tea.Println(canceledOutput(full, m.renderWidth()))
@@ -1177,46 +1123,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if first && h != nil && len(downServices(h)) > 0 {
 			w, _ := m.termSize()
 			return m, tea.Println(downHint(h, w))
-		}
-		return m, nil
-
-	case agentToolMsg:
-		if !m.working {
-			return m, nil
-		}
-		line := " " + Meta.Render(Glyph(GlyphBullet)+" "+sanitizeTerminal(msg.verb+" "+msg.tool))
-		if msg.verb == "running" {
-			line += Meta.Render(ellipsis())
-		}
-		return m, tea.Println(line)
-
-	case agentNoteMsg:
-		if strings.TrimSpace(string(msg)) == "" {
-			return m, nil
-		}
-		return m, tea.Println("   " + Meta.Render(oneLine(sanitizeTerminal(string(msg)))))
-
-	case agentModelMsg:
-		if s := strings.TrimSpace(string(msg)); s != "" {
-			m.agentModel = s
-		}
-		return m, nil
-
-	case agentSessionMsg:
-		m.agentSession = string(msg)
-		return m, nil
-
-	case agentXportMsg:
-		m.agentXport = string(msg)
-		m.agentChecked = true
-		return m, nil
-
-	case agentHealthMsg:
-		m.agentGwOK = msg.gwOK
-		m.agentBinOK = msg.binOK
-		m.agentChecked = true
-		if msg.model != "" {
-			m.agentModel = msg.model
 		}
 		return m, nil
 
@@ -1553,24 +1459,15 @@ func decideCtrlC(now, last time.Time, working, draftEmpty bool) ctrlCAction {
 	return ccHint
 }
 
-// activeModel is the model a turn really uses. In rag mode that is the model
-// picked with /model, else the one resolved when the model list first loaded,
-// and "" until one of those is known, so nothing is marked or protected as
-// active by guesswork. In agent mode it is the agent's model.
+// activeModel is the model a turn really uses: the model picked with /model,
+// else the one resolved when the model list first loaded, and "" until one of
+// those is known, so nothing is marked or protected as active by guesswork.
 func (m model) activeModel() string {
-	if m.mode == "agent" {
-		if m.agentModel != "" {
-			return m.agentModel
-		}
-		return "unknown"
-	}
 	return m.ragTurnModel()
 }
 
-// ragTurnModel is the model a grounded turn uses, independent of mode:
-// streamCmd serves forced grounded turns even in agent mode, so it must not
-// use the agent model. "" until a model is known, so streamCmd's resolve
-// fallback applies.
+// ragTurnModel is the model a turn uses: "" until a model is known, so
+// streamCmd's resolve fallback applies.
 func (m model) ragTurnModel() string {
 	if s := strings.TrimSpace(m.ragModel); s != "" {
 		return s
@@ -1578,8 +1475,8 @@ func (m model) ragTurnModel() string {
 	return m.resolvedModel
 }
 
-// currentModel is the model id shown and recorded for the active mode: the
-// active model, or the configured default until the model list has loaded.
+// currentModel is the model id shown and recorded for a turn: the active
+// model, or the configured default until the model list has loaded.
 func (m model) currentModel() string {
 	if id := m.activeModel(); id != "" {
 		return id
@@ -1709,10 +1606,10 @@ func (m *model) recordTurn(answer string) error {
 	defer m.sess.endTurn()
 	defer func() { m.pendingQ = "" }()
 	model := m.currentModel()
-	if err := m.sess.appendTurn(turnRecord{Role: roleUser, Content: m.pendingQ, Model: model, Mode: m.mode}); err != nil {
+	if err := m.sess.appendTurn(turnRecord{Role: roleUser, Content: m.pendingQ, Model: model}); err != nil {
 		return err
 	}
-	if err := m.sess.appendTurn(turnRecord{Role: roleAssistant, Content: answer, Model: model, Mode: m.mode}); err != nil {
+	if err := m.sess.appendTurn(turnRecord{Role: roleAssistant, Content: answer, Model: model}); err != nil {
 		return err
 	}
 	if err := m.sess.commitTurn(m.pendingQ, answer); err != nil {
@@ -1725,20 +1622,14 @@ func (m *model) recordTurn(answer string) error {
 }
 
 // applyModel applies a model-picker selection to subsequent turns and refreshes
-// the status-line health for the active mode.
+// the status-line health.
 func (m model) applyModel(modelID, reasoning string) (tea.Model, tea.Cmd) {
 	if strings.TrimSpace(reasoning) != "" {
 		m.reasoning = reasoning
 	}
-	if m.mode == "agent" {
-		if strings.TrimSpace(modelID) != "" {
-			m.agentModel = modelID
-		}
-	} else {
-		m.ragModel = strings.TrimSpace(modelID)
-	}
+	m.ragModel = strings.TrimSpace(modelID)
 	note := "   " + Meta.Render(joinSep("model: "+sanitizeTerminal(m.currentModel()), "reasoning: "+m.reasoning))
-	return m, tea.Batch(tea.Println(note), m.modeSwitchCmd())
+	return m, tea.Batch(tea.Println(note), m.healthCmd())
 }
 
 // openSessionInto loads a saved session's transcript, replays it into scrollback
@@ -1875,7 +1766,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 
 	// Queue-while-busy: while a turn runs, a plain question (or a
 	// turn-starting slash command) is queued FIFO instead of erroring; other slash
-	// commands run immediately (mode switch, pickers, /help, /clear, ...).
+	// commands run immediately (pickers, /help, /clear, ...).
 	if queued {
 		note := "   " + Meta.Render(fmt.Sprintf("%s queued (%d in queue)", Glyph(GlyphBullet), len(m.queue)))
 		return m, tea.Println(note)
@@ -1933,13 +1824,6 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 	case "help":
 		w, _ := m.termSize()
 		return m, tea.Sequence(tea.Println(echo), tea.Println(helpResponse(arg, w)))
-	case "mode":
-		if m.mode == "agent" {
-			m.mode = "rag"
-		} else {
-			m.mode = "agent"
-		}
-		return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
 	case "safe":
 		m.engageMode = secgate.Safe
 		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render("safe: new actions need operator approval")))
@@ -1961,15 +1845,10 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(arg) == "" {
 			return m, tea.Sequence(tea.Println(echo), tea.Println(m.answerAgentStatus()))
 		}
-		previousMode := m.mode
 		if err := m.selectAnswerAgent(arg); err != nil {
 			return m, tea.Println(styleErr(err))
 		}
-		cmd := tea.Sequence(tea.Println(echo), tea.Println(m.answerAgentStatus()))
-		if previousMode != m.mode {
-			cmd = tea.Batch(cmd, m.modeSwitchCmd())
-		}
-		return m, cmd
+		return m, tea.Sequence(tea.Println(echo), tea.Println(m.answerAgentStatus()))
 	case "tool-host":
 		value := strings.ToLower(strings.TrimSpace(arg))
 		if value == "" {
@@ -2020,8 +1899,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			m.forceRag = true
 			return m.dispatchInput("/ask " + question)
 		default:
-			m.mode = "rag"
-			return m, tea.Batch(tea.Sequence(tea.Println(echo), tea.Println(modeNote(m.mode))), m.modeSwitchCmd())
+			return m, tea.Sequence(tea.Println(echo), tea.Println(m.answerAgentStatus()))
 		}
 	case "candidates":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(candidatesBlock(m.engagement)))
@@ -2206,34 +2084,16 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		m.turnStart = time.Now()
 		m.liveTokens = 0
 		m.firstTokAt = time.Time{}
-		var ctx context.Context
-		var cancel context.CancelFunc
-		if verb == "ask" && m.mode == "agent" && !m.forceRag && !groundSearch && !webOnly {
-			// Agent turns can run for a long time (multi-step tool use) and
-			// StreamAgent assumes a long-lived ctx; only Ctrl-C should end one,
-			// not the RAG client's HTTP timeout.
-			ctx, cancel = context.WithCancel(context.Background())
-		} else {
-			// ask can be slow on a large local model, so bound the turn by the
-			// configured request timeout (BLKCHAIN_TIMEOUT_SECONDS).
-			ctx, cancel = context.WithTimeout(context.Background(), m.cfg.RequestTimeout())
-		}
+		// ask can be slow on a large local model, so bound the turn by the
+		// configured request timeout (BLKCHAIN_TIMEOUT_SECONDS).
+		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RequestTimeout())
 		m.cancel = cancel
 		if verb == "ask" {
 			// @file attachments + /init ambient context ride along with this turn.
 			preface := m.buildContextPreface()
 			m.attachments = nil // one-shot: consumed by this turn
 			m.pendingQ = arg    // the operator's question, recorded to the session
-			// AGENT mode: a full agentic turn via the gateway (or subprocess
-			// fallback), streaming into the same live buffer.
-			if m.mode == "agent" && !m.forceRag && !groundSearch && !webOnly {
-				message := arg
-				if preface != "" {
-					message = preface + "\n\n" + arg
-				}
-				return m, tea.Batch(tea.Println(echo), m.workTick(), m.startVizPoll(), m.agentStreamCmd(ctx, message))
-			}
-			// RAG mode: route through the adaptive router (skip/ground/web).
+			// Route through the adaptive router (skip/ground/web).
 			force := m.forceRag || groundSearch
 			m.forceRag = false
 			m.persona = "" // cleared for the new turn; set when its persona cue arrives
@@ -2657,11 +2517,13 @@ func (m model) dispatchCmd(ctx context.Context, verb, arg string, start time.Tim
 	}
 }
 
-// streamCmd runs the adaptive answer in a goroutine (tea.Cmd), pushing each
-// token back as a chunkMsg via the stored *tea.Program. The router picks skip,
+// streamCmd runs the answer turn in a goroutine (tea.Cmd), pushing each token
+// back as a chunkMsg via the stored *tea.Program. The router picks skip,
 // ground, or web; force grounds unconditionally. The grounded path is the full
 // bounded AnswerLoop (grade, optional web fallback or rewrite, then synthesis);
-// a cancel returns a canceledMsg.
+// a cancel returns a canceledMsg. The turn carries no session id: the model
+// persists the exchange through recordTurn. The call collector on ctx flows
+// into the turn, so streamDoneMsg reports the same calls the turn made.
 func (m model) streamCmd(ctx context.Context, question, preface string, start time.Time, force bool, explicitWeb ...bool) tea.Cmd {
 	webOnly := len(explicitWeb) > 0 && explicitWeb[0]
 	prog := m.prog
@@ -2683,17 +2545,16 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 				return errMsg{err}
 			}
 		}
-		cfg := m.cfg
 		streamed := false
-		p := loadPrefs()
-		full, cits, usedWeb, results, tokens, _, err := adaptiveAnswerFn(ctx, rc, cfg, question, askRoutes(p), force, AnswerOpts{
+		res, err := runNativeTurn(ctx, rc, m.cfg, turnRequest{
+			Question:   question,
 			Agent:      m.answerAgent,
+			Model:      turnModel,
 			ToolHost:   m.toolHost,
 			Browser:    m.browser,
 			BrowserCDP: m.browserCDP,
-			Model:      turnModel,
 			Preface:    preface,
-			NoWeb:      !p.Web,
+			ForceRag:   force,
 			WebFirst:   !force,
 			WebOnly:    webOnly,
 			History:    m.conversationHistory(),
@@ -2724,7 +2585,7 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 			return errMsg{timeoutOrErr(err)}
 		}
 		calls, partial := metrics.snapshot()
-		return streamDoneMsg{full: full, citations: cits, usedWeb: usedWeb, results: results, rerankOff: rc != nil && rc.SkipRerank, err: err, tokens: tokens, llmCalls: calls, llmCallsPartial: partial}
+		return streamDoneMsg{full: res.Answer, citations: res.Citations, usedWeb: res.UsedWeb, results: res.Results, rerankOff: rc != nil && rc.SkipRerank, err: err, tokens: res.Usage.CompletionTokens, llmCalls: calls, llmCallsPartial: partial}
 	}
 }
 
@@ -2814,118 +2675,6 @@ func (m model) healthCmd() tea.Cmd {
 	}
 }
 
-// agentStreamCmd runs one AGENT-mode turn in a goroutine (tea.Cmd). It decides
-// the transport once per turn: prefer the hermes gateway when reachable, else
-// the `hermes chat` subprocess. Answer deltas become chunkMsg (the shared live
-// buffer); tool activity and commentary become muted scrollback lines; the
-// terminal event yields a streamDoneMsg (agent). Ctrl-C (ctx cancel) aborts the
-// gateway request or kills the subprocess.
-func (m model) agentStreamCmd(ctx context.Context, message string) tea.Cmd {
-	prog := m.prog
-	sessID := m.agentSession
-	agentModel := m.agentModel
-	reasoning := m.reasoning
-	return func() tea.Msg {
-		var full strings.Builder
-		var tokens int
-		onEvent := func(ev agentEvent) {
-			switch ev.kind {
-			case agentText:
-				full.WriteString(ev.text)
-				if prog != nil {
-					prog.Send(chunkMsg(ev.text))
-				}
-			case agentCommentary:
-				if prog != nil {
-					prog.Send(agentNoteMsg(ev.text))
-				}
-			case agentToolActivity:
-				if prog != nil {
-					prog.Send(agentToolMsg{verb: ev.text, tool: ev.tool})
-				}
-			case agentModelInfo:
-				if prog != nil {
-					prog.Send(agentModelMsg(ev.text))
-				}
-			case agentTerminal:
-				// Use the terminal final text only when nothing streamed (a
-				// non-streaming run); otherwise the deltas already hold the answer.
-				if ev.text != "" && full.Len() == 0 {
-					full.WriteString(ev.text)
-				}
-				if ev.tokens > 0 {
-					tokens = ev.tokens
-				}
-			}
-		}
-
-		if hermesAvailable(ctx) {
-			id := sessID
-			var err error
-			if id == "" {
-				id, err = ensureSession(ctx)
-			}
-			if err == nil {
-				if prog != nil {
-					if id != sessID {
-						prog.Send(agentSessionMsg(id))
-					}
-					prog.Send(agentXportMsg("gateway"))
-				}
-				serr := StreamAgent(ctx, id, message, agentModel, reasoning, onEvent)
-				if errors.Is(serr, context.Canceled) {
-					return canceledMsg{}
-				}
-				return streamDoneMsg{full: full.String(), agent: true, err: serr, tokens: tokens}
-			}
-			// Gateway reachable but session setup failed: fall back with a note.
-			if prog != nil {
-				prog.Send(agentNoteMsg("gateway session failed, using hermes subprocess"))
-			}
-		}
-
-		// Subprocess fallback: gateway unreachable, or session setup failed.
-		if prog != nil {
-			prog.Send(agentXportMsg("subprocess"))
-		}
-		serr := StreamAgentSubprocess(ctx, message, onEvent)
-		if errors.Is(serr, context.Canceled) {
-			return canceledMsg{}
-		}
-		if serr != nil && full.Len() == 0 {
-			if errors.Is(serr, errHermesMissing) {
-				return errMsg{errors.New("agent mode unavailable: run `hermes gateway`, or install the hermes CLI")}
-			}
-			return errMsg{fmt.Errorf("agent turn failed: %w", serr)}
-		}
-		return streamDoneMsg{full: full.String(), agent: true, err: serr, tokens: tokens}
-	}
-}
-
-// modeSwitchCmd refreshes the status-line health after a mode change: the agent
-// gateway/binary for agent mode, qdrant + embed_server for rag mode.
-func (m model) modeSwitchCmd() tea.Cmd {
-	if m.mode == "agent" {
-		return agentHealthCmd()
-	}
-	return m.healthCmd()
-}
-
-// agentHealthCmd probes the hermes gateway and the hermes binary so the status
-// line can show the transport before the first agent turn.
-func agentHealthCmd() tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), agentSessionTimeout)
-		defer cancel()
-		gwOK := hermesAvailable(ctx)
-		model := ""
-		if gwOK {
-			model = currentAgentModel(ctx)
-		}
-		return agentHealthMsg{gwOK: gwOK, binOK: hermesBinAvailable(), model: model}
-	}
-}
-
 // sessID returns the current session id, or "" when persistence is unavailable.
 func (m model) sessID() string {
 	if m.sess != nil {
@@ -2934,35 +2683,25 @@ func (m model) sessID() string {
 	return ""
 }
 
-// openModelPickerCmd discovers the available models for the active mode in a
-// command (network IO) and opens the model picker on completion, so the event
-// loop stays responsive and the input draft is preserved. When
-// discovery fails it still opens with the current model plus the reasoning
-// levels, so the picker always works.
+// openModelPickerCmd discovers the available models in a command (network IO)
+// and opens the model picker on completion, so the event loop stays responsive
+// and the input draft is preserved. When discovery fails it still opens with
+// the current model plus the reasoning levels, so the picker always works.
 //
-// In rag mode the models hidden in /models are left out. When that leaves only
-// the active model, the picker says so and points to /models.
+// The models hidden in /models are left out. When that leaves only the active
+// model, the picker says so and points to /models.
 func (m model) openModelPickerCmd() tea.Cmd {
-	mode := m.mode
 	current := m.currentModel()
 	reasoning := m.reasoning
 	prefs := m.prefs
 	return func() tea.Msg {
-		var models []string
 		var listErr error
-		allHidden := false
-		if mode == "agent" {
-			ctx, cancel := context.WithTimeout(context.Background(), agentSessionTimeout)
-			defer cancel()
-			models, _ = modelOptions(ctx)
-		} else {
-			all, err := llmModels()
-			if errors.Is(err, errLLMRedirect) {
-				listErr = errLLMRedirect
-			}
-			models = slices.DeleteFunc(slices.Clone(all), prefs.isHidden)
-			allHidden = len(models) < len(all) && len(ensureFirst(models, current)) <= 1
+		all, err := llmModels()
+		if errors.Is(err, errLLMRedirect) {
+			listErr = errLLMRedirect
 		}
+		models := slices.DeleteFunc(slices.Clone(all), prefs.isHidden)
+		allHidden := len(models) < len(all) && len(ensureFirst(models, current)) <= 1
 		return openModelPickerMsg{models: ensureFirst(models, current), current: current, reasoning: reasoning, allHidden: allHidden, listErr: listErr}
 	}
 }
@@ -3213,15 +2952,10 @@ func statusMark(tone lipgloss.TerminalColor) string {
 	}
 }
 
-// statusLine shows the active mode, the model, and services health. In rag mode
-// the status mark reflects qdrant, embed_server, and the LLM; in
-// agent mode it reflects the hermes gateway (or "subprocess" on fallback). Rag
-// mode also shows the embedder and reranker once the probe has run, and the
-// reranker switch.
+// statusLine shows the model and services health. The status mark reflects
+// qdrant, embed_server, and the LLM. It also shows the embedder and reranker
+// once the probe has run, and the reranker switch.
 func (m model) statusLine() string {
-	if m.mode == "agent" {
-		return m.agentStatusLine()
-	}
 	style := Caut
 	var tone lipgloss.TerminalColor = Warn
 	label := "checking services"
@@ -3239,7 +2973,7 @@ func (m model) statusLine() string {
 	}
 	var retrieval []string
 	// rag is the KB-grounding switch (adaptive-RAG). On is the default and is
-	// already implied by being in rag mode, so only the off state is surfaced,
+	// already implied, so only the off state is surfaced,
 	// where it changes behavior (the answer path stops querying the local KB).
 	// This keeps the common case uncluttered and preserves the width budget.
 	if !m.prefs.Rag {
@@ -3432,52 +3166,11 @@ func (m model) queuedIndicator() string {
 	return fmt.Sprintf("(%d queued)", n)
 }
 
-// agentStatusLine renders the agent-mode status line: dot + "agent" + model +
-// transport. The transport is the one used on the last turn, or the health-probe
-// result before the first turn.
-func (m model) agentStatusLine() string {
-	xport := m.agentXport
-	if xport == "" {
-		switch {
-		case !m.agentChecked:
-			xport = "checking"
-		case m.agentGwOK:
-			xport = "gateway"
-		case m.agentBinOK:
-			xport = "subprocess"
-		default:
-			xport = "unavailable"
-		}
-	}
-	style := Caut
-	var tone lipgloss.TerminalColor = Warn
-	label := xport
-	switch xport {
-	case "gateway":
-		style, tone, label = OK, Success, "via gateway"
-	case "subprocess":
-		label = "via subprocess"
-	case "unavailable":
-		style, tone, label = Fail, Err, "gateway unavailable"
-	case "checking":
-		label = "checking gateway"
-	}
-	return m.composeStatus(style.Render(statusMark(tone)), tone, "agent", m.currentModel(), label, nil)
-}
-
 // ragModelLabel is the oMLX model the plain REPL's /models marks active,
 // without a network call: the config's default_model, which OMLX_MODEL
 // overrides. The TUI keeps its config and reads m.cfg.DefaultModel instead.
 func ragModelLabel() string {
 	return loadConfig().DefaultModel
-}
-
-// modeNote is the one-line confirmation printed when the mode changes.
-func modeNote(mode string) string {
-	if mode == "agent" {
-		return "   " + Meta.Render("mode: agent (full hermes agent with tools, web, memory)")
-	}
-	return "   " + Meta.Render("mode: rag (retrieve then stream a cited answer)")
 }
 
 // engageModeSeg is the RoE approval mode shown by the status ribbon.
@@ -3494,16 +3187,6 @@ func autoModeNote(scopeDetected bool) string {
 		return "auto: add ROE.md before engaging"
 	}
 	return "auto: RoE-authorized actions run without prompts"
-}
-
-// formatAgentAnswer glamour-renders an agent turn's answer with a muted timing
-// header and no SOURCES block (agent turns carry no citation list).
-func formatAgentAnswer(full string, elapsed time.Duration, width int) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, " %s %s\n", OK.Render(Glyph(GlyphOK)),
-		Meta.Render("Agent answered in "+elapsed.Round(100*time.Millisecond).String()))
-	b.WriteString(strings.TrimRight(glowRender(full, width), "\n"))
-	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m model) spinnerLine() string {
@@ -3812,7 +3495,7 @@ func helpResponse(arg string, width int) string {
 		}
 		text := " " + H2.Render(usage) + "\n" + wrapIndent(c.desc, 3, width)
 		examples := map[string]string{
-			"agent":   "Native auto is the interactive default. /agent NAME selects a specialist; /agent auto restores dynamic routing. Available: " + strings.Join(answerAgentNames(), ", ") + ". /mode switches between native and Hermes; /hermes calls Hermes for one turn.",
+			"agent":   "Native auto is the interactive default. /agent NAME selects a specialist; /agent auto restores dynamic routing. Available: " + strings.Join(answerAgentNames(), ", ") + ". /hermes calls Hermes for one turn.",
 			"context": "/context add PATH|URL; /context preview N; /context remove N; /context clear. Links are references, not fetched content.",
 			"queue":   "/queue list; /queue edit N; /queue remove N; /queue pause; /queue resume; /queue clear.",
 			"attach":  "/attach PATH or /attach URL prepares the next question. With no argument, the TUI opens a file picker.",

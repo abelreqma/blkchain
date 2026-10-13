@@ -98,9 +98,7 @@ func newKeyModel(t *testing.T) model {
 	t.Helper()
 	isolateUserDirs(t)
 	t.Setenv("BLK_REDUCE_MOTION", "")
-	m := initialModel()
-	m.mode = "rag"
-	return m
+	return initialModel()
 }
 
 // isolateUserDirs points every per-user location (config, data, home) at fresh
@@ -200,7 +198,6 @@ func TestCancelCommitsPartialAnswer(t *testing.T) {
 	}{
 		{"canceledMsg", canceledMsg{}},
 		{"streamDone rag", streamDoneMsg{err: context.Canceled}},
-		{"streamDone agent", streamDoneMsg{err: context.Canceled, agent: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newKeyModel(t)
@@ -748,7 +745,7 @@ func TestOpenNumberJumpsToCitedSection(t *testing.T) {
 
 func TestStatusLineNamesWhichServiceIsDown(t *testing.T) {
 	noColor(t)
-	base := model{mode: "rag", width: 200, servicesChecked: true}
+	base := model{width: 200, servicesChecked: true}
 	cases := []struct {
 		h    serviceHealth
 		want string
@@ -772,7 +769,7 @@ func TestStatusLineNamesWhichServiceIsDown(t *testing.T) {
 		}
 	}
 	// Unknown cause (for example a search error) keeps the generic label.
-	if line := (model{mode: "rag", width: 200, servicesChecked: true}).statusLine(); !strings.Contains(line, "services down") {
+	if line := (model{width: 200, servicesChecked: true}).statusLine(); !strings.Contains(line, "services down") {
 		t.Errorf("fallback label lost: %q", line)
 	}
 }
@@ -981,7 +978,7 @@ func layoutModel(t *testing.T, w, h int) model {
 	ta := textarea.New()
 	ta.SetHeight(1)
 	ta.Focus()
-	m := model{ta: ta, sp: spinner.New(), help: help.New(), keys: defaultKeys(), mode: "rag", reasoning: "medium", ragModel: "m"}
+	m := model{ta: ta, sp: spinner.New(), help: help.New(), keys: defaultKeys(), reasoning: "medium", ragModel: "m"}
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	return nm.(model)
 }
@@ -1722,14 +1719,11 @@ func TestHelpBlockLayout(t *testing.T) {
 	if !strings.Contains(lines[1], "<question>") {
 		t.Errorf("first row = %q, want the bare-question row", lines[1])
 	}
-	// /agent selects specialists; /rag remains a mode alias.
+	// /rag stays out of grouped help.
 	for _, ln := range lines {
 		f := strings.Fields(ln)
 		if len(f) > 0 && f[0] == "/rag" {
 			t.Errorf("/rag must not be a separate row: %q", ln)
-		}
-		if len(f) > 0 && f[0] == "/mode" && !strings.Contains(ln, "/rag") {
-			t.Errorf("the /mode row must name /rag: %q", ln)
 		}
 	}
 	// One description column.
@@ -1804,10 +1798,6 @@ func TestStatusLineLabelsEveryValue(t *testing.T) {
 	m.servicesChecked, m.servicesOK = true, true
 	if line := m.statusLine(); !strings.Contains(line, "services ok") {
 		t.Errorf("status %q lacks the services label", line)
-	}
-	m.mode, m.agentXport, m.agentChecked = "agent", "gateway", true
-	if line := m.statusLine(); !strings.Contains(line, "agent") || !strings.Contains(line, "via gateway") {
-		t.Errorf("agent status %q lacks the transport label", line)
 	}
 }
 
@@ -1938,15 +1928,6 @@ func TestStatusLineShowsRagSwitch(t *testing.T) {
 	m.prefs.Rag = false
 	if line := m.statusLine(); !strings.Contains(line, "rag off") {
 		t.Errorf("rag off should show when grounding is switched off: %q", line)
-	}
-	// Agent mode uses a separate status line with no retrieval group, so the
-	// rag switch never shows there.
-	am := layoutModel(t, 200, 24)
-	am.mode, am.agentXport, am.agentChecked = "agent", "gateway", true
-	am.prefs = defaultPrefs()
-	am.prefs.Rag = false
-	if line := am.statusLine(); strings.Contains(line, "rag off") {
-		t.Errorf("agent mode must not show the rag switch: %q", line)
 	}
 }
 
@@ -2678,7 +2659,7 @@ func TestHelpResponseScopesToCommand(t *testing.T) {
 	if want := strings.TrimRight(renderCommandHelp(c, 100), "\n"); got != want {
 		t.Errorf("helpResponse(ask) is not the ask command help.\n got: %q\nwant: %q", got, want)
 	}
-	if strings.Contains(got, "/mode") {
+	if strings.Contains(got, "/engage") {
 		t.Errorf("per-command help leaked the full command list: %q", got)
 	}
 	// only the first token names the command; trailing text is ignored.
@@ -2686,7 +2667,7 @@ func TestHelpResponseScopesToCommand(t *testing.T) {
 		t.Error("only the first token should name the command")
 	}
 	// no argument keeps the full command list.
-	if full := helpResponse("", 100); !strings.Contains(full, "/mode") {
+	if full := helpResponse("", 100); !strings.Contains(full, "/engage") {
 		t.Errorf("bare /help should render the full list: %q", full)
 	}
 	// an unknown command is reported with the shared suggestion phrasing.
@@ -2878,10 +2859,6 @@ func TestStatusRibbonShowsEngageMode(t *testing.T) {
 	if line := m.statusLine(); !strings.Contains(line, "auto") || strings.Contains(line, "hitl") || strings.Contains(line, "override") {
 		t.Fatalf("Auto ribbon = %q", line)
 	}
-	m.mode, m.agentXport, m.agentChecked = "agent", "gateway", true
-	if line := m.statusLine(); !strings.Contains(line, "auto") {
-		t.Fatalf("agent ribbon = %q", line)
-	}
 }
 
 func TestAutoCommandUsesRoEGuidance(t *testing.T) {
@@ -2927,11 +2904,11 @@ func TestStatusLineShowsWebProvider(t *testing.T) {
 	noColor(t)
 	t.Setenv(webFallbackEnv, "")
 	t.Setenv(tavilyAPIKeyEnv, "k")
-	on := model{mode: "rag", width: 200, servicesChecked: true, servicesOK: true, prefs: modelPrefs{Web: true}}
+	on := model{width: 200, servicesChecked: true, servicesOK: true, prefs: modelPrefs{Web: true}}
 	if line := on.statusLine(); !strings.Contains(line, "web tavily") {
 		t.Errorf("web on, tavily configured: status = %q, want web tavily", line)
 	}
-	off := model{mode: "rag", width: 200, servicesChecked: true, servicesOK: true, prefs: modelPrefs{Web: false}}
+	off := model{width: 200, servicesChecked: true, servicesOK: true, prefs: modelPrefs{Web: false}}
 	if line := off.statusLine(); strings.Contains(line, "web tavily") {
 		t.Errorf("web switch off: status = %q, want no web segment", line)
 	}

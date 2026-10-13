@@ -35,7 +35,6 @@ func isolatedHermesExecutable(t *testing.T) {
 func TestUnselectedInteractiveDefaultIsNativeAuto(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
-	isolatedHermesExecutable(t)
 	m := initialModel()
 	if m.hist != nil {
 		defer m.hist.Close()
@@ -43,14 +42,25 @@ func TestUnselectedInteractiveDefaultIsNativeAuto(t *testing.T) {
 	if m.rc != nil {
 		defer m.rc.Close()
 	}
-	if m.mode != "rag" || !m.prefs.Web || !strings.Contains(m.answerAgentStatus(), "Auto") {
-		t.Fatalf("unselected backend is %q: %s", m.mode, m.answerAgentStatus())
+	if !m.prefs.Web || !strings.Contains(m.answerAgentStatus(), "Auto") {
+		t.Fatalf("unselected backend: %s", m.answerAgentStatus())
+	}
+	if strings.Contains(m.answerAgentStatus(), "Hermes") {
+		t.Fatal("the specialist status still advertises Hermes")
 	}
 	if err := m.selectAnswerAgent("auto"); err != nil {
 		t.Fatal(err)
 	}
-	if m.mode != "rag" || m.answerAgent != "" {
+	if m.answerAgent != "" {
 		t.Fatal("explicit auto did not select native dynamic routing")
+	}
+}
+
+func TestModeCommandIsGone(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	if _, ok := slashCommand("mode"); ok {
+		t.Fatal("/mode is still registered")
 	}
 }
 

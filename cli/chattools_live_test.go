@@ -59,7 +59,7 @@ func TestChatToolsLocalLLME2E(t *testing.T) {
 		t.Fatalf("plain REPL did not run the API action: hits=%d answer=%q err=%v", hits.Load(), answer, err)
 	}
 	before = hits.Load()
-	ui := model{cfg: cfg, rc: rc, mode: "rag", answerAgent: "auto"}
+	ui := model{cfg: cfg, rc: rc, answerAgent: "auto"}
 	message := ui.streamCmd(ctx, question, "", time.Now(), false)()
 	done, ok := message.(streamDoneMsg)
 	if !ok || done.err != nil || hits.Load() <= before || !strings.Contains(done.full, "201") {

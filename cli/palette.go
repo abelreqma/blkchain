@@ -35,8 +35,7 @@ type command struct {
 // the registry and the group ordering cannot drift. Groups that also exist on
 // the command line use the same names there (ux-vocabulary); Modes and Session
 // are specific to this screen. groupHidden marks a command that grouped help
-// leaves out because another row already covers it (/rag sits under /mode); the
-// palette still lists it.
+// leaves out; the palette still lists it.
 //
 // Ask and search leads, not Engage: on an interactive surface the first thing
 // the operator does is type a question, and the bare-question row heads that
@@ -72,7 +71,6 @@ func slashCommands() []command {
 		{"web", "[action...]", spec["web"], groupAsk},
 		{"open", "<N|path>", spec["open"], groupAsk},
 		{"generate", "[question]", "answer from the last search results, no new retrieval", groupAsk},
-		{"mode", "", "switch between native answers and Hermes (also /rag)", groupModes},
 		{"engage", "<goal|web>", "run a gated, multi-step engagement toward a goal", groupEngage},
 		{"store", "<action>", spec["store"], groupEngage},
 		{"candidates", "", "list the engagement's exploit candidates and their source", groupEngage},

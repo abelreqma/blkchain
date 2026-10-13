@@ -250,8 +250,6 @@ func TestBuildReplEngageRun(t *testing.T) {
 func TestBuildReplEngageRunSelectsTheNativeModel(t *testing.T) {
 	t.Setenv("OMLX_MODEL", "native-model")
 	m := engageReadyModel(t)
-	m.mode = "agent"
-	m.agentModel = "hermes-gateway-model"
 
 	run, err := m.buildReplEngageRun("assess the host")
 	if err != nil {

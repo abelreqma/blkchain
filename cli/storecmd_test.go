@@ -385,7 +385,7 @@ func TestStoreQuestionUsesNativeModelWhileHermesIsSelected(t *testing.T) {
 	t.Setenv("OMLX_BASE_URL", server.URL+"/v1")
 	t.Setenv("OMLX_API_KEY", "")
 	m := newKeyModel(t)
-	m.mode, m.agentModel, m.ragModel = "agent", "foreign-hermes-model", "native-fixture-model"
+	m.ragModel = "native-fixture-model"
 	_, command := m.dispatchInput("/store ask --workspace " + workspace.Dir + " What was observed?")
 	found := false
 	for _, message := range drain(command) {

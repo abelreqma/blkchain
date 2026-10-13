@@ -134,6 +134,38 @@ func TestTUIAgentChoiceCapturedByAnswerCommand(t *testing.T) {
 	}
 }
 
+func TestTUITurnUsesPickedModelAndWritesNoSession(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	m := newKeyModel(t)
+	m.ragModel = "picked-model"
+	previous := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = previous })
+	var model string
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		model = opts.Model
+		return "fixture answer", nil, false, nil, 1, "skip", nil
+	}
+	before, err := listSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, ok := m.streamCmd(context.Background(), "a question", "", m.turnStart, false)().(streamDoneMsg)
+	if !ok || done.full != "fixture answer" {
+		t.Fatalf("turn did not complete: %#v", done)
+	}
+	if model != "picked-model" {
+		t.Fatalf("the turn ignored the model picked with /model: %q", model)
+	}
+	after, err := listSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("the TUI turn created a session of its own: %d before, %d after", len(before), len(after))
+	}
+}
+
 func TestInvalidCLIAgentDoesNotReachAnyBackend(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
