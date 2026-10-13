@@ -325,11 +325,15 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 	}
 	if sess != nil {
 		res.SessionID = sess.id
-		if perr := persistTurn(sess, opts.Model, question, answer, tokens); perr != nil {
-			if err == nil {
+		// A turn the router failed is not recorded. Its answer is whatever had
+		// streamed before the failure, and a later turn in this session reads the
+		// transcript back as settled memory, so persisting a truncated answer
+		// would carry it into every turn that follows. The answer still reaches
+		// the caller with the error.
+		if err == nil {
+			if perr := persistTurn(sess, opts.Model, question, answer, tokens); perr != nil {
 				return res, fmt.Errorf("conversation save failed: %w", perr)
 			}
-			return res, err
 		}
 	}
 	return res, err

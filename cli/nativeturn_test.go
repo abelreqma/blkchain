@@ -144,6 +144,45 @@ func TestNativeTurnSurfacesRouterError(t *testing.T) {
 	}
 }
 
+// A turn the router failed part-way returns what streamed and records nothing:
+// the transcript and the memory rows are a later turn's memory, so a truncated
+// answer must not reach them. Every surface takes this path or already skipped
+// its own record.
+func TestNativeTurnDoesNotPersistAnErroredTurn(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	prev := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = prev })
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		if opts.Stream != nil {
+			opts.Stream([]byte("partial answer"))
+		}
+		return "partial answer", []citation{}, false, nil, 3, "rag", errors.New("router exploded")
+	}
+
+	res, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q", SessionID: sessionTargetNew})
+	if err == nil {
+		t.Fatal("the router error was swallowed")
+	}
+	if res.Answer != "partial answer" {
+		t.Fatalf("the partial answer was lost: %q", res.Answer)
+	}
+	if res.SessionID == "" {
+		t.Fatal("the turn did not report the session it belonged to")
+	}
+	if sessionExists(res.SessionID) {
+		recs, _ := loadMessages(res.SessionID)
+		t.Fatalf("an errored turn reached the transcript: %+v", recs)
+	}
+	store := openSessionStore()
+	if store == nil {
+		t.Fatal("history store unavailable")
+	}
+	if rows, err := store.Messages(context.Background(), res.SessionID); err != nil || len(rows) != 0 {
+		t.Fatalf("an errored turn reached conversation memory: %+v, %v", rows, err)
+	}
+}
+
 func TestNativeTurnNewSessionPersistsTheExchange(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
