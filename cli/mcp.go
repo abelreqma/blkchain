@@ -92,23 +92,39 @@ type sessionTurn struct {
 	TS      int64  `json:"ts,omitempty"`
 }
 
-// cutSessionTurn shortens a turn's content, on a rune boundary, until the
-// encoded turn is at most limit bytes.
+// cutSessionTurn shortens a turn's content, on a rune boundary, to the longest
+// prefix whose encoded turn is at most limit bytes. JSON escaping makes the
+// encoded size a non-linear function of the raw length, so the prefix is found
+// by binary search over the raw length rather than by subtracting encoded
+// overage from a raw count.
 func cutSessionTurn(t sessionTurn, limit int) sessionTurn {
 	full := t.Content
-	keep := min(len(full), limit)
-	for {
-		for keep > 0 && keep < len(full) && !utf8.RuneStart(full[keep]) {
-			keep--
-		}
-		t.Content = full[:keep]
-		enc, _ := json.Marshal(t)
-		over := len(enc) - limit
-		if over <= 0 || keep == 0 {
-			return t
-		}
-		keep = max(keep-over, 0)
+	if limit <= 0 {
+		t.Content = ""
+		return t
 	}
+	aligned := func(n int) int {
+		for n > 0 && n < len(full) && !utf8.RuneStart(full[n]) {
+			n--
+		}
+		return n
+	}
+	fits := func(n int) bool {
+		t.Content = full[:n]
+		enc, _ := json.Marshal(t)
+		return len(enc) <= limit
+	}
+	lo, hi := 0, min(len(full), limit)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if fits(aligned(mid)) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	t.Content = full[:aligned(lo)]
+	return t
 }
 
 // mcpSessionResource renders one session as JSON: its listing fields plus its
