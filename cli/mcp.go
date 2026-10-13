@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"blkchain/cli/internal/ragconfig"
@@ -85,6 +86,15 @@ const mcpChatMaxSessions = 128
 // as a session:// resource is unrestricted.
 var errChatForeignSession = errors.New("chat: session was not created by this server")
 
+// errChatLocalHostRefused refuses tool_host local on a server that does not
+// serve stdio.
+var errChatLocalHostRefused = errors.New("chat: tool_host local is only available over the stdio transport")
+
+// mcpServesStdio records that this process serves its MCP client over stdio.
+// Only runMCP sets it. Its zero value is false, so a transport added without
+// setting it is refused tool_host local.
+var mcpServesStdio atomic.Bool
+
 // chatSessionOwner is the set of session ids the chat tool created on one
 // server. It lives in memory only, so after a restart no earlier session can be
 // continued: the write side stays with the process that opened the
@@ -126,9 +136,8 @@ func (o *chatSessionOwner) owns(id string) bool {
 }
 
 // mcpChatIn is chat's tool input. An empty SessionID opens a new session;
-// supplying one continues it. ToolHost accepts local because the server speaks
-// only over stdio, so its client is a local process that already holds the
-// operator's privileges. A network transport would need that revisited.
+// supplying one continues it. ToolHost accepts local only while mcpServesStdio
+// is set.
 type mcpChatIn struct {
 	Message   string `json:"message" jsonschema:"the message for this turn"`
 	SessionID string `json:"session_id,omitempty" jsonschema:"continue this session; omit to start a new one"`
@@ -320,6 +329,7 @@ func runMCP(_ []string) error {
 	}
 
 	s := newMCPServer(rc, cfg, cat)
+	mcpServesStdio.Store(true)
 	return s.Run(context.Background(), &mcp.StdioTransport{MaxLineLength: 1 << 20})
 }
 
@@ -421,6 +431,13 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 // a client cannot attach to whichever session was used most recently, and it
 // must be one this server created (see errChatForeignSession).
 func mcpChatResult(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Config, owned *chatSessionOwner, in mcpChatIn) (turnResult, error) {
+	// tool_host local runs the terminal and process tools directly on the host,
+	// outside the sandbox container. That is acceptable only when the client is
+	// a local process already holding the operator's privileges, which is true
+	// of stdio and of nothing else.
+	if in.ToolHost == chatToolHostLocal && !mcpServesStdio.Load() {
+		return turnResult{}, errChatLocalHostRefused
+	}
 	if len(in.Message) > mcpChatMaxMessage {
 		return turnResult{}, usageErr("chat: message exceeds %d bytes", mcpChatMaxMessage)
 	}

@@ -386,3 +386,63 @@ func TestMCPChatBoundsATurnByTheRequestTimeout(t *testing.T) {
 		t.Fatalf("the turn ran %s past a 1s timeout", elapsed)
 	}
 }
+
+func setMCPServesStdio(t *testing.T, v bool) {
+	t.Helper()
+	prev := mcpServesStdio.Load()
+	mcpServesStdio.Store(v)
+	t.Cleanup(func() { mcpServesStdio.Store(prev) })
+}
+
+// Without the stdio fact, tool_host local is refused with its own error class
+// before any turn runs, and the sandbox host is unaffected.
+func TestMCPChatRefusesLocalToolHostWithoutStdio(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	setMCPServesStdio(t, false)
+	var opts AnswerOpts
+	stubAdaptiveAnswer(t, "sandboxed", &opts)
+
+	_, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", ToolHost: "local"})
+	if !errors.Is(err, errChatLocalHostRefused) {
+		t.Fatalf("local without stdio: error = %v, want errChatLocalHostRefused", err)
+	}
+	if errors.Is(err, errChatForeignSession) || errors.Is(err, errChatBusy) {
+		t.Fatalf("the refusal is not distinguishable from another class: %v", err)
+	}
+	if opts.ToolHost != "" {
+		t.Fatalf("a refused turn reached the router with host %q", opts.ToolHost)
+	}
+
+	for _, host := range []string{"", "sandbox"} {
+		res, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", ToolHost: host})
+		if err != nil || res.Answer != "sandboxed" {
+			t.Fatalf("host %q: answer=%q err=%v", host, res.Answer, err)
+		}
+		if opts.ToolHost != "sandbox" {
+			t.Fatalf("host %q reached the router as %q", host, opts.ToolHost)
+		}
+	}
+}
+
+func TestMCPChatAcceptsLocalToolHostOverStdio(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	setMCPServesStdio(t, true)
+	var opts AnswerOpts
+	stubAdaptiveAnswer(t, "on the host", &opts)
+
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", ToolHost: "local"})
+	if err != nil || res.Answer != "on the host" {
+		t.Fatalf("answer=%q err=%v", res.Answer, err)
+	}
+	if opts.ToolHost != "local" {
+		t.Fatalf("the router saw host %q, want local", opts.ToolHost)
+	}
+}
+
+func TestMCPServesStdioIsOffByDefault(t *testing.T) {
+	if mcpServesStdio.Load() {
+		t.Fatal("mcpServesStdio is set outside runMCP; a transport that does not opt in must be refused")
+	}
+}
