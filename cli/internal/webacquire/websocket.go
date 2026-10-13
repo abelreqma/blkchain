@@ -1,9 +1,11 @@
 package webacquire
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -76,6 +78,46 @@ func (c *socketConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// proxyTunnel dials the upstream proxy and opens a CONNECT tunnel to target, so
+// the WebSocket upgrade that follows travels end to end. The request carries
+// nothing beyond the destination, and the response header is read through a
+// fixed buffer under a deadline. Bytes left buffered behind the response would
+// belong to the tunnel, so they are refused rather than discarded.
+func proxyTunnel(ctx context.Context, address, target string) (net.Conn, error) {
+	conn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", address)
+	if err != nil {
+		return nil, errors.New("web proxy unreachable")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	if fromContext, ok := ctx.Deadline(); ok && fromContext.Before(deadline) {
+		deadline = fromContext
+	}
+	if err = conn.SetDeadline(deadline); err != nil {
+		_ = conn.Close()
+		return nil, errors.New("web proxy tunnel deadline refused")
+	}
+	if _, err = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
+		_ = conn.Close()
+		return nil, errors.New("web proxy tunnel request failed")
+	}
+	reader := bufio.NewReaderSize(conn, 4096)
+	response, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		_ = conn.Close()
+		return nil, errors.New("web proxy tunnel response unreadable")
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || reader.Buffered() > 0 {
+		_ = conn.Close()
+		return nil, fmt.Errorf("web proxy refused the tunnel with status %d", response.StatusCode)
+	}
+	if err = conn.SetDeadline(time.Time{}); err != nil {
+		_ = conn.Close()
+		return nil, errors.New("web proxy tunnel deadline refused")
+	}
+	return conn, nil
+}
+
 func (b *Broker) OpenWebSocket(ctx context.Context, raw string, headers http.Header, protocols []string) (*WebSocket, Response, error) {
 	out := Response{URL: raw, FinalURL: raw}
 	u, target, err := WebSocketURL(raw)
@@ -133,22 +175,46 @@ func (b *Broker) OpenWebSocket(ctx context.Context, raw string, headers http.Hea
 			return nil, out, errors.New("invalid WebSocket subprotocol")
 		}
 	}
+	// An upstream proxy carries the WebSocket on the same terms as an HTTP
+	// request: scope is already enforced above, the proxy's CA is the only way
+	// to verify the leaf it re-signs, and a proxy with no CA is ignored rather
+	// than used without verification. The upgrade has to travel end to end, so
+	// the tunnel is a CONNECT to the host blk was asked for, and the proxy
+	// resolves it itself the way it does for HTTP.
+	upstream := b.Policy.Upstream
+	if upstream != nil && (upstream.Address == "" || upstream.RootCAs == nil) {
+		upstream = nil
+	}
+	tunnel := net.JoinHostPort(u.Hostname(), port)
+	if upstream != nil && strings.ContainsAny(tunnel, " \r\n\x00") {
+		return nil, out, errors.New("invalid WebSocket tunnel destination")
+	}
 	var counted *socketConn
 	wrap := func(c net.Conn) net.Conn { counted = &socketConn{Conn: c, broker: b}; return counted }
+	carrier := func(ctx context.Context, network string) (net.Conn, error) {
+		if upstream != nil {
+			return proxyTunnel(ctx, upstream.Address, tunnel)
+		}
+		return b.dial(ctx, network, pinned)
+	}
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second, ReadBufferSize: 4096, WriteBufferSize: 4096, Subprotocols: protocols,
 		NetDialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			c, e := b.dial(ctx, network, pinned)
+			c, e := carrier(ctx, network)
 			if e != nil {
 				return nil, e
 			}
 			return wrap(c), nil
 		},
 		NetDialTLSContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			c, e := b.dial(ctx, network, pinned)
+			c, e := carrier(ctx, network)
 			if e != nil {
 				return nil, e
 			}
-			tlsConn := tls.Client(c, &tls.Config{MinVersion: tls.VersionTLS12, ServerName: u.Hostname()})
+			config := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: u.Hostname()}
+			if upstream != nil {
+				config.RootCAs = upstream.RootCAs
+			}
+			tlsConn := tls.Client(c, config)
 			handshakeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
 			if e := tlsConn.HandshakeContext(handshakeCtx); e != nil {
