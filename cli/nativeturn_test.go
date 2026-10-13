@@ -390,3 +390,34 @@ func TestNativeTurnReportsPersistenceFailureWithTheAnswer(t *testing.T) {
 		t.Fatalf("the answer was lost when persistence failed: %d bytes", len(res.Answer))
 	}
 }
+
+// Each call of a tool keeps its own row: a second running after a settled call
+// opens a new row rather than overwriting the first call's outcome.
+func TestCollapseActionsKeepsOneRowPerCallOfARepeatedTool(t *testing.T) {
+	got := collapseActions([]turnAction{
+		{Tool: "run_command", Status: "running"},
+		{Tool: "run_command", Status: "done"},
+		{Tool: "run_command", Status: "running"},
+		{Tool: "run_command", Status: "failed"},
+	})
+	want := []turnAction{{Tool: "run_command", Status: "done"}, {Tool: "run_command", Status: "failed"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("rows = %+v, want %+v", got, want)
+	}
+}
+
+func TestCollapseActionsLeavesAnUnsettledCallRunning(t *testing.T) {
+	got := collapseActions([]turnAction{
+		{Tool: "run_command", Status: "running"},
+		{Tool: "run_command", Status: "done"},
+		{Tool: "run_command", Status: "running"},
+	})
+	want := []turnAction{{Tool: "run_command", Status: "done"}, {Tool: "run_command", Status: "running"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("rows = %+v, want %+v", got, want)
+	}
+	lone := collapseActions([]turnAction{{Tool: "kb_search", Status: "running"}})
+	if !slices.Equal(lone, []turnAction{{Tool: "kb_search", Status: "running"}}) {
+		t.Fatalf("a lone running call = %+v, want it to stay running", lone)
+	}
+}

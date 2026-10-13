@@ -186,9 +186,17 @@ func persistTurn(sess *session, model, question, answer string, tokens int) erro
 }
 
 // turnAction is one tool call the turn made. Status is "running" while the call
-// is in flight, then one of ToolDone, ToolFailed or ToolSkipped. Only ToolDone
-// means the tool ran to completion; a replay or memo of completed calls must
-// key on that status alone.
+// is in flight, then one of ToolDone, ToolFailed or ToolSkipped.
+//   - done: the tool ran to completion. A replay or memo of completed calls
+//     keys on this status alone.
+//   - failed: the call was attempted and may have had a side effect before it
+//     errored.
+//   - running: the turn ended before an outcome was recorded; the call may have
+//     run.
+//   - skipped: the only status known not to have run the tool.
+//
+// A row carries the tool name and no arguments, so two calls to one tool with
+// different arguments are indistinguishable here.
 type turnAction struct {
 	Tool   string `json:"tool"`
 	Status string `json:"status"`
