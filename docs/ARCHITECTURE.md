@@ -14,8 +14,11 @@ sealed RoE and separate operator approvals.
 Interactive web-first search uses the current question only. Detected target details and
 target-specific advisor turns stay local.
 
-Native chat is the default for `blk ask`, REPL, and TUI. It uses one tool registry across those
-interfaces. The user-named target in the current
+Native chat is the default for `blk ask`, REPL, TUI, and the `chat` tool of `blk mcp`. They are thin
+adapters over one turn function, `runNativeTurn` in `cli/nativeturn.go`. It resolves the session,
+loads its history, assembles the answer options once, calls the router, records tool actions, and
+persists the turn, so routing, tools, and persistence are the same on every surface. It uses one
+tool registry across those interfaces. The user-named target in the current
 conversation supplies a temporary scope for isolated commands and web actions. This path has no
 RoE file. `blk engage` keeps its sealed RoE gate, task state, and operator approvals.
 
@@ -31,7 +34,7 @@ flowchart TB
     ChatTools["Native chat tools<br/>KB, files, named-target actions"]
     Web["Live web search, interactive default"]
     Retrieval["Go retrieval + RRF"]
-    Hermes["Hermes mode<br/>separate permissions"]
+    Hermes["Hermes one-shot<br/>legacy, separate permissions"]
   end
 
   subgraph Assessment["Authorized assessment"]
@@ -165,8 +168,9 @@ a contract too.
   `blk add <url>` fetched, so it is read when present rather than required. The answer path treats
   any non-empty origin as external, so a tag added later cannot default to trusted.
 - `blk ask --json`: requires `--agent`; without it the command is a usage error and exits 2. The
-  payload carries the answer, citations, the web-use flag, the model, the agent, per-call LLM
-  metrics, and the results. `untrusted` is true on a web citation and omitted on a local one.
+  payload carries the answer, citations, the web-use flag, the model, the agent, the session id for
+  a `--session` turn, per-call LLM metrics, and the results. `untrusted` is true on a web citation
+  and omitted on a local one.
 - `blk sources --json`: the collection, the total chunk count, and per-source counts, sorted by
   count descending then name. It reads one Qdrant facet, so it is read-only.
 - `blk health --json`: `{"ok": bool, "qdrant": bool, "embed_server": bool, "llm": bool}`. `ok` is
@@ -351,9 +355,10 @@ the other's reachability from its own response.
   Scanner output is evidence linked to task and advisory records. A missing database or failed scan
   records a gap, not a clean result. A package/version match does not establish reachable code or
   attacker impact.
-- Hermes gateway readiness uses bearer-authenticated `/health/detailed`. A missing or rejected
-  `API_SERVER_KEY` selects the Hermes CLI fallback; public `/health` does not establish client
-  access. The gateway setup writes its private key file but does not export the key to the client.
+- Hermes is a legacy one-shot run through `blk hermes`, `/hermes`, and `blk ask --hermes`. It runs
+  the `hermes` CLI as a subprocess with the prompt as a single argv element, never through a shell,
+  and writes no session. `--hermes` cannot be combined with `--session`, `--agent`, `--rag`,
+  `--web`, `--json`, or `--sources`.
 - Pin dependencies. Python dependencies are `==` pinned in `pyproject.toml`. Model downloads are
   pinned to a revision in the README. The Qdrant image is pinned to a digest.
 - The corpus is adversarial: it holds payloads, prompt-injection strings, and special tokens. Local
