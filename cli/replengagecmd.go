@@ -153,8 +153,7 @@ func parseInteractiveEngageCDP(input string) (engageOpts, string, error) {
 // Safe mode.
 //
 // An engagement runs on blk's own LLM, so it takes the native model
-// (ragTurnModel) and never the agent-mode status model, which names a Hermes
-// gateway model and reads "unknown" before one is discovered.
+// (ragTurnModel).
 func (m model) buildReplEngageRun(goal string) (replEngageRun, error) {
 	model, err := newOMLX(m.cfg, m.ragTurnModel())
 	if err != nil {
