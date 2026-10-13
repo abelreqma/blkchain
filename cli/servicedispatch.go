@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -210,8 +212,41 @@ func probeWebEndpoint(ctx context.Context, g *secgate.Gate, ep serviceEndpoint) 
 			_ = conn.Close()
 			return true
 		}
+		if probeLoopbackProxy(ctx, ip, ep.port) {
+			return true
+		}
 	}
 	return false
+}
+
+func probeLoopbackProxy(ctx context.Context, ip net.IP, port int) bool {
+	setting := strings.TrimSpace(os.Getenv("BLKCHAIN_WEB_PROXY"))
+	if strings.EqualFold(setting, "off") {
+		return false
+	}
+	if setting == "" {
+		setting = "127.0.0.1:8080"
+	}
+	host, proxyPort, err := net.SplitHostPort(setting)
+	proxyIP := net.ParseIP(host)
+	if err != nil || proxyIP == nil || !proxyIP.IsLoopback() || mustPort(proxyPort) < 1 || mustPort(proxyPort) > 65535 {
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(probeCtx, "tcp", setting)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(time.Second))
+	target := net.JoinHostPort(ip.String(), strconv.Itoa(port))
+	if _, err := io.WriteString(conn, "CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\n\r\n"); err != nil {
+		return false
+	}
+	line, err := bufio.NewReaderSize(conn, 1024).ReadSlice('\n')
+	fields := strings.Fields(string(line))
+	return err == nil && len(fields) >= 2 && (fields[0] == "HTTP/1.1" || fields[0] == "HTTP/1.0") && fields[1] == "200"
 }
 
 func (d *serviceDispatcher) Observe(ctx context.Context, c secgate.Command, output string) error {

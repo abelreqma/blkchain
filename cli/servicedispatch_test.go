@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -266,5 +268,29 @@ func TestMasscanDiscoveryUnlocksOnlyReportedPort(t *testing.T) {
 		if got := d.Check(ctx, cmd) == ""; got != tc.allowed {
 			t.Errorf("%s:%s allowed=%t, want %t", tc.host, tc.port, got, tc.allowed)
 		}
+	}
+}
+
+func TestWebPortDiscoveryUsesConfiguredLoopbackProxy(t *testing.T) {
+	targets := make(chan string, 1)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			t.Errorf("proxy received %s, want CONNECT", r.Method)
+		}
+		targets <- r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer proxy.Close()
+	t.Setenv("BLKCHAIN_WEB_PROXY", strings.TrimPrefix(proxy.URL, "http://"))
+	scope, err := secgate.ParseScope(strings.NewReader("127.0.0.2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &secgate.Gate{Scope: scope}
+	if !probeWebEndpoint(context.Background(), g, serviceEndpoint{host: "127.0.0.2", transport: "tcp", port: 8443}) {
+		t.Fatal("proxy vantage did not establish the scoped port")
+	}
+	if target := <-targets; target != "127.0.0.2:8443" {
+		t.Fatalf("proxy target = %q", target)
 	}
 }
