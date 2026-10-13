@@ -34,8 +34,9 @@ pair is NOT required for CDP.
     npm integrity
     `sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw==`
     (sha1 `120f67a19181bfd183c60fa903c0d99330b56785`).
-- Node.js runs inside the pinned browser image. The operator host needs the Docker
-  CLI and the pinned Playwright package, not a local Node runtime.
+- Node.js runs inside the pinned browser image for ordinary collection. An explicit
+  signed-in Chrome CDP import also requires a host Node executable pinned by
+  `BLKCHAIN_BROWSER_NODE_PATH` and `BLKCHAIN_BROWSER_NODE_SHA256`.
 
 ## No auto-fetch (enforced)
 
@@ -61,6 +62,40 @@ The driver reads these environment values and fails closed without them:
   inside that container, so the endpoint is not published to the host.
 - `BLKCHAIN_DOCKER_BIN` - optional absolute path to the Docker CLI; defaults to
   `docker` from `PATH`.
+
+## Optional signed-in Chrome source
+
+Signed-in web roles use a second Chrome CDP endpoint on the operator host. It is
+separate from `BLKCHAIN_PLAYWRIGHT_CDP`, which remains inside the isolated
+browser container. Chrome 136 and newer require a non-default user-data directory
+for remote debugging. Keep the host endpoint on loopback and sign in to the
+approved test site in that dedicated Chrome window.
+
+On macOS:
+
+```sh
+blk_cdp_profile="$HOME/.local/share/blkchain/cdp-test-profile"
+mkdir -p "$blk_cdp_profile"
+chmod 700 "$blk_cdp_profile"
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --user-data-dir="$blk_cdp_profile" \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port=9223 --no-first-run
+```
+
+In the terminal that starts blk, set the verified host Node binary and its
+current digest:
+
+```sh
+export BLKCHAIN_BROWSER_NODE_PATH="$(command -v node)"
+export BLKCHAIN_BROWSER_NODE_SHA256="$(shasum -a 256 "$BLKCHAIN_BROWSER_NODE_PATH" | awk '{print $1}')"
+```
+
+Use `--session-cdp http://127.0.0.1:9223` with an explicit role and session
+file as shown in [README.md](../README.md#signed-in-chrome-roles). The role's
+origin must be RoE-authorized. The CDP import takes a bounded snapshot of that
+origin's cookies and local storage; it does not drive target traffic from host
+Chrome or read the profile files. Recheck the Node digest after upgrading Node.
 
 ## Isolating the browser driver
 
@@ -135,7 +170,11 @@ another architecture.
 Cookies and storage persist within one isolated task or supplied role. Contexts
 close when the executor or collection job exits. API calls share those cookies
 through the Go broker. A restart creates a fresh context from the supplied
-session configuration. No path opens the operator's personal browser profile.
+session configuration. The isolated browser never opens the operator's browser
+profile files. An explicit `--session-cdp` connects to a separate loopback Chrome
+instance, copies only state for the named in-scope role origin into memory, and
+then drives the isolated browser through the same broker. It never uses the host
+Chrome instance for engagement target traffic.
 
 Wire responses and decompressed bodies each have a 4 MiB limit. A broker permits
 500 requests and 64 MiB aggregate transfer and accepted-body budgets. Request

@@ -14,7 +14,8 @@ sealed RoE and separate operator approvals.
 Interactive web-first search uses the current question only. Detected target details and
 target-specific advisor turns stay local.
 
-Native chat uses one tool registry across CLI, REPL, and TUI. The user-named target in the current
+Native chat is the default for `blk ask`, REPL, and TUI. It uses one tool registry across those
+interfaces. The user-named target in the current
 conversation supplies a temporary scope for isolated commands and web actions. This path has no
 RoE file. `blk engage` keeps its sealed RoE gate, task state, and operator approvals.
 
@@ -191,8 +192,38 @@ hostnames, networks, and URLs named by the user, never from model output or retr
 Its command tool uses the audited binary list and the isolated executor; its web tools use the
 broker's destination and redirect checks. It reads no RoE policy. A missing target exposes no
 active tools, and the project's explicit binary denials still apply. This path does not alter
-`blk engage` authorization. An explicit action request gets one retry when the model returns text
-without the relevant tool call; a second such response fails the turn.
+`blk engage` authorization. Native chat classifies action intent without fixed request phrases.
+A requested target action, file read, or named research tool gets one retry when the model returns
+text without the relevant tool call; a second such response fails the turn. A target action with
+no user-named target fails before execution.
+
+General file and terminal tools default to a persistent project-specific Docker sandbox with an
+empty initial workspace and no network access. The operator explicitly selects local file and
+terminal access with `--tool-host local` or `/tool-host local`. File imports and exports require a
+path in the current user request, stay inside the selected roots, and do not overwrite files.
+Text tools bound reads and returned content. They decode UTF-16 and extract bounded text from
+Jupyter notebooks, DOCX, and XLSX without writing extracted content back to those formats. The
+sandbox retains background processes across chat
+turns. Public web queries are filtered against recognized target identifiers and secret-shaped
+data, and extraction rejects private destinations and redirects. Browser control uses an isolated
+driver with the same destination broker; an explicit loopback CDP endpoint can supply signed-in
+state. MCP clients expose only tools in each configured server's allowlist. Their results are
+untrusted input. Vision analysis requires an explicitly configured vision-capable local model.
+
+An authenticated web engagement may explicitly select a named role, exact origin, and loopback
+Chrome CDP endpoint. The gate authorizes the role origin before any browser state is read. Only
+cookies applicable to that host and local storage for that exact origin enter a new isolated
+browser context. Parent-domain cookies are narrowed to the selected host; other origins and
+WebAuthn credentials are not copied. The source Chrome instance never performs engagement target
+traffic. Authenticated collection accepts only targets at the selected origin. Browser and API
+requests to another in-scope origin strip imported credentials and record an anonymous role.
+Supplemental broker fetches do not use imported browser cookies and record an anonymous role.
+Every request still uses the RoE gate and the per-hop Go broker. The imported
+state stays in memory, and resume requires the same role and origin with a fresh CDP import.
+An autonomous web recon task at the role origin runs browser collection and returns its evidence
+without entering the anonymous command recon ladder.
+The collection result carries a bounded, redacted preview from a browser DOM artifact captured
+in that job. The exact response bytes remain in the restricted evidence store.
 
 Protect the operator and the runner from the target. Treat pages, responses, files, and tool output
 from a target as hostile data. They must not choose a target, arm a task, execute as code, or reach
