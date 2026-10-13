@@ -8,8 +8,8 @@ import (
 
 // cost.go is the per-turn /cost footer: a muted one-line
 // summary of latency plus completion tokens, printed after each answer when the
-// transport exposes usage. RAG usage comes from the langchaingo response when the
-// model returns it; agent usage comes from the gateway run.completed event.
+// transport exposes usage. Usage comes from the langchaingo response when the
+// model returns it.
 
 // turnCost is one turn's usage. completionTokens is 0 when the transport did
 // not report token counts, in which case the footer shows latency only.
