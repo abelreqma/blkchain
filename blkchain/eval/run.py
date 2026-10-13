@@ -4,9 +4,10 @@ Two independent layers:
 
 1. RETRIEVAL METRICS (primary gate, deterministic, no LLM). For each labeled
    case, `blk search --json` is called once for a pool of max(top_k, 10) results. A case
-   is a HIT@k when one result in the top-k matches an expected substring, an
-   expected source (when labeled), and an expected CWE (when labeled). All
-   labels must match the same result. We report hit_rate@5, hit_rate@10 and MRR.
+   is a HIT@k when one result in the top-k matches a bounded term in its text,
+   an expected source (when labeled), and an expected CWE (when labeled). All
+   labels must match the same result. Unrelated queries check for false hits.
+   We report hit_rate@5, hit_rate@10, MRR, and negative-control false hits.
 
 2. ANSWER METRICS (best-effort, LLM-judged with the local oMLX model). Wraps
    deepeval Faithfulness / AnswerRelevancy against `blk ask --agent auto --json` output. If
@@ -25,6 +26,7 @@ import blkchain.eval  # noqa: F401  -- sets telemetry opt-out before deepeval im
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,6 +37,7 @@ from pathlib import Path
 from blkchain import config
 
 DATASET_PATH = Path(__file__).resolve().parent / "dataset.jsonl"
+CONTROL_PATH = Path(__file__).resolve().parent / "negative_controls.jsonl"
 REPORT_PATH = config.ROOT / ".reports" / "eval-report.md"
 
 # Retrieval is pooled to at least this depth so hit@5, hit@10 and MRR all come
@@ -192,6 +195,12 @@ class Case:
     difficulty: str = "core"  # "core" (on-topic) or "hard" (paraphrase/typo/multi-hop)
 
 
+@dataclass
+class NegativeControl:
+    query: str
+    case_index: int
+
+
 def load_dataset(path: Path = DATASET_PATH) -> list[Case]:
     cases: list[Case] = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -210,6 +219,24 @@ def load_dataset(path: Path = DATASET_PATH) -> list[Case]:
             )
         )
     return cases
+
+
+def load_negative_controls(path: Path = CONTROL_PATH) -> list[NegativeControl]:
+    return [NegativeControl(**json.loads(line)) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def run_negative_controls(cases: list[Case], collection: str | None = None) -> list[tuple[NegativeControl, CaseResult]]:
+    controls = []
+    for control in load_negative_controls():
+        if control.case_index >= len(cases):
+            continue
+        try:
+            results = blk_search(control.query, _METRIC_DEPTH, collection)
+            outcome = evaluate_retrieval(cases[control.case_index], results)
+        except BlkError as exc:
+            outcome = CaseResult(cases[control.case_index], 0, None, None, None, None, None, str(exc))
+        controls.append((control, outcome))
+    return controls
 
 
 def _breakdown_by_difficulty(case_results: list["CaseResult"]) -> list[tuple[str, int, int]]:
@@ -257,9 +284,10 @@ def evaluate_retrieval(case: Case, results: list[dict]) -> CaseResult:
     for i, r in enumerate(results, start=1):
         payload = _payload(r)
         cwe_field_seen = cwe_field_seen or "cwe_class" in payload
-        haystack = (str(payload.get("text") or "") + " " + str(payload.get("path") or "")).lower()
+        haystack = str(payload.get("text") or "").lower()
         source = str(payload.get("source") or "")
-        sub = next((s for s in case.expected_substrings if s in haystack), None)
+        sub = next((s for s in case.expected_substrings
+                    if re.search(r"(?<!\w)" + re.escape(s) + r"(?!\w)", haystack)), None)
         if sub is None:
             continue
         if first_text_rank is None:
@@ -460,6 +488,7 @@ def build_report(
     judge_unavailable: str | None,
     judge_skipped: bool,
     collection: str | None = None,
+    controls: list[tuple[NegativeControl, CaseResult]] | None = None,
 ) -> str:
     n = len(case_results)
     hit5 = sum(1 for c in case_results if c.hit_at(5))
@@ -478,9 +507,19 @@ def build_report(
     lines.append(f"- hit_rate@5:  **{_fmt_pct(_ratio(hit5, n))}** ({hit5}/{n})")
     lines.append(f"- hit_rate@10: **{_fmt_pct(_ratio(hit10, n))}** ({hit10}/{n})")
     lines.append(f"- MRR:         **{mrr:.3f}**")
+    if controls is not None:
+        false_hits = sum(1 for _, result in controls if result.hit_at(5))
+        lines.append(f"- negative_control_false_hits@5: **{false_hits}/{len(controls)}**")
     for label, h, t in _breakdown_by_difficulty(case_results):
         lines.append(f"- hit_rate@5 ({label}): {_fmt_pct(h / t)} ({h}/{t})")
     lines.append("")
+    if controls:
+        lines.append("### Negative controls")
+        lines.append("")
+        for control, outcome in controls:
+            state = "FALSE HIT" if outcome.hit_at(5) else ("ERROR" if outcome.error else "clear")
+            lines.append(f"- {control.query}: {state} against case {control.case_index + 1}")
+        lines.append("")
     lines.append("| # | query | hit@5 | rank | matched source | matched substring |")
     lines.append("|---|-------|-------|------|----------------|-------------------|")
     for i, c in enumerate(case_results, start=1):
@@ -571,6 +610,7 @@ def main() -> int:
     print(f"Running retrieval (pool depth {max(args.top_k, _METRIC_DEPTH)}) ...\n")
 
     case_results = run_retrieval(cases, args.top_k, collection=args.collection)
+    controls = run_negative_controls(cases, collection=args.collection)
 
     # Console table
     print(f"{'#':>2}  {'hit@5':^5}  {'rank':>4}  {'matched':<24}  query")
@@ -587,6 +627,8 @@ def main() -> int:
     print("-" * 100)
     print(f"hit_rate@5 = {_fmt_pct(_ratio(hit5, n))} ({hit5}/{n})   "
           f"hit_rate@10 = {_fmt_pct(_ratio(hit10, n))} ({hit10}/{n})   MRR = {mrr:.3f}")
+    false_hits = sum(1 for _, result in controls if result.hit_at(5))
+    print(f"negative_control_false_hits@5 = {false_hits}/{len(controls)}")
     breakdown = _breakdown_by_difficulty(case_results)
     if len(breakdown) > 1:
         print("  by difficulty:  " + "   ".join(
@@ -626,7 +668,7 @@ def main() -> int:
                     print(f"  - {jr.query}: faithfulness={jr.faithfulness:.3f} relevancy={jr.relevancy:.3f}")
 
     report = build_report(case_results, args.top_k, judge_results, judge_unavailable,
-                          args.no_judge, collection=args.collection)
+                          args.no_judge, collection=args.collection, controls=controls)
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(report, encoding="utf-8")
     print(f"\nReport written to {REPORT_PATH}")
@@ -639,6 +681,12 @@ def main() -> int:
     if any(c.error for c in case_results):
         print(f"error: {sum(1 for c in case_results if c.error)} case(s) failed to run",
               file=sys.stderr)
+        return 1
+    if any(result.error for _, result in controls):
+        print("error: one or more negative controls failed to run", file=sys.stderr)
+        return 1
+    if false_hits:
+        print(f"error: {false_hits} negative control(s) matched unrelated labels", file=sys.stderr)
         return 1
     if args.min_hit5 is not None and _ratio(hit5, n) < args.min_hit5:
         print(f"error: hit_rate@5 {_ratio(hit5, n):.3f} below --min-hit5 {args.min_hit5}",

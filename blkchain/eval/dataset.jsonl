@@ -1,17 +1,17 @@
 {"query": "SSRF to cloud metadata to steal IAM credentials", "expected_substrings": ["169.254.169.254", "security-credentials", "metadata"], "expected_sources": ["skills", "hacktricks", "hacktricks-cloud"], "notes": "AWS IMDS endpoint is the canonical SSRF->cloud creds pivot; non-circular fact."}
 {"query": "server-side request forgery exploitation techniques", "expected_substrings": ["ssrf", "server-side request forgery"], "notes": "General SSRF concept; either the acronym or the full name should surface."}
 {"query": "how does reflected cross-site scripting work", "expected_substrings": ["reflected"], "expected_cwe": "xss", "notes": "Reflected XSS is echoed in the immediate response; cwe_class tag exists in corpus."}
-{"query": "stored persistent XSS payload delivery", "expected_substrings": ["stored", "persistent"], "notes": "Stored/persistent XSS is saved server-side and served to later victims."}
-{"query": "DOM-based XSS sink and source analysis", "expected_substrings": ["dom"], "notes": "DOM XSS executes purely client-side via a JS sink; expect the DOM term."}
-{"query": "union-based SQL injection to extract columns", "expected_substrings": ["union"], "expected_cwe": "sqli", "notes": "UNION SELECT appends attacker rows to the result set."}
-{"query": "blind SQL injection boolean and time based", "expected_substrings": ["blind"], "notes": "Blind SQLi infers data from behaviour, no direct output."}
-{"query": "stacked queries SQL injection multiple statements", "expected_substrings": ["stacked"], "notes": "Stacked queries run a second statement after a semicolon."}
+{"query": "stored persistent XSS payload delivery", "expected_substrings": ["stored xss", "stored cross-site scripting", "persistent xss"], "notes": "Stored/persistent XSS is saved server-side and served to later victims."}
+{"query": "DOM-based XSS sink and source analysis", "expected_substrings": ["dom-based xss", "dom based xss", "dom xss", "dom-based cross site scripting"], "notes": "DOM XSS executes purely client-side via a JS sink; require the XSS context."}
+{"query": "union-based SQL injection to extract columns", "expected_substrings": ["union select", "union-based sql", "union based sql"], "expected_cwe": "sqli", "notes": "UNION SELECT appends attacker rows to the result set."}
+{"query": "blind SQL injection boolean and time based", "expected_substrings": ["blind sql", "blind injection"], "notes": "Blind SQLi infers data from behaviour, no direct output."}
+{"query": "stacked queries SQL injection multiple statements", "expected_substrings": ["stacked queries", "stacked sql"], "notes": "Stacked queries run a second statement after a semicolon."}
 {"query": "local file inclusion read /etc/passwd", "expected_substrings": ["/etc/passwd", "local file inclusion"], "notes": "/etc/passwd is the classic LFI proof target on Linux."}
 {"query": "remote file inclusion include attacker hosted php", "expected_substrings": ["remote file inclusion", "allow_url_include"], "notes": "RFI pulls a remote payload, gated by allow_url_include in PHP."}
 {"query": "XXE XML external entity file disclosure", "expected_substrings": ["external entity"], "expected_cwe": "xxe", "notes": "XXE abuses a DOCTYPE ENTITY to read files or reach internal hosts."}
 {"query": "server-side template injection jinja2 exploitation", "expected_substrings": ["template injection"], "expected_cwe": "ssti", "notes": "SSTI evaluates attacker template syntax in the engine context."}
 {"query": "IDOR broken object level authorization", "expected_substrings": ["direct object", "idor"], "expected_cwe": "idor", "notes": "IDOR/BOLA exposes objects by predictable identifier without authz."}
-{"query": "JWT alg none signature bypass", "expected_substrings": ["alg", "none"], "expected_cwe": "jwt", "notes": "alg:none tells a naive verifier to accept an unsigned token."}
+{"query": "JWT alg none signature bypass", "expected_substrings": ["alg:none", "alg: none", "none algorithm"], "expected_cwe": "jwt", "notes": "alg:none tells a naive verifier to accept an unsigned token."}
 {"query": "JWT RS256 to HS256 key confusion attack", "expected_substrings": ["hs256", "key confusion"], "notes": "Key confusion signs with the public key as an HMAC secret."}
 {"query": "insecure deserialization gadget chain to RCE", "expected_substrings": ["gadget", "deserializ"], "notes": "Untrusted deserialization triggers gadget chains (e.g. ysoserial)."}
 {"query": "OS command injection through unsanitized input", "expected_substrings": ["command injection"], "notes": "Shell metacharacters break out into the underlying command."}
@@ -22,14 +22,14 @@
 {"query": "clickjacking with iframe and X-Frame-Options", "expected_substrings": ["clickjacking"], "notes": "Clickjacking overlays a hidden frame; X-Frame-Options/CSP defend it."}
 {"query": "linux privilege escalation via sudo misconfiguration", "expected_substrings": ["privilege escalation", "privesc"], "notes": "Local privesc from a low user to root via sudo/SUID issues."}
 {"query": "SecLists directory and file discovery wordlist", "expected_substrings": ["seclists", "wordlist"], "notes": "SecLists catalog query; expect a SecLists path or wordlist mention."}
-{"query": "wordlist of common usernames for brute forcing", "expected_substrings": ["username"], "notes": "Username enumeration wordlist; SecLists Usernames catalog."}
+{"query": "wordlist of common usernames for brute forcing", "expected_substrings": ["username lists", "usernames directory", "common usernames"], "expected_sources": ["seclists"], "notes": "Username enumeration wordlist; SecLists Usernames catalog."}
 {"query": "a web app fetches any URL I give it and I aim it at the internal cloud metadata IP to grab credentials", "expected_substrings": ["169.254.169.254"], "difficulty": "hard", "notes": "paraphrase SSRF->metadata without naming SSRF"}
 {"query": "reflcted cross site scripting explanaton", "expected_substrings": ["reflected"], "difficulty": "hard", "notes": "typos; BM25 degrades, dense/rerank must carry"}
 {"query": "sql injektion using union select to read other tables", "expected_substrings": ["union"], "difficulty": "hard", "notes": "obfuscated spelling of SQL injection"}
 {"query": "read arbitrary files on the server by tampering with a path parameter", "expected_substrings": ["/etc/passwd", "inclusion", "traversal"], "difficulty": "hard", "notes": "paraphrase LFI/path traversal"}
 {"query": "abuse an xml parser to disclose local files on the host", "expected_substrings": ["external entity", "xxe"], "difficulty": "hard", "notes": "paraphrase XXE"}
 {"query": "inject an expression into a server-rendered template so it gets evaluated", "expected_substrings": ["template injection", "ssti"], "difficulty": "hard", "notes": "paraphrase SSTI"}
-{"query": "forge a json web token by setting the signature algorithm to none", "expected_substrings": ["alg", "none"], "difficulty": "hard", "notes": "paraphrase JWT alg:none"}
+{"query": "forge a json web token by setting the signature algorithm to none", "expected_substrings": ["alg:none", "alg: none", "none algorithm", "algorithm to none"], "difficulty": "hard", "notes": "paraphrase JWT alg:none"}
 {"query": "run code by abusing how the app deserializes untrusted objects", "expected_substrings": ["gadget", "deserial"], "difficulty": "hard", "notes": "paraphrase insecure deserialization"}
 {"query": "change the numeric id in a request to view another account's records", "expected_substrings": ["idor", "direct object"], "difficulty": "hard", "notes": "paraphrase IDOR"}
 {"query": "commmand injektion via unsanitized shell input", "expected_substrings": ["command injection"], "difficulty": "hard", "notes": "typo obfuscation of command injection"}

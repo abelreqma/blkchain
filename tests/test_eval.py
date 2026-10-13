@@ -9,10 +9,25 @@ from pathlib import Path
 from unittest import mock
 
 from blkchain.eval import run
-from blkchain.eval.run import Case, build_report, evaluate_retrieval
+from blkchain.eval.run import Case, build_report, evaluate_retrieval, load_dataset, load_negative_controls
 
 
 class RetrievalEvaluationTest(unittest.TestCase):
+    def test_path_and_short_unrelated_words_do_not_pass_labels(self):
+        cases = load_dataset()
+        controls = load_negative_controls()
+        results = [
+            {"payload": {"text": "Configure a printer driver in the office", "path": "docs/dom-xss.md", "source": "skills"}},
+            {"payload": {"text": "None of the Python unit tests failed", "path": "jwt/alg-none.md", "source": "skills", "cwe_class": "jwt"}},
+        ]
+        for control, result in zip(controls, results):
+            self.assertIsNone(evaluate_retrieval(cases[control.case_index], [result]).first_rank)
+
+    def test_short_labels_require_word_boundaries(self):
+        case = Case("q", ["dom"])
+        result = evaluate_retrieval(case, [{"payload": {"text": "domain configuration", "source": "skills"}}])
+        self.assertIsNone(result.first_rank)
+
     def test_source_and_cwe_must_match_same_substring_result(self):
         case = Case("q", ["metadata"], expected_sources=["skills"], expected_cwe="ssrf")
         results = [
@@ -253,6 +268,15 @@ class MainExitCodeTest(FakeBlkTestCase):
     def test_min_hit5_below_threshold_is_nonzero(self):
         self.emit({"results": [{"payload": {"text": "unrelated", "source": "s"}}]})
         rc = self._run_main(["--no-judge", "--min-hit5", "0.9"], [Case("q", ["metadata"])])
+        self.assertNotEqual(rc, 0)
+
+    def test_negative_control_false_hit_is_nonzero(self):
+        self.emit(_SEARCH_JSON)
+        case = Case("q", ["metadata"])
+        control = run.NegativeControl("unrelated", 0)
+        false_hit = run.CaseResult(case, 1, 1, 1, 1, "metadata", "skills")
+        with mock.patch.object(run, "run_negative_controls", return_value=[(control, false_hit)]):
+            rc = self._run_main(["--no-judge"], [case])
         self.assertNotEqual(rc, 0)
 
     def test_empty_dataset_does_not_zerodivide(self):
