@@ -334,7 +334,7 @@ func plainREPL() error {
 				printErr(err)
 				recordConvo(q, ans)
 			} else {
-				fmt.Println(pm.answerAgentStatus())
+				fmt.Println(Meta.Render("rag " + boolOnOff(loadPrefs().Rag)))
 			}
 		case "web":
 			last = replWebSearch(rest, last, rc.agent)
@@ -377,8 +377,8 @@ func plainREPL() error {
 	}
 }
 
-// ragArg classifies a /rag argument. An empty argument is the mode select
-// (handled by the caller). "on"/"off" (trimmed, case-folded) set the rag
+// ragArg classifies a /rag argument. An empty argument reports the current
+// toggle (handled by the caller). "on"/"off" (trimmed, case-folded) set the rag
 // toggle. Any other argument is a question to force-ground.
 func ragArg(arg string) (setToggle bool, on bool, question string) {
 	a := strings.TrimSpace(arg)
