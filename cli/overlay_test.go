@@ -92,7 +92,7 @@ func TestPickersFitWithColorEnabled(t *testing.T) {
 	for _, w := range layoutWidths {
 		for _, h := range layoutHeights {
 			checkBox(t, fmt.Sprintf("color resume %dx%d", w, h), newHistoryPicker(manySessions(20), "id01", w).View(w, h), w, h)
-			checkBox(t, fmt.Sprintf("color model %dx%d", w, h), newModelPicker(manyModels(20), "model-01", "low", w).View(w, h), w, h)
+			checkBox(t, fmt.Sprintf("color model %dx%d", w, h), newModelPicker(manyModels(20), "model-01", w).View(w, h), w, h)
 		}
 	}
 }
@@ -127,7 +127,7 @@ func TestResumePickerResizeRecomputes(t *testing.T) {
 func TestModelPickerFitsEveryTerminal(t *testing.T) {
 	for _, w := range layoutWidths {
 		for _, h := range layoutHeights {
-			p := newModelPicker(manyModels(20), "model-15", "high", w)
+			p := newModelPicker(manyModels(20), "model-15", w)
 			view := p.View(w, h)
 			label := fmt.Sprintf("model %dx%d", w, h)
 			checkBox(t, label, view, w, h)
@@ -137,8 +137,8 @@ func TestModelPickerFitsEveryTerminal(t *testing.T) {
 			if !strings.Contains(view, "model-15") {
 				t.Errorf("%s: selected model scrolled out of view", label)
 			}
-			if !strings.Contains(view, "high") || !strings.Contains(view, "REASONING") {
-				t.Errorf("%s: reasoning column clipped:\n%s", label, view)
+			if !strings.Contains(view, "MODEL") {
+				t.Errorf("%s: the column heading is clipped:\n%s", label, view)
 			}
 		}
 	}
@@ -148,7 +148,7 @@ func TestOverlayNarrowTerminalsDoNotPanic(t *testing.T) {
 	for _, w := range []int{1, 2, 3, 5, 8, 12, 20, 30} {
 		for _, h := range []int{1, 3, 6, 10} {
 			_ = newHistoryPicker(manySessions(5), "id01", w).View(w, h)
-			_ = newModelPicker(manyModels(5), "", "", w).View(w, h)
+			_ = newModelPicker(manyModels(5), "", w).View(w, h)
 		}
 	}
 }
@@ -207,7 +207,7 @@ func TestOverlayBoxShrinksOnShortTerminals(t *testing.T) {
 			t.Errorf("height %d: box of %d rows plus status and footer does not fit", h, n)
 		}
 		for name, ov := range map[string]overlayModel{
-			"model": newModelPicker(manyModels(20), "model-15", "high", 40),
+			"model": newModelPicker(manyModels(20), "model-15", 40),
 			"file":  newFilePicker(t.TempDir(), 40),
 		} {
 			if n := len(strings.Split(ov.View(40, h), "\n")); n+2 > h {
@@ -222,7 +222,7 @@ func TestOverlayBoxShrinksOnShortTerminals(t *testing.T) {
 func TestOverlaysDrawNoInBoxKeyFooter(t *testing.T) {
 	views := map[string]string{
 		"resume": newHistoryPicker(manySessions(3), "", 100).View(100, 30),
-		"model":  newModelPicker(manyModels(3), "model-00", "low", 100).View(100, 30),
+		"model":  newModelPicker(manyModels(3), "model-00", 100).View(100, 30),
 		"file":   newFilePicker(t.TempDir(), 100).View(100, 30),
 	}
 	for name, v := range views {

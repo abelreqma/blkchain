@@ -240,7 +240,7 @@ func TestCancelWithoutPartialPrintsOnlyTag(t *testing.T) {
 func TestCtrlCClosesEveryOverlay(t *testing.T) {
 	overlays := map[string]overlayModel{
 		"resume": newHistoryPicker(nil, "", 80),
-		"model":  newModelPicker([]string{"a", "b"}, "a", "medium", 80),
+		"model":  newModelPicker([]string{"a", "b"}, "a", 80),
 		"file":   newFilePicker(t.TempDir(), 80),
 	}
 	for name, ov := range overlays {
@@ -301,7 +301,7 @@ func TestFooterFollowsState(t *testing.T) {
 
 	overlays := map[string]overlayModel{
 		"resume": newHistoryPicker(nil, "", 80),
-		"model":  newModelPicker([]string{"a"}, "a", "medium", 80),
+		"model":  newModelPicker([]string{"a"}, "a", 80),
 		"file":   newFilePicker(t.TempDir(), 80),
 	}
 	for name, ov := range overlays {
@@ -978,7 +978,7 @@ func layoutModel(t *testing.T, w, h int) model {
 	ta := textarea.New()
 	ta.SetHeight(1)
 	ta.Focus()
-	m := model{ta: ta, sp: spinner.New(), help: help.New(), keys: defaultKeys(), reasoning: "medium", ragModel: "m"}
+	m := model{ta: ta, sp: spinner.New(), help: help.New(), keys: defaultKeys(), ragModel: "m"}
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	return nm.(model)
 }
@@ -1142,7 +1142,7 @@ func TestViewNeverExceedsShortTerminals(t *testing.T) {
 			return m
 		},
 		"model overlay": func(m model) model {
-			m.overlay = newModelPicker(manyModels(20), "model-01", "low", m.width)
+			m.overlay = newModelPicker(manyModels(20), "model-01", m.width)
 			return m
 		},
 		"file overlay": func(m model) model {
@@ -1305,7 +1305,7 @@ func TestViewNarrowTerminalsDoNotPanic(t *testing.T) {
 			_ = m.View()
 			m.overlay = newHistoryPicker([]sessionMeta{{ID: "a", Title: "t", MsgCount: 1}}, "a", w)
 			_ = m.View()
-			m.overlay = newModelPicker([]string{"a", "b"}, "a", "medium", w)
+			m.overlay = newModelPicker([]string{"a", "b"}, "a", w)
 			_ = m.View()
 		}
 	}
@@ -1334,7 +1334,7 @@ func TestOverlayFooterListsEveryKey(t *testing.T) {
 	}{
 		"resume":         {newHistoryPicker(manySessions(2), "", 100), []string{"1-9", "up/down", "enter", "d then y", "esc/ctrl+c close"}},
 		"resume confirm": {confirm, []string{"y confirm delete", "ctrl+d quit", "any other key cancel"}},
-		"model":          {newModelPicker(manyModels(2), "model-00", "low", 100), []string{"up/down", "tab/left/right", "enter", "esc/ctrl+c close"}},
+		"model":          {newModelPicker(manyModels(2), "model-00", 100), []string{"up/down", "enter", "esc/ctrl+c close"}},
 		"file":           {newFilePicker(t.TempDir(), 100), []string{"type", "up/down", "enter", "backspace", "esc/ctrl+c close"}},
 	}
 	for name, c := range cases {
@@ -1566,7 +1566,7 @@ func TestKeyPanelIsGroupedWithConditionalNotes(t *testing.T) {
 	// The bindings that shadow a textarea key say when they apply. A single
 	// column keeps each row's wrapped text in reading order.
 	flat := strings.Join(strings.Fields(strings.Join(keyPanelLines(defaultKeys(), 60), " ")), " ")
-	for _, want := range []string{"pick the model and reasoning level (only while idle;", "(only while some are queued;"} {
+	for _, want := range []string{"pick the model (only while idle;", "(only while some are queued;"} {
 		if !strings.Contains(flat, want) {
 			t.Errorf("panel lacks the note %q:\n%s", want, flat)
 		}
@@ -1790,7 +1790,7 @@ func TestStatusLineLabelsEveryValue(t *testing.T) {
 	m := layoutModel(t, 200, 24)
 	m.ragModel, m.sessTitle = "gemma", "new session"
 	line := m.statusLine()
-	for _, want := range []string{"rag", "model gemma", "reasoning medium", "checking services", "new session"} {
+	for _, want := range []string{"rag", "model gemma", "viz", "checking services", "new session"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("status %q lacks %q", line, want)
 		}
@@ -1803,7 +1803,7 @@ func TestStatusLineLabelsEveryValue(t *testing.T) {
 
 // The model name has priority: at 80 columns at least 24 characters of a long
 // id show, and the other segments go first, in order: the session title, the
-// reasoning, then the word "services". No row is ever wider than the terminal.
+// viz switch, then the word "services". No row is ever wider than the terminal.
 func TestStatusLineGivesTheModelPriority(t *testing.T) {
 	noColor(t)
 	long := "supergemma4-26b-uncensored-mlx-4bit-v2"
@@ -1831,9 +1831,9 @@ func TestStatusLineGivesTheModelPriority(t *testing.T) {
 		m := nm.(model)
 		line := m.statusLine()
 		title := strings.Contains(line, "new session")
-		reasoning := strings.Contains(line, "reasoning")
+		viz := strings.Contains(line, "viz")
 		services := strings.Contains(line, "services")
-		if title && !reasoning || reasoning && !services {
+		if title && !viz || viz && !services {
 			t.Errorf("width %d: segments dropped out of order: %q", w, line)
 		}
 		if w >= 40 && !strings.Contains(line, "ok") {
@@ -1849,7 +1849,7 @@ func TestStatusLineGivesTheModelPriority(t *testing.T) {
 	}
 	m := base
 	m.width = 50
-	if line := m.statusLine(); strings.Contains(line, "reasoning") || strings.Contains(line, "new session") || strings.Contains(line, "embed") {
+	if line := m.statusLine(); strings.Contains(line, "viz") || strings.Contains(line, "new session") || strings.Contains(line, "embed") {
 		t.Errorf("50 columns should collapse to mode, model, and health: %q", line)
 	}
 }
@@ -2078,7 +2078,7 @@ func TestEveryFooterKeepsItsWayOut(t *testing.T) {
 			{"palette", pal, "esc/ctrl+c close"},
 			{"resume", with(newHistoryPicker(manySessions(2), "", w)), "esc/ctrl+c close"},
 			{"resume confirm", with(confirm), "y confirm delete"},
-			{"model picker", with(newModelPicker(manyModels(2), "model-00", "low", w)), "esc/ctrl+c close"},
+			{"model picker", with(newModelPicker(manyModels(2), "model-00", w)), "esc/ctrl+c close"},
 			{"file picker", with(newFilePicker(t.TempDir(), w)), "esc/ctrl+c close"},
 			{"models panel", panelModel(t, w, 30), "esc/ctrl+c close"},
 			{"models panel, unload armed", armed, "u confirm unload"},
@@ -2197,7 +2197,6 @@ func colorStatusLine(t *testing.T, powerline string) string {
 	m := newTestModel(t)
 	m.width = 120
 	m.ragModel = "gemma"
-	m.reasoning = "medium"
 	m.servicesChecked, m.servicesOK = true, true
 	// The embed and rerank segments share a fill, so they join with a thin separator.
 	m.health, m.rerankUp = &serviceHealth{EmbedServer: true}, true
@@ -2232,7 +2231,7 @@ func TestStatusRibbonNerdTier(t *testing.T) {
 		line := colorStatusLine(t, env)
 		for name, want := range map[string]string{
 			"separator": "\ue0b0", "mode database icon": iconDatabase, "model icon": iconCPU,
-			"reasoning icon": iconBolt, "services heartbeat icon": iconHealth, "viz icon": iconChart,
+			"services heartbeat icon": iconHealth, "viz icon": iconChart,
 		} {
 			if !strings.Contains(line, want) {
 				t.Errorf("POWERLINE=%q nerd status lacks %s %q: %q", env, name, want, line)

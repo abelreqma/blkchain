@@ -384,8 +384,8 @@ func TestModelsPanelEnterAppliesAndRefreshRefetches(t *testing.T) {
 		t.Fatalf("enter = %#v, want modelSelectedMsg for idle-model", msg)
 	}
 	nm, _ = m.Update(msg)
-	if got := nm.(model); got.ragModel != "idle-model" || got.overlay != nil || got.reasoning != "medium" {
-		t.Errorf("after enter: model %q overlay %T reasoning %q", got.ragModel, got.overlay, got.reasoning)
+	if got := nm.(model); got.ragModel != "idle-model" || got.overlay != nil {
+		t.Errorf("after enter: model %q overlay %T", got.ragModel, got.overlay)
 	}
 
 	m = panelModel(t, 100, 30)

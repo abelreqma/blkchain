@@ -141,7 +141,7 @@ func (m model) footerKeys() footerKeyMap {
 			}
 			return footerKeyMap{short: []key.Binding{hint("1-9/enter", "open"), hint("up/down", "move"), hint("/", "filter"), hint("d then y", "delete"), closeKey}}
 		case modelPicker:
-			return footerKeyMap{short: []key.Binding{hint("up/down", "choose"), hint("tab/left/right", "switch column"), hint("enter", "apply"), closeKey}}
+			return footerKeyMap{short: []key.Binding{hint("up/down", "choose"), hint("enter", "apply"), closeKey}}
 		case contextPicker:
 			if ov.preview {
 				return footerKeyMap{short: []key.Binding{hint("esc", "back")}}
@@ -512,11 +512,9 @@ type model struct {
 	// in progress.
 	engageIntake *engageIntakeFlow
 
-	// Model/reasoning selection from the /model picker. ragModel overrides the
-	// oMLX model ("" = default); reasoning is the reasoning-effort level shown
-	// in the status line.
-	ragModel  string
-	reasoning string
+	// Model selection from the /model picker. ragModel overrides the oMLX model
+	// ("" = default).
+	ragModel string
 
 	// resolvedModel is the model a rag turn uses when none is picked, resolved
 	// once per session when the model list first loads; "" until then.
@@ -645,7 +643,6 @@ func initialModel() model {
 		sess:             sess,
 		hist:             histDB,
 		sessTitle:        title,
-		reasoning:        "medium",
 		ambient:          ambient,
 		prefs:            loadInteractivePrefs(),
 		cfg:              cfg,
@@ -1132,7 +1129,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.overlay != nil || m.rsearch.open || m.pal.open {
 			return m, nil
 		}
-		p := newModelPicker(msg.models, msg.current, msg.reasoning, m.width)
+		p := newModelPicker(msg.models, msg.current, m.width)
 		switch {
 		case msg.listErr != nil:
 			p.hint = msg.listErr.Error()
@@ -1247,7 +1244,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case modelSelectedMsg:
 		m.overlay = nil
-		return m.applyModel(msg.model, msg.reasoning)
+		return m.applyModel(msg.model)
 
 	case fileSelectedMsg:
 		m.overlay = nil
@@ -1623,12 +1620,9 @@ func (m *model) recordTurn(answer string) error {
 
 // applyModel applies a model-picker selection to subsequent turns and refreshes
 // the status-line health.
-func (m model) applyModel(modelID, reasoning string) (tea.Model, tea.Cmd) {
-	if strings.TrimSpace(reasoning) != "" {
-		m.reasoning = reasoning
-	}
+func (m model) applyModel(modelID string) (tea.Model, tea.Cmd) {
 	m.ragModel = strings.TrimSpace(modelID)
-	note := "   " + Meta.Render(joinSep("model: "+sanitizeTerminal(m.currentModel()), "reasoning: "+m.reasoning))
+	note := "   " + Meta.Render("model: "+sanitizeTerminal(m.currentModel()))
 	return m, tea.Batch(tea.Println(note), m.healthCmd())
 }
 
@@ -2686,13 +2680,12 @@ func (m model) sessID() string {
 // openModelPickerCmd discovers the available models in a command (network IO)
 // and opens the model picker on completion, so the event loop stays responsive
 // and the input draft is preserved. When discovery fails it still opens with
-// the current model plus the reasoning levels, so the picker always works.
+// the current model, so the picker always works.
 //
 // The models hidden in /models are left out. When that leaves only the active
 // model, the picker says so and points to /models.
 func (m model) openModelPickerCmd() tea.Cmd {
 	current := m.currentModel()
-	reasoning := m.reasoning
 	prefs := m.prefs
 	return func() tea.Msg {
 		var listErr error
@@ -2702,7 +2695,7 @@ func (m model) openModelPickerCmd() tea.Cmd {
 		}
 		models := slices.DeleteFunc(slices.Clone(all), prefs.isHidden)
 		allHidden := len(models) < len(all) && len(ensureFirst(models, current)) <= 1
-		return openModelPickerMsg{models: ensureFirst(models, current), current: current, reasoning: reasoning, allHidden: allHidden, listErr: listErr}
+		return openModelPickerMsg{models: ensureFirst(models, current), current: current, allHidden: allHidden, listErr: listErr}
 	}
 }
 
@@ -3028,17 +3021,17 @@ func webStatusSegment(provider string, on bool) (string, bool) {
 const modelPriorityCols = 24
 
 // statusLayout is which optional segments a status line carries: the session
-// title, the reasoning, the retrieval models, and the long health label
+// title, the viz switch, the retrieval models, and the long health label
 // ("services ok" rather than "ok").
-type statusLayout struct{ title, reasoning, retrieval, longHealth bool }
+type statusLayout struct{ title, viz, retrieval, longHealth bool }
 
 // composeStatus renders the status line as a powerline ribbon of labeled
-// fields. The left cluster is mode, model, and reasoning on the surface fill.
-// The right cluster is the retrieval models, health (filled with tone), and the
-// viz switch. The session title and the queue count trail as muted text. The
+// fields. The left cluster is mode and model on the surface fill. The right
+// cluster is the retrieval models, health (filled with tone), and the viz
+// switch. The session title and the queue count trail as muted text. The
 // model name has priority. While the line overflows and fewer than
 // modelPriorityCols of the name would show, the session title goes first, then
-// the reasoning (and viz), then the word "services" in the health label. Past
+// the viz switch, then the word "services" in the health label. Past
 // that the line collapses to mode, model, and health, and the model is cut as
 // the last resort (with an ASCII "..."). A narrow rich tier puts retrieval
 // labels on a second line.
@@ -3064,9 +3057,6 @@ func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, mode
 			engSeg,
 			{Text: "model " + model, FG: wHeadFg, BG: wSegBg, Icon: iconCPU},
 		}
-		if l.reasoning {
-			left = append(left, plSegment{Text: "reasoning " + m.reasoning, FG: wMutedFg, BG: wSegBg2, Icon: iconBolt})
-		}
 		var right []plSegment
 		if l.retrieval {
 			for _, r := range retrieval {
@@ -3082,7 +3072,7 @@ func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, mode
 			hFG, hBG = wRoseFg, wRoseBg
 		}
 		right = append(right, plSegment{Text: h, FG: hFG, BG: hBG, Icon: iconHealth})
-		if l.reasoning {
+		if l.viz {
 			if m.prefs.Viz {
 				right = append(right, plSegment{Text: "viz", FG: wTanFg, BG: wTanBg, Icon: iconChart})
 			} else {
@@ -3119,8 +3109,8 @@ func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, mode
 		return clip.Render(first) + "\n" + clip.Render(second)
 	}
 	for _, l := range []statusLayout{
-		{title: true, reasoning: true, retrieval: true, longHealth: true},
-		{reasoning: true, retrieval: true, longHealth: true},
+		{title: true, viz: true, retrieval: true, longHealth: true},
+		{viz: true, retrieval: true, longHealth: true},
 		{retrieval: true, longHealth: true},
 		{retrieval: true},
 	} {
@@ -3500,7 +3490,7 @@ func helpResponse(arg string, width int) string {
 			"queue":   "/queue list; /queue edit N; /queue remove N; /queue pause; /queue resume; /queue clear.",
 			"attach":  "/attach PATH or /attach URL prepares the next question. With no argument, the TUI opens a file picker.",
 			"history": "/history reopens a conversation. In the picker, / filters titles. /history clear N removes one saved conversation.",
-			"model":   "/model chooses the model and reasoning for this session. /models manages saved visibility and retrieval settings.",
+			"model":   "/model chooses the model for this session. /models manages saved visibility and retrieval settings.",
 		}
 		if detail := examples[c.name]; detail != "" {
 			text += "\n\n" + wrapIndent(detail, 3, width)
@@ -3611,7 +3601,7 @@ func (k keyMap) panelGroups() []keyGroup {
 			{"/", "open the command list"},
 			{label(k.Attach), "attach a file to your next question"},
 			{label(k.ReverseSearch), "search earlier questions"},
-			{label(k.PickModel), "pick the model and reasoning level (only while idle; replaces cursor up)"},
+			{label(k.PickModel), "pick the model (only while idle; replaces cursor up)"},
 		}},
 		{"SESSION", []keyRow{
 			{label(k.Quit), "quit; press twice if a draft or turn is active"},
