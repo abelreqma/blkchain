@@ -106,12 +106,6 @@ func (m model) answerAgentStatus() string {
 		names[i] = answerAgentLabel(name)
 	}
 	selected := answerAgentLabel(choice) + suffix
-	if m.mode == "agent" {
-		selected = "Hermes"
-		if plCurrentTier() != plASCII {
-			selected = "\U0001f4ac " + selected
-		}
-	}
 	return "agent " + selected + "\nnative specialists:\n  " + strings.Join(names, "\n  ")
 }
 
@@ -123,6 +117,6 @@ func (m *model) selectAnswerAgent(value string) error {
 	if m.working {
 		return fmt.Errorf("agent: cancel the current turn before changing specialists")
 	}
-	m.answerAgent, m.mode, m.persona = choice, "rag", ""
+	m.answerAgent, m.persona = choice, ""
 	return nil
 }

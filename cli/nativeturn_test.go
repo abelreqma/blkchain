@@ -70,6 +70,21 @@ func TestNativeTurnDefaultsToolHostToSandbox(t *testing.T) {
 	}
 }
 
+func TestNativeTurnUsesTheRequestedModel(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	var opts AnswerOpts
+	stubAdaptiveAnswer(t, "ok", &opts)
+
+	res, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q", Model: " picked-model "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Model != "picked-model" || res.Model != "picked-model" {
+		t.Fatalf("model = %q, result model = %q, want picked-model", opts.Model, res.Model)
+	}
+}
+
 func TestNativeTurnRejectsEmptyQuestion(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)

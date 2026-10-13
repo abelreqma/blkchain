@@ -11,18 +11,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func TestClearReplacesGatewayConversationIdentity(t *testing.T) {
-	useDeadServices(t)
-	m := newKeyModel(t)
-	m.agentSession = "old-gateway-session"
-	if err := m.resetConversation(); err != nil {
-		t.Fatal(err)
-	}
-	if m.agentSession != "" {
-		t.Fatal("clear retained gateway conversation identity")
-	}
-}
-
 func TestClearStartsFreshMemoryAndPreservesSavedSession(t *testing.T) {
 	useDeadServices(t)
 	m := newKeyModel(t)
@@ -65,7 +53,7 @@ func TestUndoChangesNextAnswerAndReopenedHistory(t *testing.T) {
 }
 
 func TestScopedHelpSupportsInteractiveCommands(t *testing.T) {
-	for _, name := range []string{"model", "history", "clear", "undo", "copy", "attach", "editor", "viz", "rag", "auto", "safe", "mode"} {
+	for _, name := range []string{"model", "history", "clear", "undo", "copy", "attach", "editor", "viz", "rag", "auto", "safe"} {
 		got := stripANSI(helpResponse(name, 80))
 		if strings.Contains(got, "unknown command") || !strings.Contains(got, "/"+name) {
 			t.Errorf("%s: %s", name, got)
@@ -192,18 +180,15 @@ func TestPersistenceFailureDoesNotMirrorAnUnsavedExchange(t *testing.T) {
 	}
 }
 
-// Undo drops the exchange locally, so the gateway's own conversation no longer
-// matches this session and the next agent turn must start a new one. Pending
-// context is not part of the undone exchange: attachments are consumed when a
-// turn is sent, so anything staged now was staged afterwards and is kept.
-func TestUndoReplacesGatewayConversationAndKeepsPendingContext(t *testing.T) {
+// Pending context is not part of an undone exchange: attachments are consumed
+// when a turn is sent, so anything staged now was staged afterwards and is kept.
+func TestUndoKeepsPendingContext(t *testing.T) {
 	useDeadServices(t)
 	m := newKeyModel(t)
 	m.pendingQ = "first question"
 	if err := m.recordTurn("first answer"); err != nil {
 		t.Fatal(err)
 	}
-	m.agentSession = "old-gateway-session"
 	m.attachments = []attachment{{path: "notes.txt", content: "notes"}}
 	m.queue = []string{"queued question"}
 
@@ -211,9 +196,6 @@ func TestUndoReplacesGatewayConversationAndKeepsPendingContext(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if m.agentSession != "" {
-		t.Errorf("undo retained the gateway conversation identity: %q", m.agentSession)
-	}
 	if len(m.attachments) != 1 {
 		t.Errorf("undo dropped staged attachments: %v", m.attachments)
 	}
@@ -223,7 +205,7 @@ func TestUndoReplacesGatewayConversationAndKeepsPendingContext(t *testing.T) {
 }
 
 // Reopening a session switches conversation, so everything that belongs to the
-// previous one goes: the gateway handle, the citation targets /open reads, the
+// previous one goes: the citation targets /open reads, the
 // retained search results, and the attachments staged for it.
 func TestReopenReplacesPreviousConversationContext(t *testing.T) {
 	useDeadServices(t)
@@ -243,7 +225,6 @@ func TestReopenReplacesPreviousConversationContext(t *testing.T) {
 	} {
 		t.Run(reopen.name, func(t *testing.T) {
 			stale := m
-			stale.agentSession = "old-gateway-session"
 			stale.attachments = []attachment{{path: "notes.txt", content: "notes"}}
 			stale.openTargets = []openTarget{{Path: "previous-citation.md"}}
 			stale.lastQuery = "previous query"
@@ -252,9 +233,6 @@ func TestReopenReplacesPreviousConversationContext(t *testing.T) {
 			nm, _ := reopen.call(stale)
 			got := nm.(model)
 
-			if got.agentSession != "" {
-				t.Errorf("reopen retained the gateway conversation identity: %q", got.agentSession)
-			}
 			if len(got.attachments) != 0 {
 				t.Errorf("reopen retained the previous session's attachments: %v", got.attachments)
 			}

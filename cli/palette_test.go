@@ -79,16 +79,16 @@ func TestRefreshPaletteActivation(t *testing.T) {
 	}
 	found := false
 	for _, it := range m.pal.items {
-		if it.name == "model" || it.name == "mode" {
+		if it.name == "model" {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected model/mode in palette items, got %v", names(m.pal.items))
+		t.Errorf("expected model in palette items, got %v", names(m.pal.items))
 	}
 
 	// A space (args mode) closes it.
-	m.ta.SetValue("/mode ")
+	m.ta.SetValue("/model ")
 	m = m.refreshPalette()
 	if m.pal.open {
 		t.Error("palette should close once the command has a trailing space (args mode)")

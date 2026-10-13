@@ -1113,8 +1113,7 @@ func TestSharedCommandWordingHasOneSource(t *testing.T) {
 	}
 }
 
-// /mode, /agent, and /rag read the same way in the TUI and the plain REPL. The
-// plain REPL has no /mode row, so an empty replRow skips its /help check.
+// /agent and /rag read the same way in the TUI and the plain REPL.
 func TestModeCommandsShareOneWording(t *testing.T) {
 	noColor(t)
 	repl := collapse(captureStdout(t, replHelp))
@@ -1122,19 +1121,15 @@ func TestModeCommandsShareOneWording(t *testing.T) {
 	// is hardcoded in replGroups, not derived from the registry). The registry
 	// desc stays the single source and is pinned unchanged.
 	for _, tc := range []struct{ name, replRow, want string }{
-		{"mode", "", "switch between native answers and Hermes (also /rag)"},
 		{"agent", "/agent [auto|name]", "choose the native answer specialist; auto selects dynamically"},
 		{"rag", "/rag [on|off|question]", "answer from the knowledge base"},
 	} {
 		if c, _ := slashCommand(tc.name); c.desc != tc.want {
 			t.Errorf("/%s registry text = %q, want %q", tc.name, c.desc, tc.want)
 		}
-		if tc.replRow != "" && !strings.Contains(repl, tc.replRow+" "+tc.want) {
+		if !strings.Contains(repl, tc.replRow+" "+tc.want) {
 			t.Errorf("the plain REPL /help lacks %s %q:\n%s", tc.replRow, tc.want, repl)
 		}
-	}
-	if block := collapse(helpBlock(200)); !strings.Contains(block, "/mode switch between native answers") {
-		t.Errorf("/help lacks the /mode row:\n%s", block)
 	}
 }
 

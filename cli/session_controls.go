@@ -10,11 +10,7 @@ import (
 )
 
 // reconcileConversationContext drops the in-memory state that does not follow
-// m.sess and names what it dropped, so a caller can report it. The gateway
-// conversation handle is the load-bearing one: a reopened or undone transcript
-// no longer matches the server-side history that handle points at, so the next
-// agent turn starts a new conversation rather than continuing one whose
-// contents no longer match this session.
+// m.sess and names what it dropped, so a caller can report it.
 //
 // switching is true when the session itself changes, which also invalidates the
 // context staged for the conversation being left. An undo stays in the same
@@ -23,10 +19,6 @@ import (
 // staged at undo time was staged afterwards.
 func (m *model) reconcileConversationContext(switching bool) []string {
 	var dropped []string
-	if m.agentSession != "" {
-		m.agentSession = ""
-		dropped = append(dropped, "agent conversation restarted")
-	}
 	m.lastAnswer, m.lastQuery = "", ""
 	m.lastResults, m.openTargets = nil, nil
 	m.lastCostSet = false
@@ -134,7 +126,7 @@ func (m *model) undoConversationContext() ([]string, error) {
 			return 0, nil
 		}
 		wrote = true
-		if err := m.sess.appendTombstone(turnRecord{Role: roleTombstone, Mode: m.mode}); err != nil {
+		if err := m.sess.appendTombstone(turnRecord{Role: roleTombstone}); err != nil {
 			return 0, err
 		}
 		return m.sess.transcriptSize()

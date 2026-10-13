@@ -69,9 +69,9 @@ type ragTurnCall struct {
 	question, model string
 }
 
-// runRagQuestionTurn dispatches "/rag foo" from the given mode, runs the turn
-// cmd, and returns the model after dispatch plus what the router received.
-func runRagQuestionTurn(t *testing.T, mode string) (model, ragTurnCall) {
+// runRagQuestionTurn dispatches "/rag foo", runs the turn cmd, and returns the
+// model after dispatch plus what the router received.
+func runRagQuestionTurn(t *testing.T) (model, ragTurnCall) {
 	t.Helper()
 	useDeadServices(t)
 	old := adaptiveAnswerFn
@@ -83,13 +83,11 @@ func runRagQuestionTurn(t *testing.T, mode string) (model, ragTurnCall) {
 	}
 
 	m := frameModel(t)
-	m.mode = mode
 	m.ragModel = "ragmodel"
-	m.agentModel = "agentmodel"
 	nm, cmd := m.dispatchInput("/rag foo")
 	got := nm.(model)
 	if !got.working {
-		t.Fatalf("/rag <question> did not start a turn in %s mode", mode)
+		t.Fatal("/rag <question> did not start a turn")
 	}
 	if cmd == nil {
 		t.Fatal("dispatchInput returned no command")
@@ -109,37 +107,14 @@ func runRagQuestionTurn(t *testing.T, mode string) (model, ragTurnCall) {
 	case c := <-calls:
 		return got, c
 	case <-time.After(5 * time.Second):
-		t.Fatal("the adaptive router was never reached (agent path taken?)")
+		t.Fatal("the adaptive router was never reached")
 	}
 	return got, ragTurnCall{}
 }
 
-// In agent mode /rag <question> runs a forced grounded RAG turn for that one
-// question: it reaches the adaptive router with force=true (not the agent
-// path) on the RAG model (not the agent model), the persistent mode stays
-// agent, and the one-shot forceRag is consumed rather than leaked.
-func TestTUIRagQuestionInAgentModeForceGroundsWithoutLeak(t *testing.T) {
-	got, c := runRagQuestionTurn(t, "agent")
-	if got.forceRag {
-		t.Error("forceRag leaked: it must be consumed by the forced turn")
-	}
-	if got.mode != "agent" {
-		t.Errorf("mode = %q; want agent (no persistent mode change)", got.mode)
-	}
-	if !c.force {
-		t.Error("router was reached with force=false; /rag <question> must force grounding")
-	}
-	if c.question != "foo" {
-		t.Errorf("router question = %q; want foo", c.question)
-	}
-	if c.model != "ragmodel" {
-		t.Errorf("router model = %q; want ragmodel (not the agent model or unknown)", c.model)
-	}
-}
-
-// In rag mode /rag <question> runs a forced turn for exactly that question.
-func TestTUIRagQuestionInRagModeStartsForcedTurn(t *testing.T) {
-	got, c := runRagQuestionTurn(t, "rag")
+// /rag <question> runs a forced turn for exactly that question.
+func TestTUIRagQuestionStartsForcedTurn(t *testing.T) {
+	got, c := runRagQuestionTurn(t)
 	if got.forceRag {
 		t.Error("forceRag leaked after the forced turn")
 	}

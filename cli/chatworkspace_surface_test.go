@@ -46,7 +46,7 @@ func TestChatToolHostSelectionReachesCLIAndTUI(t *testing.T) {
 	if _, err := askWith(nil, nil, []string{"--browser-cdp", "http://192.0.2.5:9222", "question"}); err == nil {
 		t.Fatal("non-loopback CDP endpoint accepted")
 	}
-	m := model{mode: "rag"}
+	m := model{}
 	updated, _ := m.dispatchInput("/tool-host local")
 	m = updated.(model)
 	if m.toolHost != chatToolHostLocal {

@@ -25,7 +25,9 @@ type turnRequest struct {
 	// persists nothing. See sessionTarget for the resolving forms.
 	SessionID string
 	Agent     string
-	ToolHost  string
+	// Model names the model to answer with. Empty resolves the served model.
+	Model    string
+	ToolHost string
 	// BrowserCDP copies signed-in state from an explicit loopback CDP browser.
 	BrowserCDP string
 	// ForceRag skips adaptive routing and always grounds locally.
@@ -207,6 +209,11 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 	}
 	started := time.Now()
 
+	turnModel := strings.TrimSpace(req.Model)
+	if turnModel == "" {
+		turnModel = resolveModel(cfg)
+	}
+
 	var actions []turnAction
 	prefs := loadPrefs()
 	chosenAgent := "general"
@@ -215,7 +222,7 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		ToolHost:   toolHost,
 		BrowserCDP: req.BrowserCDP,
 		Browser:    req.Browser,
-		Model:      resolveModel(cfg),
+		Model:      turnModel,
 		History:    history,
 		Preface:    req.Preface,
 		NoWeb:      !prefs.Web,

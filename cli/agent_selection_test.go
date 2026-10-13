@@ -42,11 +42,10 @@ func TestAnswerAgentAutoAndExplicitDomain(t *testing.T) {
 func TestInteractiveAnswerAgentSelectionIsNativeAndValidated(t *testing.T) {
 	useDeadServices(t)
 	m := newKeyModel(t)
-	m.mode = "agent"
 	nm, _ := m.dispatchInput("/agent cloud")
 	m = nm.(model)
-	if m.answerAgent != "cloud" || m.mode != "rag" {
-		t.Fatal("selection still uses Hermes")
+	if m.answerAgent != "cloud" {
+		t.Fatal("selection did not take effect")
 	}
 	nm, _ = m.dispatchInput("/agent not-an-agent")
 	m = nm.(model)
