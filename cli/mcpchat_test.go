@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
 	"blkchain/cli/internal/skillcat"
 
@@ -354,5 +356,33 @@ func TestMCPChatKeepsTheAnswerWhenPersistenceFails(t *testing.T) {
 	}
 	if msg, _ := out["error"].(string); !strings.Contains(msg, "conversation save failed") {
 		t.Fatalf("the failed save was not reported: error = %q", msg)
+	}
+}
+
+// A chat turn whose router never returns is cut off at the configured request
+// timeout instead of holding its slot open.
+func TestMCPChatBoundsATurnByTheRequestTimeout(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	prev := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = prev })
+	adaptiveAnswerFn = func(ctx context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, _ AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		select {
+		case <-ctx.Done():
+			return "", nil, false, nil, 0, "", ctx.Err()
+		case <-time.After(5 * time.Second):
+			return "returned without a deadline", nil, false, nil, 0, "rag", nil
+		}
+	}
+	cfg := loadConfig()
+	cfg.RequestTimeoutSeconds = 1
+
+	start := time.Now()
+	_, err := mcpChatResult(context.Background(), nil, cfg, newChatSessionOwner(), mcpChatIn{Message: "q"})
+	if !errors.Is(err, errRequestTimeout) {
+		t.Fatalf("error = %v, want the request-timeout error", err)
+	}
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Fatalf("the turn ran %s past a 1s timeout", elapsed)
 	}
 }
