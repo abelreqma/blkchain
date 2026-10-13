@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/x509"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -160,5 +162,140 @@ func TestPolicySpecificWebBodyAndRequestCaps(t *testing.T) {
 	}
 	if response, err := broker.Fetch(context.Background(), Request{URL: server.URL}); err == nil || response.Complete || requests.Load() != 1 {
 		t.Fatalf("oversized response accepted: %+v requests=%d err=%v", response, requests.Load(), err)
+	}
+}
+
+// upstreamFixture stands in for an intercepting proxy on loopback. It answers
+// absolute-form requests itself and records what it was handed, so a test can
+// tell a proxied request from a direct one and compare the exact headers that
+// crossed the wire.
+type upstreamFixture struct {
+	server   *httptest.Server
+	mu       sync.Mutex
+	requests []http.Header
+	hosts    []string
+}
+
+func newUpstreamFixture(t *testing.T) *upstreamFixture {
+	t.Helper()
+	f := &upstreamFixture{}
+	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.requests = append(f.requests, r.Header.Clone())
+		f.hosts = append(f.hosts, r.Host)
+		f.mu.Unlock()
+		_, _ = w.Write([]byte("through the proxy"))
+	}))
+	t.Cleanup(f.server.Close)
+	return f
+}
+
+func (f *upstreamFixture) address() string { return strings.TrimPrefix(f.server.URL, "http://") }
+func (f *upstreamFixture) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.requests)
+}
+
+// TestUpstreamProxyKeepsTheScopeCheck pins that the resolved-address check runs
+// before any byte leaves, whether or not a proxy carries the request. Removing
+// the IPAllowed loop in Once lets the proxy see the request and fails this.
+func TestUpstreamProxyKeepsTheScopeCheck(t *testing.T) {
+	proxy := newUpstreamFixture(t)
+	broker := fixtureBroker()
+	broker.Policy.Upstream = &Upstream{Address: proxy.address(), RootCAs: x509.NewCertPool()}
+	broker.Policy.Resolve = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.7")}, nil
+	}
+	out, err := broker.Fetch(context.Background(), Request{URL: "http://app.example.test/"})
+	if err == nil || !strings.Contains(err.Error(), "outside scope") {
+		t.Fatalf("out-of-scope host accepted under a proxy: %+v %v", out, err)
+	}
+	if proxy.count() != 0 {
+		t.Fatalf("the proxy saw %d out-of-scope requests", proxy.count())
+	}
+}
+
+// TestUpstreamProxyCarriesRequestsUnaltered pins that a proxied request reaches
+// the proxy in absolute form with the target host, and that its headers are the
+// ones the direct path sends. No correlation header, tracer value or altered
+// user-agent is added, because that would make the measurement describe the
+// instrument instead of the target.
+func TestUpstreamProxyCarriesRequestsUnaltered(t *testing.T) {
+	var direct http.Header
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		direct = r.Header.Clone()
+		_, _ = w.Write([]byte("direct"))
+	}))
+	defer target.Close()
+	broker := fixtureBroker()
+	if out, err := broker.Fetch(context.Background(), Request{URL: target.URL + "/page"}); err != nil || string(out.Body) != "direct" {
+		t.Fatalf("direct fetch failed: %+v %v", out, err)
+	}
+	proxy := newUpstreamFixture(t)
+	broker = fixtureBroker()
+	broker.Policy.Upstream = &Upstream{Address: proxy.address(), RootCAs: x509.NewCertPool()}
+	out, err := broker.Fetch(context.Background(), Request{URL: target.URL + "/page"})
+	if err != nil || string(out.Body) != "through the proxy" {
+		t.Fatalf("proxied fetch failed: %+v %v", out, err)
+	}
+	if proxy.count() != 1 {
+		t.Fatalf("the proxy saw %d requests", proxy.count())
+	}
+	host := strings.TrimPrefix(target.URL, "http://")
+	if proxy.hosts[0] != host {
+		t.Fatalf("the proxy was handed host %q, want %q", proxy.hosts[0], host)
+	}
+	// Connection and Proxy-Connection are per-hop, so they differ by design.
+	hop := map[string]bool{"Connection": true, "Proxy-Connection": true}
+	for name, values := range proxy.requests[0] {
+		if hop[name] {
+			continue
+		}
+		if got := strings.Join(direct.Values(name), ","); got != strings.Join(values, ",") {
+			t.Errorf("proxied header %s is %q, direct sends %q", name, strings.Join(values, ","), got)
+		}
+	}
+	for name := range direct {
+		if !hop[name] && proxy.requests[0].Get(name) == "" {
+			t.Errorf("proxied request dropped header %s", name)
+		}
+	}
+}
+
+// TestUpstreamProxyWithoutRootCAsStaysDirect pins the no-skip-verify rule: an
+// upstream with no CA pool cannot have its re-signed leaves verified, so the
+// broker takes the direct path instead of relaxing verification. Dropping the
+// RootCAs condition in Once routes the request to the proxy and fails this.
+func TestUpstreamProxyWithoutRootCAsStaysDirect(t *testing.T) {
+	var reached atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached.Add(1)
+		_, _ = w.Write([]byte("direct"))
+	}))
+	defer target.Close()
+	proxy := newUpstreamFixture(t)
+	broker := fixtureBroker()
+	broker.Policy.Upstream = &Upstream{Address: proxy.address()}
+	out, err := broker.Fetch(context.Background(), Request{URL: target.URL})
+	if err != nil || string(out.Body) != "direct" || reached.Load() != 1 {
+		t.Fatalf("a CA-less upstream did not fall back to the direct path: %+v %v", out, err)
+	}
+	if proxy.count() != 0 {
+		t.Fatalf("a CA-less upstream carried %d requests", proxy.count())
+	}
+}
+
+// TestUpstreamProxyVerifiesTheResignedLeaf pins that TLS verification stays on
+// under a proxy: a leaf signed outside the configured pool is refused.
+func TestUpstreamProxyVerifiesTheResignedLeaf(t *testing.T) {
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("tls"))
+	}))
+	defer target.Close()
+	broker := fixtureBroker()
+	broker.Policy.Upstream = &Upstream{Address: strings.TrimPrefix(target.URL, "https://"), RootCAs: x509.NewCertPool()}
+	if _, err := broker.Fetch(context.Background(), Request{URL: "https://app.example.test/"}); err == nil {
+		t.Fatal("an unverifiable certificate was accepted under a proxy")
 	}
 }

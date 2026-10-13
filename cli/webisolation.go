@@ -152,7 +152,11 @@ func newWebBroker(g *secgate.Gate, armed webArmedFunc) *webacquire.Broker {
 			}
 			return scope != nil && scope.WebAddressAllowed(host, ip)
 		}}
-	if pivoted {
+	if !pivoted {
+		// A pivoted surface dials through the foothold carrier, which an
+		// upstream proxy would replace, so only the direct surface takes one.
+		policy.Upstream = webUpstreamProxy()
+	} else {
 		if expanded {
 			policy.Resolve = func(_ context.Context, host string) ([]net.IP, error) {
 				if ip := net.ParseIP(host); ip != nil {
