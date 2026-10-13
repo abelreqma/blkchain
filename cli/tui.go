@@ -1899,7 +1899,7 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			m.forceRag = true
 			return m.dispatchInput("/ask " + question)
 		default:
-			return m, tea.Sequence(tea.Println(echo), tea.Println(m.answerAgentStatus()))
+			return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render("rag "+boolOnOff(m.prefs.Rag))))
 		}
 	case "candidates":
 		return m, tea.Sequence(tea.Println(echo), tea.Println(candidatesBlock(m.engagement)))
@@ -3082,7 +3082,7 @@ func (m model) composeStatus(dot string, tone lipgloss.TerminalColor, mode, mode
 			hFG, hBG = wRoseFg, wRoseBg
 		}
 		right = append(right, plSegment{Text: h, FG: hFG, BG: hBG, Icon: iconHealth})
-		if l.reasoning && mode == "rag" {
+		if l.reasoning {
 			if m.prefs.Viz {
 				right = append(right, plSegment{Text: "viz", FG: wTanFg, BG: wTanBg, Icon: iconChart})
 			} else {

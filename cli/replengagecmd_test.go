@@ -244,9 +244,7 @@ func TestBuildReplEngageRun(t *testing.T) {
 }
 
 // An engagement runs on blk's own LLM, so it selects the native model the way a
-// grounded turn does. The agent-mode status model names a Hermes gateway model
-// and reads "unknown" before one is discovered; neither is a model the oMLX
-// server serves, so neither may reach the engagement client.
+// grounded turn does: the configured model, or the one /model picked.
 func TestBuildReplEngageRunSelectsTheNativeModel(t *testing.T) {
 	t.Setenv("OMLX_MODEL", "native-model")
 	m := engageReadyModel(t)

@@ -10,21 +10,13 @@ import (
 	"testing"
 )
 
-// isolatedHermesExecutable puts a fake hermes on PATH that answers both of the
-// invocations blk makes: the one-shot `hermes -z <prompt>` the stateless CLI ask
-// uses, which prints the answer as plain text, and the `hermes chat --format
-// stream-json` the REPL agent turn uses, which emits the JSONL event stream so
-// the answer is captured rather than streamed past.
+// isolatedHermesExecutable puts a fake hermes on PATH that answers the one-shot
+// `hermes -z <prompt>` invocation with a plain-text answer.
 func isolatedHermesExecutable(t *testing.T) {
 	t.Helper()
 	bin := t.TempDir()
 	script := "#!/bin/sh\n" +
-		"if [ \"$1\" = chat ]; then\n" +
-		"  printf '{\"type\":\"text\",\"text\":\"hermes-default-fixture\"}\\n'\n" +
-		"  printf '{\"type\":\"result\",\"exit_code\":0}\\n'\n" +
-		"else\n" +
-		"  printf 'hermes-default-fixture\\n'\n" +
-		"fi\n"
+		"printf 'hermes-default-fixture\\n'\n"
 	if err := os.WriteFile(filepath.Join(bin, "hermes"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
