@@ -11,9 +11,11 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"blkchain/cli/internal/secgate"
 	"blkchain/cli/internal/tooldef"
+	"github.com/gorilla/websocket"
 )
 
 // These two tests automate the Burp acceptance whose full procedure, and the
@@ -128,4 +130,74 @@ func TestBurpProxyCapturesEngageWebCollect(t *testing.T) {
 		t.Fatalf("the collected request was not found in Burp's proxy history (%d bytes of history matched %q)", len(out), host)
 	}
 	t.Logf("engage web collect against %s was found in Burp's proxy history", target.URL)
+}
+
+// TestBurpWebSocketHistoryCapturesAcquisition pins that WebSocket acquisition
+// traverses Burp's listener too, which is the only thing that makes the
+// allowlisted WebSocket history tools return anything. The fixture sends the
+// frame, so the check stays on the passive path the default RoE permits. The
+// frame body is a fixed fixture string and the history result is never logged.
+func TestBurpWebSocketHistoryCapturesAcquisition(t *testing.T) {
+	requireBurpE2E(t)
+	registry := tooldef.NewRegistry()
+	closeMCP, err := registerChatMCPTools(context.Background(), registry, t.TempDir())
+	if err != nil {
+		t.Fatalf("registration failed: %v", err)
+	}
+	defer closeMCP()
+	history, ok := registry.Get("mcp__burp__get_proxy_websocket_history_regex")
+	if !ok {
+		t.Skip("the configured Burp server does not expose get_proxy_websocket_history_regex, so WebSocket capture cannot be verified here")
+	}
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, upgradeErr := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(w, r, nil)
+		if upgradeErr != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("burp acceptance fixture"))
+	}))
+	defer target.Close()
+	forgetWebProxy(webProxyDefaultAddress)
+	t.Setenv(webProxyEnv, webProxyDefaultAddress)
+	t.Cleanup(func() { forgetWebProxy(webProxyDefaultAddress) })
+	if upstream := webUpstreamProxy(); upstream == nil {
+		t.Skipf("no proxy listening at %s; start Burp's proxy listener", webProxyDefaultAddress)
+	}
+	scope, err := secgate.ParseScope(strings.NewReader("127.0.0.1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &secgate.Gate{Mode: secgate.Auto, Scope: scope, Policy: secgate.DefaultPolicy()}
+	if err = gate.Start(); err != nil {
+		t.Fatal(err)
+	}
+	broker := newWebBroker(gate, nil)
+	if broker.Policy.Upstream == nil {
+		t.Fatal("the engagement broker did not pick up the proxy")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	raw := "ws" + strings.TrimPrefix(target.URL, "http") + "/stream"
+	socket, response, err := broker.OpenWebSocket(ctx, raw, nil, nil)
+	if err != nil || response.Status != http.StatusSwitchingProtocols {
+		t.Fatalf("the WebSocket handshake through Burp failed: %+v %v", response, err)
+	}
+	kind, body, err := socket.Receive()
+	if err != nil || kind != websocket.TextMessage || string(body) != "burp acceptance fixture" {
+		t.Fatalf("receiving a frame through Burp failed: %d %q %v", kind, body, err)
+	}
+	socket.Close()
+	args, err := json.Marshal(map[string]any{"regex": "burp acceptance fixture", "count": 5, "offset": 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := history.Call(ctx, string(args))
+	if err != nil {
+		t.Fatalf("reading Burp WebSocket history failed: %v", err)
+	}
+	if !strings.Contains(out, "burp acceptance fixture") {
+		t.Fatalf("the sent frame was not found in Burp's WebSocket history (%d bytes of history matched)", len(out))
+	}
+	t.Logf("a WebSocket frame sent to %s was found in Burp's WebSocket history", target.URL)
 }

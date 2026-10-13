@@ -130,6 +130,11 @@ func TestMCPChatCallsAToolOfAnOutboundMCPServer(t *testing.T) {
 //  3. Write down what was observed. A request with no matching entry is a failed
 //     acceptance, not a skipped one.
 //
+// WebSocket acquisition takes the same path: the handshake goes through a CONNECT
+// tunnel to the same listener, so it lands in Proxy > WebSockets history. An
+// empty WebSockets history means no WebSocket was opened, not that the traffic
+// bypassed the proxy.
+//
 // No marker header, altered user-agent or tracer parameter is added to any
 // request on either path. A marker changes the request fingerprint, so the
 // measurement would describe the instrument instead of the target. Correlation
