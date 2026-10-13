@@ -1,0 +1,90 @@
+# Web surface
+
+The web surface assesses web applications and APIs. Beyond the engagement
+executor it includes a static-analysis engine that reconstructs an application's
+API surface from its own JavaScript, a collection pipeline for traffic and
+source, an acquisition layer that characterizes an origin, an isolated browser
+with authenticated role support, and scoped replay.
+
+Executor: `cli/webexec.go`. Analysis engines: `cli/internal/webanalysis`,
+`cli/internal/webcollect`, `cli/internal/webacquire`. Persona: `web` in
+`cli/domains.go`.
+
+## Capabilities
+
+Reconnaissance and testing:
+
+- Confirm liveness, identify the server, and read TLS; discover routes and paths;
+  discover parameters and endpoints; run finding-driven probes.
+- Test to the OWASP WSTG method: map the application, virtual hosts, routes,
+  methods, parameters, forms, roles, and trust boundaries; establish a baseline
+  request and response per important flow; test authentication, session handling,
+  access control and IDOR, injection, SSRF, file handling, deserialization,
+  request smuggling, CORS, GraphQL, and client-side execution; compare behavior
+  across roles and object identifiers, testing both the denial and the
+  successful-access path; prove impact with the minimum representative data.
+- Run `nmap` for bounded service fingerprinting, `ffuf` for discovery, `curl` for
+  request-level tests, and `sslscan` or `openssl s_client` for TLS.
+
+Static analysis of application source (`cli/internal/webanalysis`):
+
+- Parse JavaScript, TypeScript, and TSX (tree-sitter plus BishopFox `jsluice`)
+  and run a lexical-scope data-flow analysis over the result.
+- Reconstruct API operations, the `fetch`, XHR, and axios calls an application
+  makes, into method, path, and parameters, merging operations seen more than
+  once, and refuse to fabricate an operation that cannot be resolved from the
+  source.
+- Extract credentials, identify libraries and versions, derive subdomains, and
+  serialize the syntax tree on request.
+
+Collection and acquisition:
+
+- Capture traffic archives, recover source maps so analysis runs on the original
+  source, parse HTML, and perform bounded imports (`cli/internal/webcollect`).
+- Characterize an origin's headers, cookies, CORS policy, methods, and a fixed
+  set of well-known metadata paths (robots, sitemap, security.txt,
+  openid-configuration, oauth-authorization-server, openapi.json, swagger.json,
+  graphql, service-worker, and others), each census run alongside random
+  same-host controls; analyze TLS and WebSocket surfaces
+  (`cli/internal/webacquire`).
+
+Browser, roles, and replay:
+
+- Drive an isolated browser (Playwright) to navigate, inspect, and capture through
+  the same destination and redirect broker as the command path.
+- Run authenticated collection under a named role from a loopback Chrome CDP
+  import: only cookies for the selected host and local storage for that exact
+  origin enter a new isolated context, parent-domain cookies are narrowed to the
+  selected host, other origins and WebAuthn credentials are not copied, and the
+  source Chrome never performs target traffic; a request to another in-scope
+  origin strips the imported credentials and records an anonymous role.
+- Replay requests within scope, preserving the body representation, through the
+  broker checks.
+
+External-surface sweep:
+
+- From a recon task naming an HTTP origin, run the code-owned sweep and store each
+  result as a provenance-bound surface record: TLS, headers, cookies, CORS,
+  methods, metadata paths, and subdomains, TLS first because its certificate names
+  feed subdomain derivation.
+
+Recon and the collection above are read-only. Actions that need credentials,
+state change, or deeper validation move to an exploit or post-exploitation task,
+which is arm-gated. The surface is carried from a foothold over SSH and command
+carriers, which forward the binary TCP stream the web broker needs.
+
+## Future expansion
+
+- Own-parser coverage for web findings, so they derive from dedicated parsers
+  rather than a single tool's output shape, matching the provenance-bound surface
+  records the sweep already produces.
+- Access-control and IDOR comparison across roles driven automatically by the
+  reconstructed API operation set rather than by prompt.
+- Client-side coverage (postMessage, WebSocket message injection, browser storage)
+  as explicit recon steps rather than finding-driven probes.
+- GraphQL introspection and operation reconstruction as a first-class step, given
+  the metadata sweep already probes the `/graphql` path.
+
+The shared engagement model (the command gate, the Auto and Safe arming modes,
+vantage reachability, the isolated runner, foothold carriers, and evidence
+recording) is described in [the index](README.md).

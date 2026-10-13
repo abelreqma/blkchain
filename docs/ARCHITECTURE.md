@@ -1,6 +1,8 @@
 # Architecture
 
 This document is for people changing blkChain. For installing and running it, see the README.
+For a per-surface reference, covering what each engagement surface does and how footholds,
+carriers, and vantage changes connect them, see [the assessment surfaces](surfaces/README.md).
 
 ## System Map
 
