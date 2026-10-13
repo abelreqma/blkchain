@@ -233,6 +233,16 @@ subresources. A private or internal address needs its own IP or CIDR entry, or a
 private CIDR discovered after foothold access. A hostname entry does not authorize the address it
 resolves to. An empty or ambiguous scope fails closed.
 
+A named target does not prove a service is reachable. Service-specific commands and web actions
+require a code-observed host, transport, and port before dispatch. Bounded port discovery is the
+exception that establishes the observation. The dispatcher checks the command's actual endpoint,
+not the model's claimed prerequisite. It admits TCP only on `open` and UDP on `open` or
+`open|filtered`; a later closed result removes the permission. An unsupported endpoint spelling
+fails closed. The engagement store ties scanner observations to exact command output and retains
+them across resume. Native chat holds observations for one turn. A web action with no observation
+performs a scoped TCP connect from the broker's vantage before sending application data. This
+service check adds to the RoE and network scope controls; it does not expand either one.
+
 The declared foothold is the one deliberate exception to the network half, and it is bounded. A
 command carried to an operator-declared foothold runs on a host whose egress is not ours to filter,
 so its scope is enforced by the command gate alone. SSH, command, and HTTP form carriers run inside
