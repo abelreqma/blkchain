@@ -73,6 +73,21 @@ func TestEditCannotBypassScope(t *testing.T) {
 	}
 }
 
+func TestEditCannotBypassServiceEvidence(t *testing.T) {
+	edited := &Command{Binary: "curl", Args: []string{"http://10.0.0.5:8080/"}}
+	g := editGate(t, editConfirmer{allow: true, edited: edited})
+	g.ServiceCheck = func(_ context.Context, c Command) string {
+		if strings.Contains(strings.Join(c.Args, " "), ":8080") {
+			return "TCP/8080 was not observed"
+		}
+		return ""
+	}
+	d := g.Authorize(context.Background(), Command{Binary: "curl", Args: []string{"http://10.0.0.5:80/"}})
+	if d.Allowed || !strings.Contains(d.Reason, "TCP/8080") {
+		t.Fatalf("edited command bypassed port evidence: %+v", d)
+	}
+}
+
 func TestEditCannotBypassDenylist(t *testing.T) {
 	// Local profile: edit a benign command into a destructive one; the re-validation
 	// destructive denylist denies it.

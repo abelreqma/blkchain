@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -35,8 +36,21 @@ CREATE INDEX IF NOT EXISTS surface_task ON surface_record(task_id);
 func SurfaceKinds() []string {
 	return []string{
 		"tls-protocol", "tls-certificate", "http-header", "http-cookie",
-		"http-cors", "http-method", "http-path", "dns-name",
+		"http-cors", "http-method", "http-path", "dns-name", "service-port",
 	}
+}
+
+func (s *Store) ServicePortState(ctx context.Context, host, transport string, port int) (string, error) {
+	if s == nil || s.db == nil {
+		return "", errors.New("engagement store unavailable")
+	}
+	var state string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM surface_record WHERE kind='service-port' AND asset=? AND name=?`,
+		host, transport+"/"+strconv.Itoa(port)).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return state, err
 }
 
 func validSurfaceKind(k string) bool {

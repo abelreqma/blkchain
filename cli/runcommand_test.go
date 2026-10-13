@@ -668,6 +668,21 @@ func TestRunCommandPipelineExecutesAndWraps(t *testing.T) {
 	}
 }
 
+func TestRunCommandPipelineRejectsUnobservedServiceBeforeExecution(t *testing.T) {
+	called := false
+	withStubPipeline(t, func(context.Context, []pipelineStage, string, int, time.Duration) runResult {
+		called = true
+		return runResult{Output: "must not run"}
+	})
+	g := autoGate(t)
+	attachServiceDispatcher(g, nil)
+	tool := newRunCommandTool(g, 1000, time.Second, "", func() string { return "t1" }, nil)
+	out, err := tool.Call(context.Background(), `{"pipeline":[{"binary":"curl","args":["http://10.0.0.5/"]},{"binary":"jq","args":["."]}]}`)
+	if err != nil || called || !strings.Contains(out, "service dispatch") {
+		t.Fatalf("pipeline reached execution without service evidence: called=%t out=%q err=%v", called, out, err)
+	}
+}
+
 func TestRealExecPipelineFilters(t *testing.T) {
 	for _, bin := range []string{"printf", "grep"} {
 		if _, err := exec.LookPath(bin); err != nil {

@@ -38,6 +38,8 @@ func TestVulnAnalysisDispatchFetchesAndStoresScannerResults(t *testing.T) {
 	d := testDeps(t, &scriptModel{resps: []*llms.ContentResponse{finalResp("done")}})
 	d.ReconTiers = true
 	d.Gate = loopbackGate(t, pivotRoE(t))
+	attachServiceDispatcher(d.Gate, d.Store)
+	seedOpenService(t, d.Store, "10.0.0.5", "tcp", 80)
 	d.Runs = NewRunOutputs()
 	d.WorkDir = t.TempDir()
 	if _, err := d.Store.Apply(eng.Delta{Upserts: []eng.Task{{
@@ -105,6 +107,8 @@ func TestVulnAnalysisAutoFetchRespectsScope(t *testing.T) {
 func TestVulnAnalysisAutoFetchRejectsRedirectBody(t *testing.T) {
 	d := testDeps(t, &scriptModel{})
 	d.Gate = loopbackGate(t, pivotRoE(t))
+	attachServiceDispatcher(d.Gate, d.Store)
+	seedOpenService(t, d.Store, "10.0.0.5", "tcp", 80)
 	task := eng.Task{ID: "v1", Kind: "vuln-analysis", Target: "http://10.0.0.5/package-lock.json",
 		Phase: eng.PhaseRecon, Surface: eng.SurfaceContainer}
 	ctx := scanRuntime(t, d.Gate, func(binary string) (string, int) {

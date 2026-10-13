@@ -94,6 +94,7 @@ func buildEngageGate(ws *engagement.Workspace, scope *secgate.Scope, mode secgat
 		AllowInterpreterPoC:  policy.AllowInterpreterPoC,
 		AutoScopeOverride:    policy.AutoScopeOverride,
 	}
+	attachServiceDispatcher(g, ws.Store)
 	if policy.AutoActions != nil {
 		g.AutoAction = policy.AutoActions.permitsCommand
 	}

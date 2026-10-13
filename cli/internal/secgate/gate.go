@@ -33,6 +33,9 @@ type Gate struct {
 	Approvals        *SessionApprovals           // nil remembers no repeats
 	Episode          *Episode                    // nil gets a default-caps episode
 	Audit            func(action, detail string) // nil is a no-op
+	ServiceCheck     func(context.Context, Command) string
+	ServiceObserve   func(context.Context, Command, string) error
+	ServiceEnsure    func(context.Context, Command)
 
 	Protected []string
 	Scratch   string
@@ -144,10 +147,23 @@ func (g *Gate) Authorize(ctx context.Context, c Command) Decision {
 		g.mu.Unlock()
 		return d
 	}
-	if d := g.checkLocked(c); !d.Allowed {
+	if d := g.checkLocked(ctx, c, true); !d.Allowed {
 		g.noteCommandDenialLocked(c, d.Reason)
 		g.mu.Unlock()
 		return d
+	}
+	g.mu.Unlock()
+	if g.ServiceEnsure != nil && !c.InternalProbe {
+		g.ServiceEnsure(ctx, c)
+	}
+	g.mu.Lock()
+	if g.ServiceCheck != nil {
+		if reason := g.ServiceCheck(ctx, c); reason != "" {
+			d := g.deny("service-evidence", c, reason, "")
+			g.noteCommandDenialLocked(c, d.Reason)
+			g.mu.Unlock()
+			return d
+		}
 	}
 	// Deny-layers passed. Run the confirmation tail, which releases g.mu for the
 	// human prompt and re-acquires it before touching Approvals or the audit log.
@@ -167,7 +183,7 @@ func (g *Gate) Authorize(ctx context.Context, c Command) Decision {
 		// operator authored it, so no second confirmation; a failed deny-layer
 		// returns the denial for the caller to surface and let the operator edit again.
 		g.mu.Lock()
-		rc := g.checkLocked(run)
+		rc := g.checkLocked(ctx, run, false)
 		g.mu.Unlock()
 		if !rc.Allowed {
 			return rc
@@ -215,7 +231,7 @@ func (g *Gate) Check(ctx context.Context, c Command) Decision {
 		g.mu.Unlock()
 		return d
 	}
-	d := g.checkLocked(c)
+	d := g.checkLocked(ctx, c, false)
 	g.mu.Unlock()
 	if !d.Allowed {
 		return d
@@ -246,7 +262,7 @@ func (g *Gate) ConfirmCommand(ctx context.Context, c Command) Decision {
 // assumes g.mu is held. A returned Decision{Allowed:true} means every deny-layer
 // passed; the command is NOT yet confirmed and no "allow" is audited. It touches
 // only g.mu-protected state (the Episode budget and the audit log).
-func (g *Gate) checkLocked(c Command) Decision {
+func (g *Gate) checkLocked(ctx context.Context, c Command, skipService bool) Decision {
 	scope := g.scopeFor(c)
 	// 1. caps and circuit breaker. An RoE policy owns the engagement's budget and
 	// its own input, action, denial and scope layers; it ADDS to the structural
@@ -394,6 +410,11 @@ func (g *Gate) checkLocked(c Command) Decision {
 					return g.deny("scope", c, "network out of scope: "+n.String(), "")
 				}
 			}
+		}
+	}
+	if g.ServiceCheck != nil && !skipService {
+		if reason := g.ServiceCheck(ctx, c); reason != "" {
+			return g.deny("service-evidence", c, reason, "")
 		}
 	}
 	// RoE rate limit is the last deny-layer: only an otherwise-admissible command

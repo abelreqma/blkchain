@@ -33,11 +33,14 @@ func loopbackRoE(t *testing.T, inScope string) *RoE {
 // comes from the production construction rather than a hand-assembled Gate. The
 // unattended allowlist is empty, which is what an engagement with no
 // .blkchain/config.yaml gets.
-func loopbackGate(t *testing.T, roe *RoE) *secgate.Gate {
+func loopbackGate(t *testing.T, roe *RoE, observedPorts ...int) *secgate.Gate {
 	t.Helper()
 	ws, err := engagement.OpenWorkspace(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, port := range observedPorts {
+		seedOpenService(t, ws.Store, "127.0.0.1", "tcp", port)
 	}
 	g := buildEngageGate(ws, roe.Scope, secgate.Auto, nil, secgate.NewSessionApprovals(), t.TempDir(),
 		gatePolicy{RoE: roe, UnattendedAllow: secgate.NewAllowlist()}, func(string, string) {})
@@ -58,7 +61,7 @@ func TestWebAPIReachesExplicitlyInScopeLoopback(t *testing.T) {
 	} {
 		t.Run(strings.ReplaceAll(inScope, "\n", "+"), func(t *testing.T) {
 			roe := loopbackRoE(t, inScope)
-			g := loopbackGate(t, roe)
+			g := loopbackGate(t, roe, 8787)
 
 			if !roe.Scope.InScope("127.0.0.1") {
 				t.Error("an explicitly listed loopback address must be in scope")

@@ -79,10 +79,18 @@ type actionOrigin struct {
 }
 
 func runAuthorized(ctx context.Context, g *secgate.Gate, bin string, args []string, dir string, limit int, timeout time.Duration, origin actionOrigin) runResult {
+	var result runResult
 	if g == nil || g.Policy == nil {
-		return execRunner(ctx, bin, args, dir, limit, timeout)
+		result = execRunner(ctx, bin, args, dir, limit, timeout)
+	} else {
+		result = runIsolatedAction(ctx, g, []pipelineStage{{Binary: bin, Args: args}}, dir, limit, timeout, origin)
 	}
-	return runIsolatedAction(ctx, g, []pipelineStage{{Binary: bin, Args: args}}, dir, limit, timeout, origin)
+	if g != nil && g.ServiceObserve != nil && !origin.BudgetExempt && result.Err == nil && !result.TimedOut && result.ExitCode == 0 {
+		if err := g.ServiceObserve(ctx, secgate.Command{TaskID: origin.TaskID, Binary: bin, Args: args, Surface: origin.Surface}, result.Output); err != nil {
+			result.Err = err
+		}
+	}
+	return result
 }
 
 func runAuthorizedPipeline(ctx context.Context, g *secgate.Gate, stages []pipelineStage, dir string, limit int, timeout time.Duration, origin actionOrigin) runResult {

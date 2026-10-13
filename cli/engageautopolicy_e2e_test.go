@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +35,8 @@ func TestRoEAutoArmLocalLLM(t *testing.T) {
 	d.Runs = NewRunOutputs()
 	d.ExploitTools = []string{"curl"}
 	d.AutoActions = roe.AutoActions
-	d.Gate = &secgate.Gate{Mode: secgate.Auto, Scope: roe.Scope, Allow: secgate.NewAllowlist("curl"), UnattendedAllow: secgate.NewAllowlist("curl"), AutoAction: roe.AutoActions.permitsCommand}
+	d.Gate = &secgate.Gate{Mode: secgate.Auto, Scope: roe.Scope, Allow: secgate.NewAllowlist("curl", "nmap"), UnattendedAllow: secgate.NewAllowlist("curl", "nmap"), AutoAction: roe.AutoActions.permitsCommand}
+	attachServiceDispatcher(d.Gate, d.Store)
 	if err := d.Gate.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +46,7 @@ func TestRoEAutoArmLocalLLM(t *testing.T) {
 	if _, err := d.Store.RecordEvidence("b1", "192.0.2.1 service observed"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{ID: "e1", Kind: "exploit", Target: "192.0.2.1:80", Phase: engagement.PhaseExploit, Surface: engagement.SurfaceNetwork, Status: engagement.StatusTodo, BasisIDs: []string{"b1"}, CodeCandidate: true}}}); err != nil {
+	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{ID: "e1", Kind: "exploit", Target: "192.0.2.1:80", Objective: "Use curl -I http://192.0.2.1/ once to verify service access", DoneWhen: "The HTTP status is observed", Phase: engagement.PhaseExploit, Surface: engagement.SurfaceNetwork, Status: engagement.StatusTodo, BasisIDs: []string{"b1"}, CodeCandidate: true}}}); err != nil {
 		t.Fatal(err)
 	}
 	task, err := d.Store.GetTask("e1")
@@ -53,7 +55,12 @@ func TestRoEAutoArmLocalLLM(t *testing.T) {
 	}
 	requester := &testArmRequester{decision: ArmSkip}
 	d.ArmReq = requester
-	withStubExec(t, func(_ context.Context, _ string, _ []string, _ string, _ int, _ time.Duration) runResult {
+	var calls []string
+	withStubExec(t, func(_ context.Context, bin string, _ []string, _ string, _ int, _ time.Duration) runResult {
+		calls = append(calls, bin)
+		if bin == "nmap" {
+			return runResult{Output: "Nmap scan report for 192.0.2.1\nPORT STATE SERVICE\n80/tcp open http\n"}
+		}
 		return runResult{Output: "HTTP 200 from test fixture"}
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -63,8 +70,8 @@ func TestRoEAutoArmLocalLLM(t *testing.T) {
 		t.Fatal(err)
 	}
 	armed, err := d.Store.GetTask("e1")
-	if err != nil || !armed.Armed || requester.called {
-		t.Fatalf("local model auto-arm: task=%+v requester=%t err=%v output=%q", armed, requester.called, err, out)
+	if err != nil || !armed.Armed || requester.called || !slices.Equal(calls, []string{"nmap", "curl"}) {
+		t.Fatalf("local model auto-arm: task=%+v requester=%t calls=%v err=%v output=%q", armed, requester.called, calls, err, out)
 	}
 	t.Logf("local model=%s auto-arm output=%q", resolveModel(cfg), out)
 }

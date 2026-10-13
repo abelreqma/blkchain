@@ -36,7 +36,10 @@ func TestAdviseLoopReturnsFinalAndCarriesPromptAndHistory(t *testing.T) {
 func TestAdviseLoopRunsNamedTargetCommand(t *testing.T) {
 	old := execRunner
 	calls := 0
-	execRunner = func(context.Context, string, []string, string, int, time.Duration) runResult {
+	execRunner = func(_ context.Context, bin string, _ []string, _ string, _ int, _ time.Duration) runResult {
+		if bin == "nmap" {
+			return runResult{Output: "Nmap scan report for 192.0.2.5\nPORT STATE SERVICE\n80/tcp open http\n"}
+		}
 		calls++
 		return runResult{Output: "fixture response"}
 	}
@@ -61,7 +64,10 @@ func TestAdviseLoopRunsNamedTargetCommand(t *testing.T) {
 func TestAdviseLoopRetriesAnExplicitActionUntilARealToolRuns(t *testing.T) {
 	old := execRunner
 	calls := 0
-	execRunner = func(context.Context, string, []string, string, int, time.Duration) runResult {
+	execRunner = func(_ context.Context, bin string, _ []string, _ string, _ int, _ time.Duration) runResult {
+		if bin == "nmap" {
+			return runResult{Output: "Nmap scan report for 192.0.2.5\nPORT STATE SERVICE\n80/tcp open http\n"}
+		}
 		calls++
 		return runResult{Output: "observed response"}
 	}

@@ -376,7 +376,7 @@ func TestEngageMCPDispatchPersistsPolicyEvidenceTranscriptAndReport(t *testing.T
 		tool := newRunCommandTool(d.Gate, 65536, time.Second, t.TempDir(), func() string { return "t1" }, func(id, out string) {
 			_, _ = d.Store.RecordEvidence(id, out)
 		})
-		result, err := tool.Call(ctx, `{"binary":"curl","args":["http://10.0.0.5"]}`)
+		result, err := tool.Call(ctx, `{"binary":"nmap","args":["-n","-sT","-p","80","10.0.0.5"]}`)
 		if err != nil || !strings.Contains(result, "fixture evidence") {
 			return "", fmt.Errorf("command result=%q err=%v", result, err)
 		}

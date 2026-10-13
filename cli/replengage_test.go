@@ -160,7 +160,7 @@ func TestRunReplEngageResumesSavedScopeAndOpenTask(t *testing.T) {
 			&countingConfirmer{ok: true}, askuser.AutoAsker{}, nil, goal, nil)
 	}
 	first := &scriptModel{resps: []*llms.ContentResponse{
-		toolCallResp("c1", "plan_add", `{"id":"t1","kind":"web","target":"192.0.2.1","objective":"inspect"}`),
+		toolCallResp("c1", "plan_add", `{"id":"t1","kind":"recon","target":"192.0.2.1","objective":"inspect"}`),
 		finalResp("paused for continuation"),
 	}}
 	if _, err := run(first); err != nil {

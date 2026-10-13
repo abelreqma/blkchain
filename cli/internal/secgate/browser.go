@@ -128,6 +128,18 @@ func (g *Gate) authorizeWebAction(ctx context.Context, c Command) Decision {
 			g.mu.Unlock()
 			return d
 		}
+		g.mu.Unlock()
+		if g.ServiceEnsure != nil {
+			g.ServiceEnsure(ctx, c)
+		}
+		g.mu.Lock()
+		if g.ServiceCheck != nil {
+			if reason := g.ServiceCheck(ctx, c); reason != "" {
+				d := g.deny("service-evidence", c, reason, "")
+				g.mu.Unlock()
+				return d
+			}
+		}
 		if d := g.rateAllowLocked(c); !d.Allowed {
 			g.mu.Unlock()
 			return d
@@ -156,6 +168,18 @@ func (g *Gate) authorizeWebAction(ctx context.Context, c Command) Decision {
 	if d := g.webScopeCheck(c); !d.Allowed {
 		g.mu.Unlock()
 		return d
+	}
+	g.mu.Unlock()
+	if g.ServiceEnsure != nil {
+		g.ServiceEnsure(ctx, c)
+	}
+	g.mu.Lock()
+	if g.ServiceCheck != nil {
+		if reason := g.ServiceCheck(ctx, c); reason != "" {
+			d := g.deny("service-evidence", c, reason, "")
+			g.mu.Unlock()
+			return d
+		}
 	}
 	if d := g.rateAllowLocked(c); !d.Allowed {
 		g.mu.Unlock()

@@ -78,7 +78,7 @@ func TestEngageResumeRetainsUsageEvidenceAndSequence(t *testing.T) {
 		tool := newRunCommandTool(d.Gate, 65536, time.Second, t.TempDir(), func() string { return "t1" }, func(id, out string) {
 			_, _ = d.Store.RecordEvidence(id, out)
 		})
-		result, err := tool.Call(ctx, `{"binary":"curl","args":["http://192.0.2.1"]}`)
+		result, err := tool.Call(ctx, `{"binary":"nmap","args":["-n","-sT","-p","80","192.0.2.1"]}`)
 		if err != nil || !strings.Contains(result, "evidence-") {
 			return "", fmt.Errorf("action result=%q err=%v", result, err)
 		}
@@ -142,7 +142,7 @@ func TestEngageResumeRetainsByteCap(t *testing.T) {
 	action := func(ctx context.Context, d engageDeps, _ string) (string, error) {
 		actionCalls++
 		tool := newRunCommandTool(d.Gate, 65536, time.Second, t.TempDir(), func() string { return "t1" }, nil)
-		result, err := tool.Call(ctx, `{"binary":"curl","args":["http://192.0.2.1"]}`)
+		result, err := tool.Call(ctx, `{"binary":"nmap","args":["-n","-sT","-p","80","192.0.2.1"]}`)
 		if err != nil {
 			return "", err
 		}
@@ -358,6 +358,7 @@ func TestEngageWebDecisionsReachTranscriptAndReport(t *testing.T) {
 	stubEngageRunner(t)
 	workspace, cwd := t.TempDir(), testEngageRoE(t)
 	run := func(ctx context.Context, d engageDeps, _ string) (string, error) {
+		seedOpenService(t, d.Store, "192.0.2.1", "tcp", 443)
 		if decision := d.Gate.AuthorizeAPIRequest(ctx, secgate.APIRequest{Method: "GET", URL: "https://192.0.2.1/read"}); !decision.Allowed {
 			return "", fmt.Errorf("permitted API read denied: %+v", decision)
 		}

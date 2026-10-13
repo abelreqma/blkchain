@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -125,11 +126,14 @@ func TestChatWebSearchUsesOnlyTheCurrentPublicQuestion(t *testing.T) {
 
 func TestChatCommandUsesNamedTargetWithoutRoE(t *testing.T) {
 	old := execRunner
-	called := 0
+	var called []string
 	execRunner = func(ctx context.Context, bin string, args []string, dir string, limit int, timeoutDuration time.Duration) runResult {
-		called++
+		called = append(called, bin)
 		if scope, _ := ctx.Value(executorScopeKey{}).(*secgate.Scope); scope == nil || !scope.InScope("192.0.2.5") {
 			t.Error("isolated command lost its per-turn target scope")
+		}
+		if bin == "nmap" {
+			return runResult{Output: "Nmap scan report for 192.0.2.5\nPORT STATE SERVICE\n80/tcp open http\n"}
 		}
 		return runResult{Output: "fixture response"}
 	}
@@ -142,15 +146,58 @@ func TestChatCommandUsesNamedTargetWithoutRoE(t *testing.T) {
 	tool, _ := reg.Get("run_command")
 	for _, tc := range []struct {
 		args string
-		want int
+		want []string
 	}{
-		{`{"binary":"curl","args":["-I","http://192.0.2.6/"]}`, 0},
-		{`{"binary":"curl","args":["-I","http://192.0.2.5/"]}`, 1},
+		{`{"binary":"curl","args":["-I","http://192.0.2.6/"]}`, nil},
+		{`{"binary":"curl","args":["-I","http://192.0.2.5/"]}`, []string{"nmap", "curl"}},
 	} {
 		_, err := tool.Call(context.Background(), tc.args)
-		if err != nil || called != tc.want {
-			t.Fatalf("calls=%d want=%d err=%v", called, tc.want, err)
+		if err != nil || !slices.Equal(called, tc.want) {
+			t.Fatalf("calls=%v want=%v err=%v", called, tc.want, err)
 		}
+	}
+}
+
+func TestChatCommandStopsAfterClosedPortDiscovery(t *testing.T) {
+	old := execRunner
+	var calls []string
+	execRunner = func(_ context.Context, bin string, _ []string, _ string, _ int, _ time.Duration) runResult {
+		calls = append(calls, bin)
+		return runResult{Output: "Nmap scan report for 192.0.2.5\nPORT STATE SERVICE\n80/tcp closed http\n"}
+	}
+	t.Cleanup(func() { execRunner = old })
+	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "Check 192.0.2.5", nil, AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTools()
+	tool, _ := reg.Get("run_command")
+	out, err := tool.Call(context.Background(), `{"binary":"curl","args":["http://192.0.2.5/"]}`)
+	if err != nil || !slices.Equal(calls, []string{"nmap"}) || !strings.Contains(out, "service dispatch") {
+		t.Fatalf("closed port reached follow-on: calls=%v output=%q err=%v", calls, out, err)
+	}
+}
+
+func TestChatSNMPDispatchesAfterObservedUDPPort(t *testing.T) {
+	old := execRunner
+	var calls []string
+	execRunner = func(_ context.Context, bin string, _ []string, _ string, _ int, _ time.Duration) runResult {
+		calls = append(calls, bin)
+		if bin == "nmap" {
+			return runResult{Output: "Nmap scan report for 192.0.2.5\nPORT STATE SERVICE\n161/udp open|filtered snmp\n"}
+		}
+		return runResult{Output: "SNMP fixture response"}
+	}
+	t.Cleanup(func() { execRunner = old })
+	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "Assess SNMP on 192.0.2.5", nil, AnswerOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTools()
+	tool, _ := reg.Get("run_command")
+	out, err := tool.Call(context.Background(), `{"binary":"snmpwalk","args":["-v2c","-c","public","192.0.2.5"]}`)
+	if err != nil || !slices.Equal(calls, []string{"nmap", "snmpwalk"}) || !strings.Contains(out, "SNMP fixture response") {
+		t.Fatalf("SNMP dispatch calls=%v output=%q err=%v", calls, out, err)
 	}
 }
 
@@ -190,6 +237,18 @@ func TestChatWebAPIUsesNamedLoopbackFixture(t *testing.T) {
 		_, _ = w.Write([]byte("fixture receipt"))
 	}))
 	defer srv.Close()
+	host, port, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := execRunner
+	execRunner = func(_ context.Context, bin string, _ []string, _ string, _ int, _ time.Duration) runResult {
+		if bin != "nmap" {
+			t.Errorf("unexpected preflight binary %s", bin)
+		}
+		return runResult{Output: "Nmap scan report for " + host + "\nPORT STATE SERVICE\n" + port + "/tcp open http\n"}
+	}
+	t.Cleanup(func() { execRunner = old })
 	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "POST to "+srv.URL, nil, AnswerOpts{})
 	if err != nil {
 		t.Fatal(err)

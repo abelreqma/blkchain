@@ -298,6 +298,7 @@ func newChatToolRegistry(ctx context.Context, rc searcher, cfg ragconfig.Config,
 		AutoAction:    func(secgate.Command) bool { return true },
 		Episode:       secgate.NewEpisode(secgate.Caps{MaxCommands: 24, MaxOutputBytes: chatCommandOutput, Wall: 3 * time.Minute}, nil),
 	}
+	attachServiceDispatcher(gate, nil)
 	if project != nil {
 		gate.ConfigDenied = project.DeniedBinaries
 	}
