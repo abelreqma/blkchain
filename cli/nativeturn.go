@@ -43,6 +43,97 @@ type turnRequest struct {
 	Browser *chatBrowserState
 }
 
+// Session selectors for turnRequest.SessionID. Any other non-empty value is a
+// session id, which must exist.
+const (
+	// sessionTargetNew starts a fresh session and persists the turn.
+	sessionTargetNew = "new"
+	// sessionTargetLast continues the most recent session, starting one when
+	// there is none.
+	sessionTargetLast = "last"
+)
+
+// resolveTurnSession returns the session a turn writes to, or nil for a
+// stateless turn. An explicit id must already exist: answering a mistyped id as
+// a fresh conversation would silently discard the history the caller asked for.
+func resolveTurnSession(selector string) (*session, error) {
+	switch selector {
+	case "":
+		return nil, nil
+	case sessionTargetNew:
+		return newSession()
+	case sessionTargetLast:
+		metas, err := listSessions()
+		if err != nil {
+			return nil, err
+		}
+		if len(metas) == 0 {
+			return newSession()
+		}
+		return openSessionFor(metas[0].ID)
+	default:
+		return openSessionFor(selector)
+	}
+}
+
+// openSessionFor opens an existing session by id. The id is untrusted input
+// from a CLI flag, an MCP tool call or an HTTP request, so it is validated
+// before it can reach a file path.
+func openSessionFor(id string) (*session, error) {
+	if !validSessionID(id) {
+		return nil, usageErr("turn: invalid session id")
+	}
+	if sessionExists(id) {
+		return openSession(id)
+	}
+	if store := openSessionStore(); store != nil {
+		if _, ok, err := store.GetSessionRow(context.Background(), id); err == nil && ok {
+			return attachSession(id)
+		}
+	}
+	return nil, sessionNotFound(id)
+}
+
+// turnHistory reads a session's committed messages as conversation memory. A
+// read failure yields no memory rather than failing the turn, so a damaged
+// store degrades to a stateless answer instead of refusing to answer.
+func turnHistory(sess *session) []priorTurn {
+	if sess == nil {
+		return nil
+	}
+	store := openSessionStore()
+	if store == nil {
+		return nil
+	}
+	recs, err := store.Messages(context.Background(), sess.id)
+	if err != nil {
+		return nil
+	}
+	out := make([]priorTurn, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, priorTurn{Role: r.Role, Content: r.Content})
+	}
+	return out
+}
+
+// persistTurn writes one completed exchange: both transcript lines, then the
+// single commit that records the memory rows and the transcript length they
+// account for. A process interrupted between them leaves a tail that
+// reconcileTranscript removes when the session is next opened.
+func persistTurn(sess *session, model, question, answer string, tokens int) error {
+	if sess == nil || strings.TrimSpace(answer) == "" {
+		return nil
+	}
+	defer sess.endTurn()
+	if err := sess.appendTurn(turnRecord{Role: roleUser, Content: question, Model: model}); err != nil {
+		return err
+	}
+	if err := sess.appendTurn(turnRecord{Role: roleAssistant, Content: answer, Model: model, Tokens: tokens}); err != nil {
+		return err
+	}
+	return sess.commitTurn(question, answer)
+}
+
 // turnAction is one tool call the turn made.
 type turnAction struct {
 	Tool   string `json:"tool"`
@@ -96,6 +187,12 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		}
 	}
 
+	sess, err := resolveTurnSession(req.SessionID)
+	if err != nil {
+		return turnResult{}, err
+	}
+	history := turnHistory(sess)
+
 	ctx, metrics := withCallMetrics(ctx)
 	started := time.Now()
 
@@ -108,6 +205,7 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		BrowserCDP: req.BrowserCDP,
 		Browser:    req.Browser,
 		Model:      resolveModel(cfg),
+		History:    history,
 		Preface:    req.Preface,
 		NoWeb:      !prefs.Web,
 		WebOnly:    req.WebOnly,
@@ -148,6 +246,15 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 	}
 	if res.Citations == nil {
 		res.Citations = []citation{}
+	}
+	if sess != nil {
+		res.SessionID = sess.id
+		if perr := persistTurn(sess, opts.Model, question, answer, tokens); perr != nil {
+			if err == nil {
+				return res, fmt.Errorf("conversation save failed: %w", perr)
+			}
+			return res, err
+		}
 	}
 	return res, err
 }
