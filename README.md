@@ -4,7 +4,7 @@ blkChain is a security research and authorized assessment framework. It combines
 
 Use it to research techniques, understand an application's exposed sources and traffic, run scoped assessment tasks, and inspect the evidence behind a conclusion.
 
-Start with the [complete setup guide](#complete-setup-guide). For an existing installation, see [answer modes](#research-and-answer-modes), [external surface and advisory scans](#external-surface-and-advisory-scans), [web analysis](#web-application-analysis), and the [engagement store](#engagement-store-and-findings).
+Start with the [complete setup guide](#complete-setup-guide). For an existing installation, see [answer modes](#research-and-answer-modes), [external surface and advisory scans](#external-surface-and-advisory-scans), [web analysis](#web-application-analysis), and the [engagement store](#engagement-store-and-findings). For a per-surface reference, covering what each engagement surface does and how footholds, carriers, and vantage changes connect them, see [the assessment surfaces](docs/surfaces/README.md).
 
 ## Capabilities
 
