@@ -13,6 +13,8 @@
   "grade_temperature": 0.0,
   "request_timeout_seconds": 300,
   "default_model": "supergemma4-26b-uncensored-mlx-4bit-v2",
+  "router_model": "",
+  "assessment_model": "",
   "dense_vector_name": "dense",
   "sparse_vector_name": "sparse",
   "sparse_model": "Qdrant/bm25",

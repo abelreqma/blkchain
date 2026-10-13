@@ -25,29 +25,37 @@ import (
 // directly onto a Config value, so keys absent from the file keep whatever the
 // value already held (the built-in default) instead of zeroing out.
 type Config struct {
-	TopK                  int      `json:"top_k"`
-	PoolSize              int      `json:"pool_size"`
-	MaxLoops              int      `json:"max_loops"`
-	AnswerMaxChunks       int      `json:"answer_max_chunks"`
-	ContextCharsPerChunk  int      `json:"context_chars_per_chunk"`
-	AnswerMaxTokens       int      `json:"answer_max_tokens"`
-	GradeMaxTokens        int      `json:"grade_max_tokens"`
-	SynthTemperature      float64  `json:"synth_temperature"`
-	SynthTopP             float64  `json:"synth_top_p"`
-	SynthTopK             int      `json:"synth_top_k"`
-	SynthPresencePenalty  float64  `json:"synth_presence_penalty"`
-	GradeTemperature      float64  `json:"grade_temperature"`
-	RequestTimeoutSeconds int      `json:"request_timeout_seconds"`
-	DefaultModel          string   `json:"default_model"`
-	DenseVectorName       string   `json:"dense_vector_name"`
-	SparseVectorName      string   `json:"sparse_vector_name"`
-	SparseModel           string   `json:"sparse_model"`
-	QdrantGRPCURL         string   `json:"qdrant_grpc_url"`
-	EmbedServerURL        string   `json:"embed_server_url"`
-	TavilyMaxResults      int      `json:"tavily_max_results"`
-	ReputableDomains      []string `json:"reputable_domains"`
-	RouteMaxTokens        int      `json:"route_max_tokens"`
-	PocDomains            []string `json:"poc_domains"`
+	TopK                  int     `json:"top_k"`
+	PoolSize              int     `json:"pool_size"`
+	MaxLoops              int     `json:"max_loops"`
+	AnswerMaxChunks       int     `json:"answer_max_chunks"`
+	ContextCharsPerChunk  int     `json:"context_chars_per_chunk"`
+	AnswerMaxTokens       int     `json:"answer_max_tokens"`
+	GradeMaxTokens        int     `json:"grade_max_tokens"`
+	SynthTemperature      float64 `json:"synth_temperature"`
+	SynthTopP             float64 `json:"synth_top_p"`
+	SynthTopK             int     `json:"synth_top_k"`
+	SynthPresencePenalty  float64 `json:"synth_presence_penalty"`
+	GradeTemperature      float64 `json:"grade_temperature"`
+	RequestTimeoutSeconds int     `json:"request_timeout_seconds"`
+	DefaultModel          string  `json:"default_model"`
+	// RouterModel answers the short deterministic calls of a turn: action
+	// classification, routing, the corpus check, context grading and
+	// conversation compression. Empty selects DefaultModel.
+	RouterModel string `json:"router_model"`
+	// AssessmentModel answers the calls that carry the turn's reasoning: the
+	// direct answer, the tool loop and grounded synthesis. Empty selects
+	// DefaultModel.
+	AssessmentModel  string   `json:"assessment_model"`
+	DenseVectorName  string   `json:"dense_vector_name"`
+	SparseVectorName string   `json:"sparse_vector_name"`
+	SparseModel      string   `json:"sparse_model"`
+	QdrantGRPCURL    string   `json:"qdrant_grpc_url"`
+	EmbedServerURL   string   `json:"embed_server_url"`
+	TavilyMaxResults int      `json:"tavily_max_results"`
+	ReputableDomains []string `json:"reputable_domains"`
+	RouteMaxTokens   int      `json:"route_max_tokens"`
+	PocDomains       []string `json:"poc_domains"`
 }
 
 // contractRelPath is where rag.json lives relative to the project root.
@@ -72,6 +80,8 @@ func builtinDefaults() Config {
 		GradeTemperature:      0.0,
 		RequestTimeoutSeconds: 300,
 		DefaultModel:          "supergemma4-26b-uncensored-mlx-4bit-v2",
+		RouterModel:           "",
+		AssessmentModel:       "",
 		DenseVectorName:       "dense",
 		SparseVectorName:      "sparse",
 		SparseModel:           "Qdrant/bm25",
@@ -166,6 +176,12 @@ func envOverrides(cfg *Config) {
 	}
 	if v, ok := os.LookupEnv("OMLX_MODEL"); ok && v != "" {
 		cfg.DefaultModel = v
+	}
+	if v, ok := os.LookupEnv("BLKCHAIN_ROUTER_MODEL"); ok && v != "" {
+		cfg.RouterModel = v
+	}
+	if v, ok := os.LookupEnv("BLKCHAIN_ASSESSMENT_MODEL"); ok && v != "" {
+		cfg.AssessmentModel = v
 	}
 	if v, ok := os.LookupEnv("BLKCHAIN_REPUTABLE_DOMAINS"); ok && v != "" {
 		parts := strings.Split(v, ",")
