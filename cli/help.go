@@ -58,7 +58,7 @@ func commandSpecs() []cmdSpec {
 			desc: "answer a question, with cited sources",
 			long: "Uses native auto by default; --agent NAME selects a specialist, --rag forces local grounding, and --web requests a web-only answer. " +
 				"Native auto selects a specialist dynamically; available: " + strings.Join(answerAgentNames(), ", ") + ". " +
-				"Hermes is available through blk hermes or --hermes.",
+				"Hermes remains as a legacy one-shot through blk hermes or --hermes.",
 			flags: func(fs *flag.FlagSet) { defineAskFlags(fs, &askOpts{}) },
 			examples: []string{
 				`blk ask "how do I chain SSRF to RCE?"`,
@@ -209,10 +209,10 @@ func commandSpecs() []cmdSpec {
 		},
 		{
 			name: "hermes", args: "<prompt...>", group: hgIntegrations,
-			desc: "run one Hermes agent turn with the knowledge base",
-			long: "Runs one turn of the Hermes agent with your prompt and prints its reply. " +
-				"Hermes has the knowledge-base tools (search and answer) plus its own tools, so it suits multi-step tasks. " +
-				"Use blk ask for a plain cited answer. " +
+			desc: "legacy: run one Hermes agent turn (no session)",
+			long: "Runs one turn of the external Hermes agent with your prompt and prints its reply. " +
+				"This is a legacy one-shot path: it keeps no session and cannot continue a conversation, and blk ask answers natively by default. " +
+				"Hermes has the knowledge-base tools through blk mcp plus its own tools. " +
 				"Hermes must be installed and on your PATH.",
 			examples: []string{
 				`blk hermes "summarize the SSRF notes"`,
@@ -222,10 +222,11 @@ func commandSpecs() []cmdSpec {
 		},
 		{
 			name: "mcp", group: hgIntegrations,
-			desc: "serve the knowledge base to Hermes over MCP (stdio)",
-			long: "Runs the local MCP server with kb_search, kb_answer, route_skill, engage, and kg. " +
+			desc: "serve the agent and knowledge base over MCP (stdio)",
+			long: "Runs the local MCP server over stdio for any MCP client, not only Hermes. " +
+				"It exposes chat, a full agent turn with adaptive routing, the knowledge base, files, terminal, browser, and web research that holds a conversation by session id; the stateless kb_search and kb_answer; route_skill; engage; kg_query; and read-only session://{id} resources. " +
 				"Engagement calls require an operator-owned RoE file named by BLKCHAIN_MCP_ROE_PATH, and the inline roe must match it. " +
-				"Start qdrant and embed_server for retrieval, and the LLM and isolated runner for engagement.",
+				"Start qdrant and embed_server for retrieval, the LLM for chat, kb_answer, and engagement, and the isolated runner for engagement.",
 			examples: []string{"blk mcp", "blk doctor"},
 			run:      runMCP,
 		},

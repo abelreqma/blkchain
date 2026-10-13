@@ -1760,7 +1760,7 @@ func TestHelpBlockLayout(t *testing.T) {
 		"show whether each local service is running",
 		"check qdrant, embed_server, and the LLM",
 		"check the whole setup and say what to fix",
-		"run one Hermes agent turn with the knowledge base",
+		"legacy: run one Hermes agent turn (no session)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help lacks the shared wording %q", want)
