@@ -55,6 +55,45 @@ func TestExecutorPromptsDriveTheOffensiveLifecycle(t *testing.T) {
 	}
 }
 
+func TestEngagementPromptsMatchAvailableActions(t *testing.T) {
+	if !strings.Contains(executorPreamble, "adapt a bounded command") || strings.Contains(executorPreamble, "Stop when the objective is met, a gate denies") {
+		t.Fatal("executor preamble stops at a fixable command denial")
+	}
+
+	cloud := domainFor("cloud").Prompt
+	for _, want := range []string{"aws", "gcloud", "approved cloud identity", "--endpoint-url", "read-only", "armed exploit", "Azure"} {
+		if !strings.Contains(cloud, want) {
+			t.Errorf("cloud prompt missing %q", want)
+		}
+	}
+	for _, stale := range []string{"Name the endpoint as --endpoint-url", "Azure and GCP have no CLI", "aws is an exploit-tier tool"} {
+		if strings.Contains(cloud, stale) {
+			t.Errorf("cloud prompt contains stale instruction %q", stale)
+		}
+	}
+
+	for _, name := range []string{"ad", "k8s"} {
+		p := domainFor(name).Prompt
+		if strings.Contains(p, "with per-action confirmation") {
+			t.Errorf("%s prompt claims confirmation is unconditional", name)
+		}
+	}
+
+	analysis := domainFor("target-analysis").Prompt
+	if !strings.Contains(analysis, "do not call plan_add") || strings.Contains(analysis, "propose a chained escalation task with plan_add") {
+		t.Error("target-analysis system prompt conflicts with its task prompt")
+	}
+	if !strings.Contains(exploitSystemPrompt, "plan_add is unavailable") || strings.Contains(exploitSystemPrompt, "Create a plan_add task") {
+		t.Error("exploit prompt requests a tool absent from its registry")
+	}
+	if !strings.Contains(exploitSystemPrompt, "registered web tool") || !strings.Contains(domainFor("web").Prompt, "web_browser") {
+		t.Error("web exploit prompt omits registered browser and API tools")
+	}
+	if strings.Contains(vulnPersonaPrompt, "Read the stored records with store vulns") {
+		t.Error("vulnerability prompt asks the model to run an unavailable store command")
+	}
+}
+
 func TestOffensiveReconAndExploitSelectorsUseEvidenceAndCoverage(t *testing.T) {
 	for _, want := range []string{"hypothesis", "expected signal", "Do not repeat completed probes"} {
 		p := reconTierPrompt(engagement.Task{ID: "t1", Objective: "map service"}, "10.0.0.5", reconTier{Name: "service-enum", Dimensions: []string{"ports"}}, reconSelection{})
