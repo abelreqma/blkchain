@@ -92,6 +92,28 @@ func TestRenderMarkdownFinalCannotCreateSetextHeading(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownStructuredAssessment(t *testing.T) {
+	m := sampleModel()
+	m.Final = "## model formatting that must not render"
+	m.Assessment = &Assessment{
+		Summary:    "Port 80 is open.\n## forged heading",
+		Confirmed:  []string{"t1: Port 80/tcp is open (`http`).", "![remote](https://example.invalid/pixel)"},
+		Blocked:    []string{"Server banner not captured."},
+		StopReason: "command cap reached",
+	}
+	md := RenderMarkdown(m)
+	for _, want := range []string{"## Final assessment", "- Stop reason: command cap reached", "### Confirmed", "### Blocked", "- t1: Port 80/tcp is open"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("missing %q in report: %s", want, md)
+		}
+	}
+	for _, bad := range []string{"\n## forged heading", "![remote]", "## model formatting that must not render"} {
+		if strings.Contains(md, bad) {
+			t.Fatalf("unsafe or legacy formatting %q in report: %s", bad, md)
+		}
+	}
+}
+
 func TestRenderMarkdownKeepsQuotedBackticks(t *testing.T) {
 	m := sampleModel()
 	m.Engagement.Tasks[1].Status = engagement.StatusActive

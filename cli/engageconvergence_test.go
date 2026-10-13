@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/engreport"
+	"blkchain/cli/internal/secgate"
 	"github.com/tmc/langchaingo/llms"
 )
 
@@ -148,6 +150,55 @@ func TestEngageConvergenceSynthesisContextBound(t *testing.T) {
 	}
 }
 
+func TestEngageConvergenceWritesStructuredAssessment(t *testing.T) {
+	m := &fakeModel{queue: []*llms.ContentResponse{textResp(`{"summary":"Port 80 is open.","confirmed":["t1: Port 80/tcp is open."],"blocked":["Server banner not captured."]}`)}}
+	d := testDeps(t, m)
+	d.Assessment = &engreport.Assessment{}
+	out, err := synthesizeEngagement(context.Background(), d, "report ports and banner", "command cap reached")
+	if err != nil || !strings.Contains(out, "### Confirmed") || d.Assessment.StopReason != "command cap reached" || len(d.Assessment.Confirmed) != 1 {
+		t.Fatalf("out=%q assessment=%+v err=%v", out, d.Assessment, err)
+	}
+}
+
+func TestEngageNormalFinalAlsoWritesStructuredAssessment(t *testing.T) {
+	m := &fakeModel{queue: []*llms.ContentResponse{
+		textResp("## Finished\nThe model's own formatting."),
+		textResp(`{"summary":"No tasks were needed.","confirmed":[]}`),
+	}}
+	d := testDeps(t, m)
+	d.Assessment = &engreport.Assessment{}
+	out, err := runOrchestrator(context.Background(), d, "answer from evidence")
+	if err != nil || out != "## Finished\nThe model's own formatting." || m.calls != 2 || d.Assessment.Summary != "No tasks were needed." {
+		t.Fatalf("out=%q assessment=%+v calls=%d err=%v", out, d.Assessment, m.calls, err)
+	}
+}
+
+func TestEngageOrchestratorStopsAfterCommandCapDenial(t *testing.T) {
+	scope, err := secgate.ParseScope(strings.NewReader("local\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := secgate.DefaultPolicy()
+	p.Allowed = []string{"local"}
+	p.MaxCommands = 1
+	gate := &secgate.Gate{Mode: secgate.Auto, Scope: scope, Policy: p}
+	if err := gate.Start(); err != nil {
+		t.Fatal(err)
+	}
+	gate.Authorize(context.Background(), secgate.Command{Binary: "id"})
+	gate.Authorize(context.Background(), secgate.Command{Binary: "id"})
+	model := &fakeModel{queue: []*llms.ContentResponse{
+		callResp("c1", "missing", "{}"),
+		textResp(`{"summary":"Command cap reached."}`),
+	}}
+	d := testDeps(t, model)
+	d.Gate = gate
+	out, err := runOrchestrator(context.Background(), d, "inspect")
+	if err != nil || !strings.Contains(out, "command cap reached") || model.calls != 2 {
+		t.Fatalf("out=%q calls=%d err=%v", out, model.calls, err)
+	}
+}
+
 func TestEngageConvergenceCompletedEvidenceStaysExact(t *testing.T) {
 	m := &fakeModel{queue: []*llms.ContentResponse{textResp("report")}}
 	d := testDeps(t, m)
@@ -278,13 +329,13 @@ func TestEngageConvergenceRoundCapSynthesizes(t *testing.T) {
 	t.Setenv("BLKCHAIN_ENGAGE_MAX_CALLS", "100")
 	m := &convergenceModel{fakeModel: fakeModel{queue: []*llms.ContentResponse{
 		callResp("c1", "plan_add", `{"id":"t1","kind":"web","target":"10.0.0.5","objective":"inspect login"}`),
-		textResp("report: login remains untested"),
+		textResp(`{"summary":"Login remains untested.","remaining":["t1: Login remains untested."]}`),
 	}}}
 	d := testDeps(t, m)
 	stopReason := ""
 	d.OnStop = func(reason string) { stopReason = reason }
 	out, err := runOrchestrator(context.Background(), d, "assess target")
-	if err != nil || !strings.Contains(out, "login remains untested") || m.calls != 2 || !strings.Contains(stopReason, "round cap") || strings.Count(out, "Engagement paused:") != 1 {
+	if err != nil || !strings.Contains(out, "Login remains untested") || m.calls != 2 || !strings.Contains(stopReason, "round cap") || strings.Count(out, "Engagement paused:") != 1 {
 		t.Fatalf("out=%q calls=%d err=%v", out, m.calls, err)
 	}
 	last := m.opts[len(m.opts)-1]
@@ -300,10 +351,10 @@ func TestEngageConvergenceNoProgressSynthesizes(t *testing.T) {
 	m := &fakeModel{queue: []*llms.ContentResponse{
 		callResp("c1", "missing_tool", "{}"),
 		callResp("c2", "missing_tool", "{}"),
-		textResp("report: no work completed"),
+		textResp(`{"summary":"No work completed.","remaining":["No work completed."]}`),
 	}}
 	out, err := runOrchestrator(context.Background(), testDeps(t, m), "assess target")
-	if err != nil || !strings.Contains(out, "no-progress") || !strings.Contains(out, "report: no work completed") || m.calls != 3 {
+	if err != nil || !strings.Contains(out, "no-progress") || !strings.Contains(out, "No work completed") || m.calls != 3 {
 		t.Fatalf("out=%q calls=%d err=%v", out, m.calls, err)
 	}
 }

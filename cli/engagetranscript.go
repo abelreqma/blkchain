@@ -41,6 +41,7 @@ type actionRecord struct {
 	Task          string `json:"task,omitempty"`
 	Runner        string `json:"runner"`
 	Kind          string `json:"kind"`
+	BudgetExempt  bool   `json:"budget_exempt,omitempty"`
 	Command       string `json:"command"`
 	// Destination is the foothold host a pivoted action ran on, and is empty when
 	// the action ran in the sandbox worker. A pivoted action executes outside the
@@ -148,6 +149,26 @@ func redactEngageText(text string) string {
 	return strings.Join(lines, "\n")
 }
 
+func redactEngageAuditDetail(detail string) string {
+	parts := strings.Split(detail, "\x00")
+	for i := range parts {
+		parts[i] = redactEngageText(parts[i])
+	}
+	return strings.Join(parts, "\x00")
+}
+
+func displayAuditCommand(command string) string {
+	parts := strings.Split(command, "\x00")
+	for i, part := range parts {
+		part = redactEngageText(part)
+		if strings.ContainsAny(part, " \t\n") {
+			part = strconv.Quote(part)
+		}
+		parts[i] = part
+	}
+	return strings.Join(parts, " ")
+}
+
 func (t *actionTranscript) restore() error {
 	fd, err := syscall.Open(t.path, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if os.IsNotExist(err) {
@@ -203,15 +224,18 @@ func (t *actionTranscript) restore() error {
 		if rec.Runner != t.runner && rec.Runner != t.otherRunner || rec.CapturedBytes != len(rec.Stdout)+len(rec.Stderr) || rec.Dropped < 0 || len(rec.Command) > 256<<10 || len(rec.Reason) > 64<<10 || len(rec.Task) > 256 {
 			return fmt.Errorf("invalid action accounting in checkpoint")
 		}
+		auditStatus := rec.Status == "denied" || rec.Status == "allowed" || rec.Status == "attempted" || rec.Status == "recorded"
 		if rec.Status == "running" {
 			if len(parts) != 1 || running[sequence] || rec.Stages < 1 || rec.Stages > 3 {
 				return fmt.Errorf("invalid checkpoint stage count")
 			}
 			running[sequence] = true
-			t.actions += rec.Stages
-		} else if rec.Stages != 0 || rec.Status != "denied" && rec.Status != "allowed" && !running[sequence] || rec.Status != "denied" && rec.Status != "allowed" && rec.Status != "complete" && rec.Status != "failed" && rec.Status != "timeout" && rec.Status != "canceled" {
+			if !rec.BudgetExempt {
+				t.actions += rec.Stages
+			}
+		} else if rec.Stages != 0 || !auditStatus && !running[sequence] || !auditStatus && rec.Status != "complete" && rec.Status != "failed" && rec.Status != "timeout" && rec.Status != "canceled" {
 			return fmt.Errorf("invalid action status in checkpoint")
-		} else if (rec.Status == "denied" || rec.Status == "allowed") && (running[sequence] || len(parts) != 1) {
+		} else if auditStatus && (running[sequence] || len(parts) != 1) {
 			return fmt.Errorf("invalid policy action in checkpoint")
 		} else if terminal[rec.ID] {
 			return fmt.Errorf("duplicate terminal action in checkpoint")
@@ -237,7 +261,7 @@ func renderActionRecord(rec actionRecord, mode string) string {
 	if rec.Destination != "" {
 		where = " on " + redactEngageText(rec.Destination)
 	}
-	fmt.Fprintf(&b, "%s [%s]%s %s %s\n", rec.ID, redactEngageText(rec.Task), where, strings.ToUpper(rec.Status), redactEngageText(rec.Command))
+	fmt.Fprintf(&b, "%s [%s]%s %s %s %s\n", rec.ID, redactEngageText(rec.Task), where, strings.ToUpper(rec.Kind), strings.ToUpper(rec.Status), displayAuditCommand(rec.Command))
 	for _, stream := range []struct{ name, text string }{{"stdout", rec.Stdout}, {"stderr", rec.Stderr}} {
 		if stream.text == "" {
 			continue
@@ -257,7 +281,7 @@ func renderActionRecord(rec actionRecord, mode string) string {
 	if rec.Reason != "" {
 		fmt.Fprintf(&b, "reason: %s\n", redactEngageText(rec.Reason))
 	}
-	if rec.Status != "running" && rec.Status != "allowed" && rec.Status != "denied" {
+	if rec.Status != "running" && rec.Status != "allowed" && rec.Status != "denied" && rec.Status != "attempted" && rec.Status != "recorded" {
 		fmt.Fprintf(&b, "exit=%d duration=%dms dropped=%d bytes\n", rec.ExitCode, rec.DurationMS, rec.Dropped)
 	}
 	return b.String()

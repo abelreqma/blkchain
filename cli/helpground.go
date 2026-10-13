@@ -95,7 +95,7 @@ func newTaskGrounder(cache toolHelpCache, g *secgate.Gate, workDir string, cmdCt
 			if g.Audit != nil {
 				g.Audit("exec", secgate.Signature(hc))
 			}
-			res := runAuthorized(ctx, g, authorized.Binary, authorized.Args, workDir, helpCaptureCapBytes, helpCaptureTimeout, actionOrigin{TaskID: cmdCtx.TaskID, Surface: cmdCtx.Surface})
+			res := runAuthorized(ctx, g, authorized.Binary, authorized.Args, workDir, helpCaptureCapBytes, helpCaptureTimeout, actionOrigin{TaskID: cmdCtx.TaskID, Surface: cmdCtx.Surface, BudgetExempt: true})
 			if res.TimedOut {
 				continue
 			}
@@ -170,14 +170,19 @@ func (hg *helpGrounder) ground(ctx context.Context, cmd secgate.Command) groundO
 		}
 		out, ok := hg.Capture(ctx, cmd.Binary)
 		if !ok {
+			_ = hg.Cache.Store(cmd.Binary, ver, toolInterface{})
 			return groundOutcome{Msg: "could not read --help for " + base + " (gate denied or no output); proceeding ungrounded - verify the flags are real or add it to the help escape hatch"}
 		}
 		iface = hg.Parse(out)
 		if len(iface.Flags) == 0 && len(iface.Subcommands) == 0 {
+			_ = hg.Cache.Store(cmd.Binary, ver, toolInterface{})
 			return groundOutcome{Msg: "help for " + base + " produced no parseable interface; proceeding ungrounded - review the command, try '" + base + " help', or inspect the tool manually"}
 		}
 		// Best-effort cache; a store error does not block validation.
 		_ = hg.Cache.Store(cmd.Binary, ver, iface)
+	}
+	if len(iface.Flags) == 0 && len(iface.Subcommands) == 0 {
+		return groundOutcome{Msg: "could not verify flags for " + base + " from tool help; proceeding ungrounded"}
 	}
 
 	unknownFlags, unknownSub := validateAgainstInterface(p, iface)

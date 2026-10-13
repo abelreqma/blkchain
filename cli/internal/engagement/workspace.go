@@ -99,6 +99,8 @@ func auditFields(action string) (kind, outcome, reasonCode string) {
 		return "decision", "denied", strings.TrimPrefix(action, "deny:")
 	case strings.HasPrefix(action, "probe-deny:"):
 		return "probe", "denied", strings.TrimPrefix(action, "probe-deny:")
+	case action == "probe-allow":
+		return "probe", "allowed", ""
 	case action == "allow":
 		return "decision", "allowed", ""
 	case action == "model-tools":

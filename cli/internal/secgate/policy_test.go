@@ -221,6 +221,107 @@ func TestPolicyActionCapSurvivesRestore(t *testing.T) {
 	}
 }
 
+func TestPolicyBudgetKeepsReadOnlySudoAvailable(t *testing.T) {
+	scope, err := ParseScope(strings.NewReader("local\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := DefaultPolicy()
+	p.Allowed = []string{"local"}
+	p.MaxCommands, p.MaxActions = 1, 1
+	g := &Gate{Mode: Auto, Scope: scope, Policy: p}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if d := g.Authorize(context.Background(), Command{Binary: "id"}); !d.Allowed {
+		t.Fatalf("first command denied: %+v", d)
+	}
+	for _, args := range [][]string{{"-l"}, {"-n", "-l"}, {"-ln"}, {"-nl"}} {
+		if d := g.Authorize(context.Background(), Command{Binary: "sudo", Args: args}); !d.Allowed {
+			t.Fatalf("sudo listing %v denied at command cap: %+v", args, d)
+		}
+	}
+	if got := g.PolicyUsage(); got != 1 || g.PolicyActionUsage() != 1 {
+		t.Fatalf("usage commands=%d actions=%d", got, g.PolicyActionUsage())
+	}
+	if d := g.Authorize(context.Background(), Command{Binary: "id"}); d.Allowed || !strings.Contains(d.Reason, "cap") {
+		t.Fatalf("substantive command bypassed cap: %+v", d)
+	}
+	if g.PolicyCapReason() == "" {
+		t.Fatal("cap denial was not retained for the planner")
+	}
+}
+
+func TestPolicyBudgetSeparatesCommandsAndActions(t *testing.T) {
+	p := DefaultPolicy()
+	p.MaxCommands, p.MaxActions = 1, 3
+	g := &Gate{Policy: p}
+	if err := g.ClaimPolicyAction("api-read"); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.PolicyUsage(); got != 0 || g.PolicyActionUsage() != 1 {
+		t.Fatalf("usage commands=%d actions=%d", got, g.PolicyActionUsage())
+	}
+	if err := g.ClaimPolicyAction("command"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.ClaimPolicyAction("api-read"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.ClaimPolicyAction("api-read"); err == nil {
+		t.Fatal("action cap did not apply")
+	}
+	if err := g.RestorePolicyUsageCounts(1, 3, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeniedInternalHelpProbeDoesNotSpendCommandBudget(t *testing.T) {
+	scope, err := ParseScope(strings.NewReader("local\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := DefaultPolicy()
+	p.Allowed = []string{"local"}
+	p.MaxCommands, p.MaxActions = 1, 1
+	g := &Gate{Mode: Auto, Scope: scope, Policy: p}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		g.Authorize(context.Background(), Command{Binary: "nmap", Args: []string{"--help"}, InternalProbe: true})
+	}
+	if g.PolicyUsage() != 0 || g.PolicyActionUsage() != 0 {
+		t.Fatalf("help probes spent budget: commands=%d actions=%d", g.PolicyUsage(), g.PolicyActionUsage())
+	}
+	if g.PolicyStopReason() != "" {
+		t.Fatalf("internal help checks stalled the planner: %s", g.PolicyStopReason())
+	}
+	if d := g.Authorize(context.Background(), Command{Binary: "id"}); !d.Allowed {
+		t.Fatalf("substantive check was blocked: %+v", d)
+	}
+}
+
+func TestPolicyStopsRepeatedIdenticalCommandDenial(t *testing.T) {
+	scope, err := ParseScope(strings.NewReader("local\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := DefaultPolicy()
+	p.Allowed = []string{"local"}
+	g := &Gate{Mode: Auto, Scope: scope, Policy: p}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	cmd := Command{Binary: "nmap", Args: []string{"-p-", "10.0.0.5"}}
+	if d := g.Authorize(context.Background(), cmd); d.Allowed || g.PolicyStopReason() != "" {
+		t.Fatalf("first denial should permit adaptation: %+v stop=%q", d, g.PolicyStopReason())
+	}
+	if d := g.Authorize(context.Background(), cmd); d.Allowed || g.PolicyStopReason() != "repeated identical command denial" {
+		t.Fatalf("repeat denial did not stop planning: %+v stop=%q", d, g.PolicyStopReason())
+	}
+}
+
 func TestPolicyByteCapSurvivesRestore(t *testing.T) {
 	scope, err := ParseScope(strings.NewReader("10.20.0.6\n"))
 	if err != nil {

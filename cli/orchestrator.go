@@ -12,6 +12,7 @@ import (
 
 	"blkchain/cli/internal/askuser"
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/engreport"
 	"blkchain/cli/internal/promptguard"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/secgate"
@@ -32,7 +33,8 @@ type engageDeps struct {
 	WebSession *webSessionRole
 	Asker      askuser.Asker
 	Gate       *secgate.Gate // command-execution gate for executors; nil disables run_command
-	Runs       *RunOutputs   // per-episode captured command output for evidence verification
+	Assessment *engreport.Assessment
+	Runs       *RunOutputs // per-episode captured command output for evidence verification
 	// ToolHelp is the shared tool-knowledge cache backing help-grounding; nil
 	// disables grounding (commands still pass through the gate unchanged).
 	ToolHelp toolHelpCache
@@ -83,6 +85,9 @@ var orchestratorSystemPrompt = "You are the orchestrator of a scoped offensive p
 	"Set basis_ids to the task or finding that supports each follow-on so the chain from observation to impact stays auditable. " +
 	"You do not run commands against targets. Complete tasks only when exact-quote evidence supports the outcome; distinguish " +
 	"confirmed access, failed hypotheses, blocked actions, and untested paths. " +
+	"After each dispatch, compare the returned evidence IDs and quotes with the task's done_when condition. If they meet it, " +
+	"call plan_complete with those evidence IDs and a concise basis before redispatching or adding work. Never add a child " +
+	"task just to finalize its parent. " +
 	"Before planning any task, read the current engagement state: never create a task that duplicates an open task or re-runs " +
 	"something in the 'already discovered (do not repeat)' list. Each dispatch result ends with the refreshed state - use it, " +
 	"advance to the next distinct step, and when coverage is sufficient for the goal, stop and return a final summary rather " +
@@ -437,6 +442,7 @@ func runOrchestrator(ctx context.Context, d engageDeps, goal string) (final stri
 		options = append(options, llms.WithModel(model))
 	}
 	caps := engageLoopCaps()
+	caps.StopReason = engageStopOnPolicy(d.Gate)
 	finalized := false
 	// Every recon task naming a web origin is swept here, so the observations do not depend on the model dispatching an executor.
 	sweeps := newSurfaceSweepQueue()
@@ -467,6 +473,11 @@ func runOrchestrator(ctx context.Context, d engageDeps, goal string) (final stri
 	}
 	if err == nil {
 		if strings.TrimSpace(final) == "" {
+			if d.Assessment != nil {
+				if _, err := synthesizeEngagement(ctx, d, goal, "empty final response", options...); err != nil {
+					return "", err
+				}
+			}
 			report, reportErr := engagementStoreReport(ctx, d.Store, goal)
 			if reportErr != nil {
 				return "", reportErr
@@ -477,6 +488,11 @@ func runOrchestrator(ctx context.Context, d engageDeps, goal string) (final stri
 			return "Engagement paused: empty final response.\n\n" + boundedEngageReport(report), nil
 		}
 		if len([]rune(final)) > 65536 {
+			if d.Assessment != nil {
+				if _, err := synthesizeEngagement(ctx, d, goal, "oversized final response", options...); err != nil {
+					return "", err
+				}
+			}
 			if d.OnStop != nil {
 				d.OnStop("oversized final response")
 			}
@@ -488,14 +504,31 @@ func runOrchestrator(ctx context.Context, d engageDeps, goal string) (final stri
 		}
 		for _, task := range snap.Tasks {
 			if task.Status == engagement.StatusTodo || task.Status == engagement.StatusActive || task.Status == engagement.StatusBlocked {
+				if d.Assessment != nil {
+					if _, err := synthesizeEngagement(ctx, d, goal, "open tasks remain", options...); err != nil {
+						return "", err
+					}
+				}
 				if d.OnStop != nil {
 					d.OnStop("open tasks remain")
 				}
 				return "Engagement paused: open tasks remain.\n\n" + final, nil
 			}
 		}
+		if d.Assessment != nil {
+			if _, err := synthesizeEngagement(ctx, d, goal, "model completed", options...); err != nil {
+				return "", err
+			}
+		}
 	}
 	return final, err
+}
+
+func engageStopOnPolicy(g *secgate.Gate) func(context.Context) (string, error) {
+	if g == nil {
+		return nil
+	}
+	return func(context.Context) (string, error) { return g.PolicyStopReason(), nil }
 }
 
 type askUserArgs struct {

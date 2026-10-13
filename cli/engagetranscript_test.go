@@ -43,6 +43,54 @@ func TestEngageTerminalRejectsControlSequences(t *testing.T) {
 	}
 }
 
+func TestRenderActionRecordShowsProbeAndArgv(t *testing.T) {
+	rec := actionRecord{ID: "a-000001", Kind: "probe", Command: "nmap\x00--help", Status: "denied", Reason: "probe-deny:classifier"}
+	out := renderActionRecord(rec, "important")
+	if !strings.Contains(out, "PROBE DENIED nmap --help") || strings.Contains(out, "nmap--help") || strings.ContainsRune(out, 0) {
+		t.Fatalf("probe rendering=%q", out)
+	}
+	rec.Kind, rec.Command, rec.Status = "command", "nmap\x00-p\x00T80,443,8000", "complete"
+	out = renderActionRecord(rec, "important")
+	if !strings.Contains(out, "COMMAND COMPLETE nmap -p T80,443,8000") {
+		t.Fatalf("command rendering=%q", out)
+	}
+}
+
+func TestEngageTranscriptRestoresExemptSudoListing(t *testing.T) {
+	dir := t.TempDir()
+	trace := newActionTranscript(dir, "off", "worker", 1, 65536, nil)
+	id, _, err := trace.begin("t1", "command", "id", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := trace.record(actionRecord{ID: id, Task: "t1", Kind: "command", Command: "id", Status: "complete"}); err != nil {
+		t.Fatal(err)
+	}
+	id, _, err = trace.begin("t1", "command", "sudo\x00-l", 1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := trace.record(actionRecord{ID: id, Task: "t1", Kind: "command", Command: "sudo\x00-l", Status: "complete"}); err != nil {
+		t.Fatal(err)
+	}
+	restored := newActionTranscript(dir, "off", "worker", 1, 65536, nil)
+	if err := restored.restore(); err != nil || restored.actions != 1 {
+		t.Fatalf("restore actions=%d err=%v", restored.actions, err)
+	}
+}
+
+func TestEngageTranscriptRestoresAttemptedAuditAction(t *testing.T) {
+	dir := t.TempDir()
+	trace := newActionTranscript(dir, "off", "worker", 1, 65536, nil)
+	if err := trace.record(actionRecord{Kind: "action", Command: "nmap\x00-p\x0080", Status: "attempted"}); err != nil {
+		t.Fatal(err)
+	}
+	restored := newActionTranscript(dir, "off", "worker", 1, 65536, nil)
+	if err := restored.restore(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEngageTranscriptKeepsExactEvidenceAndSafeDisplay(t *testing.T) {
 	for _, mode := range []string{"off", "important", "full"} {
 		t.Run(mode, func(t *testing.T) {

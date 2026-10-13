@@ -3,6 +3,7 @@ package main
 import (
 	"blkchain/cli/internal/askuser"
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/engreport"
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/secgate"
 	"blkchain/cli/internal/skillcat"
@@ -120,6 +121,7 @@ type engageRunInput struct {
 
 type engageRunMetadata struct {
 	CommandAttempts int    `json:"command_attempts"`
+	ActionAttempts  *int   `json:"action_attempts,omitempty"`
 	ByteUsage       int64  `json:"byte_usage"`
 	Goal            string `json:"goal"`
 	Mode            string `json:"mode"`
@@ -350,7 +352,11 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 		if err = trace.restore(); err != nil {
 			return "", err
 		}
-		if metadata.CommandAttempts < trace.actions || metadata.ByteUsage < int64(trace.used) {
+		charged := metadata.CommandAttempts
+		if metadata.ActionAttempts != nil {
+			charged = *metadata.ActionAttempts
+		}
+		if charged < trace.actions || metadata.ByteUsage < int64(trace.used) {
 			return "", errors.New("engage: checkpoint usage is less than recorded actions")
 		}
 	} else {
@@ -378,17 +384,26 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 		cancel()
 	}
 	gate := buildEngageGate(ws, roe.Scope, mode, input.Confirm, secgate.NewSessionApprovals(), scratch, gatePolicy{RoE: roe}, func(action, detail string) {
-		redacted := redactEngageText(detail)
+		redacted := redactEngageAuditDetail(detail)
 		if err := ws.AuditLine("secgate", action, redacted); err != nil {
 			recordWriteFailure("audit", err)
 		}
 		telemetry.gate(action, redacted)
-		status := "allowed"
-		if strings.HasPrefix(action, "deny") {
-			status = "denied"
+		kind, status := "event", "recorded"
+		switch {
+		case strings.HasPrefix(action, "probe-deny:"):
+			kind, status = "probe", "denied"
+		case action == "probe-allow":
+			kind, status = "probe", "allowed"
+		case strings.HasPrefix(action, "deny:"):
+			kind, status = "policy", "denied"
+		case action == "allow":
+			kind, status = "policy", "allowed"
+		case action == "exec":
+			kind, status = "action", "attempted"
 		}
 		select {
-		case auditEvents <- actionRecord{Kind: "policy", Command: redacted, Status: status, Reason: action}:
+		case auditEvents <- actionRecord{Kind: kind, Command: redacted, Status: status, Reason: action}:
 		default:
 			recordWriteFailure("audit queue", errors.New("action transcript queue is full"))
 		}
@@ -427,7 +442,11 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 	if err = gate.Start(); err != nil {
 		return "", err
 	}
-	if err = gate.RestorePolicyUsage(metadata.CommandAttempts, deadline, metadata.ByteUsage); err != nil {
+	actionAttempts := metadata.CommandAttempts
+	if metadata.ActionAttempts != nil {
+		actionAttempts = *metadata.ActionAttempts
+	}
+	if err = gate.RestorePolicyUsageCounts(metadata.CommandAttempts, actionAttempts, deadline, metadata.ByteUsage); err != nil {
 		return "", err
 	}
 	if cdpRole != nil {
@@ -468,6 +487,8 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 		checkpointMu.Lock()
 		defer checkpointMu.Unlock()
 		metadata.CommandAttempts = gate.PolicyUsage()
+		actionAttempts := gate.PolicyActionUsage()
+		metadata.ActionAttempts = &actionAttempts
 		metadata.ByteUsage = gate.PolicyByteUsage()
 		if err := writeEngageMetadata(ws.Dir, metadata); err != nil {
 			recordWriteFailure("checkpoint", err)
@@ -524,6 +545,7 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 		input.Asker = askuser.AutoAsker{}
 	}
 	deps := buildEngageDeps(input.Model, input.RC, input.Cfg, input.Prefs, ws.Store, gate, scratch, input.Catalog, input.Asker, input.Confirm, input.Progress)
+	deps.Assessment = &engreport.Assessment{}
 	deps.ArmReq = input.ArmReq
 	deps.WebSession = cdpRole
 	if _, ok := cloudIdentities[secgate.SurfaceCloudGCP]; ok {
@@ -601,9 +623,14 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 	checkpointMu.Lock()
 	metadata.Status = status
 	metadata.CommandAttempts = gate.PolicyUsage()
+	actionAttempts = gate.PolicyActionUsage()
+	metadata.ActionAttempts = &actionAttempts
 	metadata.ByteUsage = gate.PolicyByteUsage()
 	if runErr == nil {
 		rw.SetFinal(final)
+		if deps.Assessment.Summary != "" {
+			rw.SetAssessment(*deps.Assessment)
+		}
 	}
 	reportErr := rw.Flush(status)
 	if reportErr != nil {

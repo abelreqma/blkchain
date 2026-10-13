@@ -35,24 +35,30 @@ func releaseEngageWorker(ctx context.Context, dir string) {
 	}
 }
 
-func (t *actionTranscript) begin(task, kind, command string, count int) (string, int, error) {
+func (t *actionTranscript) begin(task, kind, command string, count int, exempt ...bool) (string, int, error) {
+	budgetExempt := len(exempt) > 0 && exempt[0]
 	t.orderMu.Lock()
 	defer t.orderMu.Unlock()
 	t.mu.Lock()
-	if t.actions+count > t.maxActions || t.used >= t.maxBytes {
+	if !budgetExempt && t.actions+count > t.maxActions || t.used >= t.maxBytes {
 		t.mu.Unlock()
 		return "", 0, errors.New("engagement action or capture budget reached")
 	}
-	t.actions += count
+	if !budgetExempt {
+		t.actions += count
+	}
 	t.seq++
 	id := fmt.Sprintf("a-%06d", t.seq)
 	remaining := t.maxBytes - t.used
 	t.mu.Unlock()
-	err := t.recordOrdered(actionRecord{ID: id, Task: task, Kind: kind, Command: command, Status: "running", ExitCode: -1, Stages: count})
+	err := t.recordOrdered(actionRecord{ID: id, Task: task, Kind: kind, Command: command, Status: "running", ExitCode: -1, Stages: count, BudgetExempt: budgetExempt})
 	return id, remaining, err
 }
 
 func recordEngageDenial(ctx context.Context, c secgate.Command, reason string) {
+	if c.InternalProbe {
+		return
+	}
 	if r := runtimeFor(ctx); r != nil {
 		if err := r.trace.record(actionRecord{Task: c.TaskID, Kind: "command", Command: secgate.Signature(c), Status: "denied", ExitCode: -1, Reason: reason}); err != nil {
 			r.cancel()
@@ -69,6 +75,7 @@ type actionOrigin struct {
 	SkipVulnIngest bool
 	UseRawWorker   bool
 	RequireHTTP200 bool
+	BudgetExempt   bool
 }
 
 func runAuthorized(ctx context.Context, g *secgate.Gate, bin string, args []string, dir string, limit int, timeout time.Duration, origin actionOrigin) runResult {
@@ -162,7 +169,11 @@ func runIsolatedAction(ctx context.Context, g *secgate.Gate, stages []pipelineSt
 	for _, s := range stages {
 		commands = append(commands, secgate.Signature(secgate.Command{Binary: s.Binary, Args: s.Args}))
 	}
-	id, remaining, err := r.trace.begin(origin.TaskID, "command", strings.Join(commands, " | "), len(stages))
+	budgetExempt := origin.BudgetExempt
+	if len(stages) == 1 && secgate.BudgetExempt(secgate.Command{Binary: stages[0].Binary, Args: stages[0].Args}) {
+		budgetExempt = true
+	}
+	id, remaining, err := r.trace.begin(origin.TaskID, "command", strings.Join(commands, " | "), len(stages), budgetExempt)
 	if err != nil {
 		r.cancel()
 		return runResult{Err: err}

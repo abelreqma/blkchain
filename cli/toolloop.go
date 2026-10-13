@@ -27,6 +27,7 @@ type LoopCaps struct {
 	MaxCalls         int
 	NoProgressRounds int
 	Progress         func(context.Context) (string, error)
+	StopReason       func(context.Context) (string, error)
 	Finalize         func(context.Context, string) (string, error)
 	Observe          func(action, detail string) error
 	// SummarizeAtChars, when > 0 and Summarizer is set, enables chain
@@ -161,6 +162,15 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 					Content:    result,
 				}},
 			})
+			if caps.StopReason != nil {
+				reason, err := caps.StopReason(ctx)
+				if err != nil {
+					return "", rounds, err
+				}
+				if reason != "" {
+					return stop(reason)
+				}
+			}
 		}
 		if total >= caps.MaxCalls {
 			return stop(fmt.Sprintf("tool call cap reached (%d calls)", total))

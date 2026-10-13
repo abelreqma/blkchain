@@ -116,6 +116,29 @@ func TestToolLoopRunsTool(t *testing.T) {
 	}
 }
 
+func TestToolLoopStopsAfterPolicyCapDenial(t *testing.T) {
+	denied := false
+	tool := &fakeTool{name: "execute", fn: func(string) (string, error) {
+		denied = true
+		return "engagement command cap reached", nil
+	}}
+	model := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "execute", "{}")}}
+	final, rounds, err := runToolLoop(context.Background(), model, newLoopReg(t, tool), userMsgs(), LoopCaps{
+		MaxRounds: 32,
+		MaxCalls:  128,
+		StopReason: func(context.Context) (string, error) {
+			if denied {
+				return "engagement command cap reached", nil
+			}
+			return "", nil
+		},
+		Finalize: func(_ context.Context, reason string) (string, error) { return "paused: " + reason, nil },
+	})
+	if err != nil || final != "paused: engagement command cap reached" || rounds != 1 || model.calls != 1 || len(tool.ran) != 1 {
+		t.Fatalf("final=%q rounds=%d calls=%d runs=%d err=%v", final, rounds, model.calls, len(tool.ran), err)
+	}
+}
+
 func TestToolLoopUnknownTool(t *testing.T) {
 	echo := &fakeTool{name: "echo", fn: func(string) (string, error) { return "", nil }}
 	m := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "nope", "{}"), textResp("final")}}

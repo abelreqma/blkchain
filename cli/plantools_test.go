@@ -457,6 +457,16 @@ func TestPlanAddRejectsOpenDuplicate(t *testing.T) {
 	}
 }
 
+func TestPlanAddRejectsRestatedDoneCondition(t *testing.T) {
+	st := openStore(t)
+	tool := newPlanAddTool(st)
+	callPlanAdd(t, tool, `{"id":"t1","kind":"recon","target":"10.0.0.5","surface":"network","objective":"Find open ports and server header","done_when":"Ports and HTTP Server header recorded"}`)
+	out := callPlanAdd(t, tool, `{"id":"t1_complete_trigger","kind":"recon","target":"10.0.0.5","surface":"network","objective":"Finalize the reconnaissance task","done_when":"Ports and HTTP Server header recorded","basis_ids":["t1"]}`)
+	if !strings.Contains(out, "duplicate of open task t1") {
+		t.Fatalf("restated task was added: %q", out)
+	}
+}
+
 func TestPlanAddAllowsDistinctObjective(t *testing.T) {
 	st := openStore(t)
 	tool := newPlanAddTool(st)

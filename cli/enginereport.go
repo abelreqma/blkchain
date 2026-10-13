@@ -26,17 +26,19 @@ const reportDebounce = 250 * time.Millisecond
 // on resume. Live updates are driven by the store's post-commit hook, debounced
 // and rendered on a background goroutine so the commit path stays cheap.
 type reportWriter struct {
-	st     *engagement.Store
-	wsDir  string
-	goal   string
-	scope  string
-	mode   string
-	final  string
-	dirty  chan struct{}
-	remove func()
+	st         *engagement.Store
+	wsDir      string
+	goal       string
+	scope      string
+	mode       string
+	final      string
+	assessment *engreport.Assessment
+	dirty      chan struct{}
+	remove     func()
 }
 
 func (w *reportWriter) SetFinal(final string) {
+	w.assessment = nil
 	const maxFinalRunes = 65536
 	if len([]rune(final)) > maxFinalRunes {
 		w.final = capRunes(final, maxFinalRunes) + "\n[final assessment truncated]"
@@ -44,6 +46,8 @@ func (w *reportWriter) SetFinal(final string) {
 	}
 	w.final = final
 }
+
+func (w *reportWriter) SetAssessment(a engreport.Assessment) { w.assessment = &a }
 
 func (w *reportWriter) RestoreFinal() error {
 	const maxHeaderBytes = 1 << 20
@@ -77,8 +81,28 @@ func (w *reportWriter) RestoreFinal() error {
 		return err
 	}
 	name, ok := key.(string)
-	if !ok || (name != "final" && name != "web" && name != "goal") {
+	if !ok || (name != "assessment" && name != "final" && name != "findings" && name != "findings_partial" && name != "web" && name != "goal") {
 		return fmt.Errorf("report: saved JSON has an unexpected header")
+	}
+	if name == "assessment" {
+		var assessment engreport.Assessment
+		if err := decoder.Decode(&assessment); err != nil {
+			return err
+		}
+		w.SetAssessment(assessment)
+		key, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if key == "final" {
+			if err := decoder.Decode(&w.final); err != nil {
+				return err
+			}
+			if len([]rune(w.final)) > 65536 {
+				return fmt.Errorf("report: saved final assessment is too large")
+			}
+		}
+		return nil
 	}
 	if name != "final" {
 		return nil
@@ -145,6 +169,7 @@ func (w *reportWriter) buildModel(status string) (engreport.Model, error) {
 		return engreport.Model{}, err
 	}
 	return engreport.Model{
+		Assessment:      w.assessment,
 		Findings:        findings,
 		FindingsPartial: findingsPartial,
 		Web:             &web,
@@ -189,7 +214,7 @@ func readAuditDenials(path string) ([]engreport.Denial, int, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
 			return nil, 0, fmt.Errorf("report: invalid audit record: %w", err)
 		}
-		if record.Actor != "secgate" || !strings.HasPrefix(record.Action, "deny:") && !strings.HasPrefix(record.Action, "probe-deny:") {
+		if record.Actor != "secgate" || !strings.HasPrefix(record.Action, "deny:") {
 			continue
 		}
 		if len(denials) < 100 {
