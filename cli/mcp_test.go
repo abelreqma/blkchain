@@ -188,6 +188,7 @@ func TestMCPRouteResultTruncatesBody(t *testing.T) {
 // in-memory transport: all three tools are listed and route_skill returns the
 // routed skill. The kb tools are listed but never called, so no service runs.
 func TestMCPServerRoundTrip(t *testing.T) {
+	isolateUserDirs(t)
 	dir := t.TempDir()
 	writeTestSkill(t, dir, "aaa-web", "---\nname: aaa-web\ndescription: web http attacks\n---\nWEBBODY\n")
 	cat, err := skillcat.Load(dir)

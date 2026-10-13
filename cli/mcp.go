@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
@@ -51,6 +54,148 @@ type mcpChatIn struct {
 	SessionID string `json:"session_id,omitempty" jsonschema:"continue this session; omit to start a new one"`
 	Agent     string `json:"agent,omitempty" jsonschema:"native answer specialist name; omit for automatic selection"`
 	ToolHost  string `json:"tool_host,omitempty" jsonschema:"file and terminal host: sandbox (default) or local. local is permitted because this server speaks only over stdio to a local client that already holds the operator's privileges"`
+}
+
+// Session resources: sessionResourceMaxBytes bounds one payload, since a
+// transcript can be up to maxSessionBytes on disk, and sessionResourceListCap
+// bounds how many existing sessions resources/list enumerates.
+const (
+	sessionResourceScheme   = "session://"
+	sessionResourceMaxBytes = 256 << 10
+	sessionResourceListCap  = 50
+)
+
+// errInvalidSessionResource marks a session URI or id that is malformed, as
+// distinct from a well-formed id that names no session.
+var errInvalidSessionResource = errors.New("invalid session resource")
+
+func sessionResourceURI(id string) string { return sessionResourceScheme + id }
+
+// sessionIDFromURI extracts the session id from a session:// URI. The URI comes
+// from the client, so the id is validated before any caller can build a file
+// path from it.
+func sessionIDFromURI(uri string) (string, error) {
+	id, ok := strings.CutPrefix(uri, sessionResourceScheme)
+	if !ok {
+		return "", fmt.Errorf("%w: not a session URI: %s", errInvalidSessionResource, sanitizeTerminal(uri))
+	}
+	if !validSessionID(id) {
+		return "", fmt.Errorf("%w: bad session id", errInvalidSessionResource)
+	}
+	return id, nil
+}
+
+// sessionTurn is one turn in a session resource payload.
+type sessionTurn struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+	TS      int64  `json:"ts,omitempty"`
+}
+
+// cutSessionTurn shortens a turn's content, on a rune boundary, until the
+// encoded turn is at most limit bytes.
+func cutSessionTurn(t sessionTurn, limit int) sessionTurn {
+	full := t.Content
+	keep := min(len(full), limit)
+	for {
+		for keep > 0 && keep < len(full) && !utf8.RuneStart(full[keep]) {
+			keep--
+		}
+		t.Content = full[:keep]
+		enc, _ := json.Marshal(t)
+		over := len(enc) - limit
+		if over <= 0 || keep == 0 {
+			return t
+		}
+		keep = max(keep-over, 0)
+	}
+}
+
+// mcpSessionResource renders one session as JSON: its listing fields plus its
+// turns, keeping the newest turns when the payload would exceed the cap.
+func mcpSessionResource(id string) ([]byte, error) {
+	if !validSessionID(id) {
+		return nil, fmt.Errorf("%w: bad session id", errInvalidSessionResource)
+	}
+	if !sessionExists(id) {
+		return nil, sessionNotFound(id)
+	}
+	recs, err := loadMessages(id)
+	if err != nil {
+		return nil, err
+	}
+	out := struct {
+		ID       string        `json:"id"`
+		Title    string        `json:"title,omitempty"`
+		MsgCount int           `json:"msg_count"`
+		Model    string        `json:"model,omitempty"`
+		Turns    []sessionTurn `json:"turns"`
+		Trimmed  bool          `json:"trimmed,omitempty"`
+	}{ID: id, MsgCount: len(recs), Turns: []sessionTurn{}, Trimmed: true}
+	if metas, lerr := listSessions(); lerr == nil {
+		for _, m := range metas {
+			if m.ID == id {
+				out.Title, out.Model = m.Title, m.Model
+				break
+			}
+		}
+	}
+	// The window is chosen in one backward pass with each turn encoded once, so
+	// a long transcript costs one walk rather than one marshal per dropped turn.
+	// Sizes are of the encoded turn because JSON escaping can expand content.
+	// The scaffolding is measured with Trimmed set, its largest form.
+	scaffold, err := json.Marshal(out)
+	if err != nil {
+		return nil, err
+	}
+	budget := sessionResourceMaxBytes - len(scaffold)
+	var kept []sessionTurn
+	cut := false
+	for i := len(recs) - 1; i >= 0; i-- {
+		t := sessionTurn{Role: recs[i].Role, Content: recs[i].Content, TS: recs[i].TS}
+		enc, err := json.Marshal(t)
+		if err != nil {
+			return nil, err
+		}
+		cost := len(enc) + 1 // the separating comma
+		if cost > budget {
+			if len(kept) == 0 {
+				kept = append(kept, cutSessionTurn(t, budget-1))
+				cut = true
+			}
+			break
+		}
+		budget -= cost
+		kept = append(kept, t)
+	}
+	slices.Reverse(kept)
+	if kept != nil {
+		out.Turns = kept
+	}
+	out.Trimmed = cut || len(kept) < len(recs)
+	return json.Marshal(out)
+}
+
+// sessionResourceHandler serves session://{id}. A malformed URI is rejected
+// before any lookup; a well-formed id with no session is reported as a missing
+// resource.
+func sessionResourceHandler(_ context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+	id, err := sessionIDFromURI(req.Params.URI)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := mcpSessionResource(id)
+	if errors.Is(err, errSessionNotFound) {
+		return nil, mcp.ResourceNotFoundError(req.Params.URI)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{
+		URI:      req.Params.URI,
+		MIMEType: "application/json",
+		Text:     string(payload),
+	}}}, nil
 }
 
 // mcpChatOut is chat's structured result. Error is set when the turn produced
@@ -118,7 +263,7 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "chat",
-		Description: "One turn of the blkChain agent: adaptive routing, the local knowledge base, files, terminal, browser and web research, with the operator's connected MCP servers. Omit session_id to start a conversation, pass the returned session_id back to continue it.",
+		Description: "One turn of the blkChain agent: adaptive routing, the local knowledge base, files, terminal, browser and web research, with the operator's connected MCP servers. Omit session_id to start a conversation, pass the returned session_id back to continue it. Sessions are readable as session://{id} resources; to resume one, read the resource and pass its id back to this tool.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpChatIn) (*mcp.CallToolResult, any, error) {
 		res, err := mcpChatResult(ctx, followPrefs(rc, loadPrefs()), cfg, in)
 		if err != nil && strings.TrimSpace(res.Answer) == "" {
@@ -137,6 +282,27 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 	}, func(_ context.Context, _ *mcp.CallToolRequest, in mcpRouteIn) (*mcp.CallToolResult, any, error) {
 		return nil, mcpRouteResult(cat, in.Domain), nil
 	})
+
+	s.AddResourceTemplate(&mcp.ResourceTemplate{
+		URITemplate: sessionResourceScheme + "{id}",
+		Name:        "blkChain session",
+		Description: "A conversation transcript. Read one to resume it: pass its id back to the chat tool.",
+		MIMEType:    "application/json",
+	}, sessionResourceHandler)
+	// A template is not listed by resources/list, so the sessions that exist
+	// when the server starts are also registered as concrete resources.
+	if metas, err := listSessions(); err == nil {
+		for i, m := range metas {
+			if i >= sessionResourceListCap {
+				break
+			}
+			s.AddResource(&mcp.Resource{
+				URI:      sessionResourceURI(m.ID),
+				Name:     firstNonEmpty(m.Title, m.ID),
+				MIMEType: "application/json",
+			}, sessionResourceHandler)
+		}
+	}
 
 	registerEngageTool(s, defaultEngageService(rc, cfg, cat))
 	registerKGTool(s)
