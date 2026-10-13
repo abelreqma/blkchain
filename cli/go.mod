@@ -14,7 +14,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/muesli/termenv v0.16.0
 	github.com/mxschmitt/playwright-go v0.6201.1
-	github.com/qdrant/go-client v1.19.3
+	github.com/qdrant/go-client v1.19.4
 	github.com/rivo/uniseg v0.4.7
 	github.com/smacker/go-tree-sitter v0.0.0-20230720070738-0d0a9f78d8f8
 	github.com/tmc/langchaingo v0.1.13
