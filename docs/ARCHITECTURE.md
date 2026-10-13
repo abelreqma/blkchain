@@ -240,8 +240,9 @@ not the model's claimed prerequisite. It admits TCP only on `open` and UDP on `o
 `open|filtered`; a later closed result removes the permission. An unsupported endpoint spelling
 fails closed. The engagement store ties scanner observations to exact command output and retains
 them across resume. Native chat holds observations for one turn. A web action with no observation
-performs a scoped TCP connect from the broker's vantage before sending application data. This
-service check adds to the RoE and network scope controls; it does not expand either one.
+performs a scoped TCP connect before sending application data. When direct reachability fails,
+a loopback intercept proxy may establish the port through a bounded CONNECT to the validated IP.
+This service check adds to the RoE and network scope controls; it does not expand either one.
 
 The declared foothold is the one deliberate exception to the network half, and it is bounded. A
 command carried to an operator-declared foothold runs on a host whose egress is not ours to filter,
