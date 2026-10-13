@@ -23,25 +23,43 @@ The research index combines dense embeddings and BM25 sparse vectors in Qdrant. 
 
 The native answer loop grades source sufficiency, can rewrite the query, and synthesizes an answer from bounded source passages. It supports conversation context, specialist prompts, streaming, per-call usage metrics, and an explicit no-results response. Exact-CVE research can add NVD details and public research when web permission is enabled.
 
-Bare `blk` starts the REPL or TUI in native auto mode. It selects a research specialist from the question, then retrieved metadata when the question is ambiguous. Interactive public research turns search live sources before answering when web is enabled. One-shot `blk ask QUESTION` still uses Hermes unless `--agent` selects native routing:
+Bare `blk` starts the REPL or TUI in native auto mode. `blk ask QUESTION` also uses native auto by default. Native auto selects a research specialist from the question, then retrieved metadata when the question is ambiguous. Interactive public research turns search live sources before answering when web is enabled:
 
 | Entry point | Behavior |
 | --- | --- |
-| `blk ask QUESTION` | Runs a Hermes turn using the external Hermes configuration. |
-| `blk ask --agent auto QUESTION` | Uses native answer routing and selects a research specialist dynamically. |
+| `blk ask QUESTION` | Uses native answer routing and selects a research specialist dynamically. |
+| `blk ask --hermes QUESTION` | Runs a Hermes turn using the external Hermes configuration. |
 | `blk ask --agent web QUESTION` | Uses the native web specialist prompt. The specialist name does not itself enable internet access. |
-| `blk ask --agent auto --rag QUESTION` | Forces the native knowledge-base answer path. |
+| `blk ask --rag QUESTION` | Forces the native knowledge-base answer path. |
 | `blk search QUERY` | Synthesizes a native answer grounded in the search results. |
 | `blk search --json QUERY` | Returns ranked chunks without answer synthesis. |
-| `blk ask --agent auto --json QUESTION` | Returns structured native answer output, citations, results, and available call metrics. |
+| `blk ask --json QUESTION` | Returns structured native answer output, citations, results, and available call metrics. |
 
-`--json` and `--sources` on `ask` require an explicit native `--agent` selection. In the interactive session, `/agent NAME` selects a native specialist, `/agent auto` restores dynamic selection, and `/mode` switches between native answers and Hermes. Research specialists change answer guidance. Engagement executors are selected separately from task kind and surface.
+`--json` and `--sources` work with the default native `ask` path. In the interactive session, `/agent NAME` selects a native specialist, `/agent auto` restores dynamic selection, and `/mode` switches between native answers and Hermes. Research specialists change answer guidance. Engagement executors are selected separately from task kind and surface.
 
-Native chat shares a bounded tool registry across `blk ask --agent`, the REPL, and the TUI. It can search the local knowledge base, load a domain playbook, and read regular, non-hidden text files inside the current working directory. When the user names an IP, host, network, or HTTP URL in the current turn, or refers to a target from the immediately preceding user turn, native chat can run isolated shell-free security commands and target-bound API or browser actions. It can choose these tools when the user asks for an action or clearly implies one. Commands use the existing audited binary catalog and an isolated runner; API and browser requests recheck their destination and redirects. Browser actions require the provisioned Playwright driver. The project `denied_binaries` list still applies. Native chat uses a temporary target scope from the user's own words and does not require `ROE.md`. `blk engage` continues to require its sealed RoE and approvals.
+Native chat shares a bounded tool registry across `blk ask`, the REPL, and the TUI. It offers knowledge-base search, playbook routing, file operations, terminal and process control, public web search and extraction, browser control, screenshot analysis, and allowlisted MCP client tools.
 
-For an explicit file or target action request, native chat retries once if the model answers without calling the relevant tool. If it still makes no such call, the turn returns an error instead of reporting an unperformed action as complete.
+File and terminal tools use an empty, persistent Docker sandbox for the current project by default. Use `--tool-host local` for an explicit one-shot local workspace or `/tool-host local` for the interactive session. `file_import` and `file_export` copy only paths named in the current request and never overwrite an existing destination. Text reads are paginated and convert UTF-16, Jupyter notebooks, DOCX, and XLSX to text. Document formats are read-only through the file tools; transfers can carry binary files. Shell processes can continue across chat turns. The sandbox has no network access, so public research and browsing use separate bounded web tools.
 
-A fresh REPL/TUI profile enables public web research on first launch. Native one-shot CLI and MCP calls do not enable it automatically. An existing saved `web off` remains off until `blk web on` enables it. `blk web off` disables public research searches, not target-bound chat API or browser actions. Providers include DuckDuckGo and Tavily; Tavily reads `TAVILY_API_KEY` or `TAVILY_SETUP_TOKEN`. Use `blk web provider duckduckgo`, `blk web provider tavily`, or `blk web provider auto` to choose a provider. Permission and provider settings persist locally. Interactive public research turns fail clearly when a required live search is unavailable rather than present local or model knowledge as current. Web-first search sends the current question, never attachments or conversation history. Questions with detected target details and target-specific advisor turns stay local; explicit `/web search` sends the query the operator enters.
+`browser_control` keeps an isolated browser across interactive turns. It can navigate, inspect, click, type, scroll, press keys, go back, read console messages, list images, and save screenshots. It requires the provisioned Playwright driver. `browser_vision` requires `BLKCHAIN_VISION_MODEL` to name a vision-capable model on the local LLM endpoint; without one, it returns a clear error. `--browser-cdp` or `/browser-cdp` explicitly copies signed-in state from a loopback Chrome or Brave CDP endpoint into the isolated browser. That path also requires a pinned host Node executable through `BLKCHAIN_BROWSER_NODE_PATH` and `BLKCHAIN_BROWSER_NODE_SHA256`.
+
+Native `file_read` does not extract PDF text or preview SQLite databases. The signed-in browser path copies storage state into an isolated context; it does not control the source browser tabs. Raw CDP commands and JavaScript dialog control are not exposed.
+
+When the user names an IP, host, network, or HTTP URL in the current turn, or refers to a target from the immediately preceding user turn, native chat can run isolated security commands and target-bound API or browser actions. It can choose these tools when the user asks for an action or clearly implies one. Target commands use the audited binary catalog and isolated runner; API and browser requests recheck destinations and redirects. The project `denied_binaries` list still applies. Native chat uses a temporary target scope from the user's own words and does not require `ROE.md`. `blk engage` continues to require its sealed RoE and approvals.
+
+Native chat classifies the user's intent without matching fixed request phrases. A requested tool action gets one retry if the model answers without calling the relevant tool. If it still makes no such call, the turn returns an error instead of reporting an unperformed action as complete. A target action without a user-named target fails before execution.
+
+A fresh REPL/TUI profile enables public web research on first launch. Native one-shot CLI and MCP calls do not enable it automatically. An existing saved `web off` remains off until `blk web on` enables it. `blk web off` disables public research searches, not target-bound chat API or browser actions. Providers include DuckDuckGo and Tavily; Tavily reads `TAVILY_API_KEY` or `TAVILY_SETUP_TOKEN`. Use `blk web provider duckduckgo`, `blk web provider tavily`, or `blk web provider auto` to choose a provider. Permission and provider settings persist locally. Interactive public research turns fail clearly when a required live search is unavailable rather than present local or model knowledge as current. Web-first answer search sends the current question, never attachments or conversation history. The `web_search` tool can send a model-generated query after filtering recognized target identifiers and secret-shaped data. Target-specific advisor turns stay local; explicit `/web search` sends the query the operator enters.
+
+When a native chat turn explicitly calls `web_search` or `web_extract`, blkChain returns the bounded source results as the final answer. It does not substitute an unsupported model summary for those results.
+
+MCP client servers are configured in `~/.config/blkchain/mcp-clients.json`, or the path named by `BLKCHAIN_MCP_CLIENT_CONFIG`. Each server must list `allow_tools`. Stdio servers run in the chat sandbox unless `host` is set to `local` with an absolute command. HTTP servers require HTTPS or a loopback HTTP URL. `env` maps child environment names to existing environment variable names, and `token_env` names an environment variable for HTTP bearer authentication. For example:
+
+```json
+{"servers":[{"name":"notes","transport":"stdio","command":"/work/notes-server","allow_tools":["search_notes"]}]}
+```
+
+Import the executable into the sandbox before using this stdio example. MCP tool results are treated as untrusted data. The MCP client configuration is separate from the `blk mcp` server.
 
 Hermes has its own provider, tools, permissions, and conversation state. Native web settings and engagement Safe/Auto settings do not control Hermes's own tool execution.
 
@@ -171,6 +189,36 @@ Collection records supplied roles and visited states under configured asset, pag
 Browser collection requires a separately provisioned pinned Playwright driver and container. `PLAYWRIGHT_DRIVER_PATH` and `BLKCHAIN_PLAYWRIGHT_CONTAINER` identify them; headed assistance also requires `BLKCHAIN_PLAYWRIGHT_CDP` to name its loopback CDP endpoint. The adapter verifies package integrity and container
 isolation and does not install a browser on demand. `blk engage setup` builds the command runner, not the browser environment.
 
+### Signed-in Chrome roles
+
+Authenticated web collection can import one role from a Chrome CDP endpoint bound to host loopback. [Provision a separate signed-in Chrome profile](cli/webbrowser-provisioning.md#optional-signed-in-chrome-source), then sign in to the approved site in that window. Keep the isolated browser container from the setup guide running. The host CDP URL and the container's `BLKCHAIN_PLAYWRIGHT_CDP` URL are separate endpoints.
+
+The session file names the role and exact target origin. It contains no credential values:
+
+```json
+{"roles":[{"name":"reader","origin":"https://app.example.test"}]}
+```
+
+For direct collection, use the session file, role, and host CDP URL together:
+
+```sh
+blk engage web collect https://app.example.test/ --roe ROE.md --workspace ./assessment \
+  --browser --session ./roles.json --role reader --session-cdp http://127.0.0.1:9223
+```
+
+The same options apply to HTTP `blk engage web replay`. Archived collection and WebSocket replay do not import CDP state. Autonomous web tasks can use the role when the engagement starts with these options:
+
+```sh
+blk engage --roe ROE.md --workspace ./assessment --session ./roles.json \
+  --role reader --session-cdp http://127.0.0.1:9223 "Assess the authorized web application"
+blk engage resume --workspace ./assessment --session ./roles.json \
+  --role reader --session-cdp http://127.0.0.1:9223
+```
+
+In the plain REPL or TUI, use `/engage` with the same flags. Resume with `/engage --resume ./assessment --session ./roles.json --role reader --session-cdp http://127.0.0.1:9223`.
+
+The import requires the role origin to be in the RoE. Direct collection and autonomous `web_collect` require every target to match that exact origin; autonomous collection selects the isolated browser when the role is present. An autonomous web recon task at that origin collects through the browser and returns its evidence without running the anonymous command ladder for that task. The tool result includes a bounded, redacted preview of the browser DOM captured in that collection, with an artifact ID; exact bytes stay in the evidence store. Parent-domain cookies are narrowed to the selected host, and only local storage from the exact origin is copied. Session storage, IndexedDB, and WebAuthn credentials are not imported, so sites relying on them for authentication may remain anonymous. Browser and API requests to other in-scope origins send no imported credentials and their evidence is labeled anonymous. Supplemental assets fetched outside the browser do not use imported cookies and are also labeled anonymous. Target traffic still crosses the engagement gate and web broker. The source Chrome profile remains open; blkChain does not read its profile files or persist the imported storage state. Resume requires the same role and origin and imports fresh state from CDP.
+
 Inspect saved operations without contacting a target:
 ```sh
 blk engage web inspect --workspace ./assessment --view apis
@@ -218,6 +266,8 @@ controls, cancellation, and bounded queues.
 | Interactive command | Purpose |
 | --- | --- |
 | `/agent auto` or `/agent NAME` | Select native answer routing and a research specialist. |
+| `/tool-host sandbox` or `/tool-host local` | Choose where native file and terminal tools run. |
+| `/browser-cdp URL` or `/browser-cdp off` | Explicitly select or clear a loopback signed-in browser source. |
 | `/model` | Select the model and reasoning level for the current answer mode. |
 | `/models` | Inspect and administer native chat models, reranking, and web settings. |
 | `/attach PATH` or `/context` | Queue, preview, or remove bounded context for the next question. URLs are references and are not fetched. |
@@ -251,7 +301,7 @@ provides schema-validated JSON generation.
 | `blkchain/` | Python MLX embedding/reranking service, offline ingestion/indexing, and evaluation harnesses. |
 | Qdrant | Persistent dense and sparse index. |
 | OpenAI-compatible LLM endpoint | Separately managed native answer and engagement inference. |
-| Hermes | Separately configured backend for default one-shot `blk ask` and optional interactive turns. |
+| Hermes | Separately configured backend for explicit one-shot and interactive turns. |
 
 Go owns query-time retrieval, answering, engagement execution, and MCP. Python serves the MLX models
 and builds the index offline. Models and corpus content are supplied by the operator.
@@ -264,7 +314,7 @@ retrieval path, the engagement harness, or the embedding service.
 ## Complete setup guide
 
 This guide targets macOS on Apple Silicon. Run the core steps first to get local retrieval and
-native answers working. Add Hermes for default one-shot `blk ask` or optional interactive turns. Add the
+native answers working. Add Hermes for optional one-shot or interactive turns. Add the
 command runner for engagements and the browser container for runtime web collection.
 
 | Component | Required for |
@@ -273,7 +323,7 @@ command runner for engagements and the browser container for runtime web collect
 | Docker Desktop | Qdrant and the isolated execution containers. |
 | Embedder and reranker model files | Local retrieval. |
 | OpenAI-compatible chat server and chat model | Native answers and model-driven engagements. |
-| Hermes | Default `blk ask` and interactive agent mode. |
+| Hermes | Explicit `blk ask --hermes` and interactive agent mode. |
 | Pinned Playwright package and browser container | Runtime browser collection. |
 
 Choose a chat model that fits alongside the embedder, reranker, Docker, and the operating system.
@@ -577,7 +627,7 @@ Use a tool-calling model and a supporting server configuration for engagement or
 
 ### 8. Set up Hermes and connect the knowledge base
 
-Hermes provides the default backend for one-shot `blk ask` and an optional interactive mode. Install it using the
+Hermes provides an optional backend for one-shot `blk ask --hermes` and interactive agent mode. Install it using the
 [official quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/).
 This CLI installer is pinned to a source commit and verified before execution:
 
@@ -630,7 +680,7 @@ Verify the integration:
 ```sh
 hermes --version
 blk doctor
-blk ask "Use kb_search to explain contextual output encoding from my local notes"
+blk ask --hermes "Use kb_search to explain contextual output encoding from my local notes"
 ```
 
 `hermes --version` checks that the installed launcher runs; `doctor` checks that it is on `PATH`
@@ -870,7 +920,7 @@ CVE lookups. Hermes provider and tool permissions are configured separately.
 | The embedding service does not become ready | Check configured model paths and `blk logs embed_server`; confirm the weights finished downloading. |
 | Retrieval has no results | Check `blk sources --json`, corpus paths, collection name, and the completed indexing output. |
 | Chat returns 401 or an unknown-model error | Supply the server's actual API key and use an ID returned by its `/v1/models` endpoint. |
-| A default answer cannot start | For bare `blk`, check `blk health --json` and `blk web status`; for one-shot `blk ask`, configure Hermes or select `--agent auto`. |
+| A default answer cannot start | Check `blk health --json` and `blk web status` for the native model and retrieval services. |
 | The gateway is unauthorized | Export the same `API_SERVER_KEY` used by the gateway in the client terminal. |
 | The gateway responds at `/health` but the client uses the CLI | Check `API_SERVER_KEY` in the client terminal; blk requires authenticated `/health/detailed`. Confirm the launcher with `hermes --version`. |
 | An offline scanner reports a database gap | Run `blk engage setup`, check its output for update failures, and ensure the printed cache path is readable by Docker workers. |
