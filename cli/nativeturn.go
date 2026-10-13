@@ -185,7 +185,10 @@ func persistTurn(sess *session, model, question, answer string, tokens int) erro
 	return sess.commitTurn(question, answer)
 }
 
-// turnAction is one tool call the turn made.
+// turnAction is one tool call the turn made. Status is "running" while the call
+// is in flight, then one of ToolDone, ToolFailed or ToolSkipped. Only ToolDone
+// means the tool ran to completion; a replay or memo of completed calls must
+// key on that status alone.
 type turnAction struct {
 	Tool   string `json:"tool"`
 	Status string `json:"status"`

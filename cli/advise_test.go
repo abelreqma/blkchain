@@ -235,3 +235,27 @@ func TestAdviseLoopRunsToolsThenAnswers(t *testing.T) {
 		t.Errorf("second request missing the route_skill tool result: %s", last.String())
 	}
 }
+
+func TestAdviseLoopRecordsToolOutcomes(t *testing.T) {
+	old := execRunner
+	execRunner = func(context.Context, string, []string, string, int, time.Duration) runResult {
+		return runResult{Output: "fixture response"}
+	}
+	t.Cleanup(func() { execRunner = old })
+	fake := &fakeModel{queue: []*llms.ContentResponse{
+		callResp("c1", "run_command", `{"binary":"curl","args":["-I","http://192.0.2.5/"]}`),
+		callResp("c2", "no_such_tool", `{}`),
+		textResp("finished"),
+	}}
+	var actions []string
+	_, _, err := adviseLoop(context.Background(), fake, nil, kbTestCfg(), nil, "Check 192.0.2.5 now", AnswerOpts{
+		Action: func(tool, status string) { actions = append(actions, tool+"="+status) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"run_command=running", "run_command=done", "no_such_tool=running", "no_such_tool=failed"}
+	if !slices.Equal(actions, want) {
+		t.Fatalf("actions = %q, want %q", actions, want)
+	}
+}

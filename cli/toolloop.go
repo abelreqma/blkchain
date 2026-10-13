@@ -21,6 +21,20 @@ type toolLoopModel interface {
 	GenerateContent(ctx context.Context, msgs []llms.MessageContent, opts ...llms.CallOption) (*llms.ContentResponse, error)
 }
 
+// ToolOutcome is what became of one requested tool call.
+type ToolOutcome string
+
+const (
+	// ToolDone means the tool ran and returned without error. It is the only
+	// outcome that means the call ran to completion.
+	ToolDone ToolOutcome = "done"
+	// ToolFailed means the call was attempted and the tool, its lookup or its
+	// arguments produced an error.
+	ToolFailed ToolOutcome = "failed"
+	// ToolSkipped means the call cap was reached and the tool never ran.
+	ToolSkipped ToolOutcome = "skipped"
+)
+
 // LoopCaps bounds one tool loop. A value <= 0 selects the default.
 type LoopCaps struct {
 	MaxRounds        int
@@ -31,6 +45,10 @@ type LoopCaps struct {
 	ReviewFinal      func(context.Context, string) (string, error)
 	Finalize         func(context.Context, string) (string, error)
 	Observe          func(action, detail string) error
+	// ObserveResult, when set, is called once per requested tool call with the
+	// call's outcome, just before the "tool-result" Observe action. It does not
+	// replace Observe.
+	ObserveResult func(name string, outcome ToolOutcome)
 	// SummarizeAtChars, when > 0 and Summarizer is set, enables chain
 	// summarization: before each model call the running history is compacted
 	// once it grows past this many characters. Zero (the default) disables it,
@@ -157,10 +175,18 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 					return "", rounds, err
 				}
 			}
-			result := "tool call skipped: call cap reached"
+			result, outcome := "tool call skipped: call cap reached", ToolSkipped
 			if total < caps.MaxCalls {
-				result = execToolCall(ctx, reg, tc.FunctionCall != nil, name, args)
+				var ok bool
+				result, ok = execToolCall(ctx, reg, tc.FunctionCall != nil, name, args)
+				outcome = ToolFailed
+				if ok {
+					outcome = ToolDone
+				}
 				total++
+			}
+			if caps.ObserveResult != nil {
+				caps.ObserveResult(name, outcome)
 			}
 			if caps.Observe != nil {
 				if err := caps.Observe("tool-result", name); err != nil {
@@ -207,25 +233,26 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 	return stop(fmt.Sprintf("round cap reached (%d rounds) without a final answer", caps.MaxRounds))
 }
 
-// execToolCall runs one tool call and returns the text to feed back to the model.
-// A panicking tool is recovered into a tool error (matching runBatch's executor
-// recover) so one bad tool cannot crash the whole loop.
-func execToolCall(ctx context.Context, reg *tooldef.Registry, hasCall bool, name, args string) (result string) {
+// execToolCall runs one tool call and returns the text to feed back to the
+// model and whether the tool ran without error. A panicking tool is recovered
+// into a tool error (matching runBatch's executor recover) so one bad tool
+// cannot crash the whole loop.
+func execToolCall(ctx context.Context, reg *tooldef.Registry, hasCall bool, name, args string) (result string, ok bool) {
 	if !hasCall {
-		return "invalid tool call: missing function"
+		return "invalid tool call: missing function", false
 	}
-	tool, ok := reg.Get(name)
-	if !ok {
-		return fmt.Sprintf("tool not found: %s; available tools: %v", name, reg.Names())
+	tool, found := reg.Get(name)
+	if !found {
+		return fmt.Sprintf("tool not found: %s; available tools: %v", name, reg.Names()), false
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			result = fmt.Sprintf("tool error: panic: %v", r)
+			result, ok = fmt.Sprintf("tool error: panic: %v", r), false
 		}
 	}()
 	out, err := tool.Call(ctx, args)
 	if err != nil {
-		return "tool error: " + err.Error()
+		return "tool error: " + err.Error(), false
 	}
-	return out
+	return out, true
 }
