@@ -1,10 +1,18 @@
 package webacquire
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +21,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func fixtureBroker() *Broker {
@@ -286,16 +295,125 @@ func TestUpstreamProxyWithoutRootCAsStaysDirect(t *testing.T) {
 	}
 }
 
+// resigningProxy stands in for an intercepting proxy that re-signs leaves. It
+// answers CONNECT, completes the TLS handshake with a leaf its own CA issued for
+// the tunnelled host, and serves one plain response over the tunnel.
+type resigningProxy struct {
+	address  string
+	pool     *x509.CertPool
+	connects atomic.Int32
+}
+
+func newResigningProxy(t *testing.T, host string) *resigningProxy {
+	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "resigning proxy CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: host},
+		DNSNames:              []string{host},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, ca, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := tls.Certificate{Certificate: [][]byte{leafDER, caDER}, PrivateKey: leafKey}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	pool := x509.NewCertPool()
+	pool.AddCert(ca)
+	p := &resigningProxy{address: listener.Addr().String(), pool: pool}
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go p.serve(conn, leaf)
+		}
+	}()
+	return p
+}
+
+func (p *resigningProxy) serve(conn net.Conn, leaf tls.Certificate) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	request, err := http.ReadRequest(bufio.NewReaderSize(conn, 4096))
+	if err != nil || request.Method != http.MethodConnect {
+		return
+	}
+	p.connects.Add(1)
+	if _, err = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		return
+	}
+	tunnel := tls.Server(conn, &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{leaf}})
+	if err = tunnel.Handshake(); err != nil {
+		return
+	}
+	defer tunnel.Close()
+	if _, err = http.ReadRequest(bufio.NewReaderSize(tunnel, 4096)); err != nil {
+		return
+	}
+	_, _ = io.WriteString(tunnel, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 17\r\n\r\nthrough the proxy")
+}
+
 // TestUpstreamProxyVerifiesTheResignedLeaf pins that TLS verification stays on
-// under a proxy: a leaf signed outside the configured pool is refused.
+// under a proxy. The stand-in answers CONNECT and hands back a leaf its own CA
+// signed, so both halves reach a real handshake: the fetch succeeds when the
+// configured pool holds that CA and fails when it does not. Relaxing
+// verification in the upstream branch makes the second half succeed and fails
+// this test.
 func TestUpstreamProxyVerifiesTheResignedLeaf(t *testing.T) {
-	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("tls"))
-	}))
-	defer target.Close()
-	broker := fixtureBroker()
-	broker.Policy.Upstream = &Upstream{Address: strings.TrimPrefix(target.URL, "https://"), RootCAs: x509.NewCertPool()}
-	if _, err := broker.Fetch(context.Background(), Request{URL: "https://app.example.test/"}); err == nil {
-		t.Fatal("an unverifiable certificate was accepted under a proxy")
+	const host = "app.example.test"
+	proxy := newResigningProxy(t, host)
+	loopback := func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("127.0.0.1")}, nil
+	}
+	trusting := fixtureBroker()
+	trusting.Policy.Resolve = loopback
+	trusting.Policy.Upstream = &Upstream{Address: proxy.address, RootCAs: proxy.pool}
+	out, err := trusting.Fetch(context.Background(), Request{URL: "https://" + host + "/"})
+	if err != nil || string(out.Body) != "through the proxy" {
+		t.Fatalf("a leaf the configured CA signed was refused: %+v %v", out, err)
+	}
+	unknowing := fixtureBroker()
+	unknowing.Policy.Resolve = loopback
+	unknowing.Policy.Upstream = &Upstream{Address: proxy.address, RootCAs: x509.NewCertPool()}
+	if out, err := unknowing.Fetch(context.Background(), Request{URL: "https://" + host + "/"}); err == nil {
+		t.Fatalf("a leaf signed outside the configured pool was accepted: %+v", out)
+	}
+	if proxy.connects.Load() != 2 {
+		t.Fatalf("the proxy tunnelled %d requests, so a half never reached a handshake", proxy.connects.Load())
 	}
 }
