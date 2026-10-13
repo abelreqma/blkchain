@@ -234,14 +234,31 @@ private CIDR discovered after foothold access. A hostname entry does not authori
 resolves to. An empty or ambiguous scope fails closed.
 
 A named target does not prove a service is reachable. Service-specific commands and web actions
-require a code-observed host, transport, and port before dispatch. Bounded port discovery is the
-exception that establishes the observation. The dispatcher checks the command's actual endpoint,
-not the model's claimed prerequisite. It admits TCP only on `open` and UDP on `open` or
-`open|filtered`; a later closed result removes the permission. An unsupported endpoint spelling
-fails closed. The engagement store ties scanner observations to exact command output and retains
-them across resume. Native chat holds observations for one turn. A web action with no observation
-performs a scoped TCP connect before sending application data. When direct reachability fails,
-a loopback intercept proxy may establish the port through a bounded CONNECT to the validated IP.
+require a code-observed host, transport, port, and execution vantage from the past hour before
+dispatch. Bounded port discovery is the exception that establishes the observation. The dispatcher
+checks the command's connected endpoint, not the model's claimed prerequisite. Only a completed
+Nmap run supplies port states. Masscan output is a candidate until a connect scan validates it;
+ACK, FIN, NULL, Xmas, idle, fragmented, decoy, and source-port scans do not supply positive
+service evidence. TCP `open` permits a protocol check, not a service identity claim. UDP `open` or
+`open|filtered` permits a protocol-correct follow-up; `open|filtered` is not a positive response.
+A completed version scan can promote that same candidate to `open`, but cannot create first
+service evidence.
+A later closed result removes the permission. A command that cannot expose its connection route
+fails closed. `curl --http3-only` needs UDP evidence and `--http3` needs TCP and UDP evidence;
+the pinned runner curl currently lacks HTTP/3 support and cannot execute those probes.
+An explicit DNS server needs evidence for both UDP and its possible TCP retry unless `dig +ignore`
+keeps it on UDP. DoT and DoH use TCP/853 and TCP/443 by default; `dig +trace` is denied because
+later name servers cannot be verified before dispatch.
+The single-address `curl --resolve` form checks both the named host and connected IP against scope
+while retaining the URL host for Host and SNI. The engagement store ties observations to command
+output, execution vantage, and observation time across resume. Native chat holds observations for
+one turn. A web action with no observation performs a scoped TCP connect before application data.
+A loopback proxy CONNECT is an alternate observation; it does not authorize the worker or web
+broker path.
+Nmap SCTP and IP-protocol scans remain diagnostic and never create TCP or UDP port permission.
+The pinned runner has no `nping`, `ike-scan`, or HTTP/3-capable curl. Large port ranges must be
+partitioned into scans that finish within the command timeout; no partial result proves a full
+inventory.
 This service check adds to the RoE and network scope controls; it does not expand either one.
 Explicit local terminal actions and configured MCP server tools are separate execution paths and
 do not inherit this built-in target tool service check.
