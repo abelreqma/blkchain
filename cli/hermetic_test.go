@@ -46,6 +46,15 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv(webProxyEnv, webProxyDisabledSetting); err != nil {
 		panic("hermetic test state: " + err.Error())
 	}
+	// An armed registry registers the out-of-band tools when an interactsh
+	// server is configured, and then resolves the client binary. An operator
+	// with a server of their own would otherwise attach it to every test that
+	// builds one, and a client it cannot resolve fails those tests outright.
+	for _, name := range []string{oobServerEnv, oobClientEnv, oobTokenEnv} {
+		if err := os.Unsetenv(name); err != nil {
+			panic("hermetic test state: " + err.Error())
+		}
+	}
 	code := m.Run()
 	os.RemoveAll(dir) // os.Exit runs no deferred call, so clean up first.
 	os.Exit(code)
