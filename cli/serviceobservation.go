@@ -4,6 +4,7 @@ import (
 	"net"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"blkchain/cli/internal/secgate"
@@ -11,13 +12,78 @@ import (
 
 var scanPortLine = regexp.MustCompile(`^([0-9]{1,5})/(tcp|udp)\s+(open\|filtered|open|closed|filtered)\s+`)
 var masscanPortLine = regexp.MustCompile(`^Discovered open port ([0-9]{1,5})/(tcp|udp) on (\S+)$`)
+var nmapDoneLine = regexp.MustCompile(`^Nmap done: [1-9][0-9]* IP address(?:es)? \([1-9][0-9]* hosts? up\) scanned in .+ seconds$`)
+
+func nmapDiagnostic(args []string) bool {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-s") && strings.ContainsAny(arg[2:], "AFNIXWMOYZ") {
+			return true
+		}
+		for _, flag := range []string{"-f", "-D", "-S", "-g", "-e", "--source-port", "--mtu", "--scanflags", "--spoof-mac", "--badsum", "--ip-options"} {
+			if arg == flag || strings.HasPrefix(arg, flag+"=") || len(flag) == 2 && strings.HasPrefix(arg, flag) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func scanPortContains(spec, defaultTransport, transport string, port int) bool {
+	if spec == "" {
+		return true
+	}
+	matched := false
+	for _, part := range strings.Split(spec, ",") {
+		if strings.HasPrefix(part, "T:") {
+			defaultTransport, part = "tcp", strings.TrimPrefix(part, "T:")
+		} else if strings.HasPrefix(part, "U:") {
+			defaultTransport, part = "udp", strings.TrimPrefix(part, "U:")
+		}
+		lo, hi := 0, 0
+		if part == "-" {
+			lo, hi = 1, 65535
+		} else if strings.Count(part, "-") == 1 {
+			left, right, _ := strings.Cut(part, "-")
+			var err error
+			lo, err = strconv.Atoi(left)
+			if err != nil {
+				return false
+			}
+			hi, err = strconv.Atoi(right)
+			if err != nil {
+				return false
+			}
+		} else {
+			var err error
+			lo, err = strconv.Atoi(part)
+			if err != nil {
+				return false
+			}
+			hi = lo
+		}
+		if lo < 1 || hi > 65535 || hi < lo {
+			return false
+		}
+		matched = matched || defaultTransport == transport && lo <= port && port <= hi
+	}
+	return matched
+}
 
 func scanServiceObservations(c secgate.Command, output string) []serviceObservation {
 	name := strings.ToLower(filepath.Base(c.Binary))
 	if name != "nmap" && name != "masscan" {
 		return nil
 	}
-	negativeOnly := name == "nmap" && nmapServiceScan(c.Args)
+	if name == "nmap" {
+		if nmapDiagnostic(c.Args) {
+			return nil
+		}
+		trimmed := strings.TrimSpace(output)
+		last := trimmed[strings.LastIndex(trimmed, "\n")+1:]
+		if !nmapDoneLine.MatchString(last) {
+			return nil
+		}
+	}
 	hosts, nets, ok := secgate.ExtractTargetSet(c)
 	if !ok {
 		return nil
@@ -40,17 +106,9 @@ func scanServiceObservations(c secgate.Command, output string) []serviceObservat
 	if name == "nmap" {
 		defaultTransport = nmapDefaultTransport(c.Args)
 	}
-	requested := scanPortSpec(c.Args, defaultTransport)
+	spec := rawPortSpec(c.Args)
 	portAllowed := func(transport string, port int) bool {
-		if len(requested) == 0 {
-			return true
-		}
-		for _, r := range requested {
-			if r.port == port && r.transport == transport {
-				return true
-			}
-		}
-		return false
+		return scanPortContains(spec, defaultTransport, transport, port)
 	}
 	var out []serviceObservation
 	host := ""
@@ -71,9 +129,6 @@ func scanServiceObservations(c secgate.Command, output string) []serviceObservat
 				continue
 			}
 			if m := scanPortLine.FindStringSubmatch(line); m != nil {
-				if negativeOnly && m[3] != "closed" && m[3] != "filtered" {
-					continue
-				}
 				port := mustPort(m[1])
 				if !portAllowed(m[2], port) {
 					continue
@@ -90,7 +145,7 @@ func scanServiceObservations(c secgate.Command, output string) []serviceObservat
 			if portAllowed(m[2], port) {
 				ep, err := endpoint(m[3], m[2], port)
 				if err == nil {
-					out = append(out, serviceObservation{endpoint: ep, state: "open"})
+					out = append(out, serviceObservation{endpoint: ep, state: "candidate"})
 				}
 			}
 		}

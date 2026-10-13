@@ -37,6 +37,18 @@ func TestExecutorEgressRequiresExactScopedTarget(t *testing.T) {
 	}
 }
 
+func TestExecutorEgressUsesScopedCurlResolveAddress(t *testing.T) {
+	scope, err := secgate.ParseScope(strings.NewReader("dispatch.example.test\n192.0.2.10\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := resolveExecutorEgress(withExecutorScope(context.Background(), scope), "curl",
+		[]string{"--resolve", "dispatch.example.test:8080:192.0.2.10", "http://dispatch.example.test:8080/"})
+	if err != nil || len(plan.IPs) != 1 || plan.IPs[0] != "192.0.2.10" || plan.Hosts["dispatch.example.test"] != "192.0.2.10" {
+		t.Fatalf("pinned egress = %+v, err=%v", plan, err)
+	}
+}
+
 func TestExecutorEgressRejectsOperatorInterface(t *testing.T) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {

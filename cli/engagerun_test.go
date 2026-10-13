@@ -358,7 +358,7 @@ func TestEngageWebDecisionsReachTranscriptAndReport(t *testing.T) {
 	stubEngageRunner(t)
 	workspace, cwd := t.TempDir(), testEngageRoE(t)
 	run := func(ctx context.Context, d engageDeps, _ string) (string, error) {
-		seedOpenService(t, d.Store, "192.0.2.1", "tcp", 443)
+		seedOpenService(t, d.Store, "192.0.2.1", "tcp", 443, "web-broker")
 		if decision := d.Gate.AuthorizeAPIRequest(ctx, secgate.APIRequest{Method: "GET", URL: "https://192.0.2.1/read"}); !decision.Allowed {
 			return "", fmt.Errorf("permitted API read denied: %+v", decision)
 		}

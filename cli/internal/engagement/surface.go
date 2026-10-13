@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -40,17 +39,20 @@ func SurfaceKinds() []string {
 	}
 }
 
-func (s *Store) ServicePortState(ctx context.Context, host, transport string, port int) (string, error) {
+func (s *Store) ServicePortState(ctx context.Context, id string) (string, time.Time, error) {
 	if s == nil || s.db == nil {
-		return "", errors.New("engagement store unavailable")
+		return "", time.Time{}, errors.New("engagement store unavailable")
 	}
-	var state string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM surface_record WHERE kind='service-port' AND asset=? AND name=?`,
-		host, transport+"/"+strconv.Itoa(port)).Scan(&state)
+	var state, observedAt string
+	err := s.db.QueryRowContext(ctx, `SELECT value, observed_at FROM surface_record WHERE kind='service-port' AND id=?`, id).Scan(&state, &observedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
+		return "", time.Time{}, nil
 	}
-	return state, err
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	observed, err := time.Parse(time.RFC3339Nano, observedAt)
+	return state, observed, err
 }
 
 func validSurfaceKind(k string) bool {

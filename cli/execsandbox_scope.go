@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -64,6 +65,21 @@ func resolveExecutorEgress(ctx context.Context, binary string, args []string) (e
 			return executorEgress{}, errors.New("executor target is outside the engagement scope")
 		}
 		ip := net.ParseIP(host)
+		if ip == nil {
+			if strings.EqualFold(filepath.Base(binary), "curl") {
+				resolves, err := secgate.CurlResolveArgs(args)
+				if err != nil || len(resolves) > 1 {
+					return executorEgress{}, errors.New("executor curl route cannot be verified")
+				}
+				if len(resolves) == 1 && strings.EqualFold(host, resolves[0].Host) {
+					ip = net.ParseIP(resolves[0].Address)
+					if !scope.InScope(ip.String()) {
+						return executorEgress{}, errors.New("executor resolved address is outside the engagement scope")
+					}
+					plan.Hosts[host] = ip.String()
+				}
+			}
+		}
 		if ip == nil {
 			lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			resolved, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)

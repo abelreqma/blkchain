@@ -84,10 +84,26 @@ func ExtractTargetSet(c Command) (hosts []string, nets []*net.IPNet, ok bool) {
 	}
 	lower := strings.ToLower(name)
 	for i, a := range c.Args {
+		if lower == "curl" && (a == "--resolve" || strings.HasPrefix(a, "--resolve=")) {
+			continue
+		}
+		if lower == "curl" && i > 0 && c.Args[i-1] == "--resolve" {
+			continue
+		}
 		if outputPathValue(lower, c.Args, i) {
 			continue
 		}
 		e.arg(a)
+	}
+	if lower == "curl" {
+		resolves, err := CurlResolveArgs(c.Args)
+		if err != nil {
+			e.ok = false
+		}
+		for _, r := range resolves {
+			e.add(r.Host)
+			e.add(r.Address)
+		}
 	}
 	return e.out, e.nets, e.ok
 }

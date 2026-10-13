@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -29,22 +30,71 @@ type serviceObservation struct {
 	state    string
 }
 
+type serviceKey struct {
+	endpoint serviceEndpoint
+	vantage  string
+}
+
+type serviceState struct {
+	value      string
+	observedAt time.Time
+}
+
+const serviceEvidenceTTL = time.Hour
+
 type serviceDispatcher struct {
 	store     *engagement.Store
 	mu        sync.RWMutex
-	state     map[serviceEndpoint]string
-	attempted map[serviceEndpoint]bool
+	vantage   func(secgate.Command) string
+	label     func(secgate.Command) string
+	state     map[serviceKey]serviceState
+	attempted map[serviceKey]bool
 }
 
 func newServiceDispatcher(store *engagement.Store) *serviceDispatcher {
-	return &serviceDispatcher{store: store, state: make(map[serviceEndpoint]string), attempted: make(map[serviceEndpoint]bool)}
+	return &serviceDispatcher{store: store, state: make(map[serviceKey]serviceState), attempted: make(map[serviceKey]bool)}
 }
 
 func attachServiceDispatcher(g *secgate.Gate, store *engagement.Store) {
 	d := newServiceDispatcher(store)
+	d.vantage = func(c secgate.Command) string {
+		foothold := g.EffectiveFoothold()
+		if g.Policy == nil || !foothold.Covers(c.Surface) {
+			if strings.HasPrefix(c.Binary, "web-") {
+				return "web-broker"
+			}
+			return "worker"
+		}
+		identity, _ := json.Marshal(foothold)
+		hash := sha256.Sum256(identity)
+		return fmt.Sprintf("foothold:%x", hash)
+	}
+	d.label = func(c secgate.Command) string {
+		foothold := g.EffectiveFoothold()
+		if g.Policy == nil || !foothold.Covers(c.Surface) {
+			if strings.HasPrefix(c.Binary, "web-") {
+				return "web broker"
+			}
+			return "worker"
+		}
+		return foothold.Transport + " on " + foothold.Host
+	}
 	g.ServiceCheck = d.Check
 	g.ServiceObserve = d.Observe
 	g.ServiceEnsure = func(ctx context.Context, c secgate.Command) { d.Ensure(ctx, c, g) }
+}
+
+func (d *serviceDispatcher) key(c secgate.Command, ep serviceEndpoint) serviceKey {
+	if d.vantage != nil {
+		return serviceKey{endpoint: ep, vantage: d.vantage(c)}
+	}
+	return serviceKey{endpoint: ep, vantage: "worker"}
+}
+
+func serviceRecordID(key serviceKey) string {
+	value := fmt.Sprintf("%s/%s/%d/%s", key.endpoint.host, key.endpoint.transport, key.endpoint.port, key.vantage)
+	id := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("service-%x", id)
 }
 
 func (d *serviceDispatcher) Check(ctx context.Context, c secgate.Command) string {
@@ -59,16 +109,17 @@ func (d *serviceDispatcher) Check(ctx context.Context, c secgate.Command) string
 		return ""
 	}
 	for _, ep := range endpoints {
+		key := d.key(c, ep)
 		if ctx.Err() != nil {
 			return "service dispatch: " + ctx.Err().Error()
 		}
-		state, err := d.portState(ctx, ep)
+		state, err := d.portState(ctx, key)
 		if err != nil {
 			return "service dispatch: cannot read port evidence: " + err.Error()
 		}
 		if state != "open" && !(ep.transport == "udp" && state == "open|filtered") {
 			d.mu.RLock()
-			attempted := d.attempted[ep]
+			attempted := d.attempted[key]
 			d.mu.RUnlock()
 			if attempted {
 				return fmt.Sprintf("service dispatch: %s/%d on %s was not observed open after bounded discovery", ep.transport, ep.port, ep.host)
@@ -79,22 +130,26 @@ func (d *serviceDispatcher) Check(ctx context.Context, c secgate.Command) string
 	return ""
 }
 
-func (d *serviceDispatcher) portState(ctx context.Context, ep serviceEndpoint) (string, error) {
-	stored := ""
+func (d *serviceDispatcher) portState(ctx context.Context, key serviceKey) (string, error) {
+	var stored serviceState
 	if d.store != nil {
 		var err error
-		stored, err = d.store.ServicePortState(ctx, ep.host, ep.transport, ep.port)
-		if err != nil || stored == "closed" || stored == "filtered" {
-			return stored, err
+		stored.value, stored.observedAt, err = d.store.ServicePortState(ctx, serviceRecordID(key))
+		if err != nil {
+			return "", err
 		}
 	}
 	d.mu.RLock()
-	state := d.state[ep]
+	state := d.state[key]
 	d.mu.RUnlock()
-	if state != "" {
-		return state, nil
+	if state.observedAt.After(stored.observedAt) {
+		stored = state
 	}
-	return stored, nil
+	age := time.Since(stored.observedAt)
+	if age < -time.Minute || age > serviceEvidenceTTL {
+		return "", nil
+	}
+	return stored.value, nil
 }
 
 func (d *serviceDispatcher) Ensure(ctx context.Context, c secgate.Command, g *secgate.Gate) {
@@ -106,27 +161,29 @@ func (d *serviceDispatcher) Ensure(ctx context.Context, c secgate.Command, g *se
 		return
 	}
 	for _, ep := range endpoints {
+		key := d.key(c, ep)
 		if ctx.Err() != nil {
 			return
 		}
-		state, err := d.portState(ctx, ep)
+		state, err := d.portState(ctx, key)
 		if err != nil || state == "open" || ep.transport == "udp" && state == "open|filtered" {
 			continue
 		}
 		d.mu.Lock()
-		if d.attempted[ep] {
+		if d.attempted[key] {
 			d.mu.Unlock()
 			continue
 		}
-		d.attempted[ep] = true
+		d.attempted[key] = true
 		d.mu.Unlock()
 		if strings.HasPrefix(c.Binary, "web-") {
 			if probeWebEndpoint(ctx, g, ep) {
 				d.mu.Lock()
-				d.state[ep] = "open"
+				d.state[key] = serviceState{value: "open", observedAt: time.Now().UTC()}
+				delete(d.attempted, key)
 				d.mu.Unlock()
 				if g.Audit != nil {
-					g.Audit("service-discovery", fmt.Sprintf("%s/%d on %s open by bounded TCP connect", ep.transport, ep.port, ep.host))
+					g.Audit("service-discovery", fmt.Sprintf("%s/%d on %s open by bounded TCP connect from %s", ep.transport, ep.port, ep.host, d.source(c)))
 				}
 			}
 			continue
@@ -156,6 +213,13 @@ func (d *serviceDispatcher) Ensure(ctx context.Context, c secgate.Command, g *se
 		_ = os.RemoveAll(dir)
 		cancel()
 	}
+}
+
+func (d *serviceDispatcher) source(c secgate.Command) string {
+	if d.label != nil {
+		return d.label(c)
+	}
+	return "worker"
 }
 
 func probeWebEndpoint(ctx context.Context, g *secgate.Gate, ep serviceEndpoint) bool {
@@ -212,8 +276,8 @@ func probeWebEndpoint(ctx context.Context, g *secgate.Gate, ep serviceEndpoint) 
 			_ = conn.Close()
 			return true
 		}
-		if probeLoopbackProxy(ctx, ip, ep.port) {
-			return true
+		if probeLoopbackProxy(ctx, ip, ep.port) && g.Audit != nil {
+			g.Audit("service-probe-gap", address+" accepted a loopback proxy CONNECT but is not reachable from the action's worker vantage")
 		}
 	}
 	return false
@@ -258,6 +322,19 @@ func (d *serviceDispatcher) Observe(ctx context.Context, c secgate.Command, outp
 		return err
 	}
 	observations := scanServiceObservations(c, output)
+	if !discovery {
+		verified := observations[:0]
+		for _, o := range observations {
+			if o.state == "open" || o.state == "open|filtered" {
+				prior, err := d.portState(ctx, d.key(c, o.endpoint))
+				if err != nil || prior != "open" && !(o.endpoint.transport == "udp" && prior == "open|filtered") {
+					continue
+				}
+			}
+			verified = append(verified, o)
+		}
+		observations = verified
+	}
 	if len(observations) == 0 {
 		return nil
 	}
@@ -265,7 +342,9 @@ func (d *serviceDispatcher) Observe(ctx context.Context, c secgate.Command, outp
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		for _, o := range observations {
-			d.state[o.endpoint] = o.state
+			key := d.key(c, o.endpoint)
+			d.state[key] = serviceState{value: o.state, observedAt: time.Now().UTC()}
+			delete(d.attempted, key)
 		}
 		return nil
 	}
@@ -274,18 +353,19 @@ func (d *serviceDispatcher) Observe(ctx context.Context, c secgate.Command, outp
 		return err
 	}
 	for _, o := range observations {
-		key := fmt.Sprintf("%s/%s/%d", o.endpoint.host, o.endpoint.transport, o.endpoint.port)
-		id := sha256.Sum256([]byte(key))
+		key := d.key(c, o.endpoint)
+		detail, _ := json.Marshal(map[string]string{"vantage": key.vantage, "source": d.source(c)})
 		_, err := d.store.SaveSurface(ctx, engagement.SurfaceRecord{
-			ID: fmt.Sprintf("service-%x", id), TaskID: c.TaskID, Surface: engagement.Surface(c.Surface),
+			ID: serviceRecordID(key), TaskID: c.TaskID, Surface: engagement.Surface(c.Surface),
 			Asset: o.endpoint.host, Kind: "service-port", Name: fmt.Sprintf("%s/%d", o.endpoint.transport, o.endpoint.port),
-			Value: o.state, Source: filepath.Base(c.Binary), EvidenceID: evidenceID,
+			Value: o.state, Detail: detail, Source: filepath.Base(c.Binary), EvidenceID: evidenceID,
 		})
 		if err != nil {
 			return err
 		}
 		d.mu.Lock()
-		d.state[o.endpoint] = o.state
+		d.state[key] = serviceState{value: o.state, observedAt: time.Now().UTC()}
+		delete(d.attempted, key)
 		d.mu.Unlock()
 	}
 	return nil

@@ -59,7 +59,7 @@ func TestRoEAutoArmLocalLLM(t *testing.T) {
 	withStubExec(t, func(_ context.Context, bin string, _ []string, _ string, _ int, _ time.Duration) runResult {
 		calls = append(calls, bin)
 		if bin == "nmap" {
-			return runResult{Output: "Nmap scan report for 192.0.2.1\nPORT STATE SERVICE\n80/tcp open http\n"}
+			return runResult{Output: "Nmap scan report for 192.0.2.1\nPORT STATE SERVICE\n80/tcp open http\n" + nmapDone}
 		}
 		return runResult{Output: "HTTP 200 from test fixture"}
 	})

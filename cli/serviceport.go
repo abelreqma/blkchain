@@ -128,6 +128,9 @@ func serviceRequirement(c secgate.Command) ([]serviceEndpoint, bool, error) {
 	switch name {
 	case "nmap":
 		if nmapServiceScan(c.Args) {
+			if nmapDiagnostic(c.Args) {
+				return nil, false, errors.New("diagnostic packet options cannot share a service follow-up")
+			}
 			return nmapRequiredEndpoints(c)
 		}
 		return nil, true, nil
@@ -135,7 +138,50 @@ func serviceRequirement(c secgate.Command) ([]serviceEndpoint, bool, error) {
 		return nil, true, nil
 	case "dig", "host", "nslookup":
 		return dnsRequirement(c)
-	case "curl", "wget", "ffuf", "gobuster", "nikto":
+	case "curl":
+		out, err := commandURLs(c)
+		if err != nil {
+			return nil, false, err
+		}
+		resolves, err := secgate.CurlResolveArgs(c.Args)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(resolves) > 0 {
+			if len(resolves) != 1 || len(out) != 1 || out[0].host != resolves[0].Host || out[0].port != resolves[0].Port {
+				return nil, false, errors.New("curl --resolve must match its only URL host and port")
+			}
+			out[0].host = resolves[0].Address
+		}
+		http3, only := false, false
+		for _, arg := range c.Args {
+			if arg == "--http3-only" {
+				http3, only = true, true
+			}
+			if arg == "--http3" {
+				http3 = true
+			}
+		}
+		if http3 {
+			for _, arg := range c.Args {
+				for _, raw := range serviceURL.FindAllString(arg, -1) {
+					if !strings.HasPrefix(strings.ToLower(raw), "https://") {
+						return nil, false, errors.New("HTTP/3 requires a verifiable HTTPS URL")
+					}
+				}
+			}
+			for i := range out {
+				if only {
+					out[i].transport = "udp"
+				} else {
+					udp := out[i]
+					udp.transport = "udp"
+					out = append(out, udp)
+				}
+			}
+		}
+		return out, false, nil
+	case "wget", "ffuf", "gobuster", "nikto":
 		out, err := commandURLs(c)
 		return out, false, err
 	case "snmpwalk", "onesixtyone":
@@ -177,7 +223,7 @@ func hiddenServiceRoute(binary string, args []string) string {
 		flag, _, _ := strings.Cut(strings.ToLower(arg), "=")
 		switch binary {
 		case "curl":
-			if flag == "-l" || flag == "--location" || flag == "--location-trusted" || flag == "--connect-to" || flag == "--resolve" || flag == "--alt-svc" || flag == "-x" || strings.HasPrefix(flag, "--proxy") || strings.HasPrefix(flag, "--preproxy") || strings.HasPrefix(flag, "--socks") {
+			if flag == "-l" || flag == "--location" || flag == "--location-trusted" || flag == "--connect-to" || flag == "--alt-svc" || flag == "--interface" || flag == "--local-port" || flag == "-x" || strings.HasPrefix(flag, "--proxy") || strings.HasPrefix(flag, "--preproxy") || strings.HasPrefix(flag, "--socks") {
 				return "connection rewrite or redirect flag is not service-verifiable: " + flag
 			}
 			if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.ContainsAny(arg[1:], "Lx") {
@@ -192,12 +238,16 @@ func hiddenServiceRoute(binary string, args []string) string {
 				return "proxy target is not service-verifiable"
 			}
 		case "nc", "ncat":
-			if flag == "-x" || flag == "--proxy" || flag == "--proxy-type" {
-				return "proxy target is not service-verifiable"
+			if flag == "-x" || flag == "--proxy" || flag == "--proxy-type" || flag == "--source" || flag == "--source-port" || flag == "--sctp" || strings.HasPrefix(arg, "-s") && !strings.HasPrefix(arg, "--") || strings.HasPrefix(arg, "-p") && !strings.HasPrefix(arg, "--") {
+				return "connection route or source is not service-verifiable: " + flag
 			}
 		case "openssl":
-			if flag == "-proxy" {
-				return "proxy target is not service-verifiable"
+			if flag == "-proxy" || flag == "-bind" {
+				return "connection route or source is not service-verifiable: " + flag
+			}
+		case "dig":
+			if strings.HasPrefix(arg, "-b") && !strings.HasPrefix(arg, "--") {
+				return "source address is not service-verifiable"
 			}
 		case "kubectl":
 			if flag == "--proxy-url" {

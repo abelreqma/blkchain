@@ -242,6 +242,29 @@ func TestPlanWildcardEgressAuthorizesScopedNetwork(t *testing.T) {
 	}
 }
 
+func TestPlanWildcardEgressUsesCurlResolveAddress(t *testing.T) {
+	scope, err := secgate.BuildScope(secgate.ScopeSpec{In: []string{"*.example.test", "192.0.2.10"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	plan, err := planWildcardEgress(context.Background(), scope,
+		[]pipelineStage{{Binary: "curl", Args: []string{"--resolve", "dispatch.example.test:8080:192.0.2.10", "http://dispatch.example.test:8080/"}}},
+		func(context.Context, string) ([]net.IPAddr, error) {
+			called = true
+			return nil, errors.New("DNS unavailable")
+		})
+	if err != nil || !plan.Dynamic || called || !slices.Contains(plan.IPs, "192.0.2.10") || !slices.Contains(plan.Hosts, "192.0.2.10 dispatch.example.test") {
+		t.Fatalf("pinned wildcard plan = %+v, err=%v, DNS called=%t", plan, err, called)
+	}
+	if _, err := planWildcardEgress(context.Background(), scope, []pipelineStage{
+		{Binary: "curl", Args: []string{"--resolve", "dispatch.example.test:8080:192.0.2.10", "http://dispatch.example.test:8080/"}},
+		{Binary: "curl", Args: []string{"http://dispatch.example.test:8080/"}},
+	}, func(context.Context, string) ([]net.IPAddr, error) { return nil, errors.New("DNS unavailable") }); err == nil {
+		t.Fatal("mixed pinned and DNS routes for one host were accepted")
+	}
+}
+
 func TestWildcardRunUsesActionScopedGuardAndCleansUp(t *testing.T) {
 	previous := newEngageRunnerForRun
 	t.Cleanup(func() { newEngageRunnerForRun = previous })

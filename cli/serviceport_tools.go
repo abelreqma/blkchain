@@ -79,16 +79,52 @@ func dnsRequirement(c secgate.Command) ([]serviceEndpoint, bool, error) {
 	name := strings.ToLower(filepath.Base(c.Binary))
 	server := ""
 	port := 53
-	transport := "udp"
+	explicitPort := false
+	mode := "udp"
+	ignoreFallback := false
 	for i, arg := range c.Args {
 		if name == "dig" && strings.HasPrefix(arg, "@") {
 			server = strings.TrimPrefix(arg, "@")
 		}
-		if name == "dig" && arg == "-p" && i+1 < len(c.Args) {
+		if arg == "-p" && i+1 < len(c.Args) {
 			port = mustPort(c.Args[i+1])
+			explicitPort = true
 		}
-		if arg == "+tcp" || arg == "+vc" || arg == "-T" {
-			transport = "tcp"
+		if strings.HasPrefix(arg, "-p") && len(arg) > 2 && !strings.HasPrefix(arg, "--") {
+			port = mustPort(arg[2:])
+			explicitPort = true
+		}
+		if name == "nslookup" && strings.HasPrefix(arg, "-port=") {
+			port = mustPort(strings.TrimPrefix(arg, "-port="))
+			explicitPort = true
+		}
+		if arg == "+trace" || strings.HasPrefix(arg, "+nohttps") || strings.HasPrefix(arg, "+notls") || strings.HasPrefix(arg, "+nohttp-plain") || arg == "+notcp" || arg == "+novc" {
+			return nil, false, errors.New("DNS option changes the destination after it was classified")
+		}
+		if arg == "+ignore" {
+			ignoreFallback = true
+		}
+		if arg == "+noignore" {
+			ignoreFallback = false
+		}
+		next := ""
+		switch {
+		case arg == "+tcp" || arg == "+vc" || name == "host" && arg == "-T" || name == "nslookup" && arg == "-vc":
+			next = "tcp"
+		case arg == "+tls":
+			next = "tls"
+		case strings.HasPrefix(arg, "+https"):
+			next = "https"
+		case strings.HasPrefix(arg, "+http-plain"):
+			next = "http"
+		case strings.EqualFold(arg, "AXFR") || strings.EqualFold(arg, "ANY") || strings.HasPrefix(strings.ToUpper(arg), "IXFR="):
+			next = "tcp"
+		}
+		if next != "" {
+			if mode != "udp" && mode != next {
+				return nil, false, errors.New("DNS transport options conflict")
+			}
+			mode = next
 		}
 	}
 	if name != "dig" && len(c.Args) >= 2 {
@@ -97,8 +133,30 @@ func dnsRequirement(c secgate.Command) ([]serviceEndpoint, bool, error) {
 	if server == "" {
 		return nil, true, nil
 	}
+	transport := "udp"
+	if mode != "udp" {
+		transport = "tcp"
+	}
+	if !explicitPort {
+		switch mode {
+		case "tls":
+			port = 853
+		case "https":
+			port = 443
+		case "http":
+			port = 80
+		}
+	}
 	ep, err := endpoint(server, transport, port)
-	return []serviceEndpoint{ep}, false, err
+	if err != nil {
+		return nil, false, err
+	}
+	if mode == "udp" && !ignoreFallback {
+		tcp := ep
+		tcp.transport = "tcp"
+		return []serviceEndpoint{ep, tcp}, false, nil
+	}
+	return []serviceEndpoint{ep}, false, nil
 }
 
 func hostPortEndpoint(raw, transport string) (serviceEndpoint, error) {

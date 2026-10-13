@@ -40,7 +40,7 @@ func loopbackGate(t *testing.T, roe *RoE, observedPorts ...int) *secgate.Gate {
 		t.Fatal(err)
 	}
 	for _, port := range observedPorts {
-		seedOpenService(t, ws.Store, "127.0.0.1", "tcp", port)
+		seedOpenService(t, ws.Store, "127.0.0.1", "tcp", port, "web-broker")
 	}
 	g := buildEngageGate(ws, roe.Scope, secgate.Auto, nil, secgate.NewSessionApprovals(), t.TempDir(),
 		gatePolicy{RoE: roe, UnattendedAllow: secgate.NewAllowlist()}, func(string, string) {})

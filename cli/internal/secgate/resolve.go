@@ -1,6 +1,9 @@
 package secgate
 
-import "net"
+import (
+	"net"
+	"strings"
+)
 
 // lookupIPFn resolves a host to IPs; a var so tests can stub it.
 var lookupIPFn = net.LookupIP
@@ -11,8 +14,15 @@ func resolveScopeViolationWith(s *Scope, c Command, lookup func(string) ([]net.I
 		return "", "", false
 	}
 	targets, _ := ExtractTargets(c)
+	var override []CurlResolve
+	if strings.EqualFold(baseName(c.Binary), "curl") {
+		override, _ = CurlResolveArgs(c.Args)
+	}
 	for _, t := range targets {
 		if net.ParseIP(t) != nil {
+			continue
+		}
+		if len(override) == 1 && strings.EqualFold(t, override[0].Host) {
 			continue
 		}
 		if lookup == nil {

@@ -133,7 +133,7 @@ func TestChatCommandUsesNamedTargetWithoutRoE(t *testing.T) {
 			t.Error("isolated command lost its per-turn target scope")
 		}
 		if bin == "nmap" {
-			return runResult{Output: "Nmap scan report for 192.0.2.5\nPORT STATE SERVICE\n80/tcp open http\n"}
+			return runResult{Output: "Nmap scan report for 192.0.2.5\nPORT STATE SERVICE\n80/tcp open http\n" + nmapDone}
 		}
 		return runResult{Output: "fixture response"}
 	}
@@ -163,7 +163,7 @@ func TestChatCommandStopsAfterClosedPortDiscovery(t *testing.T) {
 	var calls []string
 	execRunner = func(_ context.Context, bin string, _ []string, _ string, _ int, _ time.Duration) runResult {
 		calls = append(calls, bin)
-		return runResult{Output: "Nmap scan report for 192.0.2.5\nPORT STATE SERVICE\n80/tcp closed http\n"}
+		return runResult{Output: "Nmap scan report for 192.0.2.5\nPORT STATE SERVICE\n80/tcp closed http\n" + nmapDone}
 	}
 	t.Cleanup(func() { execRunner = old })
 	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "Check 192.0.2.5", nil, AnswerOpts{})
@@ -184,7 +184,7 @@ func TestChatSNMPDispatchesAfterObservedUDPPort(t *testing.T) {
 	execRunner = func(_ context.Context, bin string, _ []string, _ string, _ int, _ time.Duration) runResult {
 		calls = append(calls, bin)
 		if bin == "nmap" {
-			return runResult{Output: "Nmap scan report for 192.0.2.5\nPORT STATE SERVICE\n161/udp open|filtered snmp\n"}
+			return runResult{Output: "Nmap scan report for 192.0.2.5\nPORT STATE SERVICE\n161/udp open|filtered snmp\n" + nmapDone}
 		}
 		return runResult{Output: "SNMP fixture response"}
 	}
@@ -246,7 +246,7 @@ func TestChatWebAPIUsesNamedLoopbackFixture(t *testing.T) {
 		if bin != "nmap" {
 			t.Errorf("unexpected preflight binary %s", bin)
 		}
-		return runResult{Output: "Nmap scan report for " + host + "\nPORT STATE SERVICE\n" + port + "/tcp open http\n"}
+		return runResult{Output: "Nmap scan report for " + host + "\nPORT STATE SERVICE\n" + port + "/tcp open http\n" + nmapDone}
 	}
 	t.Cleanup(func() { execRunner = old })
 	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "POST to "+srv.URL, nil, AnswerOpts{})

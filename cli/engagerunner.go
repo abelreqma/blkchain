@@ -532,10 +532,36 @@ func planWildcardEgress(ctx context.Context, scope *secgate.Scope, stages []pipe
 	}
 	var targets []string
 	var nets []*net.IPNet
+	pinned := map[string]net.IP{}
+	routes := map[string]string{}
 	for _, stage := range stages {
+		var pin secgate.CurlResolve
+		if strings.EqualFold(filepath.Base(stage.Binary), "curl") {
+			resolves, err := secgate.CurlResolveArgs(stage.Args)
+			if err != nil || len(resolves) > 1 {
+				return engageEgressPlan{}, errors.New("command curl route cannot be verified")
+			}
+			if len(resolves) == 1 {
+				pin = resolves[0]
+			}
+		}
 		found, foundNets, ok := secgate.ExtractTargetSet(secgate.Command{Binary: stage.Binary, Args: stage.Args})
 		if !ok || len(targets)+len(nets)+len(found)+len(foundNets) > 16 {
 			return engageEgressPlan{}, errors.New("command targets cannot be verified within the limit")
+		}
+		for _, host := range found {
+			if net.ParseIP(host) != nil {
+				continue
+			}
+			route := "dns"
+			if host == pin.Host {
+				route = pin.Address
+				pinned[host] = net.ParseIP(pin.Address)
+			}
+			if previous, seen := routes[host]; seen && previous != route {
+				return engageEgressPlan{}, errors.New("command has conflicting hostname routes")
+			}
+			routes[host] = route
 		}
 		targets = append(targets, found...)
 		nets = append(nets, foundNets...)
@@ -601,9 +627,15 @@ func planWildcardEgress(ctx context.Context, scope *secgate.Scope, stages []pipe
 			}
 			continue
 		}
-		lookup, cancel := context.WithTimeout(ctx, 5*time.Second)
-		addresses, err := resolve(lookup, target)
-		cancel()
+		var addresses []net.IPAddr
+		var err error
+		if pin := pinned[target]; pin != nil {
+			addresses = []net.IPAddr{{IP: pin}}
+		} else {
+			lookup, cancel := context.WithTimeout(ctx, 5*time.Second)
+			addresses, err = resolve(lookup, target)
+			cancel()
+		}
 		if err := ctx.Err(); err != nil {
 			return engageEgressPlan{}, err
 		}
