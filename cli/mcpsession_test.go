@@ -315,3 +315,67 @@ func TestMCPServerExposesSessionsAsResources(t *testing.T) {
 		t.Fatalf("unknown session err = %v, want resource not found", err)
 	}
 }
+
+// Escaping expands a quote to two bytes and a control character to six, so the
+// newest turn must be cut by its encoded size. A cut that confuses raw and
+// encoded bytes collapses to empty content, which still satisfies the cap, so
+// each case also requires that most of what fits is kept.
+func TestMCPSessionResourceKeepsContentOfAnEscapedOversizeNewestTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ch      string
+		size    int
+		minKeep int
+	}{
+		{"quote", `"`, 300 << 10, 100 << 10},
+		// Six encoded bytes per character: 60 KiB raw is about 360 KiB encoded,
+		// over the cap, and stays under the transcript reader's line limit.
+		{"control", "\x01", 60 << 10, 40 << 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useDeadServices(t)
+			isolateUserDirs(t)
+			stubAdaptiveAnswer(t, strings.Repeat(tc.ch, tc.size), nil)
+
+			res, err := mcpChatResult(context.Background(), nil, loadConfig(), mcpChatIn{Message: "q"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := mcpSessionResource(res.SessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(payload) > sessionResourceMaxBytes {
+				t.Fatalf("resource payload is %d bytes, over the %d cap", len(payload), sessionResourceMaxBytes)
+			}
+			var out struct {
+				Trimmed bool `json:"trimmed"`
+				Turns   []struct {
+					Content string `json:"content"`
+				} `json:"turns"`
+			}
+			if err := json.Unmarshal(payload, &out); err != nil {
+				t.Fatal(err)
+			}
+			if !out.Trimmed || len(out.Turns) != 1 {
+				t.Fatalf("trimmed = %v, turns = %d", out.Trimmed, len(out.Turns))
+			}
+			c := out.Turns[0].Content
+			if len(c) < tc.minKeep {
+				t.Fatalf("kept %d bytes of content, want at least %d", len(c), tc.minKeep)
+			}
+			if strings.Trim(c, tc.ch) != "" {
+				t.Fatal("cut content is not made of the original characters")
+			}
+		})
+	}
+}
+
+func TestCutSessionTurnNonPositiveLimitYieldsEmptyContent(t *testing.T) {
+	for _, limit := range []int{0, -1, -1 << 20} {
+		got := cutSessionTurn(sessionTurn{Role: "assistant", Content: "abc"}, limit)
+		if got.Content != "" {
+			t.Fatalf("limit %d: content = %q", limit, got.Content)
+		}
+	}
+}
