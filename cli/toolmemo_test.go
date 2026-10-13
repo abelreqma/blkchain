@@ -1,0 +1,242 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"blkchain/cli/internal/tooldef"
+
+	"github.com/tmc/langchaingo/llms"
+)
+
+// runToolLoopAttempt starts a new memo attempt and runs one tool loop under it,
+// which is what a failover does for each model in the chain.
+func runToolLoopAttempt(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, msgs []llms.MessageContent, caps LoopCaps, memo *toolMemo) (string, int, error) {
+	memo.beginAttempt()
+	return runToolLoop(ctx, m, reg, msgs, caps)
+}
+
+func TestToolCallKeyIgnoresArgumentFormattingButNotArgumentValues(t *testing.T) {
+	a := toolCallKey("run_command", `{"cmd":"id","host":"a"}`)
+	b := toolCallKey("run_command", "{ \"host\" : \"a\",\n  \"cmd\": \"id\" }")
+	if a != b {
+		t.Error("the same arguments in a different key order and spacing produced different keys")
+	}
+	if c := toolCallKey("run_command", `{"cmd":"id","host":"b"}`); c == a {
+		t.Error("different argument values produced the same key")
+	}
+	if d := toolCallKey("web_api", `{"cmd":"id","host":"a"}`); d == a {
+		t.Error("a different tool with the same arguments produced the same key")
+	}
+	if e := toolCallKey("run_command", "not json at all"); e == a {
+		t.Error("arguments that are not JSON collided with JSON arguments")
+	}
+}
+
+func TestToolCallKeyBoundsTheArgumentBytesItDigests(t *testing.T) {
+	// Two long arguments that share their first toolMemoMaxArgBytes bytes must
+	// not collide: the key carries the total length as well as the prefix.
+	base := strings.Repeat("x", toolMemoMaxArgBytes+16)
+	if toolCallKey("t", base) == toolCallKey("t", base+"y") {
+		t.Error("two long arguments sharing a prefix produced the same key")
+	}
+}
+
+func TestToolMemoDoesNotAnswerARepeatInsideOneAttempt(t *testing.T) {
+	// A target polled twice in one turn must be contacted twice. Answering the
+	// second call from the first one's result manufactures a false "nothing
+	// changed".
+	m := newToolMemo()
+	m.beginAttempt()
+	key := toolCallKey("run_command", `{"cmd":"id"}`)
+	m.record(key, "uid=0")
+	if _, hit := m.lookup(key); hit {
+		t.Error("a call recorded in this attempt was replayed inside the same attempt")
+	}
+}
+
+func TestToolMemoReplaysEachRecordedCallOnceOnTheNextAttempt(t *testing.T) {
+	m := newToolMemo()
+	m.beginAttempt()
+	key := toolCallKey("run_command", `{"cmd":"id"}`)
+	m.record(key, "uid=0")
+	m.beginAttempt()
+	got, hit := m.lookup(key)
+	if !hit || got != "uid=0" {
+		t.Fatalf("replay: got %q hit=%v want %q true", got, hit, "uid=0")
+	}
+	if _, hit := m.lookup(key); hit {
+		t.Error("the same recorded call replayed twice in one attempt")
+	}
+}
+
+func TestToolMemoReplaysInCallOrder(t *testing.T) {
+	m := newToolMemo()
+	m.beginAttempt()
+	key := toolCallKey("run_command", `{"cmd":"date"}`)
+	m.record(key, "first")
+	m.record(key, "second")
+	m.beginAttempt()
+	a, _ := m.lookup(key)
+	b, _ := m.lookup(key)
+	if a != "first" || b != "second" {
+		t.Errorf("replay order: got %q then %q want %q then %q", a, b, "first", "second")
+	}
+}
+
+func TestToolMemoBoundsWhatItHolds(t *testing.T) {
+	m := newToolMemo()
+	m.beginAttempt()
+	for i := 0; i < toolMemoMaxEntries+8; i++ {
+		m.record(toolCallKey("t", `{"i":`+string(rune('0'+i%10))+`}`), "r")
+	}
+	if m.count > toolMemoMaxEntries {
+		t.Errorf("entry count: got %d want at most %d", m.count, toolMemoMaxEntries)
+	}
+	big := newToolMemo()
+	big.beginAttempt()
+	big.record(toolCallKey("t", "{}"), strings.Repeat("y", toolMemoMaxBytes+1))
+	if big.count != 0 {
+		t.Errorf("a result past the byte cap was recorded: count=%d", big.count)
+	}
+}
+
+// callThenAnswer scripts a model that requests the tool "t" once and then
+// answers.
+func callThenAnswer() *fakeModel {
+	return &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "t", "{}"), textResp("done")}}
+}
+
+func okTool() *fakeTool {
+	return &fakeTool{name: "t", fn: func(string) (string, error) { return "ran", nil }}
+}
+
+func TestToolLoopWithNoMemoRunsEveryCall(t *testing.T) {
+	// A nil memo is the default, so the engagement executors that pass none
+	// behave exactly as they do today.
+	tool := okTool()
+	m := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "t", "{}"), callResp("c2", "t", "{}"), textResp("done")}}
+	if _, _, err := runToolLoop(context.Background(), m, newLoopReg(t, tool), userMsgs(), LoopCaps{MaxRounds: 5, MaxCalls: 5}); err != nil {
+		t.Fatalf("runToolLoop: %v", err)
+	}
+	if len(tool.ran) != 2 {
+		t.Errorf("tool ran %d times, want 2", len(tool.ran))
+	}
+}
+
+func TestToolLoopRunsARepeatInsideOneAttemptWithAMemo(t *testing.T) {
+	tool := okTool()
+	memo := newToolMemo()
+	caps := LoopCaps{MaxRounds: 5, MaxCalls: 5, ToolMemo: memo}
+	m := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "t", "{}"), callResp("c2", "t", "{}"), textResp("done")}}
+	if _, _, err := runToolLoopAttempt(context.Background(), m, newLoopReg(t, tool), userMsgs(), caps, memo); err != nil {
+		t.Fatalf("attempt: %v", err)
+	}
+	if len(tool.ran) != 2 {
+		t.Errorf("tool ran %d times for two identical calls in one attempt, want 2", len(tool.ran))
+	}
+}
+
+func TestToolLoopReplaysACompletedCallInsteadOfRunningItAgain(t *testing.T) {
+	tool := okTool()
+	reg := newLoopReg(t, tool)
+	memo := newToolMemo()
+	caps := LoopCaps{MaxRounds: 5, MaxCalls: 5, ToolMemo: memo}
+	if _, _, err := runToolLoopAttempt(context.Background(), callThenAnswer(), reg, userMsgs(), caps, memo); err != nil {
+		t.Fatalf("first attempt: %v", err)
+	}
+	second := callThenAnswer()
+	if _, _, err := runToolLoopAttempt(context.Background(), second, reg, userMsgs(), caps, memo); err != nil {
+		t.Fatalf("second attempt: %v", err)
+	}
+	if len(tool.ran) != 1 {
+		t.Errorf("tool ran %d times across two attempts, want 1", len(tool.ran))
+	}
+	got := toolResults(second)
+	if len(got) != 1 || got[0].Content != "ran" {
+		t.Errorf("replayed result fed to the model: %+v", got)
+	}
+}
+
+func TestToolLoopReplaysAgainOnAThirdAttempt(t *testing.T) {
+	tool := okTool()
+	reg := newLoopReg(t, tool)
+	memo := newToolMemo()
+	caps := LoopCaps{MaxRounds: 5, MaxCalls: 5, ToolMemo: memo}
+	for i := 0; i < 3; i++ {
+		if _, _, err := runToolLoopAttempt(context.Background(), callThenAnswer(), reg, userMsgs(), caps, memo); err != nil {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+	}
+	if len(tool.ran) != 1 {
+		t.Errorf("tool ran %d times across three attempts, want 1", len(tool.ran))
+	}
+}
+
+func TestToolLoopDoesNotReplayAFailedCall(t *testing.T) {
+	// A failed call was attempted and may have had a side effect before it
+	// errored, and its result is an error string, not an answer. It is not a
+	// result to stand in for a later call.
+	tool := &fakeTool{name: "t", fn: func(string) (string, error) { return "", errors.New("some tool failure") }}
+	reg := newLoopReg(t, tool)
+	memo := newToolMemo()
+	caps := LoopCaps{MaxRounds: 5, MaxCalls: 5, ToolMemo: memo}
+	for i := 0; i < 2; i++ {
+		if _, _, err := runToolLoopAttempt(context.Background(), callThenAnswer(), reg, userMsgs(), caps, memo); err != nil {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+	}
+	if len(tool.ran) != 2 {
+		t.Errorf("a failed tool ran %d times across two attempts, want 2", len(tool.ran))
+	}
+}
+
+func TestToolLoopReplayStillFiresAuditCallbacksInOrder(t *testing.T) {
+	tool := okTool()
+	reg := newLoopReg(t, tool)
+	memo := newToolMemo()
+	var seen []string
+	caps := LoopCaps{
+		MaxRounds: 5, MaxCalls: 5, ToolMemo: memo,
+		Observe: func(action, detail string) error {
+			seen = append(seen, action+":"+detail)
+			return nil
+		},
+		ObserveResult: func(name string, outcome ToolOutcome) {
+			seen = append(seen, "outcome:"+name+"="+string(outcome))
+		},
+	}
+	if _, _, err := runToolLoopAttempt(context.Background(), callThenAnswer(), reg, userMsgs(), caps, memo); err != nil {
+		t.Fatal(err)
+	}
+	first := strings.Join(seen, "|")
+	seen = nil
+	if _, _, err := runToolLoopAttempt(context.Background(), callThenAnswer(), reg, userMsgs(), caps, memo); err != nil {
+		t.Fatal(err)
+	}
+	if len(tool.ran) != 1 {
+		t.Fatalf("tool ran %d times, want 1", len(tool.ran))
+	}
+	want := "model-tools:round=1 calls=1|tool-call:t|outcome:t=done|tool-result:t|model-final:round=2"
+	if got := strings.Join(seen, "|"); got != want || got != first {
+		t.Errorf("replay observed %q, original %q, want %q", got, first, want)
+	}
+}
+
+func TestToolLoopReplayStillSpendsACallSlot(t *testing.T) {
+	reg := newLoopReg(t, okTool())
+	memo := newToolMemo()
+	caps := LoopCaps{MaxRounds: 5, MaxCalls: 1, ToolMemo: memo}
+	if _, _, err := runToolLoopAttempt(context.Background(), callThenAnswer(), reg, userMsgs(), caps, memo); err != nil {
+		t.Fatal(err)
+	}
+	final, _, err := runToolLoopAttempt(context.Background(), callThenAnswer(), reg, userMsgs(), caps, memo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(final, "tool call cap reached") {
+		t.Errorf("a replayed call did not count against the call cap: final=%q", final)
+	}
+}
