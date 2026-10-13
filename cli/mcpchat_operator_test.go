@@ -99,28 +99,43 @@ func TestMCPChatCallsAToolOfAnOutboundMCPServer(t *testing.T) {
 //  1. The MCP client config (mcp-clients.json beside the preferences file,
 //     ~/.config/blkchain by default) has a server entry for the Burp MCP
 //     server, with allow_tools naming the Burp tools to expose and any
-//     credential given through token_env.
+//     credential given through token_env. cli/mcp-clients.example.json is a
+//     template.
 //  2. Burp is running with its MCP server enabled and reachable by that entry.
 //  3. The target is in scope and the operator is authorized to test it.
 //
-// Procedure:
+// Burp carries blk's traffic on two paths, and each one's evidence is different.
+// Checking one path by the other's evidence fails on a working implementation.
+//
+// Path one, the agent calling Burp's own tools. Burp's request tools return the
+// request and response pair to the caller and add no Proxy history entry, so the
+// returned pair is the only evidence this path produces. Procedure:
 //
 //  1. Run this test against a read-only Burp tool and require a pass.
 //  2. Note the time, start `blk mcp`, and call chat with a message that names
 //     the target host and asks for one request through the Burp tool. Note the
 //     time again.
-//  3. In Burp, read Proxy > HTTP history, or query it through Burp MCP with a
-//     narrow filter, and match each request the turn sent by host, path, method
-//     and a timestamp inside the noted window. Compare the count sent with the
-//     count found. A Burp request tool can return a pair without adding a Proxy
-//     history entry, so record capture in history as its own result.
-//  4. Write down what was observed. A request with no matching entry is a
-//     failed acceptance, not a skipped one.
+//  3. Record the returned pair. Do not expect it in Proxy history.
+//
+// Path two, blk's own engage web traffic, which traverses Burp's proxy listener
+// and therefore does land in history. Procedure:
+//
+//  1. Note the time and run `blk engage web collect` against the target under an
+//     RoE that scopes it, with BLKCHAIN_WEB_PROXY on its default or naming
+//     Burp's listener. Note the time again.
+//  2. Read Proxy > HTTP history, or query it through Burp MCP with a narrow
+//     filter, and match each request the run sent by host, path, method and a
+//     timestamp inside the noted window. Compare the count sent with the count
+//     found.
+//  3. Write down what was observed. A request with no matching entry is a failed
+//     acceptance, not a skipped one.
 //
 // No marker header, altered user-agent or tracer parameter is added to any
-// request. A marker changes the request fingerprint, so the measurement would
-// describe the instrument instead of the target. Correlation uses only the
-// fields a real request already has.
+// request on either path. A marker changes the request fingerprint, so the
+// measurement would describe the instrument instead of the target. Correlation
+// uses only the fields a real request already has. Burp's own normalization of
+// hop-by-hop and Accept-Encoding headers is visible in history and is Burp's,
+// not blk's.
 func TestMCPChatReachesAnOperatorConfiguredMCPServer(t *testing.T) {
 	if os.Getenv("BLKCHAIN_CHAT_MCP_OPERATOR_E2E") != "1" {
 		t.Skip("set BLKCHAIN_CHAT_MCP_OPERATOR_E2E=1 with an MCP client config naming a running server")
