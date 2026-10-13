@@ -221,17 +221,6 @@ func commandSpecs() []cmdSpec {
 			run: runHermes,
 		},
 		{
-			name: "gateway", group: hgIntegrations,
-			desc: "set up and start the Hermes gateway for agent mode",
-			long: "Prepares Hermes for agent mode and starts its gateway. " +
-				"It writes API_SERVER_ENABLED and API_SERVER_KEY into ~/.hermes/.env, using OMLX_API then OMLX_API_KEY, keeps a backup on change, and never prints the key. " +
-				"Export the same API_SERVER_KEY in the client terminal; authenticated /health/detailed selects the gateway, otherwise the Hermes CLI fallback runs. " +
-				"Use --setup-only to write the file and stop without starting the gateway.",
-			flags:    func(fs *flag.FlagSet) { defineGatewayFlags(fs, new(bool)) },
-			examples: []string{"blk gateway --setup-only", "blk gateway"},
-			run:      runGateway,
-		},
-		{
 			name: "mcp", group: hgIntegrations,
 			desc: "serve the knowledge base to Hermes over MCP (stdio)",
 			long: "Runs the local MCP server with kb_search, kb_answer, route_skill, engage, and kg. " +

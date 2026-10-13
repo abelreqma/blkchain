@@ -39,7 +39,6 @@ var wordingDescs = map[string]string{
 	"models":     "check each model's readiness and speed",
 	"logs":       "show the embed_server log; -f follows it",
 	"hermes":     "run one Hermes agent turn with the knowledge base",
-	"gateway":    "set up and start the Hermes gateway for agent mode",
 	"mcp":        "serve the knowledge base to Hermes over MCP (stdio)",
 	"engage":     "plan and run a gated, multi-step assessment",
 	"store":      "inspect stored engagements and cite answers",
@@ -55,7 +54,7 @@ var wordingGroups = [][]string{
 	{"engage", "store", "kg"},
 	{"ask", "search", "web", "sources", "open", "add"},
 	{"up", "down", "status", "health", "doctor", "models", "logs"},
-	{"hermes", "gateway", "mcp", "analyze"},
+	{"hermes", "mcp", "analyze"},
 	{"install", "completion", "version", "help"},
 }
 
@@ -946,7 +945,7 @@ func TestExitCode(t *testing.T) {
 func TestSuggestCommand(t *testing.T) {
 	cases := map[string]string{
 		"serach": "search", "asl": "ask", "hlep": "help", "stat": "status",
-		"instal": "install", "hermes": "hermes", "gatway": "gateway",
+		"instal": "install", "hermes": "hermes",
 		"zzzzzz": "", "d": "", "": "",
 	}
 	for in, want := range cases {
