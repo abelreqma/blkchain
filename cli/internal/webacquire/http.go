@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -36,11 +37,21 @@ type Response struct {
 	Complete bool        `json:"complete"`
 	Gap      string      `json:"gap,omitempty"`
 }
+
+// Upstream routes every brokered request through an intercepting HTTP proxy.
+// Address is the proxy's host:port. RootCAs holds the proxy's issuing CA so the
+// leaf certificates it re-signs verify against a real chain; a nil pool
+// disables the proxy rather than relaxing verification.
+type Upstream struct {
+	Address string
+	RootCAs *x509.CertPool
+}
 type Policy struct {
 	Authorize     func(context.Context, Request) error
 	IPAllowed     func(string, net.IP) bool
 	Resolve       func(context.Context, string) ([]net.IP, error)
 	DialContext   func(context.Context, string, string) (net.Conn, error)
+	Upstream      *Upstream
 	MaxBodyBytes  int
 	MaxTotalBytes int
 	MaxRequests   int
@@ -280,6 +291,23 @@ func (b *Broker) Once(ctx context.Context, r Request) (Response, error) {
 	tr := &http.Transport{Proxy: nil, DisableCompression: true, DisableKeepAlives: true, MaxResponseHeaderBytes: 64 << 10, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 15 * time.Second, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: u.Hostname()}, DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return b.dial(ctx, network, pinned)
 	}}
+	// An upstream proxy terminates the connection, so the transport dials the
+	// proxy and the request goes out in absolute form or behind CONNECT. The
+	// pinned dial to the checked target address cannot also apply. Scope is
+	// still enforced above: every address the requested hostname resolves to
+	// must pass IPAllowed before any byte leaves. The proxy then resolves that
+	// hostname itself, so the target can rebind between blk's resolution and
+	// the proxy's. That gap is inherent to proxying and cannot be closed from
+	// here; what remains enforced is the host blk was asked for. A proxy
+	// without its CA is ignored, because verifying the re-signed leaf needs
+	// that CA and the alternative would be to stop verifying.
+	if up := b.Policy.Upstream; up != nil && up.Address != "" && up.RootCAs != nil {
+		tr.Proxy = http.ProxyURL(&url.URL{Scheme: "http", Host: up.Address})
+		tr.TLSClientConfig.RootCAs = up.RootCAs
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
+		}
+	}
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	req, err := http.NewRequestWithContext(ctx, r.Method, r.URL, bytes.NewReader(r.Body))

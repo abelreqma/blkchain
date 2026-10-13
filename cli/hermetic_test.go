@@ -40,6 +40,12 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config")); err != nil {
 		panic("hermetic test state: " + err.Error())
 	}
+	// The web stack sends requests through a local intercepting proxy when one
+	// is listening. An operator running Burp on the default port would otherwise
+	// have every fixture request in this suite routed through it.
+	if err := os.Setenv(webProxyEnv, webProxyDisabledSetting); err != nil {
+		panic("hermetic test state: " + err.Error())
+	}
 	code := m.Run()
 	os.RemoveAll(dir) // os.Exit runs no deferred call, so clean up first.
 	os.Exit(code)
