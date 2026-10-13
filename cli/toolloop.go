@@ -57,13 +57,22 @@ type LoopCaps struct {
 	// Summarizer condenses older turns when the budget is exceeded. nil (the
 	// default) disables summarization regardless of SummarizeAtChars.
 	Summarizer *ChainSummarizer
+	// ToolMemo, when set, carries the results of tool calls that ran to
+	// completion across the attempts of one turn, so a failover that restarts
+	// the loop replays them instead of running the tool again. nil (the
+	// default) runs every requested call, which is what the engagement
+	// executors want: each of their loops is its own step.
+	ToolMemo *toolMemo
 }
 
 // runToolLoop drives the model through tool-calling rounds. Each round it sends
 // msgs with the registry's tool specs. A reply with no tool calls ends the loop
 // and its text is returned. Otherwise every requested tool is run (unknown tools
 // and tool errors are fed back as results, never fatal) and the loop continues.
-// It stops at caps.MaxRounds rounds or once caps.MaxCalls calls have run.
+// It stops at caps.MaxRounds rounds or once caps.MaxCalls calls have run. When
+// caps.ToolMemo is set, a call whose identical arguments already ran to
+// completion in an earlier attempt is answered from that record instead of
+// being run again.
 func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, msgs []llms.MessageContent, caps LoopCaps, extra ...llms.CallOption) (final string, rounds int, err error) {
 	if caps.Observe == nil {
 		caps.Observe = engageTelemetryFromContext(ctx)
@@ -177,12 +186,29 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 			}
 			result, outcome := "tool call skipped: call cap reached", ToolSkipped
 			if total < caps.MaxCalls {
-				var ok bool
-				result, ok = execToolCall(ctx, reg, tc.FunctionCall != nil, name, args)
-				outcome = ToolFailed
-				if ok {
-					outcome = ToolDone
+				key, replayed := "", false
+				if caps.ToolMemo != nil && tc.FunctionCall != nil {
+					key = toolCallKey(name, args)
+					if stored, hit := caps.ToolMemo.lookup(key); hit {
+						// Re-record at this attempt so a further failover can
+						// replay it again.
+						caps.ToolMemo.record(key, stored)
+						result, outcome, replayed = stored, ToolDone, true
+					}
 				}
+				if !replayed {
+					ok := false
+					result, ok = execToolCall(ctx, reg, tc.FunctionCall != nil, name, args)
+					outcome = ToolFailed
+					if ok {
+						outcome = ToolDone
+						if key != "" {
+							caps.ToolMemo.record(key, result)
+						}
+					}
+				}
+				// A replayed call still spends a call slot, so the cap bounds
+				// the whole turn's calls rather than each attempt's.
 				total++
 			}
 			if caps.ObserveResult != nil {
