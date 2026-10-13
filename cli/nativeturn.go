@@ -201,7 +201,10 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		history = turnHistory(sess)
 	}
 
-	ctx, metrics := withCallMetrics(ctx)
+	metrics, _ := ctx.Value(metricsKey{}).(*callMetrics)
+	if metrics == nil {
+		ctx, metrics = withCallMetrics(ctx)
+	}
 	started := time.Now()
 
 	var actions []turnAction

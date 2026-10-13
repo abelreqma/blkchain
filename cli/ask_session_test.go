@@ -152,6 +152,31 @@ func TestAskJSONNoResultsKeepsModel(t *testing.T) {
 	}
 }
 
+func TestAskRecordsCallsInObservedMetrics(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	prev := adaptiveAnswerFn
+	adaptiveAnswerFn = func(ctx context.Context, rc searcher, cfg ragconfig.Config, question string, enabled enabledRoutes, force bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		if m, _ := ctx.Value(metricsKey{}).(*callMetrics); m != nil {
+			m.mu.Lock()
+			m.calls = append(m.calls, llmCallStats{Stage: "answer", Status: "ok"})
+			m.mu.Unlock()
+		}
+		return "answer", []citation{}, false, []retrieval.Result{}, 3, "rag", nil
+	}
+	t.Cleanup(func() { adaptiveAnswerFn = prev })
+
+	observed := &callMetrics{}
+	captureStdout(t, func() {
+		if _, err := askWithPreface(nil, nil, []string{"q"}, "", false, nil, observed); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if calls, _ := observed.snapshot(); len(calls) != 1 {
+		t.Fatalf("observed metrics hold %d calls, want 1", len(calls))
+	}
+}
+
 func TestAskHermesRejectsSession(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
