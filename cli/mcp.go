@@ -53,6 +53,15 @@ type mcpChatIn struct {
 	ToolHost  string `json:"tool_host,omitempty" jsonschema:"file and terminal host: sandbox (default) or local. local is permitted because this server speaks only over stdio to a local client that already holds the operator's privileges"`
 }
 
+// mcpChatOut is chat's structured result. Error is set when the turn produced
+// an answer but did not finish cleanly, such as a transcript that could not be
+// written, so the caller keeps the answer and still sees that the turn was not
+// recorded. It lives here rather than on turnResult, which ask --json shares.
+type mcpChatOut struct {
+	turnResult
+	Error string `json:"error,omitempty"`
+}
+
 // runMCP starts the MCP stdio server exposing kb_search, kb_answer, and
 // route_skill. It runs in-process against the Go retrieval client and answer
 // loop, so embed_server and Qdrant must be up.
@@ -112,10 +121,14 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 		Description: "One turn of the blkChain agent: adaptive routing, the local knowledge base, files, terminal, browser and web research, with the operator's connected MCP servers. Omit session_id to start a conversation, pass the returned session_id back to continue it.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpChatIn) (*mcp.CallToolResult, any, error) {
 		res, err := mcpChatResult(ctx, followPrefs(rc, loadPrefs()), cfg, in)
-		if err != nil {
+		if err != nil && strings.TrimSpace(res.Answer) == "" {
 			return nil, nil, err
 		}
-		return nil, res, nil
+		out := mcpChatOut{turnResult: res}
+		if err != nil {
+			out.Error = err.Error()
+		}
+		return nil, out, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
