@@ -76,6 +76,58 @@ func TestNetworkVantageSkewExternalVsInternal(t *testing.T) {
 	}
 }
 
+func TestNetworkVersionTierExplainsHTTPHeaderEvidence(t *testing.T) {
+	task := engagement.Task{ID: "t1", Surface: engagement.SurfaceNetwork, Objective: "report server header"}
+	prompt := networkTierPrompt(task, "10.0.0.5", reconTier{Name: "version-safe-script-enum"}, reconSelection{}, "")
+	if !strings.Contains(prompt, "curl") || !strings.Contains(prompt, "not the exact HTTP Server header") {
+		t.Fatalf("version tier omitted HTTP header guidance: %q", prompt)
+	}
+}
+
+func TestNetworkHeaderFollowUpUsesGatedCommand(t *testing.T) {
+	task := engagement.Task{ID: "t1", Objective: "Report the HTTP Server header"}
+	tool := &fakeTool{name: "run_command", fn: func(string) (string, error) { return "ok", nil }}
+	outputs := []string{"PORT STATE SERVICE\n8080/tcp open http-proxy\n443/tcp closed https"}
+	attempted := map[int]bool{}
+	if _, err := captureRequestedHTTPHeaders(context.Background(), task, "10.0.0.5", outputs, nil, attempted, tool); err != nil {
+		t.Fatal(err)
+	}
+	if len(tool.ran) != 1 || !attempted[8080] {
+		t.Fatalf("follow-up calls=%v attempted=%v", tool.ran, attempted)
+	}
+	var args runCommandArgs
+	if err := json.Unmarshal([]byte(tool.ran[0]), &args); err != nil {
+		t.Fatal(err)
+	}
+	if args.Binary != "curl" || !strings.Contains(strings.Join(args.Args, " "), "-I --max-time 5 http://10.0.0.5:8080/") {
+		t.Fatalf("follow-up args=%+v", args)
+	}
+	if _, err := captureRequestedHTTPHeaders(context.Background(), task, "10.0.0.5", outputs, nil, attempted, tool); err != nil || len(tool.ran) != 1 {
+		t.Fatalf("follow-up repeated: calls=%v err=%v", tool.ran, err)
+	}
+}
+
+func TestNetworkHeaderFollowUpSkipsCapturedHeader(t *testing.T) {
+	task := engagement.Task{ID: "t1", Objective: "Report the HTTP Server header"}
+	tool := &fakeTool{name: "run_command", fn: func(string) (string, error) { return "ok", nil }}
+	evidence := []engagement.EvidenceRow{{Quote: "HTTP/1.0 200 OK\nServer: fixture"}}
+	_, err := captureRequestedHTTPHeaders(context.Background(), task, "10.0.0.5", []string{"8080/tcp open http"}, evidence, map[int]bool{}, tool)
+	if err != nil || len(tool.ran) != 0 {
+		t.Fatalf("existing header caused follow-up: calls=%v err=%v", tool.ran, err)
+	}
+}
+
+func TestNetworkHeaderFollowUpReturnsExactEvidence(t *testing.T) {
+	task := engagement.Task{ID: "t1", DoneWhen: "Server header recorded"}
+	tool := &fakeTool{name: "run_command", fn: func(string) (string, error) {
+		return "HTTP/1.0 200 OK\r\nServer: fixture/1.0\r\n", nil
+	}}
+	quotes, err := captureRequestedHTTPHeaders(context.Background(), task, "10.0.0.5", []string{"8080/tcp open http-proxy"}, nil, map[int]bool{}, tool)
+	if err != nil || len(quotes) != 2 || quotes[0] != "8080/tcp open http-proxy" || quotes[1] != "Server: fixture/1.0" {
+		t.Fatalf("quotes=%v err=%v", quotes, err)
+	}
+}
+
 // TestNetworkReconInjectsVantageSkewIntoTierPrompt: the network executor's recon
 // driver appends the vantage skew to the tier prompt the model receives. At an
 // internal foothold the model sees the internal (SMB/LDAP/lateral) emphasis on

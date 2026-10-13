@@ -305,6 +305,22 @@ func TestProjectionTextShowsCoverageAndDiscoveries(t *testing.T) {
 	}
 }
 
+func TestProjectionTextKeepsHeaderAndLatestPortEvidenceVisible(t *testing.T) {
+	st := openStore(t)
+	if _, err := newPlanAddTool(st).Call(context.Background(), `{"id":"t1","kind":"recon","target":"10.0.0.5","objective":"report ports and Server header"}`); err != nil {
+		t.Fatal(err)
+	}
+	for _, quote := range []string{"8080/tcp open http", "HTTP/1.0 200 OK\nServer: fixture", "8080/tcp open http"} {
+		if _, err := st.RecordEvidence("t1", quote); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := projectionText(context.Background(), st)
+	if err != nil || !strings.Contains(out, "Server: fixture") || !strings.Contains(out, "8080/tcp open http") || !strings.Contains(out, "untrusted") {
+		t.Fatalf("projection=%q err=%v", out, err)
+	}
+}
+
 func TestProjectionTextShowsVantage(t *testing.T) {
 	st := openStore(t)
 	// Unset vantage still prints the line with an empty value, so every

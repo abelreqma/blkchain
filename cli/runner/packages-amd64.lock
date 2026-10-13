@@ -109,6 +109,8 @@ d343a129794c9d1d52de2d26daea7e9fa1d92dc34d0cf0d4888368947ea5222c https://dl-cdn.
 e52a5325b8720449ed4f123a33202794361b6b164c127abdb4b3c057467e7a41 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/nghttp2-libs-1.69.0-r0.apk
 9d353b8a08f7b28ad6a4c662ee2278f1ebb5291de279b5e693d059b2a3f9803b https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/nmap-7.97-r0.apk
 0c57c86704976679c4fee316ed2b24ae8bf5145d1c319494117a31a6d49b6d0d https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/nmap-ncat-7.97-r0.apk
+532962211ba06060af582a3c0f78c30c2bfeb63a91162e2dc9f274e1a5cb3d5f https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/nmap-nselibs-7.97-r0.apk
+6e7dab21435cb41ea38a7597b604a59195e93482550ec78de49af336a74e3f18 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/nmap-scripts-7.97-r0.apk
 473d26dd8bb110c718cc4fb22cecac299984b3a409e7c018629160d1a929ae28 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/nspr-4.36-r0.apk
 d4f1f0e49c05d4dd6c2e21da860a526ee3c381cfa532946d7dbdf806da4e8662 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/nss-3.123.1-r0.apk
 1738ccfd121036cee7edb2f7820cd8aa61badff5bc9e85c59d930a5cfc5b662f https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/oniguruma-6.9.10-r0.apk

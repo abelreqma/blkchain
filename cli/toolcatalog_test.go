@@ -62,6 +62,8 @@ var infrastructurePackages = map[string]string{
 	"python3":        "runs execute.py, the worker's command shim; the classifier denies it as a command",
 	"iptables":       "writes the network guard's allowlist firewall",
 	"openssh-client": "the ssh foothold carrier, invoked only by the code-built transport in foothold.go and absent from the catalog so the model cannot reach it",
+	"nmap-nselibs":   "nmap's service detection and script runtime data",
+	"nmap-scripts":   "nmap's packaged scripts for bounded service enumeration",
 }
 
 func readPackagesList(t *testing.T) []string {

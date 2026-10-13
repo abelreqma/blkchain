@@ -75,6 +75,28 @@ func (s *Store) EvidenceRowsFor(taskID string) ([]EvidenceRow, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) EvidenceHighlightsFor(taskID string) ([]EvidenceRow, error) {
+	rows, err := s.db.Query(`SELECT id, quote FROM evidence
+		WHERE task_id = ? AND id IN (
+			(SELECT MAX(id) FROM evidence WHERE task_id = ?),
+			(SELECT MAX(id) FROM evidence WHERE task_id = ? AND quote LIKE '%Server:%')
+		)
+		ORDER BY id ASC`, taskID, taskID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []EvidenceRow
+	for rows.Next() {
+		var row EvidenceRow
+		if err := rows.Scan(&row.ID, &row.Quote); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
 // EvidenceFor returns the stored quotes for a task, oldest first.
 func (s *Store) EvidenceFor(taskID string) ([]string, error) {
 	rows, err := s.db.Query(

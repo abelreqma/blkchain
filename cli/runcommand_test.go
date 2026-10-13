@@ -19,6 +19,23 @@ import (
 	"blkchain/cli/internal/tooldef"
 )
 
+func TestNetworkNmapArgsAvoidBlockedReverseDNS(t *testing.T) {
+	gate := &secgate.Gate{Policy: secgate.DefaultPolicy()}
+	input := []string{"-p", "80", "10.0.0.5"}
+	got := networkNmapArgs(gate, secgate.SurfaceNetwork, "nmap", input)
+	if strings.Join(got, " ") != "-n -p 80 10.0.0.5" || strings.Join(input, " ") != "-p 80 10.0.0.5" {
+		t.Fatalf("normalized=%v original=%v", got, input)
+	}
+	for _, args := range [][]string{{"-n", "-p", "80", "10.0.0.5"}, {"-R", "-p", "80", "10.0.0.5"}} {
+		if got := networkNmapArgs(gate, secgate.SurfaceNetwork, "nmap", args); strings.Join(got, " ") != strings.Join(args, " ") {
+			t.Fatalf("explicit DNS setting changed: %v", got)
+		}
+	}
+	if got := networkNmapArgs(gate, secgate.SurfaceWeb, "nmap", input); strings.Join(got, " ") != strings.Join(input, " ") {
+		t.Fatalf("non-network task changed: %v", got)
+	}
+}
+
 func newRunCommandTool(g *secgate.Gate, capBytes int, timeout time.Duration, workDir string, activeTask func() string, capture func(taskID, output string)) tooldef.Tool {
 	return newRunCommandToolForTask(g, capBytes, timeout, workDir, activeTask, capture, secgate.Command{}, nil)
 }

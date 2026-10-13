@@ -41,6 +41,22 @@ func TestClassifyAllowsCleanBoundedCommand(t *testing.T) {
 	}
 }
 
+func TestClassifyAcceptsGluedNmapPortBoundForServiceDetection(t *testing.T) {
+	for _, args := range [][]string{
+		{"-p80,443,8080", "-sV", "-n", "10.0.0.5"},
+		{"-pT80,443", "-sV", "-n", "10.0.0.5"},
+	} {
+		if d := Classify(Command{Binary: "nmap", Args: args}); !d.Allowed {
+			t.Fatalf("bounded nmap %v denied: %+v", args, d)
+		}
+	}
+	for _, args := range [][]string{{"-p-", "10.0.0.5"}, {"-p", "10.0.0.5"}} {
+		if d := Classify(Command{Binary: "nmap", Args: args}); d.Allowed {
+			t.Fatalf("unbounded nmap %v allowed", args)
+		}
+	}
+}
+
 func TestClassifyDeniesUnboundedNmapWithSuggestion(t *testing.T) {
 	d := Classify(Command{Binary: "nmap", Args: []string{"10.0.0.0/8"}})
 	if d.Allowed {
