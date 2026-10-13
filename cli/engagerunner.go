@@ -54,7 +54,7 @@ func engageWorkerArgs(name, guard, image, hostsFile, vulnDB string, env []string
 // worker in exactly two ways: it runs as root and holds CAP_NET_RAW. Docker
 // exposes no ambient capability, and no-new-privileges blocks the
 // file-capability route, so an unprivileged process keeps an empty effective set
-// however the capability is added: masscan, tcpdump, and the nmap raw scan modes
+// however the capability is added: nping, tcpdump, and the nmap raw scan modes
 // need a root process or they fail with a permission error. Every other control
 // is unchanged: read-only rootfs, the rest of the capability set dropped,
 // no-new-privileges, the same memory, cpu, pid and file limits, the same

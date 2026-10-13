@@ -74,7 +74,7 @@ type tool struct {
 	Raw      rawNeed
 	// Probe is an argv that proves the binary exists and runs, and ProbeWant is a
 	// substring its combined output must contain. Exit status is not a signal:
-	// masscan --version and nbtscan both exit non-zero while working. The image
+	// nbtscan exits non-zero while working. The image
 	// end-to-end test runs every entry's probe.
 	Probe     []string
 	ProbeWant string
@@ -91,14 +91,7 @@ var toolCatalog = []tool{
 		Personas:  []string{"recon", "web", "ad", "cloud", "k8s", "container", "ai-security"},
 		Probe:     []string{"--version"},
 		ProbeWant: "Nmap version",
-		Note:      "connect scanning runs unprivileged; -sS, -sA, -sF, -sX, -sN, -sO, -sU, -O and --traceroute need the raw-socket worker. Always pass -n: the runner has no DNS, so a reverse lookup of the target stalls the scan until the command timeout",
-	},
-	{
-		Binary: "masscan", Package: "masscan", Tier: tierEnum, Raw: rawAlways,
-		Personas:  []string{"recon"},
-		Probe:     []string{"--version"},
-		ProbeWant: "Masscan version",
-		Note:      "SYN scanning only, so every invocation needs the raw-socket worker",
+		Note:      "connect scanning runs unprivileged; -sn host discovery and raw scan modes use NET_RAW. Raw Ethernet, MAC spoofing, source spoofing, and decoys are denied because the worker guard cannot constrain or attribute them. Always pass -n: the runner has no DNS, so a reverse lookup of the target stalls the scan until the command timeout",
 	},
 	{
 		Binary: "tcpdump", Package: "tcpdump", Tier: tierEnum, Raw: rawAlways,
@@ -112,6 +105,13 @@ var toolCatalog = []tool{
 		Personas:  []string{"recon", "ad"},
 		Probe:     []string{"--version"},
 		ProbeWant: "Ncat: Version",
+	},
+	{
+		Binary: "nping", Package: "nmap-nping", Tier: tierEnum, Raw: rawByFlag,
+		Personas:  []string{"recon"},
+		Probe:     []string{"--version"},
+		ProbeWant: "Nping version",
+		Note:      "bounded one-address packet diagnostics; raw TCP, UDP and ICMP use the raw worker, while TCP connect stays unprivileged",
 	},
 	{
 		Binary: "nc", Tier: tierEnum,
@@ -213,6 +213,7 @@ var toolCatalog = []tool{
 		Personas:  []string{"recon", "web", "ad", "cloud", "k8s", "container", "ai-security", "vuln-analysis", "generic"},
 		Probe:     []string{"--version"},
 		ProbeWant: "curl 8",
+		Note:      "HTTP/3 is unavailable in the pinned image; source-port HTTP checks require the bounded direct GET form",
 	},
 	{
 		Binary: "ffuf", Package: "ffuf", Tier: tierEnum,
@@ -444,6 +445,8 @@ var unavailableTools = map[string]string{
 	"dnsrecon":    "the Alpine package imports the stamina module, which has no Alpine package, so the tool fails at startup; dig, host and nslookup cover DNS enumeration",
 	"hashcat":     "needs an OpenCL runtime the image does not carry; john covers offline cracking",
 	"trivy":       "no Alpine package on either architecture; grype and osv-scanner cover image and dependency scanning, and cli/vulnscan.go parses trivy JSON so a report produced elsewhere can be imported",
+	"masscan":     "raw Ethernet packets bypass the worker destination guard; bounded Nmap scans provide guarded port discovery",
+	"ike-scan":    "no package in the pinned Alpine 3.23 runner; a bounded Nping UDP payload can carry operator-supplied IKEv2 bytes, but no native IKEv2 adapter verifies the response",
 	"syft":        "an SBOM generator rather than a scanner: grype reads the same sources directly, so the extra stage buys nothing",
 	// Named by the per-finding exploit-tier catalog in exploitallow.go, which
 	// predates the image work. None is installed, so none can run.
@@ -514,10 +517,21 @@ var nmapRawFlags = map[string]bool{
 // rawScanFlag reports whether argv selects a raw-socket mode of a rawByFlag
 // tool.
 func rawScanFlag(binary string, args []string) bool {
+	if strings.EqualFold(binary, "nping") {
+		for _, a := range args {
+			if a == "--tcp-connect" {
+				return false
+			}
+		}
+		return true
+	}
 	if !strings.EqualFold(binary, "nmap") {
 		return false
 	}
 	for _, a := range args {
+		if a == "-sn" {
+			return true
+		}
 		if nmapRawFlags[a] {
 			return true
 		}

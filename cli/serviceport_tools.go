@@ -159,6 +159,30 @@ func dnsRequirement(c secgate.Command) ([]serviceEndpoint, bool, error) {
 	return []serviceEndpoint{ep}, false, nil
 }
 
+func npingPayloadRequirement(c secgate.Command) ([]serviceEndpoint, bool, error) {
+	if d := secgate.Classify(c); !d.Allowed {
+		return nil, false, errors.New(d.Reason)
+	}
+	port, payload := 0, false
+	for i, arg := range c.Args {
+		if arg == "--data" {
+			payload = true
+		}
+		if (arg == "-p" || arg == "--dest-port") && i+1 < len(c.Args) {
+			port = mustPort(c.Args[i+1])
+		}
+	}
+	if !payload {
+		return nil, true, nil
+	}
+	hosts, nets, ok := secgate.ExtractTargetSet(c)
+	if !ok || len(nets) != 0 || len(hosts) != 1 {
+		return nil, false, errors.New("nping payload requires one verified destination")
+	}
+	ep, err := endpoint(hosts[0], "udp", port)
+	return []serviceEndpoint{ep}, false, err
+}
+
 func hostPortEndpoint(raw, transport string) (serviceEndpoint, error) {
 	host, portText, err := net.SplitHostPort(raw)
 	if err != nil {

@@ -95,7 +95,10 @@ func ScopeViolation(s *Scope, c Command) (string, bool) {
 	if s == nil {
 		return "", false
 	}
-	for _, a := range c.Args {
+	for i, a := range c.Args {
+		if strings.EqualFold(baseName(c.Binary), "nping") && i > 0 && c.Args[i-1] == "--data" {
+			continue
+		}
 		for _, cand := range candidateTokens(a) {
 			if !plausibleNumericHost(cand) {
 				continue

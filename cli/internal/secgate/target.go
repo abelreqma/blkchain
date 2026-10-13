@@ -84,6 +84,9 @@ func ExtractTargetSet(c Command) (hosts []string, nets []*net.IPNet, ok bool) {
 	}
 	lower := strings.ToLower(name)
 	for i, a := range c.Args {
+		if lower == "nping" && i > 0 && c.Args[i-1] == "--data" {
+			continue
+		}
 		if lower == "curl" && (a == "--resolve" || strings.HasPrefix(a, "--resolve=")) {
 			continue
 		}

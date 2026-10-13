@@ -92,23 +92,6 @@ func TestRequiredFlagsCloseDefaultOpenPaths(t *testing.T) {
 	allowed(t, "tcpdump -c", Classify(Command{Binary: "tcpdump", Args: []string{"-c", "50", "-i", "eth0"}}))
 	allowed(t, "tcpdump bundled -nc", Classify(Command{Binary: "tcpdump", Args: []string{"-nc", "50", "-i", "eth0"}}))
 	allowed(t, "tcpdump glued -c50", Classify(Command{Binary: "tcpdump", Args: []string{"-c50", "-i", "eth0"}}))
-	// masscan defaults to a full port sweep at its own rate.
-	for _, args := range [][]string{
-		{"192.0.2.1"},
-		{"-p", "80", "192.0.2.1"},
-		{"--rate", "100", "192.0.2.1"},
-		{"--ports", "80", "192.0.2.1"},
-	} {
-		denied(t, "masscan "+join(args), Classify(Command{Binary: "masscan", Args: args}))
-	}
-	for _, args := range [][]string{
-		{"-p", "80,443", "--rate", "100", "192.0.2.1"},
-		{"-p80", "--rate=100", "192.0.2.1"},
-		{"--ports=80", "--rate", "100", "192.0.2.1"},
-		{"--top-ports", "100", "--rate", "50", "192.0.2.1"},
-	} {
-		allowed(t, "masscan "+join(args), Classify(Command{Binary: "masscan", Args: args}))
-	}
 	// A binary with no requirement is untouched.
 	allowed(t, "curl", Classify(Command{Binary: "curl", Args: []string{"http://192.0.2.1/"}}))
 }

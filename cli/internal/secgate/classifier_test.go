@@ -67,6 +67,37 @@ func TestClassifyDeniesUnboundedNmapWithSuggestion(t *testing.T) {
 	}
 }
 
+func TestClassifyBoundsNmapHostDiscoveryToOneTarget(t *testing.T) {
+	for _, args := range [][]string{
+		{"-sn", "-n", "-PE", "192.0.2.10"},
+		{"-sn", "-n", "-PS80,443", "-PA80", "-PU53", "192.0.2.10"},
+	} {
+		if d := Classify(Command{Binary: "nmap", Args: args}); !d.Allowed {
+			t.Errorf("bounded host discovery %v denied: %s", args, d.Reason)
+		}
+	}
+	for _, args := range [][]string{
+		{"-sn", "-n", "192.0.2.0/24"},
+		{"-sn", "-n", "192.0.2.10", "192.0.2.11"},
+		{"-sn", "-n", "--exclude", "192.0.2.11", "192.0.2.10"},
+	} {
+		if d := Classify(Command{Binary: "nmap", Args: args}); d.Allowed {
+			t.Errorf("unbounded host discovery %v allowed", args)
+		}
+	}
+}
+
+func TestNmapRawEthernetCannotBypassWorkerAddressGuard(t *testing.T) {
+	for _, flag := range []string{"--send-eth", "--send-e", "-send-eth", "--spoof-mac", "--spoof-m", "-D", "-S"} {
+		c := Command{Binary: "nmap", Args: []string{"-sS", "-p", "443", flag, "192.0.2.10"}}
+		for _, classify := range []func(Command) Decision{Classify, ClassifyExternalConfirmed, ClassifyLocal, ClassifyLocalConfirmed} {
+			if d := classify(c); d.Allowed {
+				t.Errorf("%s bypassed the worker address guard", flag)
+			}
+		}
+	}
+}
+
 func TestClassifyDeniesUnboundedCracker(t *testing.T) {
 	if Classify(Command{Binary: "hashcat", Args: []string{"-m", "0", "hashes.txt", "wordlist.txt"}}).Allowed {
 		// no --runtime / bounded keyspace

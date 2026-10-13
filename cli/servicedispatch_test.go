@@ -314,34 +314,6 @@ func TestServiceDispatchRejectsHiddenConnectionRoutes(t *testing.T) {
 	}
 }
 
-func TestMasscanCandidateNeedsValidation(t *testing.T) {
-	ctx := context.Background()
-	d := newServiceDispatcher(nil)
-	probe := secgate.Command{Binary: "masscan", Args: []string{"--rate", "50", "-p", "22", "192.0.2.10"}}
-	if err := d.Observe(ctx, probe, "Discovered open port 22/tcp on 192.0.2.10\nDiscovered open port 23/tcp on 192.0.2.10\nDiscovered open port 22/tcp on 192.0.2.11\n"); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		host, port string
-		allowed    bool
-	}{
-		{"192.0.2.10", "22", false},
-		{"192.0.2.10", "23", false},
-		{"192.0.2.11", "22", false},
-	} {
-		cmd := secgate.Command{Binary: "nc", Args: []string{tc.host, tc.port}}
-		if got := d.Check(ctx, cmd) == ""; got != tc.allowed {
-			t.Errorf("%s:%s allowed=%t, want %t", tc.host, tc.port, got, tc.allowed)
-		}
-	}
-	if err := d.Observe(ctx, secgate.Command{Binary: "nmap", Args: []string{"-n", "-Pn", "-sT", "-p", "22", "192.0.2.10"}}, "Nmap scan report for 192.0.2.10\nPORT STATE SERVICE\n22/tcp open ssh\nNmap done: 1 IP address (1 host up) scanned in 1.00 seconds\n"); err != nil {
-		t.Fatal(err)
-	}
-	if reason := d.Check(ctx, secgate.Command{Binary: "nc", Args: []string{"192.0.2.10", "22"}}); reason != "" {
-		t.Fatalf("validated masscan candidate stayed blocked: %s", reason)
-	}
-}
-
 func TestScanEvidenceRequiresCompletedNmapRun(t *testing.T) {
 	d := newServiceDispatcher(nil)
 	ctx := context.Background()
@@ -370,20 +342,20 @@ func TestScanEvidenceRequiresCompletedNmapRun(t *testing.T) {
 	}
 }
 
-func TestLargeDiscoveryPortRangeKeepsCandidateBoundToReportedPort(t *testing.T) {
+func TestRangeDiscoveryKeepsReportedPortAndTransport(t *testing.T) {
 	d := newServiceDispatcher(nil)
-	probe := secgate.Command{Binary: "masscan", Args: []string{"--rate", "50", "-p", "1-65535", "192.0.2.10"}}
-	if err := d.Observe(context.Background(), probe, "Discovered open port 65000/tcp on 192.0.2.10\nDiscovered open port 65000/udp on 192.0.2.10\n"); err != nil {
+	probe := secgate.Command{Binary: "nmap", Args: []string{"-n", "-sT", "-p", "64000-65000", "192.0.2.10"}}
+	if err := d.Observe(context.Background(), probe, "Nmap scan report for 192.0.2.10\nPORT STATE SERVICE\n65000/tcp open unknown\n65000/udp open unknown\n"+nmapDone); err != nil {
 		t.Fatal(err)
 	}
 	key := d.key(probe, serviceEndpoint{host: "192.0.2.10", transport: "tcp", port: 65000})
 	state, err := d.portState(context.Background(), key)
-	if err != nil || state != "candidate" {
-		t.Fatalf("large first-pass candidate = %q, %v", state, err)
+	if err != nil || state != "open" {
+		t.Fatalf("reported range port = %q, %v", state, err)
 	}
 	key.endpoint.transport = "udp"
 	if state, _ := d.portState(context.Background(), key); state != "" {
-		t.Fatal("unrequested UDP result became a candidate")
+		t.Fatal("unrequested UDP result became service evidence")
 	}
 }
 
@@ -425,6 +397,112 @@ func TestDiagnosticScanDoesNotAuthorizeServiceFollowUp(t *testing.T) {
 		if reason := d.Check(context.Background(), secgate.Command{Binary: "curl", Args: []string{"https://192.0.2.10/"}}); reason == "" {
 			t.Fatalf("diagnostic scan %v authorized a follow-up", flags)
 		}
+	}
+}
+
+func TestNpingPacketReplyDoesNotAuthorizeServiceFollowUp(t *testing.T) {
+	ctx := context.Background()
+	d := newServiceDispatcher(nil)
+	probe := secgate.Command{Binary: "nping", Args: []string{"--tcp", "--flags", "syn", "-c", "1", "--rate", "1", "-p", "443", "192.0.2.10"}}
+	if err := d.Observe(ctx, probe, "SENT TCP 192.0.2.10:443\nRCVD TCP SYN/ACK from 192.0.2.10:443\n"); err != nil {
+		t.Fatal(err)
+	}
+	if reason := d.Check(ctx, secgate.Command{Binary: "curl", Args: []string{"https://192.0.2.10/"}}); reason == "" {
+		t.Fatal("packet diagnostic created service evidence")
+	}
+}
+
+func TestNpingPayloadRequiresDiscoveredUDPPort(t *testing.T) {
+	ctx := context.Background()
+	d := newServiceDispatcher(nil)
+	probe := secgate.Command{Binary: "nping", Args: []string{"--udp", "--data", "0x00000000aabb", "-c", "1", "--rate", "1", "-p", "4500", "192.0.2.10"}}
+	endpoints, discovery, err := serviceRequirement(probe)
+	if err != nil || discovery || len(endpoints) != 1 || endpoints[0] != (serviceEndpoint{host: "192.0.2.10", transport: "udp", port: 4500}) {
+		t.Fatalf("payload prerequisite = %v, discovery=%t, err=%v", endpoints, discovery, err)
+	}
+	if reason := d.Check(ctx, probe); reason == "" {
+		t.Fatal("protocol payload ran without UDP discovery")
+	}
+	plain := secgate.Command{Binary: "nping", Args: []string{"--udp", "-c", "1", "--rate", "1", "-p", "4500", "192.0.2.10"}}
+	if reason := d.Check(ctx, plain); reason != "" {
+		t.Fatalf("bounded UDP discovery denied: %s", reason)
+	}
+	nmap := secgate.Command{Binary: "nmap", Args: []string{"-n", "-sU", "-p", "4500", "192.0.2.10"}}
+	if err := d.Observe(ctx, nmap, "Nmap scan report for 192.0.2.10\nPORT STATE SERVICE\n4500/udp open|filtered ipsec-nat-t\n"+nmapDone); err != nil {
+		t.Fatal(err)
+	}
+	if reason := d.Check(ctx, probe); reason != "" {
+		t.Fatalf("observed UDP candidate did not unlock protocol payload: %s", reason)
+	}
+}
+
+func TestSourcePortCandidateOnlyUnlocksBoundedHTTPValidation(t *testing.T) {
+	ctx := context.Background()
+	d := newServiceDispatcher(nil)
+	request := secgate.Command{Binary: "curl", Args: []string{
+		"-q", "--silent", "--show-error", "--include", "--noproxy", "*",
+		"--connect-timeout", "3", "--max-time", "8", "--local-port", "53",
+		"http://192.0.2.10:8080/",
+	}}
+	if reason := d.Check(ctx, request); reason == "" {
+		t.Fatal("source-port HTTP request ran without discovery")
+	}
+	probe := secgate.Command{Binary: "nmap", Args: []string{"-sS", "-Pn", "-n", "--source-port", "53", "-p", "8080", "192.0.2.10"}}
+	output := "Nmap scan report for 192.0.2.10\nPORT STATE SERVICE\n8080/tcp open http\n" + nmapDone
+	if err := d.Observe(ctx, probe, output); err != nil {
+		t.Fatal(err)
+	}
+	if reason := d.Check(ctx, request); reason != "" {
+		t.Fatalf("source-port candidate did not allow HTTP validation: %s", reason)
+	}
+	if reason := d.Check(ctx, secgate.Command{Binary: "curl", Args: []string{"http://192.0.2.10:8080/"}}); reason == "" {
+		t.Fatal("source-port candidate authorized ordinary route")
+	}
+	other := request
+	other.Args = append([]string(nil), request.Args...)
+	other.Args[len(other.Args)-2] = "54"
+	if reason := d.Check(ctx, other); reason == "" {
+		t.Fatal("source-port candidate authorized another source port")
+	}
+	unsafe := request
+	unsafe.Args = append([]string(nil), request.Args...)
+	unsafe.Args = append(unsafe.Args[:len(unsafe.Args)-1], "-X", "POST", unsafe.Args[len(unsafe.Args)-1])
+	if reason := d.Check(ctx, unsafe); reason == "" {
+		t.Fatal("source-port discovery admitted a state-changing request")
+	}
+	if err := d.Observe(ctx, request, "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	key := d.key(request, serviceEndpoint{host: "192.0.2.10", transport: "tcp", port: 8080})
+	if state, _ := d.portState(ctx, key); state != "open" {
+		t.Fatalf("HTTP response did not confirm the source-port route: %q", state)
+	}
+}
+
+func TestSourcePortEvidenceSurvivesResumeWithoutWideningRoute(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	if _, err := store.Apply(engagement.Delta{Upserts: []engagement.Task{{ID: "t1", Kind: "recon", Status: engagement.StatusActive}}}); err != nil {
+		t.Fatal(err)
+	}
+	probe := secgate.Command{TaskID: "t1", Surface: secgate.SurfaceNetwork, Binary: "nmap", Args: []string{"-sS", "-Pn", "-n", "--source-port", "53", "-p", "8080", "192.0.2.10"}}
+	if err := newServiceDispatcher(store).Observe(ctx, probe, "Nmap scan report for 192.0.2.10\nPORT STATE SERVICE\n8080/tcp open http\n"+nmapDone); err != nil {
+		t.Fatal(err)
+	}
+	fresh := newServiceDispatcher(store)
+	request := secgate.Command{Surface: secgate.SurfaceNetwork, Binary: "curl", Args: []string{
+		"-q", "--silent", "--show-error", "--include", "--noproxy", "*",
+		"--connect-timeout", "3", "--max-time", "8", "--local-port", "53", "http://192.0.2.10:8080/",
+	}}
+	if reason := fresh.Check(ctx, request); reason != "" {
+		t.Fatalf("resumed source-port validation denied: %s", reason)
+	}
+	if reason := fresh.Check(ctx, secgate.Command{Binary: "curl", Args: []string{"http://192.0.2.10:8080/"}}); reason == "" {
+		t.Fatal("resumed source-port candidate widened to ordinary route")
+	}
+	rows, err := store.Surfaces(ctx, engagement.SurfaceFilter{Asset: "192.0.2.10", Kind: "service-port", Name: "tcp/8080"})
+	if err != nil || len(rows) != 1 || !strings.Contains(string(rows[0].Detail), `"source_port":"53"`) {
+		t.Fatalf("source-port provenance not stored: %+v %v", rows, err)
 	}
 }
 

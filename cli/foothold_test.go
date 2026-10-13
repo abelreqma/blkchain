@@ -583,9 +583,9 @@ func TestPivotedRawScanUsesTheGeneralWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	direct := []pipelineStage{{Binary: "masscan", Args: []string{"-p80", "10.10.5.21", "--rate", "100"}}}
+	direct := []pipelineStage{{Binary: "nping", Args: []string{"--tcp", "--flags", "syn", "-c", "1", "--rate", "1", "-p", "80", "10.10.5.21"}}}
 	if !pipelineNeedsRawSocket(direct) {
-		t.Fatal("masscan is not recognized as needing a raw socket; the premise of this test is gone")
+		t.Fatal("nping is not recognized as needing a raw socket; the premise of this test is gone")
 	}
 	if pipelineNeedsRawSocket(footholdStages(tr, direct)) {
 		t.Error("a carried raw scan still selects the privileged raw worker")

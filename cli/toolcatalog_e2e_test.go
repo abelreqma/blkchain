@@ -54,7 +54,7 @@ func workerShell(t *testing.T, image, user, network string, extra []string, scri
 	}
 	args = append(args, extra...)
 	args = append(args, image, "-c", script)
-	// Exit status is never the signal: masscan --version, nbtscan -v and getcap
+	// Exit status is never the signal: nbtscan -v and getcap
 	// all exit non-zero while working, and a bounded probe is killed on purpose.
 	out, _ := exec.Command("docker", args...).CombinedOutput()
 	return string(out)
@@ -129,7 +129,7 @@ func TestImageCarriesNoPrivilegeEscalationPath(t *testing.T) {
 
 // TestRawSocketToolsNeedTheRawWorker asserts the measurement the raw-socket
 // worker exists for: a raw tool fails in the general unprivileged worker and
-// works in the raw worker. Without it a persona could name masscan or tcpdump
+// works in the raw worker. Without it a persona could name nping or tcpdump
 // and always get a permission error.
 func TestRawSocketToolsNeedTheRawWorker(t *testing.T) {
 	image := requireRunnerImage(t)
@@ -140,16 +140,16 @@ func TestRawSocketToolsNeedTheRawWorker(t *testing.T) {
 		denied  string
 	}{
 		{
-			binary:  "masscan",
-			script:  "timeout 20 masscan -p80 --rate 100 --wait 0 127.0.0.1 2>&1",
-			working: "Initiating SYN Stealth Scan",
-			denied:  "permission denied",
-		},
-		{
 			binary:  "tcpdump",
 			script:  "timeout 5 tcpdump -c 1 -i lo -w /dev/null 2>&1",
 			working: "listening on lo",
 			denied:  "CAP_NET_RAW may be required",
+		},
+		{
+			binary:  "nping",
+			script:  "timeout 5 nping --tcp --flags syn -c 1 --rate 1 -p 9 127.0.0.1 2>&1",
+			working: "Raw packets sent: 1",
+			denied:  "requires root privileges",
 		},
 	}
 	for _, c := range cases {
@@ -167,6 +167,14 @@ func TestRawSocketToolsNeedTheRawWorker(t *testing.T) {
 				t.Fatalf("%s did not work in the raw-socket worker: %s", c.binary, terminalSafe(raw))
 			}
 		})
+	}
+}
+
+func TestMasscanAbsentFromPinnedRunner(t *testing.T) {
+	image := requireRunnerImage(t)
+	out := workerShell(t, image, generalWorkerUser, "none", nil, "command -v masscan || true")
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("masscan still exists in the guarded runner: %q", out)
 	}
 }
 
@@ -208,6 +216,17 @@ func TestRunnerRoutesRawScanToTheRawWorker(t *testing.T) {
 	}
 	if len(runner.workers) != 0 {
 		t.Fatalf("SYN scan should not have created a general worker: %+v", runner.workers)
+	}
+	nping := []pipelineStage{{Binary: "nping", Args: []string{"--tcp", "--flags", "syn", "-c", "1", "--rate", "1", "-p", "8080", ip}}}
+	if !pipelineNeedsRawSocket(nping) {
+		t.Fatal("Nping raw TCP must route to the raw worker")
+	}
+	res, _ = runner.Run(ctx, nping, "rawtask", 1<<20, 2*time.Minute)
+	if !strings.Contains(res.Output, "Raw packets sent: 1") || !strings.Contains(res.Output, "Rcvd: 1") {
+		t.Fatalf("Nping raw probe did not reach the fixture: %v %s", res.Err, terminalSafe(res.Output))
+	}
+	if len(runner.rawWorkers) != 1 || len(runner.workers) != 0 {
+		t.Fatalf("Nping used the wrong worker: raw=%+v general=%+v", runner.rawWorkers, runner.workers)
 	}
 
 	connect := []pipelineStage{{Binary: "nmap", Args: []string{"-sT", "-Pn", "-n", "-p", "8080", ip}}}

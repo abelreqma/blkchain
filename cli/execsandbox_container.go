@@ -32,6 +32,8 @@ ip6tables -P INPUT DROP
 iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 work="$1"
 shift
+raw="$1"
+shift
 while [ "$1" != "--" ]; do
   iptables -A OUTPUT -d "$1/32" -j ACCEPT
   shift
@@ -39,6 +41,9 @@ done
 shift
 limit="$1"
 shift
+if [ "$raw" = "1" ]; then
+  exec timeout -s KILL "$limit" capsh --drop=cap_net_admin,cap_setuid,cap_setgid,cap_setpcap --caps=cap_net_raw+ep -- -c 'set -e; cp -R -P /blk-inputs/. "$1"/; shift; exec "$@"' blk-run "$work" "$@"
+fi
 exec timeout -s KILL "$limit" capsh --drop=all --gid=1000 --uid=1000 --caps= -- -c 'set -e; cp -R -P /blk-inputs/. "$1"/; shift; exec "$@"' blk-run "$work" "$@"`
 
 func newContainerCommand(ctx context.Context, binary string, args []string, scratch string, egress executorEgress) (*exec.Cmd, func() error, error) {
@@ -67,14 +72,24 @@ func newContainerCommand(ctx context.Context, binary string, args []string, scra
 	if err != nil {
 		return nil, nil, err
 	}
+	raw := rawSocketCommand(binary, args)
+	workTmpfs := workDir + ":rw,noexec,nosuid,size=64m,mode=0700,uid=1000,gid=1000"
+	rawArg := "0"
+	if raw {
+		workTmpfs = workDir + ":rw,noexec,nosuid,size=64m,mode=0700,uid=0,gid=0"
+		rawArg = "1"
+	}
 	dockerArgs := []string{
 		"run", "--rm", "--pull", "never", "--name", name, "-i",
 		"--network", "bridge", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
 		"--mount", "type=bind,src=" + workDir + ",dst=/blk-inputs,readonly",
-		"--tmpfs", workDir + ":rw,noexec,nosuid,size=64m,mode=0700,uid=1000,gid=1000", "--workdir", workDir,
+		"--tmpfs", workTmpfs, "--workdir", workDir,
 		"--user", "0:0", "--cap-drop", "ALL", "--cap-add", "NET_ADMIN",
 		"--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "SETPCAP",
 		"--security-opt", "no-new-privileges", "--memory", "512m", "--cpus", "2", "--pids-limit", "64",
+	}
+	if raw {
+		dockerArgs = append(dockerArgs, "--cap-add", "NET_RAW")
 	}
 	hosts := make([]string, 0, len(egress.Hosts))
 	for host := range egress.Hosts {
@@ -84,7 +99,7 @@ func newContainerCommand(ctx context.Context, binary string, args []string, scra
 	for _, host := range hosts {
 		dockerArgs = append(dockerArgs, "--add-host", host+":"+egress.Hosts[host])
 	}
-	dockerArgs = append(dockerArgs, executorRunnerImage(), "/bin/sh", "-c", executorFirewallScript, "blk-init", workDir)
+	dockerArgs = append(dockerArgs, executorRunnerImage(), "/bin/sh", "-c", executorFirewallScript, "blk-init", workDir, rawArg)
 	dockerArgs = append(dockerArgs, egress.IPs...)
 	limit := 300 * time.Second
 	if deadline, ok := ctx.Deadline(); ok {

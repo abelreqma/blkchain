@@ -5,7 +5,7 @@ import "net"
 // cidrscope.go decides whether a whole network may be a command's target. The
 // token reader used to refuse every CIDR argument ("a whole network cannot be
 // checked as one host"), which denied the ordinary sweep of a range the operator
-// put in scope and left masscan with nothing it could do that nmap could not.
+// put in scope. A bounded network scan still needs that authorization.
 //
 // A network target is allowed only when it is wholly inside one in-scope CIDR
 // and touches nothing excluded. Containment is deliberately strict: it needs a

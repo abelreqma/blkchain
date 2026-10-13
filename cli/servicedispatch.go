@@ -31,8 +31,9 @@ type serviceObservation struct {
 }
 
 type serviceKey struct {
-	endpoint serviceEndpoint
-	vantage  string
+	endpoint   serviceEndpoint
+	vantage    string
+	sourcePort int
 }
 
 type serviceState struct {
@@ -85,14 +86,18 @@ func attachServiceDispatcher(g *secgate.Gate, store *engagement.Store) {
 }
 
 func (d *serviceDispatcher) key(c secgate.Command, ep serviceEndpoint) serviceKey {
+	key := serviceKey{endpoint: ep, vantage: "worker", sourcePort: commandSourcePort(c)}
 	if d.vantage != nil {
-		return serviceKey{endpoint: ep, vantage: d.vantage(c)}
+		key.vantage = d.vantage(c)
 	}
-	return serviceKey{endpoint: ep, vantage: "worker"}
+	return key
 }
 
 func serviceRecordID(key serviceKey) string {
 	value := fmt.Sprintf("%s/%s/%d/%s", key.endpoint.host, key.endpoint.transport, key.endpoint.port, key.vantage)
+	if key.sourcePort != 0 {
+		value += fmt.Sprintf("/source-port/%d", key.sourcePort)
+	}
 	id := sha256.Sum256([]byte(value))
 	return fmt.Sprintf("service-%x", id)
 }
@@ -117,7 +122,8 @@ func (d *serviceDispatcher) Check(ctx context.Context, c secgate.Command) string
 		if err != nil {
 			return "service dispatch: cannot read port evidence: " + err.Error()
 		}
-		if state != "open" && !(ep.transport == "udp" && state == "open|filtered") {
+		validation := key.sourcePort != 0 && strings.EqualFold(filepath.Base(c.Binary), "curl")
+		if state != "open" && !(ep.transport == "udp" && state == "open|filtered") && !(validation && state == "candidate") {
 			d.mu.RLock()
 			attempted := d.attempted[key]
 			d.mu.RUnlock()
@@ -166,7 +172,7 @@ func (d *serviceDispatcher) Ensure(ctx context.Context, c secgate.Command, g *se
 			return
 		}
 		state, err := d.portState(ctx, key)
-		if err != nil || state == "open" || ep.transport == "udp" && state == "open|filtered" {
+		if err != nil || state == "open" || ep.transport == "udp" && state == "open|filtered" || key.sourcePort != 0 && state == "candidate" {
 			continue
 		}
 		d.mu.Lock()
@@ -192,9 +198,15 @@ func (d *serviceDispatcher) Ensure(ctx context.Context, c secgate.Command, g *se
 		scan := "-sT"
 		if ep.transport == "udp" {
 			scan = "-sU"
+		} else if key.sourcePort != 0 {
+			scan = "-sS"
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		probe := secgate.Command{TaskID: c.TaskID, Binary: "nmap", Args: []string{"-n", "-Pn", scan, "-p", strconv.Itoa(ep.port), ep.host}, Phase: secgate.PhaseRecon, Surface: c.Surface}
+		args := []string{"-n", "-Pn", scan, "-p", strconv.Itoa(ep.port), ep.host}
+		if key.sourcePort != 0 {
+			args = []string{"-n", "-Pn", scan, "--source-port", strconv.Itoa(key.sourcePort), "-p", strconv.Itoa(ep.port), ep.host}
+		}
+		probe := secgate.Command{TaskID: c.TaskID, Binary: "nmap", Args: args, Phase: secgate.PhaseRecon, Surface: c.Surface}
 		decision := g.Authorize(probeCtx, probe)
 		if !decision.Allowed {
 			cancel()
@@ -317,17 +329,25 @@ func (d *serviceDispatcher) Observe(ctx context.Context, c secgate.Command, outp
 	if d == nil || c.InternalProbe {
 		return nil
 	}
-	_, discovery, err := serviceRequirement(c)
-	if err != nil || !discovery && strings.ToLower(filepath.Base(c.Binary)) != "nmap" {
+	endpoints, discovery, err := serviceRequirement(c)
+	name := strings.ToLower(filepath.Base(c.Binary))
+	if err != nil || !discovery && name != "nmap" && !(name == "curl" && commandSourcePort(c) != 0) {
 		return err
 	}
 	observations := scanServiceObservations(c, output)
+	if name == "nmap" && commandSourcePort(c) != 0 {
+		observations = scanSourcePortCandidates(c, output)
+	}
+	if name == "curl" && commandSourcePort(c) != 0 && len(endpoints) == 1 && sourcePortHTTPResponse(output) {
+		observations = []serviceObservation{{endpoint: endpoints[0], state: "open"}}
+	}
 	if !discovery {
 		verified := observations[:0]
 		for _, o := range observations {
 			if o.state == "open" || o.state == "open|filtered" {
-				prior, err := d.portState(ctx, d.key(c, o.endpoint))
-				if err != nil || prior != "open" && !(o.endpoint.transport == "udp" && prior == "open|filtered") {
+				key := d.key(c, o.endpoint)
+				prior, err := d.portState(ctx, key)
+				if err != nil || prior != "open" && !(o.endpoint.transport == "udp" && prior == "open|filtered") && !(name == "curl" && key.sourcePort != 0 && prior == "candidate") {
 					continue
 				}
 			}
@@ -354,7 +374,11 @@ func (d *serviceDispatcher) Observe(ctx context.Context, c secgate.Command, outp
 	}
 	for _, o := range observations {
 		key := d.key(c, o.endpoint)
-		detail, _ := json.Marshal(map[string]string{"vantage": key.vantage, "source": d.source(c)})
+		fields := map[string]string{"vantage": key.vantage, "source": d.source(c)}
+		if key.sourcePort != 0 {
+			fields["source_port"] = strconv.Itoa(key.sourcePort)
+		}
+		detail, _ := json.Marshal(fields)
 		_, err := d.store.SaveSurface(ctx, engagement.SurfaceRecord{
 			ID: serviceRecordID(key), TaskID: c.TaskID, Surface: engagement.Surface(c.Surface),
 			Asset: o.endpoint.host, Kind: "service-port", Name: fmt.Sprintf("%s/%d", o.endpoint.transport, o.endpoint.port),

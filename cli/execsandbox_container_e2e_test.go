@@ -106,6 +106,20 @@ func TestDockerExecutorScopesEgress(t *testing.T) {
 	if err == nil || !strings.Contains(string(output), "timed out") {
 		t.Fatalf("blocked target: output=%q err=%v", output, err)
 	}
+	rawCmd, rawCleanup, err := newContainerCommand(context.Background(), "nping",
+		[]string{"--tcp", "--flags", "syn", "-c", "1", "--rate", "1", "-p", "8080", blocked},
+		privateScratchDir(t), executorEgress{IPs: []string{allowed}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawCmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
+	rawOutput, rawErr := rawCmd.CombinedOutput()
+	if err := rawCleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if rawErr != nil || !strings.Contains(string(rawOutput), "Rcvd: 0") {
+		t.Fatalf("raw probe escaped destination guard: output=%q err=%v", rawOutput, rawErr)
+	}
 	quotaScratch := privateScratchDir(t)
 	large := quotaScratch + "/large"
 	quotaCmd, quotaCleanup, err := newContainerCommand(context.Background(), "/bin/dd", []string{"if=/dev/zero", "of=" + large, "bs=1M", "count=65"}, quotaScratch, executorEgress{IPs: []string{allowed}})

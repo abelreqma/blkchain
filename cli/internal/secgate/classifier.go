@@ -153,16 +153,6 @@ var requiredFlags = map[string]struct {
 		reason:     "tcpdump without a packet count never returns",
 		suggestion: "add a packet bound, e.g. -c 100",
 	},
-	// masscan's defaults are a full port sweep at its built-in rate, which is
-	// unbounded work against the target and ignores the engagement's own rate.
-	"masscan": {
-		groups: []flagGroup{
-			{letters: "p", longs: []string{"ports", "top-ports"}},
-			{longs: []string{"rate"}},
-		},
-		reason:     "masscan without a port bound and an explicit rate is unbounded work against the target",
-		suggestion: "add both, e.g. -p 80,443 --rate 100",
-	},
 }
 
 // classifyRequired denies a command missing any flag group its binary requires.
@@ -254,10 +244,16 @@ func classifyNonStructuralExternal(c Command) Decision {
 	if d, tripped := classifyRequired(c); tripped {
 		return d
 	}
+	if d, tripped := nmapEgressViolation(c); tripped {
+		return d
+	}
 	if d, tripped := impacketViolation(baseName(strings.TrimSpace(c.Binary)), c.Args); tripped {
 		return d
 	}
-	if d, tripped := masscanViolation(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); tripped {
+	if d, tripped := masscanDenied(c); tripped {
+		return d
+	}
+	if d, tripped := npingViolation(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); tripped {
 		return d
 	}
 	if d, tripped := socatViolation(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); tripped {
@@ -368,6 +364,15 @@ func ClassifyLocal(c Command) Decision {
 	if d, tripped := classifyRequired(c); tripped {
 		return d
 	}
+	if d, tripped := nmapEgressViolation(c); tripped {
+		return d
+	}
+	if d, tripped := masscanDenied(c); tripped {
+		return d
+	}
+	if d, tripped := npingViolation(name, c.Args); tripped {
+		return d
+	}
 	if a, bad := readOnlyForms(name, c.Args); bad {
 		return Decision{
 			Allowed:    false,
@@ -385,6 +390,15 @@ func ClassifyLocal(c Command) Decision {
 func ClassifyLocalConfirmed(c Command) Decision {
 	if strings.TrimSpace(c.Binary) == "" {
 		return Decision{Allowed: false, Reason: "empty binary"}
+	}
+	if d, tripped := nmapEgressViolation(c); tripped {
+		return d
+	}
+	if d, tripped := masscanDenied(c); tripped {
+		return d
+	}
+	if d, tripped := npingViolation(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); tripped {
+		return d
 	}
 	return Decision{Allowed: true}
 }
@@ -717,7 +731,7 @@ func classifyUnbounded(c Command) (Decision, bool) {
 	rule, ok := unboundedRules[name]
 	bounded := hasAnyFlag(c.Args, rule.flags...)
 	if name == "nmap" {
-		bounded = nmapPortBound(c.Args)
+		bounded = nmapPortBound(c.Args) || nmapHostDiscoveryBound(c)
 	}
 	if !ok || bounded {
 		return Decision{}, false
@@ -727,6 +741,14 @@ func classifyUnbounded(c Command) (Decision, bool) {
 		Reason:     name + " without a bound is structurally unbounded",
 		Suggestion: rule.suggestion,
 	}, true
+}
+
+func nmapHostDiscoveryBound(c Command) bool {
+	if !hasAnyFlag(c.Args, "-sn") {
+		return false
+	}
+	hosts, nets, ok := ExtractTargetSet(c)
+	return ok && len(hosts) == 1 && len(nets) == 0
 }
 
 func nmapPortBound(args []string) bool {

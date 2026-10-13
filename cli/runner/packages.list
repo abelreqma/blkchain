@@ -22,11 +22,11 @@ openssh-client
 # network and DNS reconnaissance
 bind-tools
 curl
-masscan
 nmap
 nmap-nselibs
 nmap-scripts
 nmap-ncat
+nmap-nping
 tcpdump
 
 # service enumeration

@@ -381,15 +381,15 @@ func TestRawSocketRouting(t *testing.T) {
 		binary string
 		args   []string
 	}{
-		{"masscan", []string{"-p80", "127.0.0.1"}},
-		{"masscan", nil},
 		{"tcpdump", []string{"-c", "1"}},
 		{"nmap", []string{"-sS", "-p", "80", "192.0.2.1"}},
 		{"nmap", []string{"-sU", "-p", "161", "192.0.2.1"}},
+		{"nmap", []string{"-sn", "-PS80,443", "-PA80", "-PU53", "192.0.2.1"}},
+		{"nping", []string{"--tcp", "--flags", "syn", "-c", "2", "--rate", "1", "-p", "443", "192.0.2.1"}},
+		{"nping", []string{"--udp", "-c", "2", "--rate", "1", "-p", "4500", "192.0.2.1"}},
 		{"nmap", []string{"-O", "192.0.2.1"}},
 		{"nmap", []string{"--traceroute", "-p", "80", "192.0.2.1"}},
 		{"NMAP", []string{"-sS", "-p", "80", "192.0.2.1"}},
-		{"Masscan", []string{"-p", "80", "--rate", "100", "192.0.2.1"}},
 	}
 	for _, c := range raw {
 		if !rawSocketCommand(c.binary, c.args) {
@@ -401,6 +401,8 @@ func TestRawSocketRouting(t *testing.T) {
 		args   []string
 	}{
 		{"nmap", []string{"-sT", "-p", "80", "192.0.2.1"}},
+		{"masscan", []string{"-p80", "192.0.2.1"}},
+		{"nping", []string{"--tcp-connect", "--source-port", "53", "-c", "1", "--rate", "1", "-p", "443", "192.0.2.1"}},
 		{"nmap", []string{"-p", "80", "192.0.2.1"}},
 		{"nmap", []string{"-sV", "--top-ports", "100", "192.0.2.1"}},
 		{"curl", []string{"http://192.0.2.1/"}},

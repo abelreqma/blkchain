@@ -134,11 +134,18 @@ func serviceRequirement(c secgate.Command) ([]serviceEndpoint, bool, error) {
 			return nmapRequiredEndpoints(c)
 		}
 		return nil, true, nil
-	case "masscan", "traceroute", "tcpdump", "whois":
+	case "traceroute", "tcpdump", "whois":
 		return nil, true, nil
+	case "nping":
+		return npingPayloadRequirement(c)
 	case "dig", "host", "nslookup":
 		return dnsRequirement(c)
 	case "curl":
+		if curlSourcePortPresent(c.Args) {
+			if err := validateCurlSourcePort(c.Args); err != nil {
+				return nil, false, err
+			}
+		}
 		out, err := commandURLs(c)
 		if err != nil {
 			return nil, false, err
@@ -223,7 +230,7 @@ func hiddenServiceRoute(binary string, args []string) string {
 		flag, _, _ := strings.Cut(strings.ToLower(arg), "=")
 		switch binary {
 		case "curl":
-			if flag == "-l" || flag == "--location" || flag == "--location-trusted" || flag == "--connect-to" || flag == "--alt-svc" || flag == "--interface" || flag == "--local-port" || flag == "-x" || strings.HasPrefix(flag, "--proxy") || strings.HasPrefix(flag, "--preproxy") || strings.HasPrefix(flag, "--socks") {
+			if flag == "-l" || flag == "--location" || flag == "--location-trusted" || flag == "--connect-to" || flag == "--alt-svc" || flag == "--interface" || flag == "-x" || strings.HasPrefix(flag, "--proxy") || strings.HasPrefix(flag, "--preproxy") || strings.HasPrefix(flag, "--socks") {
 				return "connection rewrite or redirect flag is not service-verifiable: " + flag
 			}
 			if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.ContainsAny(arg[1:], "Lx") {

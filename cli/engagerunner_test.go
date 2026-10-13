@@ -554,7 +554,7 @@ func TestEngageRunnerWorkerCapFollowsParallelism(t *testing.T) {
 
 func TestPipelineNeedsRawSocket(t *testing.T) {
 	raw := [][]pipelineStage{
-		{{Binary: "masscan", Args: []string{"-p80", "192.0.2.1"}}},
+		{{Binary: "nping", Args: []string{"--tcp", "--flags", "syn", "-c", "1", "--rate", "1", "-p", "80", "192.0.2.1"}}},
 		{{Binary: "nmap", Args: []string{"-sS", "-p", "80", "192.0.2.1"}}},
 		// One raw stage takes the whole pipeline to the raw worker.
 		{{Binary: "nmap", Args: []string{"-sU", "-p", "161", "192.0.2.1"}}, {Binary: "jq", Args: []string{"."}}},
@@ -570,7 +570,7 @@ func TestPipelineNeedsRawSocket(t *testing.T) {
 		{{Binary: "nmap", Args: []string{"-sT", "-p", "80", "192.0.2.1"}}},
 		{{Binary: "curl", Args: []string{"http://192.0.2.1/"}}, {Binary: "jq", Args: []string{"."}}},
 		{{Binary: "smbclient", Args: []string{"-L", "192.0.2.1"}}},
-		{{Binary: "sh", Args: []string{"-c", "masscan -p80 192.0.2.1"}}},
+		{{Binary: "masscan", Args: []string{"-p80", "192.0.2.1"}}},
 	}
 	for _, stages := range general {
 		if pipelineNeedsRawSocket(stages) {
