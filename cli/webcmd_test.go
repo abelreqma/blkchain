@@ -5,10 +5,13 @@ import (
 	"blkchain/cli/internal/secgate"
 	"blkchain/cli/internal/webacquire"
 	"blkchain/cli/internal/webanalysis"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	tea "github.com/charmbracelet/bubbletea"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -495,9 +498,14 @@ func TestWebExportBundleIncludesTemplatesAndRefreshes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		raw, err := webanalysis.GunzipBytes(body)
+		reader, err := gzip.NewReader(bytes.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
+		}
+		raw, err := io.ReadAll(io.LimitReader(reader, webanalysis.MaxBundleBytes+1))
+		reader.Close()
+		if err != nil || len(raw) > webanalysis.MaxBundleBytes {
+			t.Fatalf("bundle snapshot exceeds limit: %v", err)
 		}
 		var got webanalysis.Snapshot
 		if err := json.Unmarshal(raw, &got); err != nil {

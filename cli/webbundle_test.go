@@ -229,6 +229,73 @@ func TestWrittenBundleVerifiesAgainstItsChecksums(t *testing.T) {
 	}
 }
 
+func TestWriteWebBundleRejectsTamperedContent(t *testing.T) {
+	b := bundleFixture(t)
+	for i := range b.Files {
+		if b.Files[i].Name == "data.js" {
+			b.Files[i].Data = append(b.Files[i].Data, 'x')
+			break
+		}
+	}
+	dir := filepath.Join(t.TempDir(), "bundle")
+	if _, err := writeWebBundle(dir, b); err == nil {
+		t.Fatal("tampered bundle was written")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("tampered bundle left output: %v", err)
+	}
+}
+
+func TestWriteWebBundleRejectsTamperedMetadata(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*webanalysis.Bundle)
+	}{
+		{"size", func(b *webanalysis.Bundle) {
+			for i := range b.Files {
+				if b.Files[i].Name == "data.js" {
+					b.Files[i].Bytes++
+				}
+			}
+			for i := range b.Manifest.Files {
+				if b.Manifest.Files[i].Name == "data.js" {
+					b.Manifest.Files[i].Bytes++
+				}
+			}
+		}},
+		{"manifest", func(b *webanalysis.Bundle) {
+			for i := range b.Files {
+				if b.Files[i].Name == "manifest.json" {
+					b.Files[i].Data = append(b.Files[i].Data, 'x')
+				}
+			}
+		}},
+		{"checksums", func(b *webanalysis.Bundle) {
+			for i := range b.Files {
+				if b.Files[i].Name == "checksums.txt" {
+					b.Files[i].Data = append(b.Files[i].Data, 'x')
+				}
+			}
+		}},
+		{"duplicate", func(b *webanalysis.Bundle) {
+			b.Files = append(b.Files, b.Files[0])
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := bundleFixture(t)
+			tc.mutate(&b)
+			dir := filepath.Join(t.TempDir(), "bundle")
+			if _, err := writeWebBundle(dir, b); err == nil {
+				t.Fatal("invalid bundle was written")
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Fatalf("invalid bundle left output: %v", err)
+			}
+		})
+	}
+}
+
 // bundleTree lists the bundle-relative paths of every file under dir.
 func bundleTree(dir string) ([]string, error) {
 	var out []string

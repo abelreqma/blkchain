@@ -8,6 +8,12 @@ import (
 	"blkchain/cli/internal/askuser"
 )
 
+type fixedAsker struct{ reply askuser.ClarifyResult }
+
+func (a fixedAsker) Ask(context.Context, askuser.Clarification) askuser.ClarifyResult {
+	return a.reply
+}
+
 func TestAskUserToolAutoSuppressed(t *testing.T) {
 	tool := newAskUserTool(askuser.AutoAsker{})
 	out, err := tool.Call(context.Background(), `{"question":"which target?","allow_custom":true}`)
@@ -20,12 +26,7 @@ func TestAskUserToolAutoSuppressed(t *testing.T) {
 }
 
 func TestAskUserToolReturnsChoice(t *testing.T) {
-	a, reqs := askuser.NewChannelAsker()
-	go func() {
-		<-reqs
-		a.Reply(askuser.ClarifyResult{Value: "10.0.0.9"})
-	}()
-	tool := newAskUserTool(a)
+	tool := newAskUserTool(fixedAsker{reply: askuser.ClarifyResult{Value: "10.0.0.9"}})
 	out, err := tool.Call(context.Background(), `{"question":"which target?"}`)
 	if err != nil {
 		t.Fatal(err)
@@ -36,12 +37,7 @@ func TestAskUserToolReturnsChoice(t *testing.T) {
 }
 
 func TestAskUserToolEmptyAnswer(t *testing.T) {
-	a, reqs := askuser.NewChannelAsker()
-	go func() {
-		<-reqs
-		a.Reply(askuser.ClarifyResult{})
-	}()
-	out, err := newAskUserTool(a).Call(context.Background(), `{"question":"which target?"}`)
+	out, err := newAskUserTool(fixedAsker{}).Call(context.Background(), `{"question":"which target?"}`)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -252,6 +252,23 @@ func TestEngageAuditWriteFailureFailsClearly(t *testing.T) {
 	}
 }
 
+func TestEngageSessionPassesArmRequester(t *testing.T) {
+	stubEngageRunner(t)
+	req := &testArmRequester{decision: ArmSkip}
+	_, err := runEngageSession(context.Background(), engageRunInput{
+		Opts: engageOpts{workspace: t.TempDir()}, Cwd: testEngageRoE(t), Goal: "inspect the lab", ArmReq: req,
+		Run: func(_ context.Context, d engageDeps, _ string) (string, error) {
+			if d.ArmReq != req {
+				return "", errors.New("arm requester did not reach the executor")
+			}
+			return "done", nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEngageRunnerSetupFailureLeavesWorkspaceEmpty(t *testing.T) {
 	previous := newEngageRunnerForRun
 	newEngageRunnerForRun = func(context.Context, *RoE) (*engageRunner, error) {

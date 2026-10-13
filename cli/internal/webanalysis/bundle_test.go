@@ -9,6 +9,10 @@ import (
 	"testing"
 )
 
+func gunzipBundleFixture(b []byte) ([]byte, error) {
+	return gunzipBounded(b, MaxBundleBytes)
+}
+
 func bundleSnapshot() Snapshot {
 	return Snapshot{
 		Units: []SourceUnit{
@@ -89,7 +93,7 @@ func TestBundleShardsRoundTripAsJSONL(t *testing.T) {
 	if f.Records != 2 {
 		t.Errorf("shard records = %d, want 2", f.Records)
 	}
-	raw, err := GunzipBytes(f.Data)
+	raw, err := gunzipBundleFixture(f.Data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +303,7 @@ func TestBundleSnapshotFileRoundTrips(t *testing.T) {
 	if !ok {
 		t.Fatal("no snapshot file")
 	}
-	raw, err := GunzipBytes(f.Data)
+	raw, err := gunzipBundleFixture(f.Data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +340,7 @@ func TestBundleDropsATreeWithNoUnit(t *testing.T) {
 	if !strings.Contains(strings.Join(b.Manifest.Gaps, " "), "orphan") {
 		t.Errorf("gaps do not name the dropped tree: %v", b.Manifest.Gaps)
 	}
-	raw, err := GunzipBytes(mustFile(t, b, "records/ast.00000.jsonl.gz").Data)
+	raw, err := gunzipBundleFixture(mustFile(t, b, "records/ast.00000.jsonl.gz").Data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +476,7 @@ func TestBundleOfAnEmptySnapshot(t *testing.T) {
 			t.Errorf("%s counted %d in an empty snapshot", k.name, b.Manifest.Counts[k.name])
 		}
 		f := mustFile(t, b, fmt.Sprintf("records/%s.00000.jsonl.gz", k.name))
-		raw, err := GunzipBytes(f.Data)
+		raw, err := gunzipBundleFixture(f.Data)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -482,23 +486,23 @@ func TestBundleOfAnEmptySnapshot(t *testing.T) {
 	}
 }
 
-func TestGunzipBytesRejectsBadInput(t *testing.T) {
-	if _, err := GunzipBytes([]byte("not gzip")); err == nil {
+func TestGunzipBoundedRejectsBadInput(t *testing.T) {
+	if _, err := gunzipBundleFixture([]byte("not gzip")); err == nil {
 		t.Error("non-gzip input was accepted")
 	}
-	if _, err := GunzipBytes(nil); err == nil {
+	if _, err := gunzipBundleFixture(nil); err == nil {
 		t.Error("empty input was accepted")
 	}
 	round, err := gzipBytes([]byte("hello"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	back, err := GunzipBytes(round)
+	back, err := gunzipBundleFixture(round)
 	if err != nil || string(back) != "hello" {
 		t.Errorf("round trip gave %q (%v)", back, err)
 	}
 	// A truncated member is an error, not a short read.
-	if _, err := GunzipBytes(round[:len(round)-4]); err == nil {
+	if _, err := gunzipBundleFixture(round[:len(round)-4]); err == nil {
 		t.Error("a truncated gzip member was accepted")
 	}
 }

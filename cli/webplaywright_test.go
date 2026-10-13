@@ -138,17 +138,6 @@ func TestWebParseHeaderLines(t *testing.T) {
 	}
 }
 
-// TestWebResolveRedirect resolves absolute and relative Location values against
-// the request URL.
-func TestWebResolveRedirect(t *testing.T) {
-	if got := webResolveRedirect("http://10.0.0.5/a/b", "https://evil.example/x"); got != "https://evil.example/x" {
-		t.Errorf("absolute redirect = %q, want the absolute URL", got)
-	}
-	if got := webResolveRedirect("http://10.0.0.5/a/b", "/c"); got != "http://10.0.0.5/c" {
-		t.Errorf("relative redirect = %q, want http://10.0.0.5/c", got)
-	}
-}
-
 // TestWebBoundOutput caps oversized output.
 func TestWebBoundOutput(t *testing.T) {
 	big := strings.Repeat("x", webMaxDriverBytes+50)

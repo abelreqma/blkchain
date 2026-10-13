@@ -26,6 +26,9 @@ func writeWebBundle(dir string, b webanalysis.Bundle) ([]string, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, errors.New("bundle directory must be absolute: " + webanalysis.SafeText(dir))
 	}
+	if bad := webanalysis.VerifyBundle(b); len(bad) != 0 {
+		return nil, errors.New("invalid bundle: " + bad[0])
+	}
 	root := filepath.Clean(dir)
 	parent := filepath.Dir(root)
 	if err := webExportDir(parent); err != nil {

@@ -366,7 +366,7 @@ func TestADCoverageGapNotDispatchedAndNotArmable(t *testing.T) {
 
 // TestADLogicGapGatedSamePath is the completeness arm: the shared logic-gap path
 // (groundCandidate via engageDeps.RC) gates identically. The AD path rarely emits
-// logic-gap candidates, but correlateNewEvidence runs correlateLogicGaps on every
+// logic-gap candidates, but correlateNewEvidence runs logicGapHits on every
 // quote, so an AD evidence quote that trips the force-browse rule must ground with
 // a corpus hit and surface a coverage gap without one.
 func TestADLogicGapGatedSamePath(t *testing.T) {

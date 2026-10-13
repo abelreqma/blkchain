@@ -141,6 +141,49 @@ func TestEngageTelemetryHaltsGateAfterDenialBurst(t *testing.T) {
 	}
 }
 
+func TestEngageSessionHaltsAfterDenialBurst(t *testing.T) {
+	stubEngageRunner(t)
+	workspace := t.TempDir()
+	_, err := runEngageSession(context.Background(), engageRunInput{
+		Opts: engageOpts{workspace: workspace}, Cwd: testEngageRoE(t), Goal: "inspect the lab",
+		Run: func(ctx context.Context, d engageDeps, _ string) (string, error) {
+			for i := 0; i < 8; i++ {
+				if decision := d.Gate.Authorize(ctx, secgate.Command{Binary: "nmap", Args: []string{"198.51.100.2"}}); decision.Allowed {
+					return "", errors.New("out-of-scope command was allowed")
+				}
+			}
+			return "", context.Cause(ctx)
+		},
+	})
+	if !errors.Is(err, errEngageDenialBurst) {
+		t.Fatalf("denial burst result=%v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(workspace, "audit.jsonl"))
+	if err != nil || !strings.Contains(string(data), `"reason_code":"denial-burst"`) {
+		t.Fatalf("denial burst audit=%q err=%v", data, err)
+	}
+}
+
+func TestEngageSessionRecordsToolLoopDecisions(t *testing.T) {
+	stubEngageRunner(t)
+	workspace := t.TempDir()
+	_, err := runEngageSession(context.Background(), engageRunInput{
+		Opts: engageOpts{workspace: workspace}, Cwd: testEngageRoE(t), Goal: "inspect the lab",
+		Run: func(ctx context.Context, _ engageDeps, _ string) (string, error) {
+			model := &fakeModel{queue: []*llms.ContentResponse{textResp("done")}}
+			_, _, err := runToolLoop(ctx, model, newLoopReg(t), userMsgs(), LoopCaps{MaxRounds: 1})
+			return "done", err
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(workspace, "audit.jsonl"))
+	if err != nil || !strings.Contains(string(data), `"action":"model-final"`) {
+		t.Fatalf("tool loop decisions missing from audit: %q %v", data, err)
+	}
+}
+
 func TestEngageTelemetryRecordsModelAndToolDecisions(t *testing.T) {
 	ws, err := engagement.OpenWorkspace(t.TempDir())
 	if err != nil {

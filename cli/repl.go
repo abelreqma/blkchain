@@ -421,31 +421,6 @@ func plainVizSnapshot(w io.Writer, r *vizRenderer, v EngagementView) {
 	}
 }
 
-// plainClarify asks a numbered question on a non-TTY. An empty line or EOF
-// cancels, a number in range picks that option, and any other text is a custom
-// instruction. The plain REPL is serial, so it needs no reply channel.
-func plainClarify(in *bufio.Scanner, out io.Writer, c Clarification) ClarifyResult {
-	fmt.Fprintln(out, H2.Render(c.Question))
-	if c.Detail != "" {
-		fmt.Fprintln(out, Meta.Render(c.Detail))
-	}
-	for i, o := range c.Options {
-		fmt.Fprintf(out, "  %d) %s\n", i+1, o.Label)
-	}
-	fmt.Fprint(out, Prompt.Render("choose> "))
-	if !in.Scan() {
-		return ClarifyResult{Canceled: true}
-	}
-	line := strings.TrimSpace(in.Text())
-	if line == "" {
-		return ClarifyResult{Canceled: true}
-	}
-	if n, err := strconv.Atoi(line); err == nil && n >= 1 && n <= len(c.Options) {
-		return ClarifyResult{Value: c.Options[n-1].Value}
-	}
-	return ClarifyResult{Custom: line}
-}
-
 // replClient is the plain REPL's one retrieval client, made on first use and
 // closed when the loop ends.
 type replClient struct {

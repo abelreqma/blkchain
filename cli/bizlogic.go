@@ -79,8 +79,7 @@ type logicGapHit struct {
 
 // logicGapHits scans one verbatim evidence quote and returns the matched
 // logic-gap candidates, each paired with its grounding query (the rule skill).
-// It returns nil for invalid provenance or no match. correlateLogicGaps is the
-// Task-only wrapper for callers that do not ground.
+// It returns nil for invalid provenance or no match.
 func logicGapHits(prov Provenance, quote string) []logicGapHit {
 	if !prov.valid() {
 		return nil
@@ -106,25 +105,6 @@ func logicGapHits(prov Provenance, quote string) []logicGapHit {
 			Query: rule.skill + " " + rule.objective,
 			Term:  rule.term,
 		})
-	}
-	return out
-}
-
-// correlateLogicGaps scans one verbatim evidence quote for business-logic gap
-// indicators and returns the UNARMED exploit candidates they imply, in rule
-// order, one candidate per matched rule (deduped per rule). It returns nil when
-// the provenance is invalid (no candidate without a verified evidence-quote id)
-// or no indicator matches. The gate enforces arm + per-action confirm; this only
-// plans the candidate. Grounding/coverage-gap handling is applied by the caller
-// (see logicGapHits + correlateNewEvidence).
-func correlateLogicGaps(prov Provenance, quote string) []engagement.Task {
-	hits := logicGapHits(prov, quote)
-	if hits == nil {
-		return nil
-	}
-	out := make([]engagement.Task, len(hits))
-	for i, h := range hits {
-		out[i] = h.Task
 	}
 	return out
 }

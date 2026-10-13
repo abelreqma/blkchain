@@ -130,7 +130,7 @@ func TestUndoReconcilesAnUncommittedTailAndStillRejectsRealDivergence(t *testing
 			t.Fatal(err)
 		}
 		m.sess.endTurn()
-		if err := m.undoConversation(); err != nil {
+		if _, err := m.undoConversationContext(); err != nil {
 			t.Fatalf("undo refused a reconcilable divergence: %v", err)
 		}
 		memory, err := m.hist.Messages(context.Background(), m.sess.id)
@@ -159,7 +159,7 @@ func TestUndoReconcilesAnUncommittedTailAndStillRejectsRealDivergence(t *testing
 		if err := os.WriteFile(m.sess.filePath(), []byte(edited), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if err := m.undoConversation(); err == nil {
+		if _, err := m.undoConversationContext(); err == nil {
 			t.Fatal("undo accepted stores that disagree inside the committed region")
 		}
 		memory, err := m.hist.Messages(context.Background(), m.sess.id)
@@ -207,7 +207,7 @@ func TestUndoReplacesGatewayConversationAndKeepsPendingContext(t *testing.T) {
 	m.attachments = []attachment{{path: "notes.txt", content: "notes"}}
 	m.queue = []string{"queued question"}
 
-	if err := m.undoConversation(); err != nil {
+	if _, err := m.undoConversationContext(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -311,7 +311,7 @@ func TestListedCountAndTranscriptAgreeAcrossUndo(t *testing.T) {
 		t.Fatalf("after two turns listed=%d replayed=%d, want 4 and 4", listed(), replayed())
 	}
 
-	if err := m.undoConversation(); err != nil {
+	if _, err := m.undoConversationContext(); err != nil {
 		t.Fatal(err)
 	}
 	if listed() != 2 || replayed() != 2 {

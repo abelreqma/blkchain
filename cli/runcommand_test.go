@@ -16,7 +16,12 @@ import (
 	"time"
 
 	"blkchain/cli/internal/secgate"
+	"blkchain/cli/internal/tooldef"
 )
+
+func newRunCommandTool(g *secgate.Gate, capBytes int, timeout time.Duration, workDir string, activeTask func() string, capture func(taskID, output string)) tooldef.Tool {
+	return newRunCommandToolForTask(g, capBytes, timeout, workDir, activeTask, capture, secgate.Command{}, nil)
+}
 
 // stubbed execRunner for hermetic tests.
 func withStubExec(t *testing.T, fn func(ctx context.Context, bin string, args []string, dir string, capBytes int, timeout time.Duration) runResult) {

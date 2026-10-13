@@ -16,6 +16,7 @@ import (
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/secgate"
 	"blkchain/cli/internal/skillcat"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // engageReadyModel is a model whose engage dependencies build cleanly: a real
@@ -96,6 +97,50 @@ func TestEngageDispatchStartsTurn(t *testing.T) {
 	}
 	if !strings.Contains(m.workingVerb, "engag") {
 		t.Fatalf("working verb = %q; want an engage label", m.workingVerb)
+	}
+}
+
+func TestEngageCmdCarriesArmRequester(t *testing.T) {
+	req := &testArmRequester{decision: ArmSkip}
+	stubRunReplEngage(t, func(ctx context.Context, _ string, _ string, _ secgate.Mode, _ bool, _ toolLoopModel, _ searcher, _ ragconfig.Config, _ modelPrefs, _ *skillcat.Catalog, _ secgate.Confirmer, _ askuser.Asker, _ *sql.DB, _ string, _ func(int64, eng.Engagement)) (string, error) {
+		if got, _ := ctx.Value(replArmReqKey{}).(ArmRequester); got != req {
+			return "", errors.New("arm requester did not reach the engagement")
+		}
+		return "done", nil
+	})
+	msg := engageCmd(replEngageRun{ctx: context.Background(), armReq: req})()
+	if done, ok := msg.(engageDoneMsg); !ok || done.err != nil {
+		t.Fatalf("engagement command=%+v", msg)
+	}
+}
+
+func TestTUIEngageDispatchWiresArmRequester(t *testing.T) {
+	m := engageReadyModel(t)
+	m.prog = &tea.Program{}
+	stubRunReplEngage(t, func(ctx context.Context, _ string, _ string, _ secgate.Mode, _ bool, _ toolLoopModel, _ searcher, _ ragconfig.Config, _ modelPrefs, _ *skillcat.Catalog, _ secgate.Confirmer, _ askuser.Asker, _ *sql.DB, _ string, _ func(int64, eng.Engagement)) (string, error) {
+		req, ok := ctx.Value(replArmReqKey{}).(releaseArmRequester)
+		if !ok || req.prog != m.prog {
+			return "", errors.New("TUI arm requester did not reach the engagement")
+		}
+		return "done", nil
+	})
+	_, cmd := m.dispatchInput("/engage inspect 192.0.2.1")
+	if cmd == nil {
+		t.Fatal("engagement command was not dispatched")
+	}
+	var msg tea.Msg = cmd()
+	for i := 0; i < 4; i++ {
+		batch, ok := msg.(tea.BatchMsg)
+		if !ok {
+			break
+		}
+		if len(batch) == 0 {
+			t.Fatal("engagement command batch is empty")
+		}
+		msg = batch[len(batch)-1]()
+	}
+	if done, ok := msg.(engageDoneMsg); !ok || done.err != nil {
+		t.Fatalf("engagement result=%+v", msg)
 	}
 }
 

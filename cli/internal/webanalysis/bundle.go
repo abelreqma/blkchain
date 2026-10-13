@@ -13,7 +13,7 @@ import (
 
 // bundle.go turns a snapshot into sharded JSONL, a gzipped snapshot, a checksummed manifest and an offline viewer, deterministically and without touching disk.
 
-// BundleVersion is the bundle layout this package writes and reads.
+// BundleVersion is the bundle layout this package writes.
 const BundleVersion = "blkchain-web-bundle/1"
 
 // MaxShardRecords bounds one JSONL shard.
@@ -245,9 +245,6 @@ func gzipBytes(b []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// GunzipBytes decompresses a bundle file's content, bounded by the bundle limit.
-func GunzipBytes(b []byte) ([]byte, error) { return gunzipBounded(b, MaxBundleBytes) }
-
 // gunzipBounded decompresses b and fails once the output passes limit.
 func gunzipBounded(b []byte, limit int64) ([]byte, error) {
 	r, err := gzip.NewReader(bytes.NewReader(b))
@@ -278,30 +275,63 @@ func checksumList(files []BundleFile) []byte {
 // VerifyBundle recomputes every file's checksum against the manifest and reports the mismatches.
 func VerifyBundle(b Bundle) []string {
 	var bad []string
+	files := make(map[string]BundleFile, len(b.Files))
+	var checksumFiles []BundleFile
+	total := 0
+	for _, f := range b.Files {
+		if _, duplicate := files[f.Name]; duplicate {
+			bad = append(bad, f.Name+": duplicate file")
+			continue
+		}
+		files[f.Name] = f
+		if f.Name != "checksums.txt" {
+			checksumFiles = append(checksumFiles, f)
+		}
+		if len(f.Data) != f.Bytes || Hash(f.Data) != f.SHA256 {
+			bad = append(bad, f.Name+": content does not match file metadata")
+		}
+		if len(f.Data) > MaxBundleBytes-total {
+			bad = append(bad, "bundle exceeds the size limit")
+		} else {
+			total += len(f.Data)
+		}
+	}
 	listed := map[string]bool{}
 	for _, m := range b.Manifest.Files {
+		if listed[m.Name] {
+			bad = append(bad, m.Name+": duplicate manifest entry")
+			continue
+		}
 		listed[m.Name] = true
-		f, ok := b.File(m.Name)
+		f, ok := files[m.Name]
 		if !ok {
 			bad = append(bad, m.Name+": listed in the manifest but absent")
 			continue
 		}
-		if f.Bytes != m.Bytes {
-			bad = append(bad, m.Name+": size does not match the manifest")
-			continue
-		}
-		if Hash(f.Data) != m.SHA256 {
-			bad = append(bad, m.Name+": content does not match its checksum")
+		if f.Bytes != m.Bytes || f.SHA256 != m.SHA256 {
+			bad = append(bad, m.Name+": metadata does not match the manifest")
 		}
 	}
-	for _, f := range b.Files {
-		switch f.Name {
+	for name := range files {
+		switch name {
 		case "manifest.json", "checksums.txt":
 			continue
 		}
-		if !listed[f.Name] {
-			bad = append(bad, f.Name+": present but not listed in the manifest")
+		if !listed[name] {
+			bad = append(bad, name+": present but not listed in the manifest")
 		}
+	}
+	manifest, ok := b.File("manifest.json")
+	if !ok {
+		bad = append(bad, "manifest.json: absent")
+	} else if data, err := json.MarshalIndent(b.Manifest, "", " "); err != nil || !bytes.Equal(manifest.Data, append(data, '\n')) {
+		bad = append(bad, "manifest.json: content does not match the manifest")
+	}
+	checksums, ok := b.File("checksums.txt")
+	if !ok {
+		bad = append(bad, "checksums.txt: absent")
+	} else if !bytes.Equal(checksums.Data, checksumList(checksumFiles)) {
+		bad = append(bad, "checksums.txt: content does not match the files")
 	}
 	sort.Strings(bad)
 	return bad

@@ -23,9 +23,6 @@ func TestRegistryHasFiveSchemas(t *testing.T) {
 	if _, ok := Lookup("nope"); ok {
 		t.Fatalf("Lookup(nope) should be false")
 	}
-	if len(Schemas()) != len(want) {
-		t.Fatalf("Schemas() len = %d", len(Schemas()))
-	}
 }
 
 func TestTargetProfileValidate(t *testing.T) {

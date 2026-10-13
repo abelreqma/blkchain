@@ -159,13 +159,6 @@ func (m model) footerKeys() footerKeyMap {
 				return footerKeyMap{short: []key.Binding{hint("enter", "submit"), hint("esc", "back")}}
 			}
 			return footerKeyMap{short: []key.Binding{hint("up/down", "move"), hint("enter", "choose"), hint("esc", "cancel")}}
-		case confirmPicker:
-			if ov.editing {
-				return footerKeyMap{short: []key.Binding{hint("enter", "re-check & run"), hint("esc", "cancel edit")}}
-			}
-			return footerKeyMap{short: []key.Binding{hint("y", "allow"), hint("e", "edit"), hint("n", "deny"), hint("esc", "deny & stop")}}
-		case armPicker:
-			return footerKeyMap{short: []key.Binding{hint("y", "arm & continue"), hint("n", "skip"), hint("esc", "stop")}}
 		case filePicker:
 			return footerKeyMap{short: []key.Binding{hint("type", "filter"), hint("up/down", "move"), hint("enter", "open/select"), hint("backspace", "erase/up"), closeKey}}
 		case modelsPanel:
@@ -1342,64 +1335,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return nil
 		})
 
-	case confirmMsg:
-		// A confirm overlay already open is displaced: deny it so its requester is
-		// not left blocked on the reply channel.
-		var cancel tea.Cmd
-		if old, ok := m.overlay.(confirmPicker); ok && old.reply != nil {
-			reply := old.reply
-			cancel = func() tea.Msg {
-				reply <- confirmResult{}
-				return nil
-			}
-		}
-		m.overlay = newConfirmPicker(msg.cmd, m.width, msg.reply)
-		return m, cancel
-
-	case confirmResolvedMsg:
-		m.overlay = nil
-		reply, res := msg.reply, msg.res
-		// esc stops the engagement: cancel the running turn so the orchestrator
-		// winds down after this denied command.
-		if res.stop && m.cancel != nil {
-			m.cancel()
-		}
-		// The send runs in a command so a slow receiver never blocks the loop.
-		return m, tea.Batch(textarea.Blink, func() tea.Msg {
-			if reply != nil {
-				reply <- res
-			}
-			return nil
-		})
-
-	case armMsg:
-		// A displaced arm request (new before the old is answered) fails safe: the
-		// old request is answered ArmSkip so its executor is not left blocked.
-		var cancel tea.Cmd
-		if old, ok := m.overlay.(armPicker); ok && old.reply != nil {
-			reply := old.reply
-			cancel = func() tea.Msg {
-				reply <- ArmSkip
-				return nil
-			}
-		}
-		m.overlay = newArmPicker(msg.task, msg.reply)
-		return m, cancel
-
-	case armResolvedMsg:
-		m.overlay = nil
-		reply, res := msg.reply, msg.res
-		// ArmStop halts the engagement: cancel the running turn.
-		if res == ArmStop && m.cancel != nil {
-			m.cancel()
-		}
-		return m, tea.Batch(textarea.Blink, func() tea.Msg {
-			if reply != nil {
-				reply <- res
-			}
-			return nil
-		})
-
 	case historySelectedMsg:
 		m.overlay = nil
 		return m.openHistorySessionInto(msg.id)
@@ -1714,6 +1649,7 @@ func (m model) dispatchEngageAt(goal, wsDir, projectDir string, cdp ...engageOpt
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	run.ctx = ctx
+	run.armReq = releaseArmRequester{prog: m.prog}
 	if m.engageMode == secgate.Safe {
 		run.confirm = releaseConfirmer{prog: m.prog, stop: cancel}
 	}

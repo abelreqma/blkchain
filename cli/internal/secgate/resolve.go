@@ -5,18 +5,7 @@ import "net"
 // lookupIPFn resolves a host to IPs; a var so tests can stub it.
 var lookupIPFn = net.LookupIP
 
-// ResolveScopeViolation resolves every hostname target of c (bare IPs are
-// skipped, InScope already checked them) and reports the first host whose
-// resolution fails or contains any IP outside the scope. A resolver error or an
-// empty result fails closed with an empty ip. A nil scope never violates.
-//
-// This closes the check-time DNS gap only. A tool that re-resolves the name
-// itself at exec time can still see a different answer; the harness cannot
-// intercept an external resolver, so that residual TOCTOU is not closed here.
-func ResolveScopeViolation(s *Scope, c Command) (host string, ip string, violation bool) {
-	return resolveScopeViolationWith(s, c, lookupIPFn, s.WebAddressAllowed)
-}
-
+// resolveScopeViolationWith rejects hostname resolutions outside the active scope.
 func resolveScopeViolationWith(s *Scope, c Command, lookup func(string) ([]net.IP, error), webAllowed func(string, net.IP) bool) (host string, ip string, violation bool) {
 	if s == nil {
 		return "", "", false

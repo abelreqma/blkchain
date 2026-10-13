@@ -131,9 +131,6 @@ func (f *engageIntakeFlow) record(res ClarifyResult) {
 	f.step++
 }
 
-// done reports whether every step has been answered.
-func (f *engageIntakeFlow) done() bool { return f.step >= engageIntakeSteps }
-
 // goal assembles the collected answers into the engagement goal.
 func (f *engageIntakeFlow) goal() string { return assembleEngageGoal(f.answers) }
 

@@ -124,14 +124,7 @@ func denyMessage(d secgate.Decision) string {
 	return msg
 }
 
-// newRunCommandTool builds the run_command tool. It executes ONLY when the gate
-// allows the command AND the exec-time scope re-check finds no out-of-scope
-// resolved address. activeTask names the task to attribute captured output to.
-func newRunCommandTool(g *secgate.Gate, capBytes int, timeout time.Duration, workDir string, activeTask func() string, capture func(taskID, output string)) tooldef.Tool {
-	return newRunCommandToolForTask(g, capBytes, timeout, workDir, activeTask, capture, secgate.Command{}, nil)
-}
-
-// newRunCommandToolForTask is newRunCommandTool with the engagement context
+// newRunCommandToolForTask builds run_command with the engagement context
 // (phase/surface/armed) in cmdCtx stamped onto every Command the tool builds, so
 // the gate derives the per-action tier for the task's phase (exploit/post-ex
 // require an armed task and force per-action confirmation). A zero cmdCtx is the

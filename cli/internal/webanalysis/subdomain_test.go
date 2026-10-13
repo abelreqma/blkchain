@@ -2,9 +2,24 @@ package webanalysis
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 )
+
+func subdomainNames(in []SubdomainName) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, item := range in {
+		if item.Wildcard || seen[item.Name] {
+			continue
+		}
+		seen[item.Name] = true
+		out = append(out, item.Name)
+	}
+	sort.Strings(out)
+	return out
+}
 
 func TestUnderDomainRespectsTheLabelBoundary(t *testing.T) {
 	for _, tc := range []struct {
@@ -68,7 +83,7 @@ func TestPassiveSubdomainsFromCertificateNames(t *testing.T) {
 			"example.com", "cdn.other-company.net", "", "*.",
 		},
 	}})
-	names := SubdomainNames(got)
+	names := subdomainNames(got)
 	want := []string{"api.example.com", "example.com", "www.example.com"}
 	if len(names) != len(want) {
 		t.Fatalf("names = %v, want %v", names, want)
@@ -109,7 +124,7 @@ func TestPassiveSubdomainsUnderASingleLabelRoot(t *testing.T) {
 	got := PassiveSubdomains("corp", []SubdomainSource{{
 		Kind: "certificate", Values: []string{"corp", "api.corp", "*.dev.corp", "notcorp", "corp.example.com"},
 	}})
-	names := SubdomainNames(got)
+	names := subdomainNames(got)
 	if len(names) != 2 || names[0] != "api.corp" || names[1] != "corp" {
 		t.Errorf("names = %v, want api.corp and corp", names)
 	}
@@ -130,7 +145,7 @@ func TestPassiveSubdomainsFromHeaders(t *testing.T) {
 			"max-age=31536000; includeSubDomains",
 		},
 	}})
-	names := SubdomainNames(got)
+	names := subdomainNames(got)
 	for _, want := range []string{
 		"allowed.example.com", "cdn.example.com", "login.example.com",
 		"static.example.com", "ws.example.com",
@@ -171,7 +186,7 @@ version 1.2.3 and build 10.0.0.1
 	got := PassiveSubdomains("example.com", []SubdomainSource{{
 		Kind: "body", Origin: "www.example.com", EvidenceID: 11, Values: []string{body},
 	}})
-	names := SubdomainNames(got)
+	names := subdomainNames(got)
 	for _, want := range []string{
 		"assets.example.com", "fonts.example.com", "internal.example.com",
 		"mail.example.com", "support.example.com",
@@ -210,8 +225,8 @@ func TestPassiveSubdomainsDeduplicatesPerSource(t *testing.T) {
 	if got[0].Source == got[1].Source {
 		t.Errorf("the two records share a source: %+v", got)
 	}
-	if names := SubdomainNames(got); len(names) != 1 || names[0] != "api.example.com" {
-		t.Errorf("SubdomainNames = %v, want the one distinct host", names)
+	if names := subdomainNames(got); len(names) != 1 || names[0] != "api.example.com" {
+		t.Errorf("subdomain names = %v, want the one distinct host", names)
 	}
 }
 
@@ -274,7 +289,7 @@ func TestPassiveSubdomainsBoundsTheMaterialItScans(t *testing.T) {
 	got := PassiveSubdomains("example.com", []SubdomainSource{
 		{Kind: "body", Values: []string{b.String()}},
 	})
-	if names := SubdomainNames(got); len(names) != 1 || names[0] != "early.example.com" {
+	if names := subdomainNames(got); len(names) != 1 || names[0] != "early.example.com" {
 		t.Fatalf("names = %v, want only the name inside the scan bound", names)
 	}
 }
