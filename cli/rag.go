@@ -217,7 +217,8 @@ type AnswerOpts struct {
 	// a short status token. It is not called for the generic persona.
 	Persona func(domain string)
 	// Action, when set, is called once per tool call with the tool's name and
-	// "running" or "done", so a caller can record what a turn actually did.
+	// "running", then once the call settles its ToolOutcome, so a caller can
+	// record what a turn actually did.
 	Action       func(tool, status string)
 	WebOnly      bool
 	ToolHost     string

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -387,5 +388,56 @@ func TestToolLoopAuditFailureSkipsTool(t *testing.T) {
 	})
 	if !errors.Is(err, auditErr) || len(echo.ran) != 0 {
 		t.Fatalf("err=%v tool calls=%v", err, echo.ran)
+	}
+}
+
+func TestToolLoopReportsEachCallOutcome(t *testing.T) {
+	good := &fakeTool{name: "good", fn: func(string) (string, error) { return "tool error: quoted by a tool", nil }}
+	bad := &fakeTool{name: "bad", fn: func(string) (string, error) { return "", errors.New("boom") }}
+	late := &fakeTool{name: "late", fn: func(string) (string, error) { return "ok", nil }}
+	response := &llms.ContentResponse{Choices: []*llms.ContentChoice{{ToolCalls: []llms.ToolCall{
+		{ID: "c1", FunctionCall: &llms.FunctionCall{Name: "good", Arguments: "{}"}},
+		{ID: "c2", FunctionCall: &llms.FunctionCall{Name: "bad", Arguments: "{}"}},
+		{ID: "c3", FunctionCall: &llms.FunctionCall{Name: "late", Arguments: "{}"}},
+	}}}}
+	m := &fakeModel{queue: []*llms.ContentResponse{response}}
+	var seen []string
+	caps := LoopCaps{
+		MaxRounds: 3,
+		MaxCalls:  2,
+		Observe: func(action, detail string) error {
+			seen = append(seen, action+":"+detail)
+			return nil
+		},
+		ObserveResult: func(name string, outcome ToolOutcome) {
+			seen = append(seen, "outcome:"+name+"="+string(outcome))
+		},
+	}
+	if _, _, err := runToolLoop(context.Background(), m, newLoopReg(t, good, bad, late), userMsgs(), caps); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"model-tools:round=1 calls=3",
+		"tool-call:good", "outcome:good=done", "tool-result:good",
+		"tool-call:bad", "outcome:bad=failed", "tool-result:bad",
+		"tool-call:late", "outcome:late=skipped", "tool-result:late",
+	}
+	if !slices.Equal(seen, want) {
+		t.Fatalf("observed %q, want %q", seen, want)
+	}
+	if len(late.ran) != 0 {
+		t.Fatalf("skipped tool ran: %v", late.ran)
+	}
+}
+
+func TestToolLoopReportsUnknownToolAsFailed(t *testing.T) {
+	m := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "nope", "{}"), textResp("done")}}
+	var got []ToolOutcome
+	caps := LoopCaps{MaxRounds: 3, ObserveResult: func(_ string, outcome ToolOutcome) { got = append(got, outcome) }}
+	if _, _, err := runToolLoop(context.Background(), m, newLoopReg(t), userMsgs(), caps); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []ToolOutcome{ToolFailed}) {
+		t.Fatalf("outcomes = %v", got)
 	}
 }

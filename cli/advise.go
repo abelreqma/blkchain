@@ -126,7 +126,11 @@ func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig
 	required := opts.requiredAction
 	requiredCalled, toolCalls := false, 0
 	observe := engageTelemetryFromContext(ctx)
-	caps := LoopCaps{MaxRounds: adviseMaxRounds, MaxCalls: adviseMaxCalls, Observe: func(action, detail string) error {
+	caps := LoopCaps{MaxRounds: adviseMaxRounds, MaxCalls: adviseMaxCalls, ObserveResult: func(name string, outcome ToolOutcome) {
+		if opts.Action != nil {
+			opts.Action(name, string(outcome))
+		}
+	}, Observe: func(action, detail string) error {
 		if observe != nil {
 			if err := observe(action, detail); err != nil {
 				return err
@@ -144,8 +148,6 @@ func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig
 			switch action {
 			case "tool-call":
 				opts.Action(detail, "running")
-			case "tool-result":
-				opts.Action(detail, "done")
 			}
 		}
 		if action == "tool-call" {
