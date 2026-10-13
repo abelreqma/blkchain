@@ -43,8 +43,9 @@ type mcpRouteIn struct {
 // Bounds on chat's caller-supplied strings. Generated session ids are well
 // under mcpChatMaxSessionID bytes.
 const (
-	mcpChatMaxMessage   = 256 << 10
-	mcpChatMaxSessionID = 128
+	mcpChatMaxMessage    = 256 << 10
+	mcpChatMaxSessionID  = 128
+	mcpChatMaxBrowserCDP = 256
 )
 
 // mcpChatMaxInFlight bounds the chat turns one server runs at once. The SDK
@@ -89,6 +90,10 @@ var errChatForeignSession = errors.New("chat: session was not created by this se
 // errChatLocalHostRefused refuses tool_host local on a server that does not
 // serve stdio.
 var errChatLocalHostRefused = errors.New("chat: tool_host local is only available over the stdio transport")
+
+// errChatBrowserCDPRefused refuses browser_cdp on a server that does not serve
+// stdio.
+var errChatBrowserCDPRefused = errors.New("chat: browser_cdp is only available over the stdio transport")
 
 // mcpServesStdio records that this process serves its MCP client over stdio.
 // Only runMCP sets it. Its zero value is false, so a transport added without
@@ -143,13 +148,17 @@ func (o *chatSessionOwner) touch(id string) bool {
 }
 
 // mcpChatIn is chat's tool input. An empty SessionID opens a new session;
-// supplying one continues it. ToolHost accepts local only while mcpServesStdio
-// is set.
+// supplying one continues it. ToolHost accepts local and BrowserCDP accepts an
+// endpoint only while mcpServesStdio is set. ForceRag and WebOnly are routing
+// hints and are mutually exclusive.
 type mcpChatIn struct {
-	Message   string `json:"message" jsonschema:"the message for this turn"`
-	SessionID string `json:"session_id,omitempty" jsonschema:"continue this session; omit to start a new one"`
-	Agent     string `json:"agent,omitempty" jsonschema:"native answer specialist name; omit for automatic selection"`
-	ToolHost  string `json:"tool_host,omitempty" jsonschema:"file and terminal host: sandbox (default) or local. local is permitted because this server speaks only over stdio to a local client that already holds the operator's privileges"`
+	Message    string `json:"message" jsonschema:"the message for this turn"`
+	SessionID  string `json:"session_id,omitempty" jsonschema:"continue this session; omit to start a new one"`
+	Agent      string `json:"agent,omitempty" jsonschema:"native answer specialist name; omit for automatic selection"`
+	ToolHost   string `json:"tool_host,omitempty" jsonschema:"file and terminal host: sandbox (default) or local. local is permitted because this server speaks only over stdio to a local client that already holds the operator's privileges"`
+	BrowserCDP string `json:"browser_cdp,omitempty" jsonschema:"loopback CDP endpoint of a browser whose signed-in state the browser tools copy, for example http://127.0.0.1:9222. Permitted only because this server speaks only over stdio to a local client that already holds the operator's privileges: it hands the agent the operator's authenticated browser session"`
+	ForceRag   bool   `json:"force_rag,omitempty" jsonschema:"skip adaptive routing and answer from the local knowledge base; cannot be combined with web_only"`
+	WebOnly    bool   `json:"web_only,omitempty" jsonschema:"answer from the public web only for this turn; cannot be combined with force_rag"`
 }
 
 // Session resources: sessionResourceMaxBytes bounds one payload, since a
@@ -445,6 +454,22 @@ func mcpChatResult(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 	if in.ToolHost == chatToolHostLocal && !mcpServesStdio.Load() {
 		return turnResult{}, errChatLocalHostRefused
 	}
+	// browser_cdp hands the agent the operator's signed-in browser session, which
+	// is at least as sensitive as the local tool host, so it has the same gate.
+	if in.BrowserCDP != "" {
+		if !mcpServesStdio.Load() {
+			return turnResult{}, errChatBrowserCDPRefused
+		}
+		if len(in.BrowserCDP) > mcpChatMaxBrowserCDP {
+			return turnResult{}, usageErr("chat: browser_cdp exceeds %d bytes", mcpChatMaxBrowserCDP)
+		}
+		if err := webValidateCDPEndpoint(in.BrowserCDP); err != nil {
+			return turnResult{}, usageErr("chat: %s", err)
+		}
+	}
+	if in.ForceRag && in.WebOnly {
+		return turnResult{}, usageErr("chat: web_only cannot be combined with force_rag")
+	}
 	if len(in.Message) > mcpChatMaxMessage {
 		return turnResult{}, usageErr("chat: message exceeds %d bytes", mcpChatMaxMessage)
 	}
@@ -462,10 +487,13 @@ func mcpChatResult(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 	ctx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout())
 	defer cancel()
 	res, err := runNativeTurn(ctx, rc, cfg, turnRequest{
-		Question:  in.Message,
-		SessionID: selector,
-		Agent:     in.Agent,
-		ToolHost:  in.ToolHost,
+		Question:   in.Message,
+		SessionID:  selector,
+		Agent:      in.Agent,
+		ToolHost:   in.ToolHost,
+		BrowserCDP: in.BrowserCDP,
+		ForceRag:   in.ForceRag,
+		WebOnly:    in.WebOnly,
 	})
 	owned.own(res.SessionID)
 	return res, timeoutOrErr(err)
