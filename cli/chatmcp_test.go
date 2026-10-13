@@ -87,6 +87,33 @@ func TestChatMCPConfigRequiresPerServerAllowlist(t *testing.T) {
 	}
 }
 
+// TestChatMCPConfigCarriesAnUnknownTopLevelKey pins that the operator's own
+// config can hold the hazard note the example template carries. The note lives
+// in a _README key beside servers, and the loader has to ignore it.
+func TestChatMCPConfigCarriesAnUnknownTopLevelKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp-clients.json")
+	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", path)
+	note := "send_http1_request and send_http2_request reach no code-side gate."
+	config := `{"_README":"` + note + `","servers":[{"name":"fixture","transport":"http","url":"https://fixture.test/mcp","allow_tools":["send_http1_request"]}]}`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadChatMCPConfig()
+	if err != nil {
+		t.Fatalf("a config with a hazard note was refused: %v", err)
+	}
+	if len(loaded.Servers) != 1 || loaded.Servers[0].Name != "fixture" {
+		t.Fatalf("the note changed what loaded: %+v", loaded)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), note) {
+		t.Fatal("loading rewrote the operator's config and dropped the note")
+	}
+}
+
 func TestChatMCPHTTPBearerNeverFollowsRedirect(t *testing.T) {
 	var redirected bool
 	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
