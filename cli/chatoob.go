@@ -358,22 +358,33 @@ func oobReadTail(path string, limit int64) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	defer file.Close()
-	info, err := file.Stat()
+	end, err := file.Seek(0, io.SeekEnd)
 	if err != nil {
 		return nil, false, err
 	}
-	dropped := info.Size() > limit
-	if dropped {
-		if _, err := file.Seek(-limit, io.SeekEnd); err != nil {
-			return nil, false, err
-		}
+	// dropped comes from the offset the read starts at, not from a size measured
+	// earlier: the client is appending, and a size that goes stale would label a
+	// read of the head as having dropped nothing.
+	start := end - limit
+	dropped := start > 0
+	if !dropped {
+		start = 0
+	} else {
+		// Open the window one byte early. A boundary that falls exactly on a
+		// record start then reads as that record's leading terminator, so the
+		// discard below drops the terminator instead of a whole valid record.
+		start--
 	}
-	data, err := io.ReadAll(io.LimitReader(file, limit))
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return nil, false, err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
 	if err != nil {
 		return nil, false, err
 	}
 	if dropped {
-		// The seek lands inside a record, so discard that partial first line.
+		// The window opens inside a record or on its terminator; either way the
+		// bytes up to the first newline are not a record of their own.
 		if cut := bytes.IndexByte(data, '\n'); cut >= 0 {
 			data = data[cut+1:]
 		} else {
@@ -427,6 +438,7 @@ func (s *oobSession) interactions(payload string, limit int) (string, error) {
 		return "", err
 	}
 	var kept []oobInteraction
+	parsed := 0
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	// A single interaction record carries its raw request and response, so one
 	// large HTTP callback exceeds a scanner's default token limit. Without this
@@ -437,11 +449,21 @@ func (s *oobSession) interactions(payload string, limit int) (string, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
 			continue
 		}
+		parsed++
 		if oobMatches(record, payload) {
 			kept = append(kept, record)
 		}
 	}
 	droppedNewer := scanner.Err() != nil
+	// A record larger than the whole window leaves no complete record in it, so
+	// there is data on disk and nothing to report from it. Reporting that as no
+	// interactions would read as "nothing called back", which is the one wrong
+	// answer a detection tool must not give: a callback may be the very record
+	// that does not fit. Note this counts records before the payload filter, so
+	// a filter that matches nothing still reports no interactions.
+	if parsed == 0 && (droppedOlder || len(data) > 0) {
+		return fmt.Sprintf("out-of-band interactions could not be read: the recorded data holds no complete record within the %d-byte read window. This is not evidence that nothing called back.", oobInteractionsBytes), nil
+	}
 	if len(kept) > limit {
 		kept = kept[len(kept)-limit:]
 		droppedOlder = true
