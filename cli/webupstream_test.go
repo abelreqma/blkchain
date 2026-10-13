@@ -195,6 +195,41 @@ func TestWebProxyFetchesTheCertificateOncePerProcess(t *testing.T) {
 	}
 }
 
+// TestWebProxyReportsTheAddressAndCAItAccepted pins that the decision to proxy
+// is visible. Without the notice blk proxies or goes direct in silence, and the
+// trust anchor it took from an unauthenticated listener is never named.
+func TestWebProxyReportsTheAddressAndCAItAccepted(t *testing.T) {
+	proxy := newProxyStandIn(t)
+	notices := captureProxyNotices(t)
+	useProxyStandIn(t, proxy.address())
+	if upstream := webUpstreamProxy(); upstream == nil {
+		t.Fatal("a reachable proxy did not resolve")
+	}
+	if len(*notices) != 1 {
+		t.Fatalf("the proxy decision produced %d notices: %v", len(*notices), *notices)
+	}
+	line := (*notices)[0]
+	if !strings.Contains(line, proxy.address()) || !strings.Contains(line, webProxyInUseLabel) || !strings.Contains(line, "proxy stand-in CA") {
+		t.Fatalf("the notice names neither the address nor the CA subject: %q", line)
+	}
+	_ = webUpstreamProxy()
+	if len(*notices) != 1 {
+		t.Fatalf("the notice repeated per resolution: %v", *notices)
+	}
+}
+
+// TestWebProxySubjectStaysOneBoundedLine pins that a subject from the listening
+// process cannot break the notice into more lines or grow without bound.
+func TestWebProxySubjectStaysOneBoundedLine(t *testing.T) {
+	got := webProxySubject("CN=proxy\r\nblk: web proxy 127.0.0.1:1 carrying\x07" + strings.Repeat("x", 400))
+	if strings.ContainsAny(got, "\r\n\x07") || len(got) > webProxySubjectMaxRunes {
+		t.Fatalf("the subject was not clamped: %q", got)
+	}
+	if subject := webProxySubject("   "); subject != "unnamed" {
+		t.Fatalf("an empty subject rendered as %q", subject)
+	}
+}
+
 func TestWebProxyReadsAnOperatorSuppliedCertificate(t *testing.T) {
 	proxy := newProxyStandIn(t)
 	proxy.caStatus = http.StatusNotFound

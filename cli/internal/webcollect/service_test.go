@@ -6,6 +6,7 @@ import (
 	"blkchain/cli/internal/webanalysis"
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -78,6 +79,52 @@ func TestBrowserOnlyAuthenticationDoesNotLabelBrokerFetchAsRole(t *testing.T) {
 	}
 	if roles["browser-dom"] != "reader" || roles["script"] != "anonymous" {
 		t.Fatalf("browser and broker roles: %v", roles)
+	}
+}
+
+// TestCoverageRecordsTheProxyItTraversed pins the durable provenance record: a
+// collection carrying its requests through an upstream proxy stores that
+// address, and one on the direct path stores nothing. Without it a later reader
+// of the artifacts cannot tell which path a request took.
+func TestCoverageRecordsTheProxyItTraversed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html><body>fixture</body></html>"))
+	}))
+	defer server.Close()
+	direct := New(fixtureStore(t), fixtureBroker(server), nil)
+	coverage, err := direct.Collect(context.Background(), []string{server.URL + "/"}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coverage.Proxy != "" {
+		t.Fatalf("the direct path recorded proxy %q", coverage.Proxy)
+	}
+	// A closed loopback port, so the record is checked without handing the
+	// fixture request to whatever happens to be proxying on this machine.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err = listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	broker := fixtureBroker(server)
+	broker.Policy.Upstream = &webacquire.Upstream{Address: address, RootCAs: x509.NewCertPool()}
+	proxied := New(fixtureStore(t), broker, nil)
+	if coverage, err = proxied.Collect(context.Background(), []string{server.URL + "/"}, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if coverage.Proxy != address {
+		t.Fatalf("the proxied path recorded proxy %q, want %q", coverage.Proxy, address)
+	}
+	snapshot, err := proxied.Store.WebSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Coverage) == 0 || snapshot.Coverage[0].Proxy != address {
+		t.Fatalf("the stored coverage record lost the proxy: %+v", snapshot.Coverage)
 	}
 }
 

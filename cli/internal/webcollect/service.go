@@ -122,6 +122,11 @@ func (s *Service) Collect(ctx context.Context, targets []string, o Options) (web
 	defer cancel()
 	initialGaps := s.coverage.Gaps
 	s.coverage = webanalysis.Coverage{Targets: append([]string(nil), targets...), ID: webanalysis.ID(webanalysis.Now(), o.Role), Role: o.Role, Started: webanalysis.Now(), State: "running", Routes: []string{}, Interactions: []string{}, Downloaded: []string{}, Stages: []string{"collection"}, Gaps: initialGaps}
+	// The condition matches the one Once applies, so the record names the proxy
+	// only when requests actually traverse it.
+	if up := s.Broker.Policy.Upstream; up != nil && up.Address != "" && up.RootCAs != nil {
+		s.coverage.Proxy = up.Address
+	}
 	s.gap("state", "", "Only supplied roles and visited states are covered; unavailable roles, credentials and runtime values are not inferred")
 	if o.Browser != nil {
 		s.gap("browser", "", "worker cache responses may not reach the network; stream capture is bounded by page dwell and job lifetime")

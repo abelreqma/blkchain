@@ -176,6 +176,10 @@ type Coverage struct {
 	Started      string   `json:"started"`
 	Ended        string   `json:"ended,omitempty"`
 	State        string   `json:"state"`
+	// Proxy is the intercepting proxy address this collection's requests went
+	// through, empty when they went direct. A later reader of the artifacts
+	// needs it to know a request's provenance.
+	Proxy string `json:"proxy,omitempty"`
 }
 type Feature struct {
 	ID         string   `json:"id"`

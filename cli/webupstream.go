@@ -34,6 +34,8 @@ const (
 	webProxyCAMaxBytes       = 64 << 10
 	webProxyDisabledSetting  = "off"
 	webProxyUnreachableLabel = "not listening"
+	webProxyInUseLabel       = "carrying engagement web traffic"
+	webProxySubjectMaxRunes  = 120
 )
 
 var webProxyNotice = func(line string) { fmt.Fprintln(os.Stderr, line) }
@@ -84,12 +86,37 @@ func resolveWebUpstreamProxy(address string, configured bool) *webacquire.Upstre
 		return nil
 	}
 	_ = conn.Close()
-	pool, err := webProxyRootCAs(address)
+	pool, subject, err := webProxyRootCAs(address)
 	if err != nil {
 		webProxyNotice(fmt.Sprintf("blk: web proxy %s has no usable CA certificate, using direct requests: %v", address, err))
 		return nil
 	}
+	// The trust anchor comes from whatever is listening on the address, which
+	// is not authenticated, so the notice names the subject it accepted. An
+	// operator proxying through the wrong local process can see it there.
+	webProxyNotice(fmt.Sprintf("blk: web proxy %s %s, CA subject %s", address, webProxyInUseLabel, subject))
 	return &webacquire.Upstream{Address: address, RootCAs: pool}
+}
+
+// webProxySubject renders a CA subject for one notice line. The subject is
+// whatever the listening process issued itself, so it is reduced to printable
+// ASCII on a single line and bounded before it reaches stderr.
+func webProxySubject(name string) string {
+	var out strings.Builder
+	for _, r := range name {
+		if out.Len() >= webProxySubjectMaxRunes {
+			break
+		}
+		if r < 32 || r > 126 {
+			r = ' '
+		}
+		out.WriteRune(r)
+	}
+	text := strings.Join(strings.Fields(out.String()), " ")
+	if text == "" {
+		return "unnamed"
+	}
+	return text
 }
 
 // webProxyAddressAllowed accepts only a loopback IP literal and a port. A
@@ -113,11 +140,12 @@ func webProxyAddressAllowed(address string) error {
 
 // webProxyRootCAs returns the system roots plus the proxy's issuing CA, read
 // from webProxyCAEnv when the operator sets it and otherwise fetched through the
-// proxy from webProxyCAURL, the endpoint Burp serves its CA on.
-func webProxyRootCAs(address string) (*x509.CertPool, error) {
+// proxy from webProxyCAURL, the endpoint Burp serves its CA on. The second
+// return value is that CA's certificate subject, which the notice reports.
+func webProxyRootCAs(address string) (*x509.CertPool, string, error) {
 	data, err := webProxyCABytes(address)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	pool, err := x509.SystemCertPool()
 	if err != nil {
@@ -125,16 +153,20 @@ func webProxyRootCAs(address string) (*x509.CertPool, error) {
 	}
 	if block, _ := pem.Decode(data); block != nil {
 		if !pool.AppendCertsFromPEM(data) {
-			return nil, errors.New("certificate is not a usable PEM chain")
+			return nil, "", errors.New("certificate is not a usable PEM chain")
 		}
-		return pool, nil
+		anchor, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, "", errors.New("certificate PEM holds no readable certificate")
+		}
+		return pool, webProxySubject(anchor.Subject.String()), nil
 	}
 	certificate, err := x509.ParseCertificate(data)
 	if err != nil {
-		return nil, errors.New("certificate is neither PEM nor DER")
+		return nil, "", errors.New("certificate is neither PEM nor DER")
 	}
 	pool.AddCert(certificate)
-	return pool, nil
+	return pool, webProxySubject(certificate.Subject.String()), nil
 }
 
 func webProxyCABytes(address string) ([]byte, error) {
