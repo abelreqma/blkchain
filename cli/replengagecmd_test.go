@@ -99,6 +99,36 @@ func TestEngageDispatchStartsTurn(t *testing.T) {
 	}
 }
 
+func TestInteractiveEngageCDPFlagsReachTheTUIRun(t *testing.T) {
+	input := `--session "roles one.json" --role reader --session-cdp http://127.0.0.1:9223 "assess 127.0.0.1"`
+	opts, goal, err := parseInteractiveEngageCDP(input)
+	if err != nil || opts.session != "roles one.json" || opts.role != "reader" || opts.sessionCDP != "http://127.0.0.1:9223" || goal != "assess 127.0.0.1" {
+		t.Fatalf("interactive CDP flags were lost: opts=%+v goal=%q err=%v", opts, goal, err)
+	}
+	if _, _, err := parseInteractiveEngageCDP(`resume /tmp/assessment --session roles.json --role reader --session-cdp http://127.0.0.1:9223`); err == nil || !strings.Contains(err.Error(), "use --resume") {
+		t.Fatalf("ambiguous TUI resume syntax was accepted: %v", err)
+	}
+	if _, _, err := parseInteractiveEngageCDP(`--resume /tmp/assessment --session roles.json --role reader --session-cdp http://127.0.0.1:9223`); err != nil {
+		t.Fatalf("TUI CDP resume syntax was rejected: %v", err)
+	}
+	m := engageReadyModel(t)
+	next, _ := m.dispatchInput("/engage " + input)
+	if !next.(model).working {
+		t.Fatal("TUI did not dispatch the signed-in engagement")
+	}
+	stubRunReplEngage(t, func(ctx context.Context, _ string, _ string, _ secgate.Mode, _ bool, _ toolLoopModel, _ searcher, _ ragconfig.Config, _ modelPrefs, _ *skillcat.Catalog, _ secgate.Confirmer, _ askuser.Asker, _ *sql.DB, _ string, _ func(int64, eng.Engagement)) (string, error) {
+		selected, ok := ctx.Value(replCDPKey{}).(engageOpts)
+		if !ok || selected.session != opts.session || selected.role != opts.role || selected.sessionCDP != opts.sessionCDP {
+			t.Fatalf("TUI engagement context lost CDP role: %+v", selected)
+		}
+		return "done", nil
+	})
+	message := engageCmd(replEngageRun{ctx: context.Background(), cdp: &opts})()
+	if done, ok := message.(engageDoneMsg); !ok || done.err != nil {
+		t.Fatalf("CDP engagement command failed: %+v", message)
+	}
+}
+
 func TestTUIEngageApprovalUsesOperatorCommandPath(t *testing.T) {
 	m := newTestModel(t)
 	next, cmd := m.dispatchInput("/engage approve-network")

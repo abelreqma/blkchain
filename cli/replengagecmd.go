@@ -99,6 +99,7 @@ type engageRunStatus struct{ paused bool }
 type engageActionMsg struct{ text string }
 type replTranscriptKey struct{}
 type replActionKey struct{}
+type replCDPKey struct{}
 
 // replEngageRun is the fully-built input to one gated REPL engagement. The deps
 // (model, rc, cat, roeDB, confirm, cfg, prefs, mode, override, cwd, goal) are
@@ -123,6 +124,25 @@ type replEngageRun struct {
 	finding    func([]byte) error
 	transcript string
 	onAction   func(actionRecord)
+	cdp        *engageOpts
+}
+
+func parseInteractiveEngageCDP(input string) (engageOpts, string, error) {
+	args, err := webArguments(input)
+	if err != nil {
+		return engageOpts{}, "", err
+	}
+	if len(args) > 0 && args[0] == "resume" {
+		return engageOpts{}, "", fmt.Errorf("engage: use --resume with --session-cdp in the TUI")
+	}
+	o, goal, err := parseEngageArgs(args)
+	if err != nil {
+		return o, "", err
+	}
+	if o.sessionCDP == "" || o.safe || o.auto || o.model != "" || o.transcript != "important" {
+		return o, "", fmt.Errorf("engage: set mode, model, and transcript separately before using --session-cdp in the TUI")
+	}
+	return o, goal, nil
 }
 
 // buildReplEngageRun assembles the engage dependencies from the session, failing
@@ -188,6 +208,9 @@ func engageCmd(r replEngageRun) tea.Cmd {
 		}
 		ctx = context.WithValue(ctx, replTranscriptKey{}, r.transcript)
 		ctx = context.WithValue(ctx, replActionKey{}, r.onAction)
+		if r.cdp != nil {
+			ctx = context.WithValue(ctx, replCDPKey{}, *r.cdp)
+		}
 		final, err := runReplEngageFn(ctx, r.wsDir, r.cwd, r.mode, r.override, r.model, r.rc,
 			r.cfg, r.prefs, r.cat, r.confirm, r.asker, r.roeDB, r.goal, progress)
 		return engageDoneMsg{final: final, err: err, paused: status.paused || strings.HasPrefix(final, "Engagement paused:")}

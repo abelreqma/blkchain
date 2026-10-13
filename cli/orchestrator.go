@@ -24,14 +24,15 @@ import (
 // engageDeps carries everything an engagement run needs. Asker is used by the
 // orchestrator to ask the operator for clarification; in /auto it is an AutoAsker.
 type engageDeps struct {
-	Model toolLoopModel
-	RC    searcher
-	Cfg   ragconfig.Config
-	Prefs modelPrefs
-	Store *engagement.Store
-	Asker askuser.Asker
-	Gate  *secgate.Gate // command-execution gate for executors; nil disables run_command
-	Runs  *RunOutputs   // per-episode captured command output for evidence verification
+	Model      toolLoopModel
+	RC         searcher
+	Cfg        ragconfig.Config
+	Prefs      modelPrefs
+	Store      *engagement.Store
+	WebSession *webSessionRole
+	Asker      askuser.Asker
+	Gate       *secgate.Gate // command-execution gate for executors; nil disables run_command
+	Runs       *RunOutputs   // per-episode captured command output for evidence verification
 	// ToolHelp is the shared tool-knowledge cache backing help-grounding; nil
 	// disables grounding (commands still pass through the gate unchanged).
 	ToolHelp toolHelpCache

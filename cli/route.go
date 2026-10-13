@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"regexp"
 	"strings"
@@ -40,19 +41,6 @@ type enabledRoutes struct {
 var arithmeticPattern = regexp.MustCompile(`^[0-9.+\-*/%^()\s]+[=?]?\s*$`)
 
 var numberToken = regexp.MustCompile(`[0-9.]+`)
-var chatToolRequestPattern = regexp.MustCompile(`(?i)^\s*(?:(?:please|can you|could you)\s+)?(?:read|open|run|execute|send|fetch|navigate|scan|probe|inspect|investigate|test|use|check|assess|audit)\b`)
-var chatFileRequestPattern = regexp.MustCompile(`(?i)^\s*(?:(?:please|can you|could you)\s+)?(?:read|open)\b`)
-var chatActiveRequestPattern = regexp.MustCompile(`(?i)^\s*(?:(?:please|can you|could you)\s+)?(?:run|execute|send|navigate|scan|probe|test)\b`)
-var chatNamedToolPattern = regexp.MustCompile(`(?i)\b(?:file_read|web_search|kb_search|route_skill|run_command|web_api|web_browser)\b`)
-
-func wantsChatTools(question string, history []priorTurn) bool {
-	if !chatToolRequestPattern.MatchString(question) {
-		return false
-	}
-	return len(chatTargetEntries(question, history)) > 0 || chatQuestionNamesFile(question) ||
-		chatActiveRequestPattern.MatchString(question) || chatNamedToolPattern.MatchString(question)
-}
-
 var targetAddressPattern = regexp.MustCompile(`(?i)(?:[a-z][a-z0-9+.-]*://|\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.[a-z]{2,}\b|\blocalhost\b|\b[a-z][a-z0-9-]*:[0-9]{2,5}\b|\[[0-9a-f:]+\](?::[0-9]+)?|\b[a-z0-9._-]+@[a-z0-9._-]+\b)`)
 var targetContextPattern = regexp.MustCompile(`(?i)\b(?:my|our|this)\s+(?:[a-z0-9-]+\s+)?(?:host|server|domain|cluster|tenant|app|application|environment|foothold|account|project|network|vpc|subscription|realm|asset|instance|service)\b|\b(?:foothold|internal|private|staging|production|dc[0-9]+|srv[0-9]+|host[0-9]+)\b`)
 var targetSecretPattern = regexp.MustCompile(`(?i)\b(?:api[_-]?key|token|password|passwd|secret|authorization|credential|host|server|target)\s*[:=]\s*\S+|\b(?:api[_-]?key|token|password|passwd|secret|credential)\s+(?:is|was)\s+\S+|\bbearer\s+[a-z0-9._~-]{8,}\b`)
@@ -298,11 +286,20 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 			return "", nil, false, nil, 0, "", err
 		}
 		kind := routeAdvise
-		toolRequest := wantsChatTools(question, opts.History)
-		if !toolRequest && (enabled.Local || enabled.Web || len(chatTargetEntries(question, opts.History)) == 0) {
+		hasTarget := len(chatTargetEntries(question, opts.History)) > 0
+		if !isPureArithmetic(question) {
+			opts.requiredAction, err = classifyChatAction(ctx, l, question, hasTarget)
+			if err != nil {
+				return "", nil, false, nil, 0, "", err
+			}
+			if opts.requiredAction == "web_search" && (!enabled.Web || opts.NoWeb || !loadPrefs().Web) {
+				return "", nil, false, nil, 0, "", errors.New("native chat: public web search is disabled")
+			}
+		}
+		if !hasTarget && opts.requiredAction == "" {
 			kind, _ = routeQuery(ctx, l, cfg, question, enabled)
 		}
-		if kind == routeAdvise && opts.WebFirst && enabled.Web && !opts.NoWeb && !toolRequest {
+		if kind == routeAdvise && opts.WebFirst && enabled.Web && !opts.NoWeb && !hasTarget && opts.requiredAction == "" {
 			kind = routeGround
 		}
 		if keepLocal && kind == routeSkip {

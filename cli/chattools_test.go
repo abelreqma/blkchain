@@ -69,6 +69,11 @@ func TestChatRegistryExposesActionsOnlyForNamedTargets(t *testing.T) {
 			t.Errorf("missing shared tool %q", want)
 		}
 	}
+	for _, denied := range []string{"file_write", "file_patch", "terminal"} {
+		if _, ok := plain.Get(denied); ok {
+			t.Errorf("mutating tool %q offered without a user request", denied)
+		}
+	}
 	targeted, closeTargeted, err := newChatToolRegistry(ctx, nil, ragconfig.Config{}, nil, "Assess 192.0.2.5", nil, AnswerOpts{})
 	if err != nil {
 		t.Fatal(err)
@@ -78,6 +83,14 @@ func TestChatRegistryExposesActionsOnlyForNamedTargets(t *testing.T) {
 		if _, ok := targeted.Get(want); !ok {
 			t.Errorf("missing target tool %q", want)
 		}
+	}
+}
+
+func TestChatMCPActionFailsWithoutConfiguredTools(t *testing.T) {
+	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
+	_, _, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "Use the MCP server", nil, AnswerOpts{requiredAction: "mcp"})
+	if err == nil || !strings.Contains(err.Error(), "no MCP client tools") {
+		t.Fatalf("missing MCP tool action was accepted: %v", err)
 	}
 }
 
@@ -226,7 +239,7 @@ func TestChatFileReadStaysInsideWorkingDirectory(t *testing.T) {
 	if err := os.Symlink(outside, "escape.txt"); err != nil {
 		t.Fatal(err)
 	}
-	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "Read notes.txt", nil, AnswerOpts{})
+	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "Read notes.txt", nil, AnswerOpts{ToolHost: chatToolHostLocal})
 	if err != nil {
 		t.Fatal(err)
 	}

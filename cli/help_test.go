@@ -316,7 +316,7 @@ func TestUsageLayout(t *testing.T) {
 	for _, want := range []string{
 		"start the interactive session",
 		"   blk <command> [flags]  run one command",
-		"Native ask needs --agent auto with --json; search and models accept --json.",
+		"Ask, search, and models accept --json; --hermes uses plain output.",
 		"flags go before or after the query",
 		`Run "blk help <command>" for its flags`,
 	} {
@@ -512,7 +512,7 @@ func TestUsageClosingLinesHighlightCommands(t *testing.T) {
 	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
 	out := renderUsage(80)
 	for _, want := range []string{
-		Meta.Render("Native ask needs --agent auto with ") + Flag.Render("--json") + Meta.Render("; search and models accept ") + Flag.Render("--json") + Meta.Render("."),
+		Meta.Render("Ask, search, and models accept ") + Flag.Render("--json") + Meta.Render("; --hermes uses plain output."),
 		Meta.Render(`Run "`) + styleWords("blk help <command>") + Meta.Render(`" for its flags, or "`) + styleWords("blk help env"),
 	} {
 		if !strings.Contains(out, want) {

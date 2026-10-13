@@ -29,13 +29,13 @@ import (
 var webPlaceholder = regexp.MustCompile(`\{([^{}]+)\}`)
 
 type webOpts struct {
-	workspace, scope, roe, file, role, session, view, task, operation, values, resume string
-	transcript                                                                        string
-	asJSON, auto, browser, headed, noRDNS                                             bool
-	safe                                                                              bool
-	depth, states, example                                                            int
-	assistSeconds                                                                     int
-	interactions                                                                      webStringFlags
+	workspace, scope, roe, file, role, session, sessionCDP, view, task, operation, values, resume string
+	transcript                                                                                    string
+	asJSON, auto, browser, headed, noRDNS                                                         bool
+	safe                                                                                          bool
+	depth, states, example                                                                        int
+	assistSeconds                                                                                 int
+	interactions                                                                                  webStringFlags
 }
 type webStringFlags []string
 
@@ -55,6 +55,7 @@ func defineWebFlags(fs *flag.FlagSet, o *webOpts) {
 	fs.StringVar(&o.file, "file", "", "target list or HAR input")
 	fs.StringVar(&o.role, "role", "", "supplied session role (default: all supplied roles)")
 	fs.StringVar(&o.session, "session", "", "isolated role sessions with environment references")
+	fs.StringVar(&o.sessionCDP, "session-cdp", "", "import one origin-bound role from a loopback signed-in Chrome CDP endpoint")
 	fs.StringVar(&o.view, "view", "summary", "summary, apis, artifacts, functions, features, findings, coverage, exports, all")
 	fs.StringVar(&o.task, "task", "", "existing engagement task for active actions")
 	fs.StringVar(&o.operation, "operation", "", "API operation id for export or replay")
@@ -107,7 +108,7 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 	var o webOpts
 	defineWebFlags(fs, &o)
 	valueFlags := map[string]bool{}
-	for _, k := range []string{"workspace", "scope", "roe", "transcript", "file", "role", "session", "view", "task", "operation", "values", "depth", "states", "interaction", "resume", "assist-seconds", "example"} {
+	for _, k := range []string{"workspace", "scope", "roe", "transcript", "file", "role", "session", "session-cdp", "view", "task", "operation", "values", "depth", "states", "interaction", "resume", "assist-seconds", "example"} {
 		valueFlags[k] = true
 	}
 	if e := parseFlags(fs, reorder(args, valueFlags)); e != nil {
@@ -115,6 +116,14 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 	}
 	if o.safe && o.auto {
 		return "", usageErr("web: choose --safe or --auto")
+	}
+	if o.sessionCDP != "" {
+		if command != "collect" && command != "replay" || command == "collect" && !o.browser && !o.headed {
+			return "", usageErr("web: --session-cdp requires collect --browser or replay")
+		}
+		if err := webValidateCDPSelection(o.session, o.role, o.sessionCDP); err != nil {
+			return "", usageErr("web: %s", err)
+		}
 	}
 	if !validTranscriptMode(o.transcript) {
 		return "", usageErr("web: transcript must be off, important, or full")
@@ -470,6 +479,11 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 			if o.role != "" && r.Name != o.role {
 				continue
 			}
+			if o.sessionCDP != "" {
+				if err := webValidateCDPRole(r); err != nil {
+					return "", err
+				}
+			}
 			found = true
 			collector := webcollect.New(ws.Store, svc.Broker, webParseWorker)
 			collector.KeepAST = true
@@ -495,7 +509,18 @@ func webExecute(ctx context.Context, args []string, mode secgate.Mode, confirm s
 			if r.Origin != "" && !webTargetMatches(r.Origin, targets.URLs) {
 				return "", errors.New("session origin is not a supplied target")
 			}
-			opt := webcollect.Options{Role: r.Name, Headers: headers, CredentialOrigin: r.Origin, MaxDepth: o.depth, MaxStates: o.states, Historical: command == "archive", Interactions: o.interactions}
+			if o.sessionCDP != "" {
+				for _, target := range targets.URLs {
+					if !webSameOrigin(target, r.Origin) {
+						return "", errors.New("session-cdp targets must match the role origin")
+					}
+				}
+				r, e = webImportCDPRole(ctx, gate, r, o.sessionCDP)
+				if e != nil {
+					return "", e
+				}
+			}
+			opt := webcollect.Options{Role: r.Name, Headers: headers, CredentialOrigin: r.Origin, MaxDepth: o.depth, MaxStates: o.states, Historical: command == "archive", Interactions: o.interactions, BrowserOnlyAuth: r.AuthState != nil}
 			if command == "archive" {
 				collector.Archive = webcollect.NewArchive(collector.DiscoveryAllowed)
 				collector.Archive.Resume = o.resume
@@ -745,6 +770,9 @@ func webReplay(ctx context.Context, svc *webcollect.Service, g *secgate.Gate, ar
 	if op.ID == "" {
 		return errors.New("operation not found")
 	}
+	if o.sessionCDP != "" && op.Protocol != "http" {
+		return errors.New("session-cdp replay supports HTTP operations only")
+	}
 	if op.Protocol == "websocket" {
 		return webReplaySocket(ctx, svc, op, o)
 	}
@@ -806,7 +834,13 @@ func webReplay(ctx context.Context, svc *webcollect.Service, g *secgate.Gate, ar
 	if role.Origin != "" && !webSameOrigin(raw, role.Origin) {
 		return errors.New("replay origin differs from session")
 	}
-	if len(role.Storage) == 0 && role.Login == nil {
+	if o.sessionCDP != "" {
+		role, e = webImportCDPRole(ctx, g, role, o.sessionCDP)
+		if e != nil {
+			return e
+		}
+	}
+	if len(role.Storage) == 0 && role.Login == nil && role.AuthState == nil {
 		hs, err := webRoleHeaders(role)
 		if err != nil {
 			if e := svc.RecordGap(ctx, role.Name, "role", raw, err.Error()); e != nil {

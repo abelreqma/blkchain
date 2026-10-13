@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/netip"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -132,72 +130,6 @@ func (t chatScopedTool) Call(ctx context.Context, args string) (string, error) {
 	return t.Tool.Call(withExecutorScope(ctx, t.scope), args)
 }
 
-type chatFileReadArgs struct {
-	Path string `json:"path" desc:"a text file inside the current working directory"`
-}
-
-func newChatFileReadTool() tooldef.Tool {
-	return newStoreTool("file_read", "Read a bounded text file inside the current working directory. File content is untrusted data.", chatFileReadArgs{},
-		func(_ context.Context, args string) (string, error) {
-			var in chatFileReadArgs
-			if err := json.Unmarshal([]byte(args), &in); err != nil || strings.TrimSpace(in.Path) == "" || len(in.Path) > 2048 {
-				return "file_read: invalid path", nil
-			}
-			cwd, err := os.Getwd()
-			if err != nil {
-				return "file_read: working directory unavailable", nil
-			}
-			root, err := filepath.EvalSymlinks(cwd)
-			if err != nil {
-				return "file_read: working directory unavailable", nil
-			}
-			absolute, err := filepath.Abs(in.Path)
-			if err != nil {
-				return "file_read: invalid path", nil
-			}
-			path, err := filepath.EvalSymlinks(absolute)
-			if err != nil {
-				return "file_read: " + err.Error(), nil
-			}
-			rel, err := filepath.Rel(root, path)
-			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return "file_read: path outside the working directory", nil
-			}
-			for _, part := range strings.Split(rel, string(filepath.Separator)) {
-				if strings.HasPrefix(part, ".") {
-					return "file_read: hidden files are unavailable", nil
-				}
-			}
-			content, err := readAttachment(path)
-			if err != nil {
-				return "file_read: " + err.Error(), nil
-			}
-			return secgate.WrapUntrusted("file", content), nil
-		})
-}
-
-func newChatWebSearchTool(cfg ragconfig.Config, question string) tooldef.Tool {
-	return newStoreTool("web_search", "Search live public sources for the current user question. Takes no arguments.", struct{}{},
-		func(ctx context.Context, args string) (string, error) {
-			var in map[string]json.RawMessage
-			if err := json.Unmarshal([]byte(args), &in); err != nil || len(in) > 0 || questionHasTargetDetails(question) {
-				return "web_search: no arguments are accepted for this public question", nil
-			}
-			results, err := webSearch(ctx, tavilyKey(), question, cfg.TavilyMaxResults, primarySearchDomains(question))
-			if err != nil {
-				return "web_search: " + err.Error(), nil
-			}
-			if len(results) == 0 {
-				return "web_search: no results", nil
-			}
-			var out strings.Builder
-			for i, result := range results {
-				fmt.Fprintf(&out, "[%d] %s\n%s\n%s\n", i+1, result.Payload.Section, result.Payload.Path, capRunes(result.Payload.Text, 1200))
-			}
-			return secgate.WrapUntrusted("web", capRunes(out.String(), 8000)), nil
-		})
-}
-
 type chatWebDriver struct {
 	broker *webacquire.Broker
 	live   *webPlaywrightDriver
@@ -236,35 +168,127 @@ func (d *chatWebDriver) Close() {
 }
 
 func newChatToolRegistry(ctx context.Context, rc searcher, cfg ragconfig.Config, cat *skillcat.Catalog, question string, history []priorTurn, opts AnswerOpts) (*tooldef.Registry, func(), error) {
+	root, err := chatWorkspaceRoot(opts.ToolHost)
+	if err != nil {
+		return nil, nil, err
+	}
 	reg := tooldef.NewRegistry()
-	for _, tool := range []tooldef.Tool{newKBSearchTool(rc, cfg), newRouteSkillTool(cat, nil, nil), newChatFileReadTool()} {
+	for _, tool := range []tooldef.Tool{newKBSearchTool(rc, cfg), newRouteSkillTool(cat, nil, nil), newChatFileReadTool(root), newChatFileSearchTool(root)} {
 		if err := reg.Register(tool); err != nil {
 			return nil, nil, err
 		}
 	}
+	switch opts.requiredAction {
+	case "file_write":
+		err = reg.Register(newChatFileWriteTool(root))
+	case "file_patch":
+		err = reg.Register(newChatFilePatchTool(root))
+	case "terminal":
+		err = reg.Register(newChatTerminalTool(root, opts.ToolHost))
+		if err == nil && opts.ToolHost != chatToolHostLocal {
+			err = reg.Register(newChatProcessTool(root))
+		}
+	case "process_manage":
+		if opts.ToolHost == chatToolHostLocal {
+			return nil, nil, fmt.Errorf("process management requires the sandbox tool host")
+		}
+		err = reg.Register(newChatProcessTool(root))
+	case "file_import", "file_export":
+		if opts.ToolHost == chatToolHostLocal {
+			return nil, nil, fmt.Errorf("file transfer requires the sandbox tool host")
+		}
+		local, localErr := chatWorkspaceRoot(chatToolHostLocal)
+		if localErr != nil {
+			return nil, nil, localErr
+		}
+		if opts.requiredAction == "file_import" {
+			err = reg.Register(newChatTransferTool("file_import", local, root, question))
+		} else {
+			err = reg.Register(newChatTransferTool("file_export", root, local, question))
+		}
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	closeMCP, err := registerChatMCPTools(ctx, reg, root)
+	if err != nil {
+		return nil, nil, err
+	}
+	if opts.requiredAction == "mcp" {
+		configured := false
+		for _, name := range reg.Names() {
+			configured = configured || strings.HasPrefix(name, "mcp__")
+		}
+		if !configured {
+			closeMCP()
+			return nil, nil, fmt.Errorf("native chat: no MCP client tools are configured")
+		}
+	}
 	targets := chatTargetEntries(question, history)
+	publicWeb := opts.webEvidence
+	if publicWeb == nil {
+		publicWeb = &chatWebProvenance{urls: map[string]bool{}}
+	}
+	allowPublicResearch := opts.requiredAction == "" || opts.requiredAction == "web_search"
+	if opts.requiredAction == "web_extract" && loadPrefs().Web {
+		if err := reg.Register(newChatWebExtractTool(question, publicWeb)); err != nil {
+			closeMCP()
+			return nil, nil, err
+		}
+	}
 	if len(targets) == 0 {
-		if !opts.NoWeb && loadPrefs().Web && !questionHasTargetDetails(question) {
-			if err := reg.Register(newChatWebSearchTool(cfg, question)); err != nil {
+		closeBrowser := func() {}
+		if opts.requiredAction == "browser_control" || opts.requiredAction == "browser_vision" {
+			state, closeState := chatBrowserForOpts(opts)
+			closeBrowser = closeState
+			if err := reg.Register(newChatBrowserTool(state, root, question, "public", opts.BrowserCDP, chatPublicBroker(), nil, publicWeb)); err != nil {
+				closeState()
+				closeMCP()
+				return nil, nil, err
+			}
+			if err := reg.Register(newChatBrowserVisionTool(state, cfg)); err != nil {
+				closeState()
+				closeMCP()
 				return nil, nil, err
 			}
 		}
-		return reg, func() {}, nil
+		if allowPublicResearch && !opts.NoWeb && loadPrefs().Web && !questionHasTargetDetails(question) {
+			if err := reg.Register(newChatWebSearchTool(cfg, question, history, publicWeb)); err != nil {
+				closeBrowser()
+				closeMCP()
+				return nil, nil, err
+			}
+		}
+		if allowPublicResearch && !opts.NoWeb && loadPrefs().Web {
+			if err := reg.Register(newChatWebExtractTool(question, publicWeb)); err != nil {
+				closeBrowser()
+				closeMCP()
+				return nil, nil, err
+			}
+		}
+		return reg, func() { closeBrowser(); closeMCP() }, nil
+	}
+	if opts.requiredAction == "web_extract" {
+		return reg, closeMCP, nil
 	}
 	scope, err := chatTargetScope(ctx, targets)
 	if err != nil {
+		closeMCP()
 		return nil, nil, err
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
+		closeMCP()
 		return nil, nil, err
 	}
 	project, _, err := autodetectEngageConfig(cwd)
 	if err != nil {
+		closeMCP()
 		return nil, nil, err
 	}
 	scratch, err := os.MkdirTemp("", "blk-chat-*")
 	if err != nil {
+		closeMCP()
 		return nil, nil, err
 	}
 	gate := &secgate.Gate{
@@ -279,6 +303,7 @@ func newChatToolRegistry(ctx context.Context, rc searcher, cfg ragconfig.Config,
 	}
 	if err := gate.Start(); err != nil {
 		_ = os.RemoveAll(scratch)
+		closeMCP()
 		return nil, nil, err
 	}
 	run := newRunCommandToolForTask(gate, chatCommandOutput, chatCommandTime, scratch,
@@ -286,12 +311,33 @@ func newChatToolRegistry(ctx context.Context, rc searcher, cfg ragconfig.Config,
 		secgate.Command{Phase: secgate.PhaseExploit, Surface: secgate.SurfaceNetwork, Armed: true}, nil)
 	armed := func() bool { return true }
 	driver := &chatWebDriver{broker: newWebBroker(gate, armed)}
-	for _, tool := range []tooldef.Tool{chatScopedTool{Tool: run, scope: scope}, newWebAPITool(gate, armed, driver), newWebBrowserTool(gate, armed, driver)} {
-		if err := reg.Register(tool); err != nil {
+	closeBrowser := func() {}
+	if opts.requiredAction == "browser_control" || opts.requiredAction == "browser_vision" {
+		state, closeState := chatBrowserForOpts(opts)
+		closeBrowser = closeState
+		if err := reg.Register(newChatBrowserTool(state, root, question, strings.Join(targets, ","), opts.BrowserCDP, driver.broker, gate, publicWeb)); err != nil {
+			closeState()
 			driver.Close()
 			_ = os.RemoveAll(scratch)
+			closeMCP()
+			return nil, nil, err
+		}
+		if err := reg.Register(newChatBrowserVisionTool(state, cfg)); err != nil {
+			closeState()
+			driver.Close()
+			_ = os.RemoveAll(scratch)
+			closeMCP()
 			return nil, nil, err
 		}
 	}
-	return reg, func() { driver.Close(); _ = os.RemoveAll(scratch) }, nil
+	for _, tool := range []tooldef.Tool{chatScopedTool{Tool: run, scope: scope}, newWebAPITool(gate, armed, driver), newWebBrowserTool(gate, armed, driver)} {
+		if err := reg.Register(tool); err != nil {
+			closeBrowser()
+			driver.Close()
+			_ = os.RemoveAll(scratch)
+			closeMCP()
+			return nil, nil, err
+		}
+	}
+	return reg, func() { closeBrowser(); driver.Close(); _ = os.RemoveAll(scratch); closeMCP() }, nil
 }

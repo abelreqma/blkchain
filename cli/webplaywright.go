@@ -107,10 +107,12 @@ func webValidateCDPEndpoint(ep string) error {
 type webPlaywrightDriver struct {
 	sessionOrigin  string
 	sessionHeaders http.Header
+	lastAPIURL     string
 	pw             *playwright.Playwright
 	browser        playwright.Browser
 	mu             sync.Mutex
 	context        playwright.BrowserContext
+	storageState   *playwright.StorageState
 	page           playwright.Page
 	redirectOK     webRedirectAuthorizer
 	requests       atomic.Int64
@@ -220,12 +222,16 @@ func (d *webPlaywrightDriver) ensureContext() error {
 	if err != nil {
 		return err
 	}
-	bctx, err := d.browser.NewContext(playwright.BrowserNewContextOptions{
+	options := playwright.BrowserNewContextOptions{
 		AcceptDownloads:   playwright.Bool(false),
 		ServiceWorkers:    playwright.ServiceWorkerPolicyAllow,
 		Proxy:             &playwright.Proxy{Server: endpoint},
 		IgnoreHttpsErrors: playwright.Bool(true),
-	})
+	}
+	if d.storageState != nil {
+		options.StorageState = d.storageState.ToOptionalStorageState()
+	}
+	bctx, err := d.browser.NewContext(options)
 	if err != nil {
 		return fmt.Errorf("new browser context: %w", err)
 	}
@@ -351,6 +357,7 @@ func (d *webPlaywrightDriver) DoAPIRequest(ctx context.Context, req webAPIReques
 	d.stateMu.Unlock()
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.lastAPIURL = ""
 	if d.broker == nil {
 		return "", errors.New("web request broker missing")
 	}
@@ -358,14 +365,24 @@ func (d *webPlaywrightDriver) DoAPIRequest(ctx context.Context, req webAPIReques
 		return "", err
 	}
 	r := webacquire.Request{Method: req.Method, URL: req.URL, Headers: webHeaders(webParseHeaderLines(req.Headers)), Body: []byte(req.Body)}
-	cookies, err := d.context.Cookies(req.URL)
-	if err != nil {
-		return "", errors.New("cannot read isolated session cookies")
+	if d.sessionOrigin != "" && !webSameOrigin(req.URL, d.sessionOrigin) {
+		for key := range r.Headers {
+			if webanalysis.Sensitive(key) {
+				r.Headers.Del(key)
+			}
+		}
 	}
-	for _, c := range cookies {
-		r.Headers.Add("Cookie", c.Name+"="+c.Value)
+	if d.sessionOrigin == "" || webSameOrigin(req.URL, d.sessionOrigin) {
+		cookies, err := d.context.Cookies(req.URL)
+		if err != nil {
+			return "", errors.New("cannot read isolated session cookies")
+		}
+		for _, c := range cookies {
+			r.Headers.Add("Cookie", c.Name+"="+c.Value)
+		}
 	}
 	out, err := d.broker.Fetch(ctx, r)
+	d.lastAPIURL = out.FinalURL
 	if d.observe != nil {
 		example := webanalysis.RequestExample{URL: req.URL, Method: req.Method, Headers: r.Headers, Role: d.role, Status: out.Status, Denied: err != nil}
 		webanalysis.SetRequestBody(&example, []byte(req.Body))

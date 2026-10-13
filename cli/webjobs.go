@@ -46,22 +46,43 @@ func webJobTools(g *secgate.Gate, task engagement.Task, c webCapture, broker *we
 			svc.DiscoveryAllowed = webRedirectOK(g)
 			svc.SetTask(task.ID)
 			var err error
+			var collected map[string]bool
 			switch op {
 			case "collect":
 				if len(a.Targets) == 0 {
 					return "web_collect requires scoped absolute targets", nil
 				}
-				o := webcollect.Options{Role: task.ID, Historical: a.Historical}
+				if c.Session != nil {
+					if a.Historical {
+						return "web_collect: session-cdp cannot be used for archived content", nil
+					}
+					for _, target := range a.Targets {
+						if !webSameOrigin(target, c.Session.Origin) {
+							return "web_collect: session-cdp targets must match the role origin", nil
+						}
+					}
+					a.Browser = true
+				}
+				role := webSessionRole{Name: task.ID}
+				if c.Session != nil {
+					role = *c.Session
+				}
+				o := webcollect.Options{Role: role.Name, Historical: a.Historical, BrowserOnlyAuth: role.AuthState != nil}
 				if a.Historical {
 					svc.Archive = webcollect.NewArchive(svc.DiscoveryAllowed)
 				} else if a.Browser {
-					b, e := webNewJobBrowser(g, func() bool { return task.Armed }, svc, webSessionRole{Name: task.ID}, false)
+					b, e := webNewJobBrowser(g, func() bool { return task.Armed }, svc, role, false)
 					if e != nil {
 						return "web_collect: " + e.Error(), nil
 					}
 					o.Browser = b
 				}
-				_, err = svc.Collect(ctx, a.Targets, o)
+				coverage, collectErr := svc.Collect(ctx, a.Targets, o)
+				err = collectErr
+				collected = make(map[string]bool, len(coverage.Downloaded))
+				for _, id := range coverage.Downloaded {
+					collected[id] = true
+				}
 				if err == nil {
 					err = webScanLibraries(ctx, svc)
 				}
@@ -99,6 +120,19 @@ func webJobTools(g *secgate.Gate, task engagement.Task, c webCapture, broker *we
 			}
 			snap = webFilter(snap, a.Targets)
 			summary := fmt.Sprintf("web %s: artifacts=%d units=%d functions=%d operations=%d findings=%d coverage=%d", op, len(snap.Artifacts), len(snap.Units), len(snap.Functions), len(snap.Operations), len(snap.Findings), len(snap.Coverage))
+			if op == "collect" && c.Session != nil {
+				for _, artifact := range snap.Artifacts {
+					if !collected[artifact.ID] || artifact.TaskID != task.ID || artifact.Kind != "browser-dom" || artifact.Role != c.Session.Name || !webSameOrigin(artifact.URL, c.Session.Origin) || !artifact.Complete {
+						continue
+					}
+					body, err := c.Store.WebBlob(artifact.Hash)
+					if err != nil {
+						return "web_collect: captured browser evidence unavailable", nil
+					}
+					summary += fmt.Sprintf("\nrole %s browser artifact=%s\n%s", artifact.Role, artifact.ID, capRunes(webModelPreview("browser-dom", string(body), snap.Findings), 4096))
+					break
+				}
+			}
 			if op != "inspect" {
 				id, e := c.Store.RecordEvidence(task.ID, summary)
 				if e != nil {

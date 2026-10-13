@@ -18,12 +18,13 @@ import (
 )
 
 type webSessionRole struct {
-	Name       string            `json:"name"`
-	Origin     string            `json:"origin"`
-	HeadersEnv map[string]string `json:"headers_env"`
-	CookiesEnv map[string]string `json:"cookies_env"`
-	Login      *webBrowserArgs   `json:"login,omitempty"`
-	Storage    map[string]string `json:"storage_env,omitempty"`
+	Name       string                   `json:"name"`
+	Origin     string                   `json:"origin"`
+	HeadersEnv map[string]string        `json:"headers_env"`
+	CookiesEnv map[string]string        `json:"cookies_env"`
+	Login      *webBrowserArgs          `json:"login,omitempty"`
+	Storage    map[string]string        `json:"storage_env,omitempty"`
+	AuthState  *playwright.StorageState `json:"-"`
 }
 
 func webLoadSessions(path string) ([]webSessionRole, error) {
@@ -127,8 +128,19 @@ func webNewJobBrowser(g *secgate.Gate, armed webArmedFunc, collector *webcollect
 	b := &webJobBrowser{Driver: d, Gate: g, Armed: armed, Collector: collector, Role: role}
 	d.broker = collector.Broker
 	d.role = role.Name
+	d.storageState = role.AuthState
 	d.redirectOK = webRedirectOK(g)
 	d.observe = func(o webObservation) error {
+		if role.Origin != "" {
+			observedURL := o.Artifact.URL
+			if o.Artifact.FinalURL != "" {
+				observedURL = o.Artifact.FinalURL
+			}
+			o.Artifact.Role = webCapturedRole(&role, observedURL, role.Name)
+			if o.Request.URL != "" {
+				o.Request.Role = webCapturedRole(&role, o.Request.URL, role.Name)
+			}
+		}
 		d.cdp.mu.Lock()
 		defer d.cdp.mu.Unlock()
 		if len(b.Queue) >= 500 || b.queueBytes+len(o.Body) > 64<<20 {

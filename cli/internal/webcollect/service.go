@@ -28,6 +28,7 @@ type Options struct {
 	Headers          http.Header
 	CredentialOrigin string
 	Browser          Browser
+	BrowserOnlyAuth  bool
 	Interactions     []string
 	MaxDepth         int
 	MaxStates        int
@@ -204,7 +205,11 @@ func (s *Service) Collect(ctx context.Context, targets []string, o Options) (web
 			}
 			out, err = s.Broker.Fetch(ctx, webacquire.Request{Method: "GET", URL: f.URL, Headers: headers})
 		}
-		a := webanalysis.Artifact{DocumentURL: f.DocumentURL, MapLine: f.MapLine, MapColumn: f.MapColumn, CapturedAt: stamp, Kind: f.Kind, URL: f.URL, FinalURL: out.FinalURL, Role: o.Role, Status: out.Status, Headers: out.Headers, MIME: out.Headers.Get("Content-Type"), Complete: out.Complete, Parents: []string{f.Parent}, Gap: out.Gap}
+		role := o.Role
+		if o.BrowserOnlyAuth && stamp == "" {
+			role = "anonymous"
+		}
+		a := webanalysis.Artifact{DocumentURL: f.DocumentURL, MapLine: f.MapLine, MapColumn: f.MapColumn, CapturedAt: stamp, Kind: f.Kind, URL: f.URL, FinalURL: out.FinalURL, Role: role, Status: out.Status, Headers: out.Headers, MIME: out.Headers.Get("Content-Type"), Complete: out.Complete, Parents: []string{f.Parent}, Gap: out.Gap}
 		if err != nil {
 			reason := "request denied or acquisition failed"
 			if f.Timestamp != "" {

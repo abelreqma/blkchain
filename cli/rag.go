@@ -217,14 +217,19 @@ type AnswerOpts struct {
 	// a short status token. It is not called for the generic persona.
 	Persona      func(domain string)
 	WebOnly      bool
+	ToolHost     string
+	BrowserCDP   string
 	NoWeb        bool
 	WebFirst     bool
 	NoLocal      bool
 	SearchTopK   int
 	SearchFilter map[string]any
 
-	History []priorTurn
-	llm     toolLoopModel // reuse this client if set; nil builds one
+	History        []priorTurn
+	llm            toolLoopModel // reuse this client if set; nil builds one
+	requiredAction string
+	Browser        *chatBrowserState
+	webEvidence    *chatWebProvenance
 }
 
 // priorTurn is one earlier message in the conversation. Role is "human" or

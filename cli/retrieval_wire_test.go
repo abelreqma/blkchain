@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -256,7 +257,7 @@ func TestAskJSONGolden(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &response); err != nil {
 		t.Fatal(err)
 	}
-	if len(response.LLMCalls) != 3 || response.LLMCalls[0].Stage != "routing" || response.LLMCalls[1].Stage != "grading" || response.LLMCalls[2].Stage != "synthesis" {
+	if len(response.LLMCalls) != 4 || response.LLMCalls[0].Stage != "routing" || response.LLMCalls[1].Stage != "routing" || response.LLMCalls[2].Stage != "grading" || response.LLMCalls[3].Stage != "synthesis" {
 		t.Fatalf("call stages=%+v", response.LLMCalls)
 	}
 	response.LLMCalls = nil
@@ -316,16 +317,23 @@ func TestAskJSONGolden(t *testing.T) {
 func citedLLM(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
 		var body struct {
 			Stream bool `json:"stream"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = json.Unmarshal(raw, &body)
 		if body.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"see [1] and [2]\"}}]}\n\ndata: [DONE]\n\n")
 			return
 		}
-		io.WriteString(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"{\"sufficient\":true,\"rewrite\":\"\",\"use_web\":false}"},"finish_reason":"stop"}]}`)
+		answer := `{"sufficient":true,"rewrite":"","use_web":false}`
+		if strings.Contains(string(raw), "Classify the current user request") {
+			answer = "ADVICE"
+		} else if strings.Contains(string(raw), "You decide how to handle") {
+			answer = "GROUND"
+		}
+		fmt.Fprintf(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":%q},"finish_reason":"stop"}]}`, answer)
 	}))
 	t.Cleanup(srv.Close)
 	return srv

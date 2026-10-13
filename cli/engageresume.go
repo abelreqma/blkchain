@@ -9,10 +9,13 @@ import (
 
 func runEngageResume(args []string) error {
 	fs := newFlagSet("engage resume")
-	var workspace, model string
+	var workspace, model, session, role, sessionCDP string
 	fs.StringVar(&workspace, "workspace", "", "engagement workspace directory (default: the most recent engagement)")
 	fs.StringVar(&model, "model", "", "chat model id (default: the resolved model)")
-	if err := parseFlags(fs, reorder(args, map[string]bool{"workspace": true, "model": true})); err != nil {
+	fs.StringVar(&session, "session", "", "web role session file")
+	fs.StringVar(&role, "role", "", "named web role")
+	fs.StringVar(&sessionCDP, "session-cdp", "", "loopback signed-in Chrome CDP endpoint")
+	if err := parseFlags(fs, reorder(args, map[string]bool{"workspace": true, "model": true, "session": true, "role": true, "session-cdp": true})); err != nil {
 		return err
 	}
 	if len(fs.Args()) == 1 && workspace == "" {
@@ -33,6 +36,9 @@ func runEngageResume(args []string) error {
 	resume := []string{"--resume", workspace}
 	if model != "" {
 		resume = append(resume, "--model", model)
+	}
+	if sessionCDP != "" || session != "" || role != "" {
+		resume = append(resume, "--session", session, "--role", role, "--session-cdp", sessionCDP)
 	}
 	return runEngage(resume)
 }

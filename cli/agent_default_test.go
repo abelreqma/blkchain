@@ -54,31 +54,77 @@ func TestUnselectedInteractiveDefaultIsNativeAuto(t *testing.T) {
 	}
 }
 
-func TestUnselectedCLIAskDefaultsToHermes(t *testing.T) {
+func TestUnselectedCLIAskDefaultsToNativeAuto(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
 	isolatedHermesExecutable(t)
+	old := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = old })
+	calls := 0
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		calls++
+		if opts.Agent != "" {
+			t.Errorf("default agent = %q, want auto", opts.Agent)
+		}
+		if opts.Stream != nil {
+			opts.Stream([]byte("native-default-fixture"))
+		}
+		return "native-default-fixture", nil, false, nil, 1, "skip", nil
+	}
 	var err error
 	out := captureStdout(t, func() { _, err = askWith(nil, nil, []string{"a question"}) })
-	if err != nil || !strings.Contains(out, "hermes-default-fixture") {
-		t.Fatalf("default CLI bypassed Hermes: %q, %v", out, err)
+	if err != nil || calls != 1 || !strings.Contains(out, "native-default-fixture") || strings.Contains(out, "hermes-default-fixture") {
+		t.Fatalf("default CLI did not use native auto: calls=%d out=%q err=%v", calls, out, err)
 	}
 }
 
-func TestNativeOutputRequiresExplicitAgent(t *testing.T) {
+func TestDefaultCLIOutputFlagsUseNative(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
 	isolatedHermesExecutable(t)
+	old := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = old })
+	calls := 0
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		calls++
+		if opts.Stream != nil {
+			opts.Stream([]byte("native-default-fixture"))
+		}
+		return "native-default-fixture", nil, false, nil, 1, "skip", nil
+	}
 	for _, args := range [][]string{
 		{"--json", "question"},
 		{"--sources", "question"},
 		{"--rag", "--json", "question"},
 		{"--web", "--sources", "question"},
-		{"--json", "--context", filepath.Join(t.TempDir(), "missing"), "question"},
 	} {
-		_, err := askWith(nil, nil, args)
-		if _, ok := err.(*usageError); !ok || !strings.Contains(err.Error(), "--agent auto") {
-			t.Fatalf("native output did not require explicit selection for %v: %v", args, err)
+		out := captureStdout(t, func() {
+			if _, err := askWith(nil, nil, args); err != nil {
+				t.Fatalf("default native output failed for %v: %v", args, err)
+			}
+		})
+		if !strings.Contains(out, "native-default-fixture") || strings.Contains(out, "hermes-default-fixture") {
+			t.Fatalf("default native output for %v: %q", args, out)
+		}
+	}
+	if calls != 4 {
+		t.Fatalf("native answer calls = %d, want 4", calls)
+	}
+}
+
+func TestExplicitHermesCLIAsk(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	isolatedHermesExecutable(t)
+	var err error
+	out := captureStdout(t, func() { _, err = askWith(nil, nil, []string{"--hermes", "a question"}) })
+	if err != nil || !strings.Contains(out, "hermes-default-fixture") {
+		t.Fatalf("explicit Hermes failed: out=%q err=%v", out, err)
+	}
+	for _, flag := range []string{"--json", "--sources"} {
+		_, err := askWith(nil, nil, []string{"--hermes", flag, "a question"})
+		if _, ok := err.(*usageError); !ok {
+			t.Fatalf("Hermes accepted unsupported %s: %v", flag, err)
 		}
 	}
 }

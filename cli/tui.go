@@ -62,6 +62,9 @@ func runTUI() error {
 	if m.rc != nil {
 		m.rc.Close()
 	}
+	if m.browser != nil {
+		m.browser.Close()
+	}
 	return err
 }
 
@@ -602,6 +605,9 @@ type model struct {
 	// status ribbon shows it; it is cleared at the start of each new rag turn.
 	persona     string
 	answerAgent string
+	toolHost    string
+	browser     *chatBrowserState
+	browserCDP  string
 	// engageMode and engageTranscript are the engagement settings shown by the
 	// ribbon and passed to the shared RoE session.
 	engageMode       secgate.Mode
@@ -679,6 +685,7 @@ func initialModel() model {
 		cfg:              cfg,
 		rc:               rc,
 		liveCache:        &liveCache{},
+		browser:          &chatBrowserState{},
 		rcErr:            rcErr,
 		viz:              newVizRenderer(newMmdfluxRunner()),
 
@@ -1685,7 +1692,7 @@ func (m model) dispatchEngage(goal string) (tea.Model, tea.Cmd) {
 	return m.dispatchEngageAt(goal, "", "")
 }
 
-func (m model) dispatchEngageAt(goal, wsDir, projectDir string) (tea.Model, tea.Cmd) {
+func (m model) dispatchEngageAt(goal, wsDir, projectDir string, cdp ...engageOpts) (tea.Model, tea.Cmd) {
 	run, err := m.buildReplEngageRun(goal)
 	if err != nil {
 		return m, tea.Println(styleErr(err))
@@ -1693,6 +1700,9 @@ func (m model) dispatchEngageAt(goal, wsDir, projectDir string) (tea.Model, tea.
 	if wsDir != "" {
 		run.wsDir = wsDir
 		run.cwd = projectDir
+	}
+	if len(cdp) > 0 {
+		run.cdp = &cdp[0]
 	}
 	m.working = true
 	m.tickGen++
@@ -2024,6 +2034,36 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			cmd = tea.Batch(cmd, m.modeSwitchCmd())
 		}
 		return m, cmd
+	case "tool-host":
+		value := strings.ToLower(strings.TrimSpace(arg))
+		if value == "" {
+			value = m.toolHost
+			if value == "" {
+				value = chatToolHostSandbox
+			}
+		} else if value == chatToolHostSandbox || value == chatToolHostLocal {
+			m.toolHost = value
+		} else {
+			return m, tea.Println(styleErr(fmt.Errorf("tool-host: choose sandbox or local")))
+		}
+		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render("tool-host: "+value)))
+	case "browser-cdp":
+		value := strings.TrimSpace(arg)
+		if value == "off" {
+			value = ""
+		} else if value != "" {
+			if err := webValidateCDPEndpoint(value); err != nil {
+				return m, tea.Println(styleErr(err))
+			}
+		}
+		if value != m.browserCDP && m.browser != nil {
+			m.browser.Close()
+		}
+		m.browserCDP = value
+		if value == "" {
+			value = "isolated"
+		}
+		return m, tea.Sequence(tea.Println(echo), tea.Println("   "+Meta.Render("browser-cdp: "+value)))
 	case "rag":
 		toggle, on, question := ragArg(arg)
 		switch {
@@ -2305,6 +2345,26 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 		parts := strings.Fields(arg)
 		if len(parts) > 0 && parts[0] == "web" {
 			return m.dispatchWeb(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), "web")), echo)
+		}
+		if strings.Contains(arg, "--session-cdp") {
+			o, goal, err := parseInteractiveEngageCDP(arg)
+			if err != nil {
+				return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
+			}
+			if o.resume != "" {
+				var checkpoint engageRunMetadata
+				if err := readEngageMetadata(filepath.Join(o.resume, "run.json"), &checkpoint); err != nil {
+					return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
+				}
+				m.engageMode = secgate.Auto
+				if checkpoint.Mode == "safe" {
+					m.engageMode = secgate.Safe
+				}
+				model, cmd := m.dispatchEngageAt(checkpoint.Goal, o.resume, checkpoint.ProjectDir, o)
+				return model, tea.Batch(tea.Println(echo), cmd)
+			}
+			model, cmd := m.dispatchEngageAt(goal, o.workspace, "", o)
+			return model, tea.Batch(tea.Println(echo), cmd)
 		}
 		if isEngageApproval(parts) {
 			args, err := engageApprovalArgs(arg)
@@ -2691,13 +2751,16 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 		streamed := false
 		p := loadPrefs()
 		full, cits, usedWeb, results, tokens, _, err := adaptiveAnswerFn(ctx, rc, cfg, question, askRoutes(p), force, AnswerOpts{
-			Agent:    m.answerAgent,
-			Model:    turnModel,
-			Preface:  preface,
-			NoWeb:    !p.Web,
-			WebFirst: !force,
-			WebOnly:  webOnly,
-			History:  m.conversationHistory(),
+			Agent:      m.answerAgent,
+			ToolHost:   m.toolHost,
+			Browser:    m.browser,
+			BrowserCDP: m.browserCDP,
+			Model:      turnModel,
+			Preface:    preface,
+			NoWeb:      !p.Web,
+			WebFirst:   !force,
+			WebOnly:    webOnly,
+			History:    m.conversationHistory(),
 			Persona: func(domain string) {
 				if prog != nil {
 					prog.Send(personaMsg(domain))

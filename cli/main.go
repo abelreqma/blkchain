@@ -427,13 +427,15 @@ func newAskStream(w io.Writer, full *strings.Builder) func([]byte) {
 
 // askOpts holds the flags of `blk ask`.
 type askOpts struct {
-	json    bool
-	sources bool
-	agent   string
-	hermes  bool
-	rag     bool
-	web     bool
-	context multiFlag
+	json       bool
+	sources    bool
+	agent      string
+	toolHost   string
+	browserCDP string
+	hermes     bool
+	rag        bool
+	web        bool
+	context    multiFlag
 }
 
 // askRoutes builds the router's enabled-route set from the saved model prefs.
@@ -444,7 +446,9 @@ func askRoutes(p modelPrefs) enabledRoutes {
 func defineAskFlags(fs *flag.FlagSet, o *askOpts) {
 	fs.BoolVar(&o.json, "json", false, "print the answer as JSON instead of formatted text")
 	fs.BoolVar(&o.sources, "sources", false, "also print the retrieved passages")
-	fs.StringVar(&o.agent, "agent", "", "native answer specialist `NAME` (unset: Hermes; auto: native dynamic)")
+	fs.StringVar(&o.agent, "agent", "", "native answer specialist `NAME` (default: auto)")
+	fs.StringVar(&o.toolHost, "tool-host", chatToolHostSandbox, "native file and terminal host: sandbox or local")
+	fs.StringVar(&o.browserCDP, "browser-cdp", "", "copy signed-in state from an explicit loopback CDP browser")
 	fs.BoolVar(&o.hermes, "hermes", false, "answer with Hermes")
 	fs.BoolVar(&o.web, "web", false, "search the internet for this answer only")
 	fs.BoolVar(&o.rag, "rag", false, "force a grounded answer from the knowledge base, skipping adaptive routing")
@@ -460,10 +464,10 @@ func runAsk(args []string) error {
 // askWith runs `blk ask` with args. rc is a long-lived retrieval client to
 // reuse, such as the plain REPL's; nil makes one for this call and closes it.
 func askWith(rc *retrieval.Client, history []priorTurn, args []string) (string, error) {
-	return askWithPreface(rc, history, args, "", false)
+	return askWithPreface(rc, history, args, "", false, nil)
 }
 
-func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, preface string, webFirst bool, observed ...*callMetrics) (string, error) {
+func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, preface string, webFirst bool, browser *chatBrowserState, observed ...*callMetrics) (string, error) {
 	ctx, metrics := withCallMetrics(context.Background())
 	if len(observed) > 0 && observed[0] != nil {
 		metrics = observed[0]
@@ -472,8 +476,16 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 	var o askOpts
 	fs := newFlagSet("ask")
 	defineAskFlags(fs, &o)
-	if err := parseFlags(fs, reorder(args, map[string]bool{"context": true, "agent": true})); err != nil {
+	if err := parseFlags(fs, reorder(args, map[string]bool{"context": true, "agent": true, "tool-host": true, "browser-cdp": true})); err != nil {
 		return "", err
+	}
+	if o.toolHost != chatToolHostSandbox && o.toolHost != chatToolHostLocal {
+		return "", usageErr("ask: --tool-host must be sandbox or local")
+	}
+	if o.browserCDP != "" {
+		if err := webValidateCDPEndpoint(o.browserCDP); err != nil {
+			return "", usageErr("ask: %s", err)
+		}
 	}
 	jsonOut, showSources := &o.json, &o.sources
 	agent, err := parseAnswerAgent(o.agent)
@@ -488,16 +500,21 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 	if o.hermes && (o.rag || o.web) {
 		return "", usageErr("ask: --hermes cannot be combined with --rag or --web")
 	}
+	if o.hermes && (o.json || o.sources) {
+		return "", usageErr("ask: --hermes cannot be combined with --json or --sources")
+	}
+	if o.hermes && o.toolHost != chatToolHostSandbox {
+		return "", usageErr("ask: --tool-host applies only to native chat")
+	}
+	if o.hermes && o.browserCDP != "" {
+		return "", usageErr("ask: --browser-cdp applies only to native chat")
+	}
 	if o.web && o.rag {
 		return "", usageErr("ask: --web cannot be combined with --rag")
 	}
-	useHermes := o.hermes || (!explicitAgent && !o.rag && !o.web)
 	query := strings.Join(fs.Args(), " ")
 	if query == "" {
 		return "", missingArg("ask", "missing question", `ask "what is SSRF?"`)
-	}
-	if !explicitAgent && (o.json || o.sources) {
-		return "", usageErr("ask: --json and --sources need native routing; select --agent auto or a specialist")
 	}
 	if len(o.context) > 0 {
 		pending := model{}
@@ -509,7 +526,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		preface = strings.TrimSpace(preface + "\n\n" + pending.buildContextPreface())
 	}
 
-	if useHermes {
+	if o.hermes {
 		if preface != "" {
 			query = preface + "\n\n" + query
 		}
@@ -542,13 +559,16 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		var full strings.Builder
 		p := loadPrefs()
 		_, cits, usedWeb, _, _, _, err := adaptiveAnswerFn(ctx, rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{
-			Agent:    agent,
-			Stream:   newAskStream(os.Stdout, &full),
-			Preface:  preface,
-			NoWeb:    !p.Web,
-			WebFirst: webFirst,
-			WebOnly:  o.web,
-			History:  history,
+			Agent:      agent,
+			ToolHost:   o.toolHost,
+			Browser:    browser,
+			BrowserCDP: o.browserCDP,
+			Stream:     newAskStream(os.Stdout, &full),
+			Preface:    preface,
+			NoWeb:      !p.Web,
+			WebFirst:   webFirst,
+			WebOnly:    o.web,
+			History:    history,
 			Stage: func(stage string) {
 				if strings.HasPrefix(stage, "tool ") {
 					fmt.Fprintln(os.Stderr, sanitizeTerminal(stage))
@@ -580,7 +600,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 	model := resolveModel(cfg)
 	p := loadPrefs()
 	actualAgent := "general"
-	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(ctx, rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Agent: agent, Model: model, NoWeb: !p.Web, WebFirst: webFirst, WebOnly: o.web, History: history, Preface: preface, Persona: func(domain string) { actualAgent = answerAgentName(domain) }})
+	answer, cits, usedWeb, results, _, route, err := adaptiveAnswerFn(ctx, rc, cfg, query, askRoutes(p), o.rag, AnswerOpts{Agent: agent, ToolHost: o.toolHost, Browser: browser, BrowserCDP: o.browserCDP, Model: model, NoWeb: !p.Web, WebFirst: webFirst, WebOnly: o.web, History: history, Preface: preface, Persona: func(domain string) { actualAgent = answerAgentName(domain) }})
 	if errors.Is(err, ErrNoResults) {
 		return "", reportNoResults(os.Stderr, *jsonOut, model)
 	}
