@@ -43,7 +43,10 @@ func plainAsk(m *model, query string, c *replClient, history []priorTurn, prefac
 		c.browser = &chatBrowserState{}
 	}
 	var full strings.Builder
-	ctx := context.WithValue(context.Background(), metricsKey{}, c.metrics)
+	// The turn is bounded by the configured request timeout
+	// (BLKCHAIN_TIMEOUT_SECONDS), the same bound the TUI gives its turn.
+	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), metricsKey{}, c.metrics), m.cfg.RequestTimeout())
+	defer cancel()
 	res, err := runNativeTurn(ctx, rc, m.cfg, turnRequest{
 		Question:   query,
 		Agent:      c.agent,

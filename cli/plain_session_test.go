@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"blkchain/cli/internal/histstore"
 	"blkchain/cli/internal/ragconfig"
@@ -365,6 +366,38 @@ func TestPlainAskFollowsTheCurrentRerankPreference(t *testing.T) {
 	})
 	if len(skips) != 2 || skips[0] || !skips[1] {
 		t.Fatalf("rerank skipped per turn = %v, want the second turn to follow the toggle", skips)
+	}
+}
+
+// The plain turn is bounded like the TUI's: the answer path runs under the
+// configured request timeout.
+func TestPlainAskBoundsTheTurnByTheRequestTimeout(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	t.Setenv("BLKCHAIN_TIMEOUT_SECONDS", "7")
+	prev := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = prev })
+	var deadline time.Time
+	var bounded bool
+	adaptiveAnswerFn = func(ctx context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		deadline, bounded = ctx.Deadline()
+		opts.Stream([]byte("answer"))
+		return "answer", nil, false, nil, 1, "rag", nil
+	}
+
+	m := model{cfg: loadConfig()}
+	var rc replClient
+	defer rc.close()
+	captureStdout(t, func() {
+		if _, err := plainAsk(&m, "a question", &rc, nil, "", false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !bounded {
+		t.Fatal("the plain turn ran with no deadline")
+	}
+	if left := time.Until(deadline); left <= 0 || left > 7*time.Second {
+		t.Fatalf("the turn's deadline is %s away, want at most the configured 7s", left)
 	}
 }
 
