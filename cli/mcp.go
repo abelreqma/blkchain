@@ -435,6 +435,8 @@ func mcpChatResult(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 	case !owned.owns(selector):
 		return turnResult{}, fmt.Errorf("%w: %s", errChatForeignSession, sanitizeTerminal(selector))
 	}
+	ctx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout())
+	defer cancel()
 	res, err := runNativeTurn(ctx, rc, cfg, turnRequest{
 		Question:  in.Message,
 		SessionID: selector,
@@ -442,7 +444,7 @@ func mcpChatResult(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		ToolHost:  in.ToolHost,
 	})
 	owned.own(res.SessionID)
-	return res, err
+	return res, timeoutOrErr(err)
 }
 
 // mcpSearchTopK validates kb_search's input and resolves its effective top_k,
