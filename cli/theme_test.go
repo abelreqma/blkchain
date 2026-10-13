@@ -434,7 +434,7 @@ func TestUserFacingStringsAreASCIIWhenUnicodeOff(t *testing.T) {
 		"histNext":  defaultKeys().HistNext.Help().Key,
 		"resume":    newHistoryPicker([]sessionMeta{meta}, "", 80).View(80, 24),
 		"resumeNil": newHistoryPicker(nil, "", 80).View(80, 24),
-		"model":     newModelPicker([]string{"m1", "m2"}, "m1", "low", 80).View(80, 24),
+		"model":     newModelPicker([]string{"m1", "m2"}, "m1", 80).View(80, 24),
 		"palette":   pm.paletteView(80, 24),
 		"repl":      replBanner(),
 		"prompt":    replPrompt(),

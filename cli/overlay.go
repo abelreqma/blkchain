@@ -15,7 +15,7 @@ import (
 )
 
 // overlay.go holds the focused overlay pickers: the /history
-// session picker and the /model reasoning picker. An overlay captures keys while
+// session picker and the /model picker. An overlay captures keys while
 // open; the base Update passes through only quit (tui.go). Each overlay renders
 // over the live region, replacing the input area, inside one rounded single-line
 // border in Rule with a Surface fill (per the design). Overlays never mutate the
@@ -34,7 +34,7 @@ type overlayModel interface {
 
 type overlayCloseMsg struct{}               // Esc: cancel, keep current session/model
 type historySelectedMsg struct{ id string } // reopen this session (/history picker)
-type modelSelectedMsg struct{ model, reasoning string }
+type modelSelectedMsg struct{ model string }
 
 // openModelPickerMsg carries the discovered models into the model picker. Model
 // discovery is a network call, so it runs in a command and opens the overlay on
@@ -43,13 +43,9 @@ type modelSelectedMsg struct{ model, reasoning string }
 type openModelPickerMsg struct {
 	models    []string
 	current   string
-	reasoning string
 	allHidden bool
 	listErr   error // the model list failed in a way worth saying (a redirect)
 }
-
-// reasoningLevels are the reasoning-effort choices, low to high.
-var reasoningLevels = []string{"minimal", "low", "medium", "high"}
 
 // --- shared list plumbing ---
 
@@ -89,7 +85,7 @@ func newCompactList(items []list.Item, width, height int, render func(bool, list
 	return l
 }
 
-// strItem is a plain string list item (model ids, reasoning levels).
+// strItem is a plain string list item (model ids).
 type strItem string
 
 func (s strItem) FilterValue() string { return string(s) }
@@ -376,19 +372,17 @@ func (p historyPicker) View(width, height int) string {
 	}, width, height)
 }
 
-// --- model / reasoning picker ---
+// --- model picker ---
 
 type modelPicker struct {
-	models  list.Model
-	reasons list.Model
-	focus   int    // 0 = models column, 1 = reasoning column
-	hint    string // a muted line under the columns, when set
+	models list.Model
+	hint   string // a muted line under the list, when set
 }
 
-// newModelPicker builds the two-column picker. When discovery yields no models it
-// falls back to the current model plus a free-text note (the caller adds the
-// note); the picker always has at least one selectable model.
-func newModelPicker(models []string, current, reasoning string, width int) modelPicker {
+// newModelPicker builds the picker. When discovery yields no models it falls
+// back to the current model plus a free-text note (the caller adds the note);
+// the picker always has at least one selectable model.
+func newModelPicker(models []string, current string, width int) modelPicker {
 	if len(models) == 0 {
 		if current != "" {
 			models = []string{current}
@@ -400,30 +394,14 @@ func newModelPicker(models []string, current, reasoning string, width int) model
 	for i, m := range models {
 		mItems[i] = strItem(m)
 	}
-	rItems := make([]list.Item, len(reasoningLevels))
-	for i, r := range reasoningLevels {
-		rItems[i] = strItem(r)
-	}
-
 	ml := newCompactList(mItems, 30, clamp(len(mItems), 1, 8), strRow)
-	rl := newCompactList(rItems, 14, len(reasoningLevels), strRow)
-
 	for i, m := range models {
 		if m == current {
 			ml.Select(i)
 			break
 		}
 	}
-	if reasoning == "" {
-		reasoning = "medium"
-	}
-	for i, r := range reasoningLevels {
-		if r == reasoning {
-			rl.Select(i)
-			break
-		}
-	}
-	return modelPicker{models: ml, reasons: rl}
+	return modelPicker{models: ml}
 }
 
 func (p modelPicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
@@ -436,72 +414,42 @@ func (p modelPicker) Update(msg tea.Msg) (overlayModel, tea.Cmd) {
 		return p, closeOverlayCmd
 	case "enter":
 		model, _ := p.models.SelectedItem().(strItem)
-		reason, _ := p.reasons.SelectedItem().(strItem)
-		return p, func() tea.Msg {
-			return modelSelectedMsg{model: string(model), reasoning: string(reason)}
-		}
-	case "tab", "right", "l":
-		p.focus = 1
-		return p, nil
-	case "shift+tab", "left", "h":
-		p.focus = 0
-		return p, nil
+		return p, func() tea.Msg { return modelSelectedMsg{model: string(model)} }
 	}
-	// up/down (and anything else) drive the focused column.
+	// up/down (and anything else) drive the list.
 	var cmd tea.Cmd
-	if p.focus == 0 {
-		p.models, cmd = p.models.Update(msg)
-	} else {
-		p.reasons, cmd = p.reasons.Update(msg)
-	}
+	p.models, cmd = p.models.Update(msg)
 	return p, cmd
 }
 
 func (p modelPicker) View(width, height int) string {
-	// Both columns are sized to the box on every render. The reasoning column
-	// is at most 14 wide (a third of the box when narrow), the model column
-	// takes the rest, and each column is padded to a fixed width so the
-	// reasoning column does not shift as the selection changes.
+	// The list is sized to the box on every render, and padded to a fixed width
+	// so it does not shift as the selection changes.
 	body := func(w, rows int) string {
 		hint := ""
 		if p.hint != "" && rows > 2 {
 			rows--
 			hint = "\n" + Meta.Render(ellipsize(p.hint, w))
 		}
-		rw := clamp(w/3, 9, 14)
-		mw := max(min(w-2-rw, 30), 8)
-		// One row goes to the column heading, unless that would leave no list row.
+		mw := max(min(w, 30), 8)
+		// One row goes to the heading, unless that would leave no list row.
 		listRows := max(rows-1, 1)
 		p.models.SetSize(mw, listRows)
-		p.reasons.SetSize(rw, min(len(reasoningLevels), listRows))
-		pad := func(cw int, s string) string { return lipgloss.NewStyle().Width(cw).Render(s) }
-		left, right := p.models.View(), p.reasons.View()
+		out := p.models.View()
 		if rows > 1 {
-			left = modelColumn("MODEL", left, p.focus == 0)
-			right = modelColumn("REASONING", right, p.focus == 1)
+			out = H2.Render("MODEL") + "\n" + out
 		}
-		left, right = pad(mw, left), pad(rw, right)
-		return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right) + hint
+		return lipgloss.NewStyle().Width(mw).Render(out) + hint
 	}
 	hintRows := 0
 	if p.hint != "" {
 		hintRows = 1
 	}
 	return overlayBox(overlaySpec{
-		title: "MODEL / REASONING",
-		wantW: 46, wantRows: 1 + max(min(len(p.models.Items()), 8), len(reasoningLevels)) + hintRows,
+		title: "MODEL",
+		wantW: 46, wantRows: 1 + min(len(p.models.Items()), 8) + hintRows,
 		minRows: 4, body: body,
 	}, width, height)
-}
-
-// modelColumn renders one picker column with a heading that brightens when the
-// column has focus.
-func modelColumn(title, body string, focused bool) string {
-	head := Meta.Render(title)
-	if focused {
-		head = H2.Render(title)
-	}
-	return head + "\n" + body
 }
 
 // closeOverlayCmd emits the overlay-cancel message.

@@ -84,7 +84,7 @@ func slashCommands() []command {
 		{"browser-cdp", "[loopback URL|off]", "copy signed-in state into the isolated browser", groupModes},
 		{"rag", "[on|off|question]", "answer from the knowledge base", groupHidden},
 		{"history", "[clear [n]]", "reopen a saved session; clear or clear [n] erases", groupSession},
-		{"model", "", "pick the model and reasoning level (also ctrl+p)", groupSession},
+		{"model", "", "pick the model (also ctrl+p)", groupSession},
 		{"title", "<name>", "rename the current session", groupSession},
 		{"attach", "[path|URL]", "attach a file or URL reference to your next question (also @)", groupSession},
 		{"context", "[action]", "review or remove pending files and URL references", groupSession},
