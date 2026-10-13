@@ -76,3 +76,30 @@ func TestChatToolHostSelectionReachesCLIAndTUI(t *testing.T) {
 		t.Fatal("tool-host is missing from interactive help")
 	}
 }
+
+func TestPlainAskCarriesBrowserCDPToTheTurn(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	old := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = old })
+	cdp := "unset"
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		cdp = opts.BrowserCDP
+		if opts.Stream != nil {
+			opts.Stream([]byte("fixture"))
+		}
+		return "fixture", nil, false, nil, 0, "skip", nil
+	}
+	m := model{}
+	for _, endpoint := range []string{"http://127.0.0.1:9333", ""} {
+		client := &replClient{browserCDP: endpoint}
+		cdp = "unset"
+		if _, err := plainAsk(&m, "question", client, nil, "", false); err != nil {
+			t.Fatal(err)
+		}
+		client.close()
+		if cdp != endpoint {
+			t.Fatalf("plain REPL CDP endpoint = %q, want %q", cdp, endpoint)
+		}
+	}
+}
