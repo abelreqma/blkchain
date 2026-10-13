@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -47,8 +48,42 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 	activeTask := func() string { return task.ID }
 
 	reg := tooldef.NewRegistry()
-	webTools, closeWeb := webToolsForTask(e.d.Gate, task, webCapture{Store: e.d.Store, Runs: e.d.Runs})
+	webTools, closeWeb := webToolsForTask(e.d.Gate, task, webCapture{Store: e.d.Store, Session: e.d.WebSession, Runs: e.d.Runs})
 	defer closeWeb()
+	if e.d.WebSession != nil && e.d.WebSession.AuthState != nil && task.Surface == engagement.SurfaceWeb && webSameOrigin(task.Target, e.d.WebSession.Origin) {
+		var collect tooldef.Tool
+		for _, tool := range webTools {
+			if tool.Name() == "web_collect" {
+				collect = tool
+				break
+			}
+		}
+		if collect == nil {
+			return "", fmt.Errorf("authenticated web collection tool unavailable")
+		}
+		args, err := json.Marshal(webJobArgs{Targets: []string{task.Target}})
+		if err != nil {
+			return "", err
+		}
+		before := e.d.Runs.Count(task.ID)
+		out, err := collect.Call(ctx, string(args))
+		if err != nil {
+			return "", err
+		}
+		if e.d.Runs.Count(task.ID) == before {
+			return "role-backed web collection failed: " + capRunes(out, 500), nil
+		}
+		snapshot, err := e.d.Store.WebSnapshot(ctx)
+		if err != nil {
+			return "", err
+		}
+		for _, artifact := range snapshot.Artifacts {
+			if artifact.TaskID == task.ID && artifact.Kind == "browser-dom" && artifact.Role == e.d.WebSession.Name && webSameOrigin(artifact.URL, e.d.WebSession.Origin) {
+				return out, nil
+			}
+		}
+		return "role-backed web collection produced no same-origin browser evidence", nil
+	}
 	tools := []tooldef.Tool{
 		newKBSearchTool(e.d.RC, e.d.Cfg),
 		newKBAnswerTool(e.d.RC, e.d.Cfg, !e.d.Prefs.Web),

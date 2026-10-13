@@ -225,18 +225,21 @@ func plainREPL() error {
 				}
 				break
 			}
-			if strings.HasPrefix(rest, "resume /") || strings.HasPrefix(rest, "resume --workspace /") || strings.HasPrefix(rest, "resume \"") || strings.HasPrefix(rest, "resume --workspace \"") {
-				path := strings.TrimSpace(strings.TrimPrefix(rest, "resume "))
-				path = strings.TrimPrefix(path, "--workspace ")
-				printErr(runEngage([]string{"resume", strings.Trim(path, `"`)}))
-			} else {
-				args := []string{"--transcript", pm.engageTranscript}
-				if pm.engageMode == secgate.Safe {
-					args = append(args, "--safe")
-				}
-				args = append(args, strings.Fields(rest)...)
-				printErr(invokePlainEngage(args))
+			parsed, err := webArguments(rest)
+			if err != nil {
+				printErr(err)
+				break
 			}
+			if len(parsed) > 0 && parsed[0] == "resume" {
+				printErr(runEngage(parsed))
+				break
+			}
+			args := []string{"--transcript", pm.engageTranscript}
+			if pm.engageMode == secgate.Safe {
+				args = append(args, "--safe")
+			}
+			args = append(args, parsed...)
+			printErr(invokePlainEngage(args))
 		case "store":
 			args, err := webArguments(rest)
 			if err != nil {
@@ -300,6 +303,35 @@ func plainREPL() error {
 				rc.agent = pm.answerAgent
 				fmt.Println(pm.answerAgentStatus())
 			}
+		case "tool-host":
+			value := strings.ToLower(strings.TrimSpace(rest))
+			if value == "" {
+				value = rc.toolHost
+				if value == "" {
+					value = chatToolHostSandbox
+				}
+			} else if value == chatToolHostSandbox || value == chatToolHostLocal {
+				rc.toolHost = value
+			} else {
+				printErr(fmt.Errorf("tool-host: choose sandbox or local"))
+				continue
+			}
+			fmt.Println(Meta.Render("tool-host: " + value))
+		case "browser-cdp":
+			value := strings.TrimSpace(rest)
+			if value == "off" {
+				value = ""
+			} else if value != "" {
+				if err := webValidateCDPEndpoint(value); err != nil {
+					printErr(err)
+					continue
+				}
+			}
+			if value != rc.browserCDP && rc.browser != nil {
+				rc.browser.Close()
+			}
+			rc.browserCDP = value
+			fmt.Println(Meta.Render("browser-cdp: " + map[bool]string{true: "isolated", false: value}[value == ""]))
 		case "rag":
 			if toggle, on, q := ragArg(rest); toggle {
 				p := loadPrefs()
@@ -417,10 +449,13 @@ func plainClarify(in *bufio.Scanner, out io.Writer, c Clarification) ClarifyResu
 // replClient is the plain REPL's one retrieval client, made on first use and
 // closed when the loop ends.
 type replClient struct {
-	agent   string
-	rc      *retrieval.Client
-	metrics *callMetrics
-	started time.Time
+	agent      string
+	toolHost   string
+	browser    *chatBrowserState
+	browserCDP string
+	rc         *retrieval.Client
+	metrics    *callMetrics
+	started    time.Time
 }
 
 func (c *replClient) get() (*retrieval.Client, error) {
@@ -435,6 +470,9 @@ func (c *replClient) get() (*retrieval.Client, error) {
 }
 
 func (c *replClient) close() {
+	if c.browser != nil {
+		c.browser.Close()
+	}
 	if c.rc != nil {
 		c.rc.Close()
 	}
@@ -532,6 +570,7 @@ func replGroups() []rowGroup {
 		}},
 		{replGroupEngage, []helpRow{
 			{"/engage [flags] <goal>", replSpecDesc("engage")},
+			{"/engage --session FILE --role NAME --session-cdp URL <goal>", "use a signed-in web role under the RoE"},
 			{"/engage web <action>", "assess web targets within an engagement"},
 			{"/engage approve-network --workspace DIR CIDR", "approve a discovered foothold network"},
 			{"/engage attach-foothold [flags]", "attach an evidenced execution carrier"},

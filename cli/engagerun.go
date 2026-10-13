@@ -75,7 +75,7 @@ func parseEngageArgs(args []string) (engageOpts, string, error) {
 	var o engageOpts
 	fs := newFlagSet("engage")
 	defineEngageFlags(fs, &o)
-	values := map[string]bool{"scope": true, "workspace": true, "model": true, "roe": true, "transcript": true, "resume": true}
+	values := map[string]bool{"scope": true, "workspace": true, "model": true, "roe": true, "transcript": true, "resume": true, "session": true, "role": true, "session-cdp": true}
 	if err := parseFlags(fs, reorder(args, values)); err != nil {
 		return o, "", err
 	}
@@ -84,6 +84,13 @@ func parseEngageArgs(args []string) (engageOpts, string, error) {
 	}
 	if !validTranscriptMode(o.transcript) {
 		return o, "", usageErr("engage: transcript must be off, important, or full")
+	}
+	if o.sessionCDP != "" {
+		if err := webValidateCDPSelection(o.session, o.role, o.sessionCDP); err != nil {
+			return o, "", usageErr("engage: %s", err)
+		}
+	} else if o.session != "" || o.role != "" {
+		return o, "", usageErr("engage: --session and --role require --session-cdp")
 	}
 	goal := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if goal == "" && o.resume == "" {
@@ -120,6 +127,8 @@ type engageRunMetadata struct {
 	PolicyHash      string `json:"policy_hash"`
 	Started         string `json:"started"`
 	Status          string `json:"status"`
+	WebCDPRole      string `json:"web_cdp_role,omitempty"`
+	WebCDPOrigin    string `json:"web_cdp_origin,omitempty"`
 }
 
 var newEngageRunnerForRun = newEngageRunner
@@ -165,6 +174,24 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 	}
 	if metadata.PolicyHash != "" && metadata.PolicyHash != roe.Policy.Hash {
 		return "", errors.New("engage: resumed ROE policy differs from the checkpoint; start a new engagement")
+	}
+	var cdpRole *webSessionRole
+	if o.sessionCDP != "" {
+		if err := webValidateCDPSelection(o.session, o.role, o.sessionCDP); err != nil {
+			return "", err
+		}
+		role, err := webSelectCDPRole(o.session, o.role)
+		if err != nil {
+			return "", err
+		}
+		cdpRole = &role
+	} else if o.session != "" || o.role != "" {
+		return "", errors.New("engage: --session and --role require --session-cdp")
+	}
+	if o.resume != "" && (metadata.WebCDPRole != "" || cdpRole != nil) {
+		if cdpRole == nil || metadata.WebCDPRole != cdpRole.Name || !webSameOrigin(metadata.WebCDPOrigin, cdpRole.Origin) {
+			return "", errors.New("engage: resumed web CDP role differs from the checkpoint")
+		}
 	}
 	if o.transcript == "" {
 		o.transcript = "important"
@@ -396,6 +423,15 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 	if err = gate.RestorePolicyUsage(metadata.CommandAttempts, deadline, metadata.ByteUsage); err != nil {
 		return "", err
 	}
+	if cdpRole != nil {
+		role, importErr := webImportCDPRole(ctx, gate, *cdpRole, o.sessionCDP)
+		if importErr != nil {
+			return "", importErr
+		}
+		cdpRole = &role
+		metadata.WebCDPRole = role.Name
+		metadata.WebCDPOrigin = role.Origin
+	}
 	rw := newReportWriter(ws.Store, ws.Dir, input.Goal, roePath, mode.String())
 	if o.resume != "" {
 		if err = rw.RestoreFinal(); err != nil {
@@ -481,6 +517,7 @@ func runEngageSession(ctx context.Context, input engageRunInput) (final string, 
 		input.Asker = askuser.AutoAsker{}
 	}
 	deps := buildEngageDeps(input.Model, input.RC, input.Cfg, input.Prefs, ws.Store, gate, scratch, input.Catalog, input.Asker, input.Confirm, input.Progress)
+	deps.WebSession = cdpRole
 	if _, ok := cloudIdentities[secgate.SurfaceCloudGCP]; ok {
 		deps.ExploitTools = append(deps.ExploitTools, "gcloud")
 	}

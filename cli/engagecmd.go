@@ -36,6 +36,9 @@ type engageOpts struct {
 	autoOverride bool
 	workspace    string
 	model        string
+	session      string
+	role         string
+	sessionCDP   string
 }
 
 // defineEngageFlags declares `blk engage`'s flags.
@@ -47,6 +50,9 @@ func defineEngageFlags(fs *flag.FlagSet, o *engageOpts) {
 	fs.BoolVar(&o.auto, "auto", false, "run RoE-authorized actions without prompts (default)")
 	fs.StringVar(&o.workspace, "workspace", "", "engagement workspace directory (default: a new one under the config dir)")
 	fs.StringVar(&o.model, "model", "", "chat model id (default: the resolved model)")
+	fs.StringVar(&o.session, "session", "", "web role session file for authenticated browser tasks")
+	fs.StringVar(&o.role, "role", "", "named web role to use during autonomous tasks")
+	fs.StringVar(&o.sessionCDP, "session-cdp", "", "import the named web role from a loopback signed-in Chrome CDP endpoint")
 }
 
 // runEngage builds a gated engagement and runs the orchestrator for goal.

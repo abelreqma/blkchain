@@ -264,7 +264,7 @@ func TestDirectAnswerAutoUsesQuestionSpecialist(t *testing.T) {
 func TestAdaptiveAnswerSkipStaysSkipWhenCorpusInsufficient(t *testing.T) {
 	// Router says SKIP; validation retrieves and the grader says the corpus is
 	// not sufficient, so it stays skip and answers ungrounded.
-	srv := fakeLLM(t, []string{"SKIP", "IRRELEVANT"}, "direct answer, no sources")
+	srv := fakeLLM(t, []string{"ADVICE", "SKIP", "IRRELEVANT"}, "direct answer, no sources")
 	t.Setenv("OMLX_BASE_URL", srv.URL)
 	t.Setenv("OMLX_MODEL", "m")
 	t.Setenv("OMLX_API_KEY", "test-key")
@@ -294,6 +294,7 @@ func TestAdaptiveAnswerSkipGroundsWhenCorpusSufficient(t *testing.T) {
 	// Router says SKIP, but validation finds the corpus sufficient, so it is
 	// overridden to grounding (AnswerLoop then grades + synthesizes).
 	srv := fakeLLM(t, []string{
+		"ADVICE",
 		"SKIP",
 		"RELEVANT", // validation relevance check
 		`{"sufficient":true,"rewrite":"","use_web":false}`, // AnswerLoop grade
@@ -335,7 +336,7 @@ func TestAdaptiveAnswerArithmeticSkipDoesNotValidate(t *testing.T) {
 }
 
 func TestAdaptiveAnswerGroundSearches(t *testing.T) {
-	srv := fakeLLM(t, []string{"GROUND", `{"sufficient":true,"rewrite":"","use_web":false}`}, "grounded [1]")
+	srv := fakeLLM(t, []string{"ADVICE", "GROUND", `{"sufficient":true,"rewrite":"","use_web":false}`}, "grounded [1]")
 	t.Setenv("OMLX_BASE_URL", srv.URL)
 	t.Setenv("OMLX_MODEL", "m")
 	t.Setenv("OMLX_API_KEY", "test-key")
@@ -379,7 +380,7 @@ func TestAdaptiveAnswerForceBypassesRouter(t *testing.T) {
 
 func TestAdaptiveAnswerWebFirstDoesNotSkipLiveResearch(t *testing.T) {
 	authorizeWebTest(t)
-	srv := fakeLLM(t, []string{"SKIP", `{"sufficient":true,"use_web":false}`}, "Current answer [1].")
+	srv := fakeLLM(t, []string{"ADVICE", "SKIP", `{"sufficient":true,"use_web":false}`}, "Current answer [1].")
 	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
 	old := webSearch
 	calls := 0
@@ -414,7 +415,7 @@ func TestAdaptiveAnswerWebFirstSkipsPureArithmetic(t *testing.T) {
 
 func TestAdaptiveAnswerKeepsTargetDetailsOutOfWebSearch(t *testing.T) {
 	authorizeWebTest(t)
-	srv := fakeLLM(t, []string{"GROUND", `{"sufficient":true,"use_web":true}`}, "Local answer [1].")
+	srv := fakeLLM(t, []string{"ADVICE", "Local answer [1]."}, "")
 	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
 	old := webSearch
 	calls := 0
@@ -432,7 +433,7 @@ func TestAdaptiveAnswerKeepsTargetDetailsOutOfWebSearch(t *testing.T) {
 
 func TestAdaptiveAnswerKeepsTargetAdvisorTurnsLocal(t *testing.T) {
 	authorizeWebTest(t)
-	srv := fakeLLM(t, []string{"ADVISE", "local advice"}, "")
+	srv := fakeLLM(t, []string{"ADVICE", "ADVISE", "local advice"}, "")
 	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
 	old := webSearch
 	calls := 0
@@ -450,7 +451,7 @@ func TestAdaptiveAnswerKeepsTargetAdvisorTurnsLocal(t *testing.T) {
 
 func TestAdaptiveAnswerUsesNamedTargetFromRecentUserTurn(t *testing.T) {
 	authorizeWebTest(t)
-	srv := fakeLLM(t, []string{"ADVISE", "I checked the named target."}, "")
+	srv := fakeLLM(t, []string{"ADVICE", "I checked the named target."}, "")
 	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
 	old := webSearch
 	calls := 0
@@ -468,7 +469,7 @@ func TestAdaptiveAnswerUsesNamedTargetFromRecentUserTurn(t *testing.T) {
 }
 
 func TestAdaptiveAnswerUsesToolsWhenResearchIsOff(t *testing.T) {
-	srv := fakeLLM(t, []string{"Tool advice."}, "")
+	srv := fakeLLM(t, []string{"ADVICE", "Tool advice."}, "")
 	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
 	answer, _, _, _, _, route, err := adaptiveAnswer(context.Background(), nil, answerCfg(1), "What next for 192.0.2.5?", enabledRoutes{}, false, AnswerOpts{})
 	if err != nil || answer != "Tool advice." || route != "rag" {
@@ -478,7 +479,7 @@ func TestAdaptiveAnswerUsesToolsWhenResearchIsOff(t *testing.T) {
 
 func TestAdaptiveAnswerFileRequestRequiresToolBeforeWeb(t *testing.T) {
 	authorizeWebTest(t)
-	srv := fakeLLM(t, []string{"File answer."}, "")
+	srv := fakeLLM(t, []string{"FILE", "File answer."}, "")
 	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
 	old := webSearch
 	calls := 0
@@ -494,7 +495,7 @@ func TestAdaptiveAnswerFileRequestRequiresToolBeforeWeb(t *testing.T) {
 }
 
 func TestAdaptiveAnswerTargetActionWorksWithLocalResearchOff(t *testing.T) {
-	srv := fakeLLM(t, []string{"Target tool answer."}, "")
+	srv := fakeLLM(t, []string{"ADVICE", "Target tool answer."}, "")
 	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
 	answer, _, _, _, _, route, err := adaptiveAnswer(context.Background(), nil, answerCfg(1), "What next for 192.0.2.5?", enabledRoutes{Web: true}, false, AnswerOpts{WebFirst: true})
 	if err != nil || answer != "Target tool answer." || route != "rag" {
@@ -503,7 +504,7 @@ func TestAdaptiveAnswerTargetActionWorksWithLocalResearchOff(t *testing.T) {
 }
 
 func TestAdaptiveAnswerExplicitCheckUsesToolLoop(t *testing.T) {
-	srv := fakeLLM(t, []string{"Action answer."}, "")
+	srv := fakeLLM(t, []string{"TARGET", "Action answer."}, "")
 	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
 	local := fakeSearcher{[]retrieval.Result{chunk("local", "local.md", "Local", "local evidence")}}
 	answer, _, _, _, _, route, err := adaptiveAnswer(context.Background(), local, answerCfg(1), "Check 192.0.2.5", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
@@ -512,17 +513,54 @@ func TestAdaptiveAnswerExplicitCheckUsesToolLoop(t *testing.T) {
 	}
 }
 
-func TestChatToolRequestRecognizesDirectAssessmentVerbs(t *testing.T) {
-	for _, question := range []string{"Check 192.0.2.5", "Please assess example.com", "Can you audit this host?"} {
-		if !chatToolRequestPattern.MatchString(question) {
-			t.Errorf("tool request not recognized: %q", question)
-		}
+func TestAdaptiveAnswerIndirectTargetRequestsRequireTools(t *testing.T) {
+	for _, question := range []string{
+		"Would you mind checking what http://192.0.2.5/ serves?",
+		"I'd like you to inspect http://192.0.2.5/ now.",
+		"What response comes back from http://192.0.2.5/?",
+	} {
+		t.Run(question, func(t *testing.T) {
+			srv := fakeLLM(t, []string{"TARGET", "I checked it."}, "")
+			t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+			answer, _, _, _, _, route, err := adaptiveAnswer(context.Background(), nil, answerCfg(1), question, enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
+			if err == nil || !strings.Contains(err.Error(), "no target action tool call") || answer != "" || route != "rag" {
+				t.Fatalf("answer=%q route=%q err=%v", answer, route, err)
+			}
+		})
+	}
+}
+
+func TestAdaptiveAnswerRefusesActionWithoutNamedTarget(t *testing.T) {
+	srv := fakeLLM(t, []string{"TARGET"}, "")
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	answer, _, _, _, _, route, err := adaptiveAnswer(context.Background(), nil, answerCfg(1),
+		"Would you check the target for me?", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
+	if err == nil || !strings.Contains(err.Error(), "name a target") || answer != "" || route != "" {
+		t.Fatalf("answer=%q route=%q err=%v", answer, route, err)
+	}
+}
+
+func TestAdaptiveAnswerNamedResearchToolDoesNotBecomeWebAnswer(t *testing.T) {
+	authorizeWebTest(t)
+	srv := fakeLLM(t, []string{"KB_SEARCH", "I used the knowledge base."}, "")
+	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
+	old := webSearch
+	calls := 0
+	webSearch = func(context.Context, string, string, int, []string) ([]retrieval.Result, error) {
+		calls++
+		return nil, nil
+	}
+	t.Cleanup(func() { webSearch = old })
+	answer, _, _, _, _, route, err := adaptiveAnswer(context.Background(), nil, answerCfg(1),
+		"Would you use the knowledge base to answer this?", enabledRoutes{Local: true, Web: true}, false, AnswerOpts{WebFirst: true})
+	if err == nil || !strings.Contains(err.Error(), "no kb_search tool call") || answer != "" || route != "rag" || calls != 0 {
+		t.Fatalf("answer=%q route=%q webCalls=%d err=%v", answer, route, calls, err)
 	}
 }
 
 func TestAdaptiveAnswerPublicAssessmentStillSearchesWeb(t *testing.T) {
 	authorizeWebTest(t)
-	srv := fakeLLM(t, []string{"ADVISE", `{"sufficient":true,"use_web":false}`}, "Current guidance [1].")
+	srv := fakeLLM(t, []string{"ADVICE", "ADVISE", `{"sufficient":true,"use_web":false}`}, "Current guidance [1].")
 	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
 	old := webSearch
 	calls := 0
@@ -540,7 +578,7 @@ func TestAdaptiveAnswerPublicAssessmentStillSearchesWeb(t *testing.T) {
 
 func TestAdaptiveAnswerSearchesWebForPublicAdvice(t *testing.T) {
 	authorizeWebTest(t)
-	srv := fakeLLM(t, []string{"ADVISE", `{"sufficient":true,"use_web":false}`}, "Current advice [1].")
+	srv := fakeLLM(t, []string{"ADVICE", "ADVISE", `{"sufficient":true,"use_web":false}`}, "Current advice [1].")
 	t.Setenv("OMLX_BASE_URL", srv.URL+"/v1")
 	old := webSearch
 	calls := 0

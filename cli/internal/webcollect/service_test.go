@@ -36,6 +36,51 @@ func fixtureBroker(server *httptest.Server) *webacquire.Broker {
 	}}}
 }
 
+type roleFixtureBrowser struct {
+	service *Service
+	page    string
+}
+
+func (b roleFixtureBrowser) Visit(ctx context.Context, target, role string) error {
+	_, err := b.service.Accept(ctx, webanalysis.Artifact{Kind: "browser-dom", URL: target, FinalURL: target, Role: role, Complete: true, MIME: "text/html"}, []byte(b.page), 0)
+	return err
+}
+
+func (roleFixtureBrowser) Interact(context.Context, string, string) error { return nil }
+func (roleFixtureBrowser) Close() error                                   { return nil }
+
+func TestBrowserOnlyAuthenticationDoesNotLabelBrokerFetchAsRole(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app.js" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/javascript")
+		_, _ = w.Write([]byte("const ready = true"))
+	}))
+	defer server.Close()
+	store := fixtureStore(t)
+	svc := New(store, fixtureBroker(server), nil)
+	svc.DiscoveryAllowed = func(u string) bool { return strings.HasPrefix(u, server.URL+"/") }
+	_, err := svc.Collect(context.Background(), []string{server.URL + "/"}, Options{
+		Role: "reader", Browser: roleFixtureBrowser{service: svc, page: `<script src="/app.js"></script>`}, BrowserOnlyAuth: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.WebSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles := map[string]string{}
+	for _, artifact := range snapshot.Artifacts {
+		roles[artifact.Kind] = artifact.Role
+	}
+	if roles["browser-dom"] != "reader" || roles["script"] != "anonymous" {
+		t.Fatalf("browser and broker roles: %v", roles)
+	}
+}
+
 func TestRoEArtifactBodyCapBeforeStorage(t *testing.T) {
 	store := fixtureStore(t)
 	svc := New(store, &webacquire.Broker{Policy: webacquire.Policy{MaxBodyBytes: 8}}, nil)

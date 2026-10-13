@@ -56,14 +56,13 @@ func commandSpecs() []cmdSpec {
 		{
 			name: "ask", args: "<question...>", group: hgKnowledge,
 			desc: "answer a question, with cited sources",
-			long: "Uses Hermes by default; --agent NAME selects native answers, --rag forces local grounding, and --web requests a web-only answer. " +
+			long: "Uses native auto by default; --agent NAME selects a specialist, --rag forces local grounding, and --web requests a web-only answer. " +
 				"Native auto selects a specialist dynamically; available: " + strings.Join(answerAgentNames(), ", ") + ". " +
-				"--json and --sources require explicit --agent auto or a specialist name. " +
-				"Hermes is also available through blk hermes or --hermes.",
+				"Hermes is available through blk hermes or --hermes.",
 			flags: func(fs *flag.FlagSet) { defineAskFlags(fs, &askOpts{}) },
 			examples: []string{
 				`blk ask "how do I chain SSRF to RCE?"`,
-				`blk ask --agent auto --json "what is IDOR?"`,
+				`blk ask --json "what is IDOR?"`,
 				`blk ask --agent cloud "explain IAM"`,
 			},
 			run: runAsk,
@@ -260,7 +259,7 @@ func commandSpecs() []cmdSpec {
 			name: "engage", args: "<goal...>", group: hgEngage,
 			desc: "plan and run a gated, multi-step assessment",
 			long: "Runs an engagement under one operator policy that sets target scope, actions, caps, and an isolated runner; Auto runs permitted actions and --safe asks for interactive approval. " +
-				"The workspace records policy, evidence, transcripts, and reports; --resume continues interrupted work under the same policy. " +
+				"The workspace records policy, evidence, transcripts, and reports; --resume continues interrupted work under the same policy and requires the same signed-in web role when --session-cdp was used. " +
 				"Use blk engage approve-network --workspace DIR CIDR for a discovered private network, blk engage attach-foothold for an evidenced SSH, command, raw, Metasploit RPC, or HTTP form session, blk engage listen-shell and close-shell for a retained loopback raw shell, and blk engage approve-cloud-identity for an evidenced credential file on a foothold. " +
 				"Use blk engage setup to warm the offline OSV and Grype databases; a dispatched vuln-analysis task can fetch a recognized in-scope manifest URL and store scanner advisories as leads.",
 			flags: func(fs *flag.FlagSet) { defineEngageFlags(fs, &engageOpts{}) },
@@ -358,7 +357,7 @@ func engageWebSpec() cmdSpec {
 	return cmdSpec{
 		name: "engage web", args: "<collect|analyze|inspect|import|archive|export|replay> [targets...]",
 		desc:  "assess web targets within an engagement",
-		long:  "Runs bounded web collection, replay, and analysis in an engagement workspace. Collection, replay, and import use the operator RoE policy; inspect and export read saved evidence. The web broker checks DNS addresses and redirects against scope.",
+		long:  "Runs bounded web collection, replay, and analysis in an engagement workspace. Collection, replay, and import use the operator RoE policy; inspect and export read saved evidence. The web broker checks DNS addresses and redirects against scope. --session-cdp imports one named role from a loopback Chrome endpoint into the isolated browser after the RoE authorizes its exact origin.",
 		flags: func(fs *flag.FlagSet) { defineWebFlags(fs, &webOpts{}) },
 		examples: []string{
 			"blk engage web collect example.com --roe ROE.md --workspace ./assessment",
@@ -948,6 +947,12 @@ func usageEnv() []rowGroup {
 			{"NVD_API_KEY", "optional key for direct CVE lookups"},
 			{"BLKCHAIN_WEB_PROVIDER", "auto, duckduckgo, or tavily; overrides the saved provider"},
 		}},
+		{"NATIVE TOOLS", []helpRow{
+			{"BLKCHAIN_MCP_CLIENT_CONFIG", "optional MCP client server and per-server tool allowlist JSON"},
+			{"BLKCHAIN_BROWSER_NODE_PATH", "host Node executable for explicit signed-in browser selection"},
+			{"BLKCHAIN_BROWSER_NODE_SHA256", "SHA-256 digest of the selected host Node executable"},
+			{"BLKCHAIN_VISION_MODEL", "vision-capable model for browser screenshot analysis"},
+		}},
 		{"DISPLAY", []helpRow{
 			{"NO_COLOR", "any value turns colors off"},
 			{"BLK_THEME", "light, dark, or auto (default auto)"},
@@ -1016,7 +1021,7 @@ func renderUsage(width int) string {
 	writeCols(&b, envRows, 3, nameW, total, renderWith(Cmd), Body)
 
 	b.WriteString("\n")
-	writeNote(&b, "Native ask needs --agent auto with --json; search and models accept --json.", total, "--json")
+	writeNote(&b, "Ask, search, and models accept --json; --hermes uses plain output.", total, "--json")
 	writeNote(&b, fmt.Sprintf(`Run "blk help <command>" for its flags, or "blk help env" for all %d variables.`, envCount), total,
 		"blk help <command>", "blk help env")
 	return b.String()

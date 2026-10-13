@@ -392,12 +392,13 @@ func recordingLLM(t *testing.T) (*httptest.Server, func() []llmRequest) {
 	var mu sync.Mutex
 	var seen []llmRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
 		var body struct {
 			Stream              bool `json:"stream"`
 			MaxCompletionTokens int  `json:"max_completion_tokens"`
 			MaxTokens           int  `json:"max_tokens"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = json.Unmarshal(raw, &body)
 		mu.Lock()
 		seen = append(seen, llmRequest{stream: body.Stream, maxTokens: max(body.MaxCompletionTokens, body.MaxTokens), auth: r.Header.Get("Authorization")})
 		mu.Unlock()
@@ -406,7 +407,13 @@ func recordingLLM(t *testing.T) (*httptest.Server, func() []llmRequest) {
 			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok [1]\"}}]}\n\ndata: [DONE]\n\n")
 			return
 		}
-		fmt.Fprint(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"{\"sufficient\":true,\"rewrite\":\"\",\"use_web\":false}"},"finish_reason":"stop"}]}`)
+		answer := `{"sufficient":true,"rewrite":"","use_web":false}`
+		if strings.Contains(string(raw), "Classify the current user request") {
+			answer = "ADVICE"
+		} else if strings.Contains(string(raw), "You decide how to handle") {
+			answer = "GROUND"
+		}
+		fmt.Fprintf(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":%q},"finish_reason":"stop"}]}`, answer)
 	}))
 	t.Cleanup(srv.Close)
 	return srv, func() []llmRequest {

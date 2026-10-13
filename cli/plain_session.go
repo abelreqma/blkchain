@@ -128,7 +128,16 @@ func plainAsk(m *model, mode, query string, c *replClient, history []priorTurn, 
 		args = []string{"--web", query}
 	}
 	args = append([]string{"--agent", c.agent}, args...)
-	return askWithPreface(rc, history, args, preface, !force, c.metrics)
+	if c.toolHost != "" {
+		args = append([]string{"--tool-host", c.toolHost}, args...)
+	}
+	if c.browserCDP != "" {
+		args = append([]string{"--browser-cdp", c.browserCDP}, args...)
+	}
+	if c.browser == nil {
+		c.browser = &chatBrowserState{}
+	}
+	return askWithPreface(rc, history, args, preface, !force, c.browser, c.metrics)
 }
 
 func plainEditor(before string) (string, error) {

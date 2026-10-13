@@ -13,6 +13,7 @@ import (
 
 type webCapture struct {
 	Store    *engagement.Store
+	Session  *webSessionRole
 	Runs     *RunOutputs
 	OnResult func(string)
 	OnSafety func(webSafety)
@@ -20,6 +21,16 @@ type webCapture struct {
 type webSafety struct {
 	Access bool
 	Stop   exploitStop
+}
+
+func webCapturedRole(session *webSessionRole, rawURL, fallback string) string {
+	if session == nil {
+		return fallback
+	}
+	if webSameOrigin(rawURL, session.Origin) {
+		return session.Name
+	}
+	return "anonymous"
 }
 
 type capturedWebDriver struct {
@@ -37,7 +48,8 @@ func (d *capturedWebDriver) save(ctx context.Context, kind, rawURL, out string) 
 	if d.gate != nil && d.gate.Policy != nil && len(out) > d.gate.Policy.OutputBytes {
 		return "", fmt.Errorf("web evidence exceeds the RoE output cap")
 	}
-	a, err := d.capture.Store.SaveWebArtifact(ctx, webanalysis.Artifact{TaskID: d.task.ID, Kind: kind, URL: rawURL, Role: d.task.ID, Complete: !strings.Contains(out, "...[truncated]")}, []byte(out))
+	role := webCapturedRole(d.capture.Session, rawURL, d.task.ID)
+	a, err := d.capture.Store.SaveWebArtifact(ctx, webanalysis.Artifact{TaskID: d.task.ID, Kind: kind, URL: rawURL, Role: role, Complete: !strings.Contains(out, "...[truncated]")}, []byte(out))
 	if err != nil {
 		return "", err
 	}
@@ -70,12 +82,28 @@ func (d *capturedWebDriver) DoBrowser(ctx context.Context, a webBrowserAction, r
 	if err != nil {
 		return "", err
 	}
-	return d.save(ctx, "browser-dom", a.URL, out)
+	finalURL := a.URL
+	if live, ok := d.inner.(*webPlaywrightDriver); ok {
+		live.mu.Lock()
+		if live.page != nil {
+			finalURL = live.page.URL()
+		}
+		live.mu.Unlock()
+	}
+	return d.save(ctx, "browser-dom", finalURL, out)
 }
 func (d *capturedWebDriver) DoAPIRequest(ctx context.Context, a webAPIRequest, r webRedirectAuthorizer) (string, error) {
 	out, err := d.inner.DoAPIRequest(ctx, a, r)
 	if err != nil {
 		return "", err
 	}
-	return d.save(ctx, "api-observation", a.URL, out)
+	finalURL := a.URL
+	if live, ok := d.inner.(*webPlaywrightDriver); ok {
+		live.mu.Lock()
+		if live.lastAPIURL != "" {
+			finalURL = live.lastAPIURL
+		}
+		live.mu.Unlock()
+	}
+	return d.save(ctx, "api-observation", finalURL, out)
 }

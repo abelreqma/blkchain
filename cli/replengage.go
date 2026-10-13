@@ -40,6 +40,12 @@ func runReplEngage(ctx context.Context, wsDir, cwd string, mode secgate.Mode, ov
 	transcript, _ := ctx.Value(replTranscriptKey{}).(string)
 	onAction, _ := ctx.Value(replActionKey{}).(func(actionRecord))
 	o := engageOpts{workspace: wsDir, safe: mode == secgate.Safe, autoOverride: override, transcript: transcript}
+	if selected, ok := ctx.Value(replCDPKey{}).(engageOpts); ok {
+		o.roe = selected.roe
+		o.session = selected.session
+		o.role = selected.role
+		o.sessionCDP = selected.sessionCDP
+	}
 	if wsDir != "" {
 		if _, err := os.Stat(filepath.Join(wsDir, "run.json")); err == nil {
 			o.resume = wsDir

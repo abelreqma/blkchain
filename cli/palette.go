@@ -82,6 +82,8 @@ func slashCommands() []command {
 		{"safe", "", "approve new RoE actions interactively", groupEngage},
 		{"auto", "", "run RoE-authorized actions without prompts", groupEngage},
 		{"agent", "[auto|name]", "choose the native answer specialist; auto selects dynamically", groupModes},
+		{"tool-host", "[sandbox|local]", "choose where native file and terminal tools run", groupModes},
+		{"browser-cdp", "[loopback URL|off]", "copy signed-in state into the isolated browser", groupModes},
 		{"rag", "[on|off|question]", "answer from the knowledge base", groupHidden},
 		{"history", "[clear [n]]", "reopen a saved session; clear or clear [n] erases", groupSession},
 		{"model", "", "pick the model and reasoning level (also ctrl+p)", groupSession},

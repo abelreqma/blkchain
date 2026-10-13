@@ -46,11 +46,30 @@ func webToolsForTask(gate *secgate.Gate, task engagement.Task, captures ...webCa
 	}
 	if len(captures) > 0 {
 		c := captures[0]
+		if live != nil && c.Session != nil {
+			live.storageState = c.Session.AuthState
+			live.sessionOrigin = c.Session.Origin
+			live.role = c.Session.Name
+		}
 		if live != nil && c.Store != nil {
 			svc := webcollect.New(c.Store, live.broker, webParseWorker)
 			svc.SetTask(task.ID)
 			svc.DiscoveryAllowed = webRedirectOK(gate)
 			live.observe = func(o webObservation) error {
+				if c.Session != nil {
+					raw := o.Artifact.URL
+					if o.Artifact.FinalURL != "" {
+						raw = o.Artifact.FinalURL
+					}
+					if raw == "" {
+						raw = o.Artifact.DocumentURL
+					}
+					role := webCapturedRole(c.Session, raw, task.ID)
+					o.Artifact.Role = role
+					if o.Request.URL != "" {
+						o.Request.Role = webCapturedRole(c.Session, o.Request.URL, task.ID)
+					}
+				}
 				live.stateMu.RLock()
 				ctx := live.actionCtx
 				live.stateMu.RUnlock()
