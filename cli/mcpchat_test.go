@@ -503,3 +503,183 @@ func TestMCPServesStdioIsOffByDefault(t *testing.T) {
 		t.Fatal("mcpServesStdio is set outside runMCP; a transport that does not opt in must be refused")
 	}
 }
+
+// captureTurnInputs replaces the router with a stub that records the options
+// and the force flag a turn reaches it with. reached counts router calls.
+func captureTurnInputs(t *testing.T, opts *AnswerOpts, force *bool, reached *int) {
+	t.Helper()
+	prev := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = prev })
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, f bool, o AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		*opts, *force = o, f
+		*reached++
+		return "answered", []citation{}, false, []retrieval.Result{}, 1, "rag", nil
+	}
+}
+
+const testLoopbackCDP = "http://127.0.0.1:9222"
+
+func TestMCPChatThreadsBrowserCDPAndRoutingHints(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	setMCPServesStdio(t, true)
+	var opts AnswerOpts
+	var force bool
+	var reached int
+	captureTurnInputs(t, &opts, &force, &reached)
+	run := func(in mcpChatIn) {
+		t.Helper()
+		in.Message = "q"
+		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), in); err != nil {
+			t.Fatalf("%+v: %v", in, err)
+		}
+	}
+
+	run(mcpChatIn{BrowserCDP: testLoopbackCDP})
+	if opts.BrowserCDP != testLoopbackCDP {
+		t.Fatalf("browser_cdp reached AnswerOpts as %q", opts.BrowserCDP)
+	}
+	run(mcpChatIn{ForceRag: true})
+	if !force || opts.WebOnly {
+		t.Fatalf("force_rag: force=%v webOnly=%v", force, opts.WebOnly)
+	}
+	run(mcpChatIn{WebOnly: true})
+	if force || !opts.WebOnly {
+		t.Fatalf("web_only: force=%v webOnly=%v", force, opts.WebOnly)
+	}
+	run(mcpChatIn{ToolHost: "local"})
+	if opts.ToolHost != chatToolHostLocal {
+		t.Fatalf("tool_host local reached AnswerOpts as %q", opts.ToolHost)
+	}
+
+	run(mcpChatIn{})
+	if opts.ToolHost != chatToolHostSandbox || opts.BrowserCDP != "" || opts.WebOnly || force {
+		t.Fatalf("absent parameters: host=%q cdp=%q webOnly=%v force=%v", opts.ToolHost, opts.BrowserCDP, opts.WebOnly, force)
+	}
+}
+
+// The parameters survive the JSON-RPC decode of a real chat tool call, not only
+// a hand-built struct.
+func TestMCPChatToolCallCarriesBrowserCDPAndRoutingHints(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	setMCPServesStdio(t, true)
+	var opts AnswerOpts
+	var force bool
+	var reached int
+	captureTurnInputs(t, &opts, &force, &reached)
+
+	srv := newMCPServer(&retrieval.Client{}, loadConfig(), nil)
+	ctx := context.Background()
+	st, ct := mcp.NewInMemoryTransports()
+	ss, err := srv.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+
+	tools, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tl := range tools.Tools {
+		if tl.Name != "chat" {
+			continue
+		}
+		raw, _ := json.Marshal(tl.InputSchema)
+		for _, prop := range []string{"browser_cdp", "force_rag", "web_only"} {
+			if !strings.Contains(string(raw), `"`+prop+`"`) {
+				t.Errorf("chat input schema lacks %s: %s", prop, raw)
+			}
+		}
+	}
+
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "chat", Arguments: map[string]any{
+		"message": "q", "browser_cdp": testLoopbackCDP, "web_only": true,
+	}})
+	if err != nil || res.IsError {
+		t.Fatalf("call: err=%v res=%+v", err, res)
+	}
+	if opts.BrowserCDP != testLoopbackCDP || !opts.WebOnly || force {
+		t.Fatalf("over the wire: cdp=%q webOnly=%v force=%v", opts.BrowserCDP, opts.WebOnly, force)
+	}
+}
+
+func TestMCPChatRefusesBrowserCDPWithoutStdio(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	setMCPServesStdio(t, false)
+	var opts AnswerOpts
+	var force bool
+	var reached int
+	captureTurnInputs(t, &opts, &force, &reached)
+
+	_, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", BrowserCDP: testLoopbackCDP})
+	if !errors.Is(err, errChatBrowserCDPRefused) {
+		t.Fatalf("browser_cdp without stdio: error = %v, want errChatBrowserCDPRefused", err)
+	}
+	if errors.Is(err, errChatLocalHostRefused) {
+		t.Fatalf("the refusal is not distinguishable from the tool_host refusal: %v", err)
+	}
+	if reached != 0 {
+		t.Fatal("a refused turn reached the router")
+	}
+
+	if _, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q"}); err != nil {
+		t.Fatalf("a turn without browser_cdp: %v", err)
+	}
+}
+
+func TestMCPChatRefusesInvalidBrowserCDPEndpoint(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	setMCPServesStdio(t, true)
+	var opts AnswerOpts
+	var force bool
+	var reached int
+	captureTurnInputs(t, &opts, &force, &reached)
+
+	for name, endpoint := range map[string]string{
+		"non-loopback host":  "http://192.0.2.7:9222",
+		"hostname":           "http://example.com:9222",
+		"unsupported scheme": "ftp://127.0.0.1:9222",
+		"malformed":          "http://[::1",
+		"no scheme":          "127.0.0.1:9222",
+		"oversized":          "http://127.0.0.1:9222/" + strings.Repeat("a", mcpChatMaxBrowserCDP),
+	} {
+		_, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", BrowserCDP: endpoint})
+		if err == nil {
+			t.Errorf("%s: %q was accepted", name, endpoint)
+			continue
+		}
+		if !strings.Contains(err.Error(), "chat:") {
+			t.Errorf("%s: error = %v", name, err)
+		}
+	}
+	if reached != 0 {
+		t.Fatalf("%d refused turns reached the router", reached)
+	}
+}
+
+func TestMCPChatRefusesForceRagWithWebOnly(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	setMCPServesStdio(t, false)
+	var opts AnswerOpts
+	var force bool
+	var reached int
+	captureTurnInputs(t, &opts, &force, &reached)
+
+	_, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", ForceRag: true, WebOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "web_only cannot be combined with force_rag") {
+		t.Fatalf("force_rag with web_only: error = %v", err)
+	}
+	if reached != 0 {
+		t.Fatal("a refused turn reached the router")
+	}
+}
