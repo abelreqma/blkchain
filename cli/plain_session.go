@@ -43,7 +43,8 @@ func plainAsk(m *model, query string, c *replClient, history []priorTurn, prefac
 		c.browser = &chatBrowserState{}
 	}
 	var full strings.Builder
-	res, err := runNativeTurn(context.Background(), rc, m.cfg, turnRequest{
+	ctx := context.WithValue(context.Background(), metricsKey{}, c.metrics)
+	res, err := runNativeTurn(ctx, rc, m.cfg, turnRequest{
 		Question:   query,
 		Agent:      c.agent,
 		ToolHost:   c.toolHost,

@@ -260,3 +260,32 @@ func TestPlainAskTurnPersistsThroughRecordTurn(t *testing.T) {
 		t.Fatalf("turn not in the transcript: %v, %v", replay, err)
 	}
 }
+
+func TestPlainAskCollectsCallMetricsOnTheClient(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	prev := adaptiveAnswerFn
+	adaptiveAnswerFn = func(ctx context.Context, rc searcher, cfg ragconfig.Config, question string, enabled enabledRoutes, force bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		if m, _ := ctx.Value(metricsKey{}).(*callMetrics); m != nil {
+			m.mu.Lock()
+			m.calls = append(m.calls, llmCallStats{Stage: "synthesis", Status: "ok", UsageReported: true, CompletionTokens: 5})
+			m.mu.Unlock()
+		}
+		return "answer", []citation{}, false, []retrieval.Result{}, 5, "rag", nil
+	}
+	t.Cleanup(func() { adaptiveAnswerFn = prev })
+
+	m := model{cfg: loadConfig(), prefs: loadInteractivePrefs()}
+	m.sess, _ = newSession()
+	var rc replClient
+	defer rc.close()
+	captureStdout(t, func() {
+		if _, err := plainAsk(&m, "what is SSRF?", &rc, nil, "", false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	calls, _ := rc.metrics.snapshot()
+	if len(calls) != 1 || calls[0].CompletionTokens != 5 {
+		t.Fatalf("client metrics = %+v, want the turn's synthesis call", calls)
+	}
+}
