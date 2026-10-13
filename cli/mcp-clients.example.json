@@ -1,0 +1,46 @@
+{
+  "_README": "Template only. Copy to ~/.config/blkchain/mcp-clients.json (mode 0600, directory 0700) or to the path named by BLKCHAIN_MCP_CLIENT_CONFIG, and replace the placeholder paths. This entry drives Burp Suite Pro through its MCP server, reached over the stdio proxy jar Burp ships; --sse-url is Burp's own MCP listener. host=local is required: a stdio server without it runs inside the chat sandbox container, which has no network and could never reach Burp on loopback. A local command must be an absolute path. allow_tools holds every tool this Burp MCP server advertises, so the agent has full functionality; registration fails if a listed tool is absent, so trim the list to match your Burp version. Five of them are hazardous and are listed deliberately: output_project_options and output_user_options dump configuration that can carry credentials into model context, set_project_options and set_user_options rewrite that configuration, and set_task_execution_engine_state pauses or resumes the scanner. Remove those five for a read-mostly setup. MCP tool results are untrusted data. This file configures blk's outbound MCP clients and is separate from the blk mcp server.",
+  "servers": [
+    {
+      "name": "burp",
+      "transport": "stdio",
+      "host": "local",
+      "command": "/usr/bin/java",
+      "args": [
+        "-jar",
+        "/absolute/path/to/.BurpSuite/mcp-proxy/mcp-proxy-all.jar",
+        "--sse-url",
+        "http://127.0.0.1:9876"
+      ],
+      "allow_tools": [
+        "send_http1_request",
+        "send_http2_request",
+        "create_repeater_tab",
+        "create_repeater_tab_http2",
+        "send_to_intruder",
+        "url_encode",
+        "url_decode",
+        "base64_encode",
+        "base64_decode",
+        "generate_random_string",
+        "output_project_options",
+        "output_user_options",
+        "set_project_options",
+        "set_user_options",
+        "get_scanner_issues",
+        "generate_collaborator_payload",
+        "get_collaborator_interactions",
+        "get_proxy_http_history",
+        "get_proxy_http_history_regex",
+        "get_organizer_items",
+        "get_organizer_items_regex",
+        "get_proxy_websocket_history",
+        "get_proxy_websocket_history_regex",
+        "set_task_execution_engine_state",
+        "set_proxy_intercept_state",
+        "get_active_editor_contents",
+        "set_active_editor_contents"
+      ]
+    }
+  ]
+}

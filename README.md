@@ -68,6 +68,8 @@ MCP client servers are configured in `~/.config/blkchain/mcp-clients.json`, or t
 
 Import the executable into the sandbox before using this stdio example. MCP tool results are treated as untrusted data. The MCP client configuration is separate from the `blk mcp` server.
 
+`cli/mcp-clients.example.json` is a fuller template: a Burp Suite Pro entry reached over the stdio proxy jar Burp ships, with `host` set to `local` because a sandboxed stdio server has no network and could never reach Burp on loopback. Its `allow_tools` lists every tool that server advertises. Five of them are hazardous and listed deliberately: `output_project_options` and `output_user_options` dump configuration that can carry credentials into model context, `set_project_options` and `set_user_options` rewrite it, and `set_task_execution_engine_state` pauses or resumes the scanner. Remove those five for a read-mostly setup. Registration fails if a listed tool is absent, so the list has to match the server's version.
+
 Hermes is a legacy one-shot, reached through `blk hermes`, `/hermes`, and `blk ask --hermes`. It has its own provider, tools, and permissions, and it writes no blk session. Native web settings and engagement Safe/Auto settings do not control Hermes's own tool execution.
 
 ## Engagement harness
