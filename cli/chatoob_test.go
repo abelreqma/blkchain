@@ -11,6 +11,7 @@ import (
 
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/tooldef"
+	"github.com/tmc/langchaingo/llms"
 )
 
 // oobFakeArgvParse is the stand-in client's argv parse. It reads the paths out
@@ -254,6 +255,72 @@ func TestOOBInteractionsSurviveAnOversizedRecord(t *testing.T) {
 	}
 }
 
+// oobFakeOverlongTrailer records a real callback and then one record larger
+// than the whole read window, which is one request to a payload domain that is
+// public by design.
+const oobFakeOverlongTrailer = `
+pad=$(printf '%300000s' '' | tr ' ' x)
+printf '{"protocol":"http","unique-id":"%s","full-id":"%s","remote-address":"203.0.113.254","timestamp":"2026-10-13T12:00:00Z"}\n' "$id" "$id" > "$out_file"
+printf '{"protocol":"http","unique-id":"%s","full-id":"%s","remote-address":"198.51.100.1","timestamp":"2026-10-13T12:00:09Z","pad":"%s"}\n' "$id" "$id" "$pad" >> "$out_file"
+printf '%s\n' "$payload" > "$payload_file"
+exec sleep 60
+`
+
+// TestOOBInteractionsDistinguishUnreadableFromNone pins the one output a
+// detection tool must never produce by accident. When a record larger than the
+// read window leaves no complete record in it, the report must not read as
+// "nothing called back", because a callback is on disk.
+func TestOOBInteractionsDistinguishUnreadableFromNone(t *testing.T) {
+	t.Setenv(oobServerEnv, "oast.fixture.test")
+	fakeOOBClient(t, oobFakeOverlongTrailer)
+	registry, closeTools := oobTargetRegistry(t)
+	defer closeTools()
+	oobCall(t, registry, "oob_payload", `{}`)
+	out := oobCall(t, registry, "oob_interactions", `{}`)
+	if strings.Contains(out, "0 out-of-band interactions") {
+		t.Fatalf("an unreadable window reported as no interactions: %q", out)
+	}
+	if !strings.Contains(out, "could not be read") || !strings.Contains(out, "not evidence that nothing called back") {
+		t.Fatalf("an unreadable window was not reported distinctly: %q", out)
+	}
+}
+
+// TestOOBReadTailKeepsWholeRecordsAtTheCapBoundary covers the two things the
+// tail read has to get right: the window it returns, and whether it says
+// anything was dropped. A cap boundary that falls exactly on a record start
+// must not consume that record.
+func TestOOBReadTailKeepsWholeRecordsAtTheCapBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "interactions.jsonl")
+	if err := os.WriteFile(path, []byte("aaaa\nbbbb\ncccc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 10 bytes is exactly the last two records, so the window opens on a record
+	// start.
+	data, dropped, err := oobReadTail(path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "bbbb\ncccc\n" || !dropped {
+		t.Fatalf("tail = %q dropped = %v, want %q and true", data, dropped, "bbbb\ncccc\n")
+	}
+	// A window that opens inside a record drops that partial record only.
+	data, dropped, err = oobReadTail(path, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "cccc\n" || !dropped {
+		t.Fatalf("partial-record tail = %q dropped = %v", data, dropped)
+	}
+	// A file inside the cap is returned whole, with nothing reported dropped.
+	data, dropped, err = oobReadTail(path, 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "aaaa\nbbbb\ncccc\n" || dropped {
+		t.Fatalf("whole-file tail = %q dropped = %v", data, dropped)
+	}
+}
+
 // oobFakeTokenCheck refuses to register unless the token arrived in the config
 // file rather than the argv, and reports which way it arrived on the path the
 // tool surfaces.
@@ -317,6 +384,27 @@ func TestOOBTokenShapeIsRefusedBeforeItIsWritten(t *testing.T) {
 	}
 	if err != nil && strings.Contains(err.Error(), "token with a space") {
 		t.Fatal("the error repeated the token value")
+	}
+}
+
+// TestOOBInteractionsDoNotSatisfyARequiredTargetAction guards the credit
+// condition in adviseLoop. oob_interactions reads a local file, performs no
+// egress and can refuse, so a turn whose only tool call is that one has not
+// performed the target action it was classified as.
+func TestOOBInteractionsDoNotSatisfyARequiredTargetAction(t *testing.T) {
+	t.Setenv(oobServerEnv, "oast.fixture.test")
+	fakeOOBClient(t, oobFakeRecord)
+	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
+	fake := &fakeModel{queue: []*llms.ContentResponse{
+		callResp("c1", "oob_interactions", `{}`),
+		textResp("Nothing called back."),
+		callResp("c2", "oob_interactions", `{}`),
+		textResp("Still nothing."),
+	}}
+	answer, _, err := adviseLoop(context.Background(), fake, nil, kbTestCfg(), nil,
+		"Did anything hit my payload on 192.0.2.5?", AnswerOpts{requiredAction: "target action"})
+	if err == nil || !strings.Contains(err.Error(), "no target action tool") || answer != "" {
+		t.Fatalf("oob_interactions satisfied a required target action: answer=%q err=%v", answer, err)
 	}
 }
 
