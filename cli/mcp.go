@@ -45,6 +45,33 @@ const (
 	mcpChatMaxSessionID = 128
 )
 
+// mcpChatMaxInFlight bounds the chat turns one server runs at once. The SDK
+// dispatches tool calls asynchronously, and a turn drives a model with the whole
+// tool registry, a sandbox container and web fetches behind it, so a few at once
+// is as much as one local model host carries; past that a turn is refused rather
+// than queued.
+const mcpChatMaxInFlight = 4
+
+// errChatBusy refuses a chat turn because mcpChatMaxInFlight are already
+// running.
+var errChatBusy = fmt.Errorf("chat: %d turns are already in flight; retry when one finishes", mcpChatMaxInFlight)
+
+// acquireChatSlot takes one in-flight chat slot and returns its release. It
+// never queues: a full server refuses the turn, and a request whose context is
+// already done is refused with that error instead of taking a slot no one is
+// waiting on.
+func acquireChatSlot(ctx context.Context, slots chan struct{}) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, nil
+	default:
+		return nil, errChatBusy
+	}
+}
+
 // mcpChatIn is chat's tool input. An empty SessionID opens a new session;
 // supplying one continues it. ToolHost accepts local because the server speaks
 // only over stdio, so its client is a local process that already holds the
@@ -249,6 +276,9 @@ func runMCP(_ []string) error {
 func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Catalog) *mcp.Server {
 	v, _, _, _ := versionInfo()
 	s := mcp.NewServer(&mcp.Implementation{Name: "blkchain", Version: v}, nil)
+	// One set of chat slots per server, so a test's server bounds only its own
+	// turns.
+	chatSlots := make(chan struct{}, mcpChatMaxInFlight)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "kb_search",
@@ -281,6 +311,11 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 		Name:        "chat",
 		Description: "One turn of the blkChain agent: adaptive routing, the local knowledge base, files, terminal, browser and web research, with the operator's connected MCP servers. Omit session_id to start a conversation, pass the returned session_id back to continue it. Sessions are readable as session://{id} resources; to resume one, read the resource and pass its id back to this tool.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpChatIn) (*mcp.CallToolResult, any, error) {
+		release, err := acquireChatSlot(ctx, chatSlots)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer release()
 		res, err := mcpChatResult(ctx, followPrefs(rc, loadPrefs()), cfg, in)
 		if err != nil && strings.TrimSpace(res.Answer) == "" {
 			return nil, nil, err

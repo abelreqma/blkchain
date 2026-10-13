@@ -151,6 +151,45 @@ func TestMCPChatRejectsUnknownAgent(t *testing.T) {
 	}
 }
 
+// The in-flight bound refuses the turn past the cap instead of queueing it, and
+// a freed slot is reusable.
+func TestAcquireChatSlotRefusesPastTheCap(t *testing.T) {
+	slots := make(chan struct{}, mcpChatMaxInFlight)
+	releases := make([]func(), 0, mcpChatMaxInFlight)
+	for i := range mcpChatMaxInFlight {
+		release, err := acquireChatSlot(context.Background(), slots)
+		if err != nil {
+			t.Fatalf("slot %d of %d was refused: %v", i+1, mcpChatMaxInFlight, err)
+		}
+		releases = append(releases, release)
+	}
+	if _, err := acquireChatSlot(context.Background(), slots); !errors.Is(err, errChatBusy) {
+		t.Fatalf("past the cap: err = %v, want errChatBusy", err)
+	}
+	releases[0]()
+	release, err := acquireChatSlot(context.Background(), slots)
+	if err != nil {
+		t.Fatalf("a freed slot was not reusable: %v", err)
+	}
+	release()
+	for _, done := range releases[1:] {
+		done()
+	}
+}
+
+// A cancelled request takes no slot: it is refused with its own context error.
+func TestAcquireChatSlotRefusesACancelledRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	slots := make(chan struct{}, 1)
+	if _, err := acquireChatSlot(ctx, slots); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled request: err = %v, want context.Canceled", err)
+	}
+	if len(slots) != 0 {
+		t.Fatalf("a cancelled request took %d slots", len(slots))
+	}
+}
+
 func TestMCPChatKeepsTheAnswerWhenPersistenceFails(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)

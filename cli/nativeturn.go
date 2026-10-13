@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"blkchain/cli/internal/ragconfig"
@@ -101,6 +102,49 @@ func openSessionFor(id string) (*session, error) {
 	return nil, sessionNotFound(id)
 }
 
+// turnLock is one session's in-process turn lock plus the number of turns
+// holding or waiting for it.
+type turnLock struct {
+	mu      sync.Mutex
+	holders int
+}
+
+// The in-process turn locks, one per session id in use. The transcript flock
+// taken in session.lock is per open file description, so two session handles in
+// one process do not exclude each other: without this, two turns on one id both
+// read the same history, both answer, and the one that persists second answered
+// without ever seeing the other's question.
+var (
+	turnLocksMu sync.Mutex
+	turnLocks   = map[string]*turnLock{}
+)
+
+// lockTurnSession blocks until this process holds the turn lock for id and
+// returns its release. The entry is dropped when its last holder leaves, so the
+// table holds one lock per session with a turn in flight rather than one per
+// session a long-lived server has ever opened.
+func lockTurnSession(id string) func() {
+	turnLocksMu.Lock()
+	l := turnLocks[id]
+	if l == nil {
+		l = &turnLock{}
+		turnLocks[id] = l
+	}
+	l.holders++
+	turnLocksMu.Unlock()
+
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		turnLocksMu.Lock()
+		l.holders--
+		if l.holders == 0 {
+			delete(turnLocks, id)
+		}
+		turnLocksMu.Unlock()
+	}
+}
+
 // turnHistory reads a session's committed messages as conversation memory. A
 // read failure yields no memory rather than failing the turn, so a damaged
 // store degrades to a stateless answer instead of refusing to answer.
@@ -194,9 +238,22 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		}
 	}
 
+	// A session turn holds that session's turn lock for the whole turn, from
+	// before the history read to after the persist, so concurrent turns on one
+	// session run one at a time. A named id is locked before the session is
+	// opened, because opening it takes the transcript flock, which a second
+	// handle in this process does not wait for. A stateless turn takes no lock.
+	locked := ""
+	if id := req.SessionID; id != "" && id != sessionTargetNew && id != sessionTargetLast {
+		defer lockTurnSession(id)()
+		locked = id
+	}
 	sess, err := resolveTurnSession(req.SessionID)
 	if err != nil {
 		return turnResult{}, err
+	}
+	if sess != nil && sess.id != locked {
+		defer lockTurnSession(sess.id)()
 	}
 	history := req.History
 	if sess != nil {
