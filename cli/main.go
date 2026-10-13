@@ -453,7 +453,7 @@ func defineAskFlags(fs *flag.FlagSet, o *askOpts) {
 	fs.StringVar(&o.agent, "agent", "", "native answer specialist `NAME` (default: auto)")
 	fs.StringVar(&o.toolHost, "tool-host", chatToolHostSandbox, "native file and terminal host: sandbox or local")
 	fs.StringVar(&o.browserCDP, "browser-cdp", "", "copy signed-in state from an explicit loopback CDP browser")
-	fs.BoolVar(&o.hermes, "hermes", false, "answer with Hermes")
+	fs.BoolVar(&o.hermes, "hermes", false, "answer with Hermes (legacy one-shot)")
 	fs.BoolVar(&o.web, "web", false, "search the internet for this answer only")
 	fs.BoolVar(&o.rag, "rag", false, "force a grounded answer from the knowledge base, skipping adaptive routing")
 	fs.StringVar(&o.session, "session", "", "continue a saved conversation: an `ID`, new, or last")

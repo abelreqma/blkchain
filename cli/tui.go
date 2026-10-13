@@ -3495,7 +3495,7 @@ func helpResponse(arg string, width int) string {
 		}
 		text := " " + H2.Render(usage) + "\n" + wrapIndent(c.desc, 3, width)
 		examples := map[string]string{
-			"agent":   "Native auto is the interactive default. /agent NAME selects a specialist; /agent auto restores dynamic routing. Available: " + strings.Join(answerAgentNames(), ", ") + ". /hermes calls Hermes for one turn.",
+			"agent":   "Native auto is the interactive default. /agent NAME selects a specialist; /agent auto restores dynamic routing. Available: " + strings.Join(answerAgentNames(), ", ") + ". /hermes runs one legacy Hermes turn.",
 			"context": "/context add PATH|URL; /context preview N; /context remove N; /context clear. Links are references, not fetched content.",
 			"queue":   "/queue list; /queue edit N; /queue remove N; /queue pause; /queue resume; /queue clear.",
 			"attach":  "/attach PATH or /attach URL prepares the next question. With no argument, the TUI opens a file picker.",
