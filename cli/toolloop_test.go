@@ -97,6 +97,32 @@ func TestToolLoopImmediateReply(t *testing.T) {
 	}
 }
 
+func TestToolLoopReviewsFinalOnce(t *testing.T) {
+	m := &fakeModel{queue: []*llms.ContentResponse{textResp("draft"), textResp("final")}}
+	reviews := 0
+	final, rounds, err := runToolLoop(context.Background(), m, newLoopReg(t), userMsgs(), LoopCaps{
+		MaxRounds: 4,
+		ReviewFinal: func(context.Context, string) (string, error) {
+			reviews++
+			return "review open task evidence", nil
+		},
+	})
+	if err != nil || final != "final" || rounds != 2 || reviews != 1 || m.calls != 2 {
+		t.Fatalf("final=%q rounds=%d reviews=%d calls=%d err=%v", final, rounds, reviews, m.calls, err)
+	}
+	seenReview := false
+	for _, message := range m.seen[1] {
+		for _, part := range message.Parts {
+			if text, ok := part.(llms.TextContent); ok && strings.Contains(text.Text, "review open task evidence") {
+				seenReview = true
+			}
+		}
+	}
+	if !seenReview {
+		t.Fatal("second model call did not receive the final review")
+	}
+}
+
 func TestToolLoopRunsTool(t *testing.T) {
 	echo := &fakeTool{name: "echo", fn: func(a string) (string, error) { return "echoed:" + a, nil }}
 	m := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "echo", `{"x":1}`), textResp("final")}}
@@ -113,6 +139,29 @@ func TestToolLoopRunsTool(t *testing.T) {
 	res := toolResults(m)
 	if len(res) != 1 || res[0].ToolCallID != "c1" || res[0].Name != "echo" || res[0].Content != `echoed:{"x":1}` {
 		t.Fatalf("tool results = %+v", res)
+	}
+}
+
+func TestToolLoopStopsAfterPolicyCapDenial(t *testing.T) {
+	denied := false
+	tool := &fakeTool{name: "execute", fn: func(string) (string, error) {
+		denied = true
+		return "engagement command cap reached", nil
+	}}
+	model := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "execute", "{}")}}
+	final, rounds, err := runToolLoop(context.Background(), model, newLoopReg(t, tool), userMsgs(), LoopCaps{
+		MaxRounds: 32,
+		MaxCalls:  128,
+		StopReason: func(context.Context) (string, error) {
+			if denied {
+				return "engagement command cap reached", nil
+			}
+			return "", nil
+		},
+		Finalize: func(_ context.Context, reason string) (string, error) { return "paused: " + reason, nil },
+	})
+	if err != nil || final != "paused: engagement command cap reached" || rounds != 1 || model.calls != 1 || len(tool.ran) != 1 {
+		t.Fatalf("final=%q rounds=%d calls=%d runs=%d err=%v", final, rounds, model.calls, len(tool.ran), err)
 	}
 }
 

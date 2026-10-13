@@ -174,8 +174,31 @@ func TestGroundUnparseableHelpFailsOpenWithNote(t *testing.T) {
 	if oc.Msg == "" {
 		t.Fatal("unparseable help must carry an advisory note")
 	}
-	if cache.stored != 0 {
-		t.Fatal("an unparseable interface must not be cached")
+	if cache.stored != 1 {
+		t.Fatal("an unparseable interface must be cached for this engagement")
+	}
+}
+
+func TestGroundFailedHelpReadIsCachedAcrossTasks(t *testing.T) {
+	cache := openTestCache(t)
+	reads := 0
+	capture := func(context.Context, string) (string, bool) {
+		reads++
+		return "", false
+	}
+	cmd := secgate.Command{Binary: "nmap", Args: []string{"-sV", "127.0.0.1"}}
+	for range 3 {
+		outcome := newGrounder(cache, capture).ground(context.Background(), cmd)
+		if outcome.Reject || outcome.Msg == "" {
+			t.Fatalf("missing ungrounded advisory: %+v", outcome)
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("help read repeated %d times", reads)
+	}
+	var count int
+	if err := cache.db.QueryRow("SELECT COUNT(*) FROM blk_tool_help WHERE binary = ?", "nmap").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("negative cache persisted: count=%d err=%v", count, err)
 	}
 }
 

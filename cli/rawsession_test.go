@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os/exec"
@@ -12,6 +13,31 @@ import (
 	"testing"
 	"time"
 )
+
+func (b *rawBroker) WaitConnected(ctx context.Context) error {
+	for {
+		b.stateMu.Lock()
+		if b.closed {
+			b.stateMu.Unlock()
+			return errors.New("raw broker closed")
+		}
+		if b.shell != nil {
+			b.stateMu.Unlock()
+			return nil
+		}
+		ready := b.ready
+		b.stateMu.Unlock()
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func rawBrokerRequest(ctx context.Context, address, token string, args []string, limit int, timeout time.Duration) (rawSessionResponse, error) {
+	return rawBrokerExecRequest(ctx, address, rawSessionRequest{Operation: "exec", Token: token, Args: args}, limit, timeout)
+}
 
 func TestRawBrokerRetainsShellAcrossControlConnections(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

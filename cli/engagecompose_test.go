@@ -64,7 +64,6 @@ func TestBuildEngageGateOneCompositionRoot(t *testing.T) {
 		ws.EvidenceDir(),
 		protMD,
 		protJSON,
-		ws.Dir + "/checkpoint.json",
 		ws.Dir + "/ROE.md",
 		ws.Dir + "/scope.txt",
 		approvedNetworksPath(ws.Dir),

@@ -14,6 +14,11 @@ import (
 type Gate struct {
 	Policy           *Policy
 	policyCount      int
+	policyActions    int
+	policyCapDenied  string
+	policyStall      string
+	lastDenial       string
+	denialRepeats    int
 	policyBytes      int64
 	policyDeadline   time.Time
 	mu               sync.Mutex // serializes Authorize and Start: the Episode budget and Approvals are shared state
@@ -140,6 +145,7 @@ func (g *Gate) Authorize(ctx context.Context, c Command) Decision {
 		return d
 	}
 	if d := g.checkLocked(c); !d.Allowed {
+		g.noteCommandDenialLocked(c, d.Reason)
 		g.mu.Unlock()
 		return d
 	}
@@ -502,7 +508,12 @@ func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
 		needConfirm = g.Mode == Safe && (g.Approvals == nil || !g.Approvals.Approved(g.policyApprovalCommand(c)))
 	}
 	if !needConfirm {
-		g.audit("allow", Signature(c))
+		if !c.InternalProbe {
+			g.lastDenial = ""
+			g.denialRepeats = 0
+			g.policyStall = ""
+		}
+		g.audit(allowAction(c), Signature(c))
 		g.mu.Unlock()
 		return Decision{Allowed: true, Command: c}
 	}
@@ -537,9 +548,21 @@ func (g *Gate) confirmTailLocked(ctx context.Context, c Command) Decision {
 	if edited == nil && g.Approvals != nil {
 		g.Approvals.Remember(g.policyApprovalCommand(c))
 	}
-	g.audit("allow", Signature(run))
+	if !run.InternalProbe {
+		g.lastDenial = ""
+		g.denialRepeats = 0
+		g.policyStall = ""
+	}
+	g.audit(allowAction(run), Signature(run))
 	g.mu.Unlock()
 	return Decision{Allowed: true, Command: run}
+}
+
+func allowAction(c Command) string {
+	if c.InternalProbe {
+		return "probe-allow"
+	}
+	return "allow"
 }
 
 // deniedByConfig reports whether c's binary base name matches any entry in the
@@ -564,6 +587,22 @@ func deniedByConfig(binary string, denied []string) bool {
 func (g *Gate) deny(layer string, c Command, reason, suggestion string) Decision {
 	g.audit(denialAction(c, layer), Signature(c)+" :: "+reason)
 	return Decision{Allowed: false, Reason: reason, Suggestion: suggestion}
+}
+
+func (g *Gate) noteCommandDenialLocked(c Command, reason string) {
+	if c.InternalProbe {
+		return
+	}
+	signature := Signature(c) + "\x00" + reason
+	if signature == g.lastDenial {
+		g.denialRepeats++
+	} else {
+		g.lastDenial = signature
+		g.denialRepeats = 1
+	}
+	if g.denialRepeats >= 2 {
+		g.policyStall = "repeated identical command denial"
+	}
 }
 
 func denialAction(c Command, layer string) string {

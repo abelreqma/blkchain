@@ -80,7 +80,6 @@ func buildEngageGate(ws *engagement.Workspace, scope *secgate.Scope, mode secgat
 			ws.EvidenceDir(),
 			protMD,
 			protJSON,
-			filepath.Join(ws.Dir, "checkpoint.json"),
 			filepath.Join(ws.Dir, "ROE.md"),
 			filepath.Join(ws.Dir, "scope.txt"),
 			approvedNetworksPath(ws.Dir),

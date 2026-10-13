@@ -68,13 +68,7 @@ func (m *model) resetConversation() error {
 	return nil
 }
 
-func (m *model) undoConversation() error {
-	_, err := m.undoConversationContext()
-	return err
-}
-
-// undoConversationContext is undoConversation plus the reconciliation report:
-// the state the removed exchange invalidated, named for the caller to print.
+// undoConversationContext removes the last exchange and reports the state it invalidated.
 func (m *model) undoConversationContext() ([]string, error) {
 	if m.working {
 		return nil, fmt.Errorf("cancel the current turn before undoing")

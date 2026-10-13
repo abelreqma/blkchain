@@ -100,6 +100,7 @@ type engageActionMsg struct{ text string }
 type replTranscriptKey struct{}
 type replActionKey struct{}
 type replCDPKey struct{}
+type replArmReqKey struct{}
 
 // replEngageRun is the fully-built input to one gated REPL engagement. The deps
 // (model, rc, cat, roeDB, confirm, cfg, prefs, mode, override, cwd, goal) are
@@ -119,6 +120,7 @@ type replEngageRun struct {
 	cat        *skillcat.Catalog
 	confirm    secgate.Confirmer
 	asker      askuser.Asker
+	armReq     ArmRequester
 	roeDB      *sql.DB
 	stub       *stubEngagement
 	finding    func([]byte) error
@@ -210,6 +212,9 @@ func engageCmd(r replEngageRun) tea.Cmd {
 		ctx = context.WithValue(ctx, replActionKey{}, r.onAction)
 		if r.cdp != nil {
 			ctx = context.WithValue(ctx, replCDPKey{}, *r.cdp)
+		}
+		if r.armReq != nil {
+			ctx = context.WithValue(ctx, replArmReqKey{}, r.armReq)
 		}
 		final, err := runReplEngageFn(ctx, r.wsDir, r.cwd, r.mode, r.override, r.model, r.rc,
 			r.cfg, r.prefs, r.cat, r.confirm, r.asker, r.roeDB, r.goal, progress)

@@ -474,55 +474,11 @@ func toolFor(binary string) (tool, bool) {
 	return tool{}, false
 }
 
-// catalogPackages returns the distinct apk packages the catalog requires, in
-// sorted order. It is the set packages.list must declare.
-func catalogPackages() []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, t := range toolCatalog {
-		if t.Package == "" || seen[t.Package] {
-			continue
-		}
-		seen[t.Package] = true
-		out = append(out, t.Package)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // scratchReachBinaries returns the binaries that address no network destination but confine their paths to the scratch directory, which the gate permits with no scope target.
 func scratchReachBinaries() []string {
 	var out []string
 	for _, t := range toolCatalog {
 		if t.Reach == reachScratch {
-			out = append(out, t.Binary)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// localReachBinaries returns the binaries with no network destination:
-// host-introspection, analysis and offline tools the LOCAL profile runs under
-// per-command confirmation.
-func localReachBinaries() []string {
-	var out []string
-	for _, t := range toolCatalog {
-		if t.Reach == reachLocal {
-			out = append(out, t.Binary)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// exploitToolBinaries returns the tierExploit binaries: the code-owned default
-// exploit-tier catalog that the operator's exploit_tools extends. None of them
-// may appear in an unattended allowlist.
-func exploitToolBinaries() []string {
-	var out []string
-	for _, t := range toolCatalog {
-		if t.Tier == tierExploit {
 			out = append(out, t.Binary)
 		}
 	}

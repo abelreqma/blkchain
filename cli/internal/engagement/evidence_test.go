@@ -2,6 +2,7 @@ package engagement
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -202,6 +203,41 @@ func TestEvidenceRowsForEmpty(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Fatalf("EvidenceRowsFor = %d rows, want 0", len(rows))
+	}
+}
+
+func TestEvidenceHighlightsKeepLatestHeaderAndLatestRow(t *testing.T) {
+	st := openTemp(t)
+	seedAB(t, st)
+	if _, err := st.RecordEvidence("A", "HTTP/1.0 200 OK\nServer: fixture"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		if _, err := st.RecordEvidence("A", fmt.Sprintf("port scan %d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := st.EvidenceHighlightsFor("A")
+	if err != nil || len(rows) != 2 || !strings.Contains(rows[0].Quote, "Server:") || rows[1].Quote != "port scan 19" {
+		t.Fatalf("highlights=%v err=%v", rows, err)
+	}
+}
+
+func TestEvidenceHighlightsKeepPortAfterLaterTimeout(t *testing.T) {
+	st := openTemp(t)
+	seedAB(t, st)
+	for _, quote := range []string{
+		"8080/tcp open http",
+		"HTTP/1.0 200 OK\nServer: fixture",
+		"Starting Nmap; command timed out",
+	} {
+		if _, err := st.RecordEvidence("A", quote); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := st.EvidenceHighlightsFor("A")
+	if err != nil || len(rows) != 3 || rows[0].Quote != "8080/tcp open http" || !strings.Contains(rows[1].Quote, "Server:") || rows[2].Quote != "Starting Nmap; command timed out" {
+		t.Fatalf("highlights=%v err=%v", rows, err)
 	}
 }
 

@@ -122,31 +122,6 @@ func candidateTask(svc Service, technique string) engagement.Task {
 	}
 }
 
-// correlateFromEvidence reads a task's stored evidence rows, parses services
-// from each quote (provenance = that task + the quote's row id), and returns the
-// deduped set of candidate exploit tasks the catalog maps them to. It is
-// deterministic and does not consult the corpus or the model.
-func correlateFromEvidence(store *engagement.Store, taskID string) ([]engagement.Task, error) {
-	rows, err := store.EvidenceRowsFor(taskID)
-	if err != nil {
-		return nil, err
-	}
-	seen := map[string]bool{}
-	var out []engagement.Task
-	for _, r := range rows {
-		prov := Provenance{TaskID: taskID, EvidenceID: r.ID}
-		for _, svc := range parseServices(prov, r.Quote) {
-			cand, ok := correlateService(svc)
-			if !ok || seen[cand.ID] {
-				continue
-			}
-			seen[cand.ID] = true
-			out = append(out, cand)
-		}
-	}
-	return out, nil
-}
-
 // assetFallbackHost returns the recon asset when it names one host, which a
 // service row parsed without a host of its own takes as its target. The asset
 // comes from the recon ladder, so it is code-derived. A range, a URL, a

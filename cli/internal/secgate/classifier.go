@@ -715,7 +715,11 @@ func firstMetaToken(s string) string {
 func classifyUnbounded(c Command) (Decision, bool) {
 	name := strings.ToLower(baseName(strings.TrimSpace(c.Binary)))
 	rule, ok := unboundedRules[name]
-	if !ok || hasAnyFlag(c.Args, rule.flags...) {
+	bounded := hasAnyFlag(c.Args, rule.flags...)
+	if name == "nmap" {
+		bounded = nmapPortBound(c.Args)
+	}
+	if !ok || bounded {
 		return Decision{}, false
 	}
 	return Decision{
@@ -723,6 +727,35 @@ func classifyUnbounded(c Command) (Decision, bool) {
 		Reason:     name + " without a bound is structurally unbounded",
 		Suggestion: rule.suggestion,
 	}, true
+}
+
+func nmapPortBound(args []string) bool {
+	if hasAnyFlag(args, "-F", "--top-ports") {
+		return true
+	}
+	for i, arg := range args {
+		if arg == "-p" && i+1 < len(args) && nmapPortSpec(args[i+1]) {
+			return true
+		}
+		if strings.HasPrefix(arg, "-p") && len(arg) > 2 && nmapPortSpec(arg[2:]) {
+			return true
+		}
+	}
+	return false
+}
+
+func nmapPortSpec(spec string) bool {
+	hasDigit := false
+	for _, r := range spec {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case strings.ContainsRune(",:-TUSP", r):
+		default:
+			return false
+		}
+	}
+	return hasDigit
 }
 
 // baseName returns the final path element of a binary path.

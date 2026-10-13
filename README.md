@@ -254,7 +254,11 @@ version match or a surface observation into a validated finding.
 
 `blk kg` and the `kg_query` MCP tool expose task, asset, and evidence relationships, including dependencies and provenance. The graph refreshes from the engagement store.
 
-A workspace includes `engagement.db`, captured artifacts under `evidence/`, `actions.jsonl`, `audit.jsonl`, policy/checkpoint data, and Markdown/JSON reports. Reports include completed and unfinished tasks, persisted finding review states, and exact evidence IDs. Use `blk store findings` to inspect those conclusions and their review history.
+A workspace includes `engagement.db`, captured artifacts under `evidence/`, `actions.jsonl`, `audit.jsonl`, policy/checkpoint data, and Markdown/JSON reports. Reports include completed and unfinished tasks, persisted finding review states, and exact evidence IDs. The final assessment uses fixed report sections with escaped model text. The action transcript labels internal help probes and separates command arguments. Use `blk store findings` to inspect those conclusions and their review history.
+
+`max_commands` counts substantive command attempts. `max_actions` counts those attempts and other policy actions. Exact read-only `sudo -l` listings and internal help checks do not spend either count, but still pass the remaining RoE and runtime limits. A command cap denial ends planning and produces a final report.
+
+For a network task that requests an HTTP banner, the recon executor follows an observed open HTTP port with a bounded, gated HEAD request. It records the port line and exact `Server:` response line as evidence. The runner includes Nmap's service-detection data. Network Nmap calls add `-n` unless the command explicitly selects a DNS mode, avoiding reverse-DNS waits behind the worker's egress guard.
 
 ## Terminal and MCP interfaces
 

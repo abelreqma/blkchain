@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"blkchain/cli/internal/histstore"
@@ -13,7 +14,9 @@ import (
 // interfaces in the blk_tool_help table on the shared history database so a
 // tool's help is read once and reused across engagements.
 type sqlToolHelpCache struct {
-	db *sql.DB
+	db       *sql.DB
+	mu       sync.Mutex
+	negative map[string]bool
 }
 
 // newSQLToolHelpCache creates the blk_tool_help table (if absent) and returns a
@@ -34,12 +37,18 @@ func newSQLToolHelpCache(db *sql.DB) (*sqlToolHelpCache, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &sqlToolHelpCache{db: db}, nil
+	return &sqlToolHelpCache{db: db, negative: make(map[string]bool)}, nil
 }
 
 // Lookup returns the cached interface for binary+version. A missing row is a
 // miss (hit=false), not an error. A query or scan error is returned.
 func (c *sqlToolHelpCache) Lookup(binary, version string) (toolInterface, bool, error) {
+	c.mu.Lock()
+	negative := c.negative[binary+"\x00"+version]
+	c.mu.Unlock()
+	if negative {
+		return toolInterface{}, true, nil
+	}
 	var flagsJSON, subsJSON string
 	err := c.db.QueryRow(
 		`SELECT flags, subcommands FROM blk_tool_help WHERE binary = ? AND version = ?`,
@@ -64,6 +73,12 @@ func (c *sqlToolHelpCache) Lookup(binary, version string) (toolInterface, bool, 
 // Store upserts the interface for binary+version. INSERT OR REPLACE keeps the
 // write idempotent when two executors ground the same binary concurrently.
 func (c *sqlToolHelpCache) Store(binary, version string, iface toolInterface) error {
+	if len(iface.Flags) == 0 && len(iface.Subcommands) == 0 {
+		c.mu.Lock()
+		c.negative[binary+"\x00"+version] = true
+		c.mu.Unlock()
+		return nil
+	}
 	flagsJSON, err := json.Marshal(iface.Flags)
 	if err != nil {
 		return err

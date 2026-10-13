@@ -152,18 +152,3 @@ func candidatesFor(kind, value string) []string {
 	}
 	return hostPattern.FindAllString(value, 2000)
 }
-
-// SubdomainNames returns the distinct host names from a result set, excluding wildcards.
-func SubdomainNames(in []SubdomainName) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, s := range in {
-		if s.Wildcard || seen[s.Name] {
-			continue
-		}
-		seen[s.Name] = true
-		out = append(out, s.Name)
-	}
-	sort.Strings(out)
-	return out
-}

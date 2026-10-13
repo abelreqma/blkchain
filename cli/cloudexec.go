@@ -163,7 +163,7 @@ func (e cloudExecutor) cloudRunReconPhase(ctx context.Context, task engagement.T
 			{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(dom.Prompt)}},
 			{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(human)}},
 		}
-		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8}); err != nil {
+		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8, StopReason: engageStopOnPolicy(e.d.Gate)}); err != nil {
 			return tierOutcome{}, err
 		}
 		// Code-side evidence capture (shared helper, promoted via the embedded

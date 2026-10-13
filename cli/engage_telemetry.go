@@ -38,10 +38,6 @@ func newEngageTelemetry(ws *engagement.Workspace, cancel context.CancelCauseFunc
 }
 
 func (t *engageTelemetry) gate(action, detail string) {
-	if err := t.write("secgate", action, detail); err != nil {
-		t.cancel(fmt.Errorf("engagement audit failed: %w", err))
-		return
-	}
 	if !strings.HasPrefix(action, "deny:") || action == "deny:context" {
 		return
 	}
@@ -74,7 +70,7 @@ func (t *engageTelemetry) gate(action, detail string) {
 }
 
 func (t *engageTelemetry) observe(action, detail string) error {
-	if err := t.write("orchestrator", action, detail); err != nil {
+	if err := t.write("orchestrator", action, redactEngageText(detail)); err != nil {
 		wrapped := fmt.Errorf("engagement audit failed: %w", err)
 		t.cancel(wrapped)
 		return wrapped

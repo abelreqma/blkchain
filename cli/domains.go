@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"blkchain/cli/internal/engagement"
@@ -126,6 +127,15 @@ func projectionText(ctx context.Context, st *engagement.Store) (string, error) {
 			break
 		}
 		fmt.Fprintf(&b, "\n- %s [%s] status=%s target=%s objective=%s", t.ID, t.Kind, t.Status, t.Target, t.Objective)
+		rows, err := st.EvidenceHighlightsFor(t.ID)
+		if err != nil {
+			return "", err
+		}
+		if len(rows) > 0 {
+			for _, row := range rows {
+				fmt.Fprintf(&b, "\n  evidence %d (untrusted): %s", row.ID, strconv.Quote(capRunes(row.Quote, 600)))
+			}
+		}
 	}
 	b.WriteString("\n\nAlready discovered (do not repeat):")
 	discovered := 0

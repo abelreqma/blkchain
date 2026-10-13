@@ -16,9 +16,10 @@ import (
 
 // Model is the assembled, render-ready view of an engagement.
 type Model struct {
+	Assessment      *Assessment                     `json:"assessment,omitempty"`
+	Final           string                          `json:"final,omitempty"`
 	Findings        []engagement.Finding            `json:"findings,omitempty"`
 	FindingsPartial bool                            `json:"findings_partial,omitempty"`
-	Final           string                          `json:"final,omitempty"`
 	Web             *webanalysis.Snapshot           `json:"web,omitempty"`
 	Goal            string                          `json:"goal"`
 	Scope           string                          `json:"scope"`
@@ -32,6 +33,43 @@ type Model struct {
 	Transitions     []engagement.Transition         `json:"transitions"`
 	Denials         []Denial                        `json:"denials,omitempty"`
 	DenialsOmitted  int                             `json:"denials_omitted,omitempty"`
+}
+
+type Assessment struct {
+	Summary    string   `json:"summary"`
+	Confirmed  []string `json:"confirmed,omitempty"`
+	Blocked    []string `json:"blocked,omitempty"`
+	Remaining  []string `json:"remaining,omitempty"`
+	NextSteps  []string `json:"next_steps,omitempty"`
+	StopReason string   `json:"stop_reason,omitempty"`
+}
+
+func RenderAssessment(a Assessment) string {
+	var b strings.Builder
+	if a.StopReason != "" {
+		fmt.Fprintf(&b, "- Stop reason: %s\n", safeMarkdownLine(a.StopReason))
+	}
+	if a.Summary != "" {
+		fmt.Fprintf(&b, "\n%s\n", safeMarkdownLine(a.Summary))
+	}
+	for _, section := range []struct {
+		title string
+		items []string
+	}{
+		{"Confirmed", a.Confirmed},
+		{"Blocked", a.Blocked},
+		{"Remaining", a.Remaining},
+		{"Recommended next steps", a.NextSteps},
+	} {
+		if len(section.items) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "\n### %s\n\n", section.title)
+		for _, item := range section.items {
+			fmt.Fprintf(&b, "- %s\n", safeMarkdownLine(item))
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 type Denial struct {
@@ -74,9 +112,13 @@ func RenderMarkdown(m Model) string {
 	fmt.Fprintf(&b, "- Status: %s\n", safeMarkdownLine(m.Status))
 	fmt.Fprintf(&b, "- Generated: %s\n", safeMarkdownLine(m.GeneratedAt))
 	fmt.Fprintf(&b, "- Revision: %d\n\n", m.Engagement.Revision)
-	if strings.TrimSpace(m.Final) != "" {
+	if m.Assessment != nil || strings.TrimSpace(m.Final) != "" {
 		b.WriteString("## Final assessment\n\n")
-		b.WriteString(sanitizeFinal(m.Final))
+		if m.Assessment != nil {
+			b.WriteString(RenderAssessment(*m.Assessment))
+		} else {
+			b.WriteString(sanitizeFinal(m.Final))
+		}
 		b.WriteString("\n\n")
 	}
 

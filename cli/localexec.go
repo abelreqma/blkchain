@@ -147,7 +147,7 @@ func (e localExecutor) localRunTargetAnalysis(ctx context.Context, task engageme
 		{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(effectiveEngagePrompt(e.d.Gate, dom.Prompt))}},
 		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(localTargetAnalysisPrompt(proj, task))}},
 	}
-	final, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 6, MaxCalls: 12})
+	final, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 6, MaxCalls: 12, StopReason: engageStopOnPolicy(e.d.Gate)})
 	if err != nil {
 		return final, err
 	}

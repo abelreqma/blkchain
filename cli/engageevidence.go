@@ -40,7 +40,7 @@ var (
 )
 
 // SetEngageEvidenceSource registers the current engagement's evidence source so
-// the REPL /evidence view can read it on demand, paralleling SetReplArmRequester.
+// the REPL /evidence view can read it on demand.
 // runReplEngage registers ws.Store.EvidenceRowsFor while it runs and clears it
 // (nil) on exit. With no source registered (no active engagement) EngageEvidence
 // returns nothing.

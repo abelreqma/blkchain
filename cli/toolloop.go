@@ -27,6 +27,8 @@ type LoopCaps struct {
 	MaxCalls         int
 	NoProgressRounds int
 	Progress         func(context.Context) (string, error)
+	StopReason       func(context.Context) (string, error)
+	ReviewFinal      func(context.Context, string) (string, error)
 	Finalize         func(context.Context, string) (string, error)
 	Observe          func(action, detail string) error
 	// SummarizeAtChars, when > 0 and Summarizer is set, enables chain
@@ -75,6 +77,7 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 	idle := 0
 	opts := append([]llms.CallOption{llms.WithTools(reg.Specs())}, extra...)
 	total := 0
+	reviewedFinal := false
 	for rounds < caps.MaxRounds {
 		if err := ctx.Err(); err != nil {
 			return "", rounds, err
@@ -101,6 +104,17 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 		}
 		choice := resp.Choices[0]
 		if len(choice.ToolCalls) == 0 {
+			if !reviewedFinal && rounds+2 <= caps.MaxRounds && caps.ReviewFinal != nil {
+				retry, err := caps.ReviewFinal(ctx, choice.Content)
+				if err != nil {
+					return "", rounds, err
+				}
+				if retry != "" {
+					reviewedFinal = true
+					msgs = append(msgs, llms.TextParts(llms.ChatMessageTypeAI, choice.Content), llms.TextParts(llms.ChatMessageTypeHuman, retry))
+					continue
+				}
+			}
 			if caps.Observe != nil {
 				if err := caps.Observe("model-final", fmt.Sprintf("round=%d", rounds)); err != nil {
 					return "", rounds, err
@@ -161,6 +175,15 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 					Content:    result,
 				}},
 			})
+			if caps.StopReason != nil {
+				reason, err := caps.StopReason(ctx)
+				if err != nil {
+					return "", rounds, err
+				}
+				if reason != "" {
+					return stop(reason)
+				}
+			}
 		}
 		if total >= caps.MaxCalls {
 			return stop(fmt.Sprintf("tool call cap reached (%d calls)", total))

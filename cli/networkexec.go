@@ -2,7 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"blkchain/cli/internal/engagement"
@@ -94,19 +100,23 @@ func (e networkExecutor) networkRunReconPhase(ctx context.Context, task engageme
 	defer cleanup()
 
 	cmdCtx := secgate.Command{
+		TaskID:  task.ID,
 		Phase:   secgate.Phase(string(task.Phase)),
 		Surface: secgate.Surface(string(task.Surface)),
 		Armed:   task.Armed,
+		Kind:    task.Kind,
+		Target:  task.Target,
 	}
 	grounder := newTaskGrounder(e.d.ToolHelp, e.d.Gate, execDir, cmdCtx)
 	activeTask := func() string { return task.ID }
+	runCommand := newRunCommandToolForTask(e.d.Gate, runCap, runTimeout, execDir, activeTask, e.d.Runs.Add, cmdCtx, grounder)
 
 	reg := tooldef.NewRegistry()
 	for _, t := range []tooldef.Tool{
 		newKBSearchTool(e.d.RC, e.d.Cfg),
 		newKBAnswerTool(e.d.RC, e.d.Cfg, !e.d.Prefs.Web),
 		newRouteSkillTool(e.d.Catalog, e.d.Store, activeTask),
-		newRunCommandToolForTask(e.d.Gate, runCap, runTimeout, execDir, activeTask, e.d.Runs.Add, cmdCtx, grounder),
+		runCommand,
 		newVerifiedRecordEvidenceTool(e.d.Store, e.d.Runs.Contains),
 	} {
 		if err := reg.Register(t); err != nil {
@@ -120,6 +130,7 @@ func (e networkExecutor) networkRunReconPhase(ctx context.Context, task engageme
 	if e.d.RC != nil {
 		exploitSel = newKBExploitSelector(e.d.Model, e.d.RC, e.d.Cfg)
 	}
+	headerAttempts := map[int]bool{}
 
 	runTier := func(ctx context.Context, _ engagement.Surface, asset string, tier reconTier, sel reconSelection) (tierOutcome, error) {
 		beforeCmds := e.d.Runs.Count(task.ID)
@@ -129,10 +140,35 @@ func (e networkExecutor) networkRunReconPhase(ctx context.Context, task engageme
 		}
 		msgs := []llms.MessageContent{
 			{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(dom.Prompt)}},
-			{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(networkTierPrompt(task, asset, tier, sel, v))}},
+			{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(networkTierPrompt(task, asset, tier, sel, v) + reconEvidenceContext(beforeRows))}},
 		}
-		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8}); err != nil {
+		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8, StopReason: engageStopOnPolicy(e.d.Gate)}); err != nil {
 			return tierOutcome{}, err
+		}
+		if e.d.Gate.PolicyCapReason() == "" {
+			quotes, err := captureRequestedHTTPHeaders(ctx, task, asset, e.d.Runs.Outputs(task.ID), beforeRows, headerAttempts, runCommand)
+			if err != nil {
+				return tierOutcome{}, err
+			}
+			if len(quotes) > 0 {
+				current, err := e.d.Store.EvidenceRowsFor(task.ID)
+				if err != nil {
+					return tierOutcome{}, err
+				}
+				seen := map[string]bool{}
+				for _, row := range current {
+					seen[row.Quote] = true
+				}
+				for _, quote := range quotes {
+					if seen[quote] {
+						continue
+					}
+					if _, err := e.d.Store.RecordEvidence(task.ID, quote); err != nil {
+						return tierOutcome{}, err
+					}
+					seen[quote] = true
+				}
+			}
 		}
 		// Code-side evidence capture: do not rely on the model's
 		// record_evidence. captureTierEvidence returns the model's rows when it
@@ -168,9 +204,63 @@ func (e networkExecutor) networkRunReconPhase(ctx context.Context, task engageme
 	return reconSummary(task, res), nil
 }
 
+var openHTTPPort = regexp.MustCompile(`(?m)^([0-9]{1,5})/tcp[[:space:]]+open[[:space:]]+((?:ssl/)?https?(?:-[a-z0-9]+)?)\b`)
+
+func captureRequestedHTTPHeaders(ctx context.Context, task engagement.Task, asset string, outputs []string, evidence []engagement.EvidenceRow, attempted map[int]bool, runCommand tooldef.Tool) ([]string, error) {
+	request := strings.ToLower(task.Objective + " " + task.DoneWhen)
+	if !strings.Contains(request, "server header") && !strings.Contains(request, "banner") {
+		return nil, nil
+	}
+	for _, row := range evidence {
+		if strings.Contains(strings.ToLower(row.Quote), "\nserver:") || strings.HasPrefix(strings.ToLower(row.Quote), "server:") {
+			return nil, nil
+		}
+	}
+	for _, output := range outputs {
+		if strings.Contains(strings.ToLower(output), "\nserver:") || strings.HasPrefix(strings.ToLower(output), "server:") {
+			return nil, nil
+		}
+	}
+	var quotes []string
+	for _, output := range outputs {
+		for _, match := range openHTTPPort.FindAllStringSubmatch(output, -1) {
+			port, err := strconv.Atoi(match[1])
+			if err != nil || port < 1 || port > 65535 || attempted[port] || len(attempted) >= 4 {
+				continue
+			}
+			attempted[port] = true
+			scheme := "http"
+			if strings.Contains(match[2], "https") || strings.HasPrefix(match[2], "ssl/") {
+				scheme = "https"
+			}
+			target := (&url.URL{Scheme: scheme, Host: net.JoinHostPort(asset, match[1]), Path: "/"}).String()
+			args, err := json.Marshal(runCommandArgs{Binary: "curl", Args: []string{"-sS", "-I", "--max-time", "5", target}})
+			if err != nil {
+				return nil, err
+			}
+			result, err := runCommand.Call(ctx, string(args))
+			if err != nil {
+				return nil, err
+			}
+			for _, line := range strings.Split(result, "\n") {
+				line = strings.TrimSuffix(line, "\r")
+				if strings.HasPrefix(strings.ToLower(line), "server:") {
+					quotes = append(quotes, match[0], line)
+					break
+				}
+			}
+		}
+	}
+	return quotes, nil
+}
+
 // networkTierPrompt is the per-tier human prompt for network recon: the shared
 // per-tier instruction (reconTierPrompt) plus the vantage-skewed technique
 // emphasis. One persona, vantage only colors the emphasis.
 func networkTierPrompt(task engagement.Task, asset string, tier reconTier, sel reconSelection, v engagement.Vantage) string {
-	return reconTierPrompt(task, asset, tier, sel) + "\n" + networkVantageSkew(v)
+	prompt := reconTierPrompt(task, asset, tier, sel) + "\n" + networkVantageSkew(v)
+	if tier.Name == "version-safe-script-enum" {
+		prompt += "\nFor an open HTTP service, capture response headers with a bounded curl request when the objective needs a banner. A scanner service/version label is not the exact HTTP Server header. Do not repeat a completed port sweep."
+	}
+	return prompt
 }

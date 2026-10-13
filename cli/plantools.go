@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -74,14 +75,11 @@ func newPlanAddTool(st *engagement.Store) tooldef.Tool {
 			} else if err != nil && !errors.Is(err, engagement.ErrNotFound) {
 				return "plan_add: " + err.Error(), nil
 			}
-			// Storm guard: under repeated command failure an executor loop otherwise
-			// re-adds near-identical recon tasks. Reject a plan_add that duplicates an
-			// OPEN task on (kind, target, objective, surface). Re-adding the same id
-			// is an update, not a storm, so it is allowed.
+			// Reject a repeated objective or a child with its parent's done condition.
 			if dup, err := findOpenDuplicateTask(st, a); err != nil {
 				return "plan_add: " + err.Error(), nil
 			} else if dup != "" && dup != a.ID {
-				return fmt.Sprintf("plan_add: duplicate of open task %s (same kind/target/objective/surface); not added", dup), nil
+				return fmt.Sprintf("plan_add: duplicate of open task %s (same target and objective or done condition); not added", dup), nil
 			}
 			rev, err := st.Apply(engagement.Delta{
 				Upserts: []engagement.Task{planTaskFromArgs(a)},
@@ -103,12 +101,18 @@ func findOpenDuplicateTask(st *engagement.Store, a planTaskArgs) (string, error)
 	k := strings.TrimSpace(a.Kind)
 	tg := strings.TrimSpace(a.Target)
 	ob := strings.TrimSpace(a.Objective)
+	done := strings.TrimSpace(a.DoneWhen)
 	sf := strings.TrimSpace(a.Surface)
 	for _, t := range snap.Tasks {
 		if t.Status != engagement.StatusTodo && t.Status != engagement.StatusActive {
 			continue
 		}
-		if strings.TrimSpace(t.Kind) != k || strings.TrimSpace(t.Target) != tg || strings.TrimSpace(t.Objective) != ob {
+		if strings.TrimSpace(t.Kind) != k || strings.TrimSpace(t.Target) != tg {
+			continue
+		}
+		sameDone := done != "" && strings.TrimSpace(t.DoneWhen) == done &&
+			(slices.Contains(a.BasisIDs, t.ID) || slices.Contains(a.DependsOn, t.ID))
+		if strings.TrimSpace(t.Objective) != ob && !sameDone {
 			continue
 		}
 		if sf != "" && strings.TrimSpace(string(t.Surface)) != sf {

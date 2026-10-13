@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 
-	"blkchain/cli/internal/secgate"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -305,7 +304,7 @@ func TestReverseSearchAcceptanceUsesDraftBounds(t *testing.T) {
 	}
 }
 
-func TestOverlayCursorMessagesReachFocusedInputs(t *testing.T) {
+func TestOverlayCursorMessageReachesClarificationInput(t *testing.T) {
 	useDeadServices(t)
 	m := frameModel(t)
 	p := newClarifyPicker(Clarification{AllowCustom: true}, 80, nil)
@@ -314,13 +313,6 @@ func TestOverlayCursorMessagesReachFocusedInputs(t *testing.T) {
 	m.overlay = p
 	if _, cmd := m.Update(cursor.Blink()); cmd == nil {
 		t.Fatal("clarification cursor message was dropped")
-	}
-	confirm := newConfirmPicker(secgate.Command{}, 80, nil)
-	confirm.editing = true
-	confirm.input.Focus()
-	m.overlay = confirm
-	if _, cmd := m.Update(cursor.Blink()); cmd == nil {
-		t.Fatal("confirmation cursor message was dropped")
 	}
 }
 

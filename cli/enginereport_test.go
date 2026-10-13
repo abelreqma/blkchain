@@ -36,6 +36,24 @@ func TestReportDenialsAreBoundedAndVisible(t *testing.T) {
 	}
 }
 
+func TestReportPolicyDenialsExcludeInternalHelpProbes(t *testing.T) {
+	ws, err := engagement.OpenWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	if err := ws.AuditLine("secgate", "probe-deny:classifier", "nmap --help"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.AuditLine("secgate", "deny:scope", "out of scope"); err != nil {
+		t.Fatal(err)
+	}
+	denials, _, err := readAuditDenials(filepath.Join(ws.Dir, "audit.jsonl"))
+	if err != nil || len(denials) != 1 || denials[0].Action != "deny:scope" {
+		t.Fatalf("report denials=%v err=%v", denials, err)
+	}
+}
+
 func TestReportPaths(t *testing.T) {
 	md, js := reportPaths("/ws")
 	if md != filepath.Join("/ws", "report.md") || js != filepath.Join("/ws", "report.json") {
@@ -122,6 +140,27 @@ func TestReportWriterPersistsFinalAssessment(t *testing.T) {
 	}
 	if !strings.Contains(string(markdown), "Final assessment\n\nConfirmed response\n") || !strings.Contains(string(markdown), "&lt;script&gt;") || strings.Contains(string(markdown), "\x1b") {
 		t.Fatalf("unsafe or missing final assessment: %q", markdown)
+	}
+}
+
+func TestReportWriterRestoresStructuredAssessment(t *testing.T) {
+	ws, err := engagement.OpenWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	w := newReportWriter(ws.Store, ws.Dir, "inspect", "local", "auto")
+	w.SetFinal("Engagement paused: command cap reached.")
+	w.SetAssessment(engreport.Assessment{Summary: "Port 80 is open.", Confirmed: []string{"t1: Port 80/tcp is open."}, StopReason: "command cap reached"})
+	if err := w.Flush("paused"); err != nil {
+		t.Fatal(err)
+	}
+	reopened := newReportWriter(ws.Store, ws.Dir, "inspect", "local", "auto")
+	if err := reopened.RestoreFinal(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened.assessment == nil || reopened.assessment.Summary != "Port 80 is open." || reopened.final != "Engagement paused: command cap reached." {
+		t.Fatalf("restored assessment=%+v final=%q", reopened.assessment, reopened.final)
 	}
 }
 

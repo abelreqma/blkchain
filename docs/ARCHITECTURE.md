@@ -326,6 +326,12 @@ the other's reachability from its own response.
 - General command workers have a 2 GiB memory limit for offline OSV databases; raw-socket workers
   remain at 256 MiB. Both retain CPU, process, scratch, output, and duration bounds. RoE parallelism
   defaults to one and may be raised only within the policy limit.
+- The pinned runner includes Nmap's NSE libraries and scripts so bounded service detection can run.
+  A network recon task that requests an HTTP banner uses the gated command tool for a bounded HEAD
+  request after it observes an open HTTP port; only an exact response line establishes a Server header.
+- Before accepting a model final with active evidence-backed tasks, the orchestrator allows one
+  bounded completion review. A no-progress stop can also review those tasks using only
+  `plan_complete`. A policy command cap ends planning without this review.
 - MLX inference is serialized. `embed_server` runs all inference under a single lock and sub-batches
   forward passes. Do not add concurrent MLX calls.
 - `embed_server` releases the Metal cache after large index-time batches. Do not clear the LLM cache
@@ -391,8 +397,9 @@ export BLK_BIN="$PWD/cli/blk"
 ```
 
 The harness runs `blk search --json` per case, and `blk ask --json` for the judge, so Qdrant and
-`embed_server` must be running. The dataset holds labeled regression cases, and the run reports hit
-rates and reciprocal rank.
+`embed_server` must be running. Retrieval labels match bounded terms in result text, with optional
+source and CWE constraints. Two unrelated queries check for false hits against the DOM XSS and JWT
+cases. The run reports hit rates, reciprocal rank, and negative-control false hits.
 
 ## Coding standards
 

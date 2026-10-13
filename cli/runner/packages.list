@@ -24,6 +24,8 @@ bind-tools
 curl
 masscan
 nmap
+nmap-nselibs
+nmap-scripts
 nmap-ncat
 tcpdump
 

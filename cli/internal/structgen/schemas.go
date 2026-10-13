@@ -281,13 +281,6 @@ var schemas = []Schema{
 	},
 }
 
-// Schemas returns a copy of the schema registry, in help-listing order.
-func Schemas() []Schema {
-	out := make([]Schema, len(schemas))
-	copy(out, schemas)
-	return out
-}
-
 // Lookup returns the schema with the given name.
 func Lookup(name string) (Schema, bool) {
 	for _, s := range schemas {

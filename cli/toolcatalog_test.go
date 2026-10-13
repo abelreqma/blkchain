@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -11,12 +12,58 @@ import (
 	"blkchain/cli/internal/secgate"
 )
 
+// catalogPackages returns the distinct apk packages the catalog requires, in
+// sorted order. It is the set packages.list must declare.
+func catalogPackages() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range toolCatalog {
+		if t.Package == "" || seen[t.Package] {
+			continue
+		}
+		seen[t.Package] = true
+		out = append(out, t.Package)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// localReachBinaries returns the binaries with no network destination:
+// host-introspection, analysis and offline tools the LOCAL profile runs under
+// per-command confirmation.
+func localReachBinaries() []string {
+	var out []string
+	for _, t := range toolCatalog {
+		if t.Reach == reachLocal {
+			out = append(out, t.Binary)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// exploitToolBinaries returns the tierExploit binaries: the code-owned default
+// exploit-tier catalog that the operator's exploit_tools extends. None of them
+// may appear in an unattended allowlist.
+func exploitToolBinaries() []string {
+	var out []string
+	for _, t := range toolCatalog {
+		if t.Tier == tierExploit {
+			out = append(out, t.Binary)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // infrastructurePackages are packages.list entries that provide no model-runnable binary, so the catalog does not claim them: bash and python3 are denied interpreters that the runner itself uses (execute.py runs the worker's commands), iptables writes the guard's firewall, and openssh-client is the foothold carrier.
 var infrastructurePackages = map[string]string{
 	"bash":           "the runner's own shell; the classifier denies it as a command",
 	"python3":        "runs execute.py, the worker's command shim; the classifier denies it as a command",
 	"iptables":       "writes the network guard's allowlist firewall",
 	"openssh-client": "the ssh foothold carrier, invoked only by the code-built transport in foothold.go and absent from the catalog so the model cannot reach it",
+	"nmap-nselibs":   "nmap's service detection and script runtime data",
+	"nmap-scripts":   "nmap's packaged scripts for bounded service enumeration",
 }
 
 func readPackagesList(t *testing.T) []string {

@@ -55,7 +55,7 @@ func TestEngageIntakeFlowRecordsAndAssembles(t *testing.T) {
 	f.record(ClarifyResult{Value: "web"})       // domain
 	f.record(ClarifyResult{Custom: "10.0.0.5"}) // target typed
 	f.record(ClarifyResult{Value: "yes"})       // interactive
-	if !f.done() {
+	if f.step < engageIntakeSteps {
 		t.Fatal("after 3 records the flow should be done")
 	}
 	if _, ok := f.clarification(); ok {

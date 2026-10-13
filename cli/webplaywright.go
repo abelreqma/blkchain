@@ -438,22 +438,6 @@ func webParseHeaderLines(lines []string) map[string]string {
 	return h
 }
 
-// webResolveRedirect resolves a redirect Location against the current request URL
-// (absolute Location is used as-is; a relative one is resolved against base). A
-// parse failure returns the raw location, which the scope recheck then fails
-// closed on.
-func webResolveRedirect(base, location string) string {
-	bu, err := url.Parse(base)
-	if err != nil {
-		return location
-	}
-	ref, err := url.Parse(location)
-	if err != nil {
-		return location
-	}
-	return bu.ResolveReference(ref).String()
-}
-
 func (d *webPlaywrightDriver) captureDOM(kind string) (string, error) {
 	value, err := d.page.Evaluate(webDOMCaptureScript)
 	content := ""

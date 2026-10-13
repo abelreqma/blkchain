@@ -42,6 +42,7 @@ data/
 .run/
 .reranker-report.md
 .deepeval/
+/:memory:.ses
 *.log
 
 # OS & editor cruft

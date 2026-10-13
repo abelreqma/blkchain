@@ -1,12 +1,39 @@
 package secgate
 
 import (
+	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 )
 
 func (g *Gate) PolicyUsage() int { g.mu.Lock(); defer g.mu.Unlock(); return g.policyCount }
+
+func (g *Gate) PolicyActionUsage() int { g.mu.Lock(); defer g.mu.Unlock(); return g.policyActions }
+
+func (g *Gate) PolicyCapReason() string { g.mu.Lock(); defer g.mu.Unlock(); return g.policyCapDenied }
+
+func (g *Gate) PolicyStopReason() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.policyCapDenied != "" {
+		return g.policyCapDenied
+	}
+	return g.policyStall
+}
+
+func budgetExempt(c Command) bool {
+	if path.Base(c.Binary) == "sudo" && sudoListOnly(c.Args) {
+		return true
+	}
+	if !c.InternalProbe {
+		return false
+	}
+	return len(c.Args) == 1 && (c.Args[0] == "--help" || c.Args[0] == "help")
+}
+
+func BudgetExempt(c Command) bool { return budgetExempt(c) }
 
 func (g *Gate) PolicyByteUsage() int64 {
 	g.mu.Lock()
@@ -50,31 +77,39 @@ func (g *Gate) ClaimPolicyAction(action string) error {
 	if !g.Policy.Allows(action) {
 		return fmt.Errorf("engagement action %s is not allowed", action)
 	}
-	limit := g.Policy.MaxCommands
-	if g.Policy.MaxActions < limit {
-		limit = g.Policy.MaxActions
-	}
 	if !g.policyDeadline.IsZero() && !time.Now().Before(g.policyDeadline) {
 		return fmt.Errorf("engagement deadline reached")
 	}
-	if g.policyCount >= limit {
-		return fmt.Errorf("engagement command or action cap reached")
+	if g.policyActions >= g.Policy.MaxActions || action == "command" && g.policyCount >= g.Policy.MaxCommands {
+		g.policyCapDenied = "engagement action cap reached"
+		if g.policyCount >= g.Policy.MaxCommands && action == "command" {
+			g.policyCapDenied = "engagement command cap reached"
+		}
+		return errors.New(g.policyCapDenied)
 	}
-	g.policyCount++
+	g.policyActions++
+	if action == "command" {
+		g.policyCount++
+	}
 	return nil
 }
 
 func (g *Gate) RestorePolicyUsage(count int, deadline time.Time, bytes ...int64) error {
+	return g.RestorePolicyUsageCounts(count, count, deadline, bytes...)
+}
+
+func (g *Gate) RestorePolicyUsageCounts(commands, actions int, deadline time.Time, bytes ...int64) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	byteCount := int64(0)
 	if len(bytes) > 0 {
 		byteCount = bytes[0]
 	}
-	if g.Policy == nil || count < 0 || count > g.Policy.MaxCommands || count > g.Policy.MaxActions || len(bytes) > 1 || byteCount < 0 || byteCount > int64(g.Policy.TotalBytes) {
+	if g.Policy == nil || commands < 0 || commands > g.Policy.MaxCommands || actions < commands || actions > g.Policy.MaxActions || len(bytes) > 1 || byteCount < 0 || byteCount > int64(g.Policy.TotalBytes) {
 		return fmt.Errorf("invalid checkpoint policy usage")
 	}
-	g.policyCount = count
+	g.policyCount = commands
+	g.policyActions = actions
 	g.policyBytes = byteCount
 	g.policyDeadline = deadline
 	return nil
@@ -117,14 +152,18 @@ func (g *Gate) checkPolicyLocked(c Command) Decision {
 	if !g.policyDeadline.IsZero() && !time.Now().Before(g.policyDeadline) {
 		return g.deny("cap", c, "engagement deadline reached", "")
 	}
-	limit := p.MaxCommands
-	if p.MaxActions < limit {
-		limit = p.MaxActions
+	exempt := budgetExempt(c)
+	if !exempt && (g.policyCount >= p.MaxCommands || g.policyActions >= p.MaxActions) {
+		g.policyCapDenied = "engagement action cap reached"
+		if g.policyCount >= p.MaxCommands {
+			g.policyCapDenied = "engagement command cap reached"
+		}
+		return g.deny("cap", c, g.policyCapDenied, "")
 	}
-	if g.policyCount >= limit {
-		return g.deny("cap", c, "engagement command or action cap reached", "")
+	if !exempt {
+		g.policyCount++
+		g.policyActions++
 	}
-	g.policyCount++
 	if strings.TrimSpace(c.Binary) == "" || len(c.Binary) > 4096 || len(c.Args) > 1024 {
 		return g.deny("input", c, "invalid or oversized command", "")
 	}

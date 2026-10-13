@@ -3,8 +3,6 @@ package main
 import (
 	"strings"
 	"testing"
-
-	"blkchain/cli/internal/engagement"
 )
 
 // TestWebBrowserOpClassification pins the passive/active split that drives the
@@ -15,12 +13,11 @@ func TestWebBrowserOpClassification(t *testing.T) {
 		op     webBrowserOp
 		valid  bool
 		active bool
-		phase  engagement.Phase
 	}{
-		{webBrowserNavigate, true, false, engagement.PhaseRecon},
-		{webBrowserInject, true, true, engagement.PhaseExploit},
-		{webBrowserSubmit, true, true, engagement.PhaseExploit},
-		{webBrowserOp("evaljs"), false, false, engagement.PhaseExploit},
+		{webBrowserNavigate, true, false},
+		{webBrowserInject, true, true},
+		{webBrowserSubmit, true, true},
+		{webBrowserOp("evaljs"), false, false},
 	}
 	for _, c := range cases {
 		if got := c.op.valid(); got != c.valid {
@@ -28,9 +25,6 @@ func TestWebBrowserOpClassification(t *testing.T) {
 		}
 		if got := c.op.active(); got != c.active {
 			t.Errorf("op %q active()=%v, want %v", c.op, got, c.active)
-		}
-		if got := c.op.webPhase(); got != c.phase {
-			t.Errorf("op %q webPhase()=%v, want %v", c.op, got, c.phase)
 		}
 	}
 }
@@ -62,18 +56,6 @@ func TestWebParseBrowserActionValidates(t *testing.T) {
 		if _, err := webParseBrowserAction(in); err == nil {
 			t.Errorf("webParseBrowserAction(%s) err=nil, want a validation error", in)
 		}
-	}
-}
-
-// TestWebParseBrowserActionHost: the parsed action exposes the target host for
-// the gate's scope check (the port is not part of the host).
-func TestWebParseBrowserActionHost(t *testing.T) {
-	act, err := webParseBrowserAction(`{"op":"navigate","url":"https://10.0.0.5:8443/app"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if act.host() != "10.0.0.5" {
-		t.Fatalf("host()=%q, want 10.0.0.5 (no userinfo, no port)", act.host())
 	}
 }
 
@@ -115,17 +97,5 @@ func TestWebParseAPIRequestValidates(t *testing.T) {
 		if _, err := webParseAPIRequest(in); err == nil {
 			t.Errorf("webParseAPIRequest(%s) err=nil, want a validation error", in)
 		}
-	}
-}
-
-// TestWebAPIRequestHost: the parsed request exposes the host for the gate's scope
-// check without its port.
-func TestWebAPIRequestHost(t *testing.T) {
-	r, err := webParseAPIRequest(`{"method":"GET","url":"https://10.0.0.5:8443/api"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.host() != "10.0.0.5" {
-		t.Fatalf("host()=%q, want 10.0.0.5", r.host())
 	}
 }

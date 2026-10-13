@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-
-	"blkchain/cli/internal/engagement"
 )
 
 // webbrowser.go defines the browser and API actions offered to web-surface
@@ -39,17 +37,6 @@ func (op webBrowserOp) valid() bool {
 // active reports whether op injects or changes state (vs. a passive page load).
 func (op webBrowserOp) active() bool {
 	return op == webBrowserInject || op == webBrowserSubmit
-}
-
-// webPhase maps the op to the engagement phase the gate tiers it by: an active
-// op is exploit (requires an armed task), a passive op is recon. An unknown op
-// fails safe to exploit (the stricter tier); callers validate with valid()
-// first, so this only governs the fail-safe default.
-func (op webBrowserOp) webPhase() engagement.Phase {
-	if op == webBrowserNavigate {
-		return engagement.PhaseRecon
-	}
-	return engagement.PhaseExploit
 }
 
 // webBrowserAction is one parsed, validated browser action: a known op, an
@@ -132,18 +119,6 @@ func webParseBrowserAction(argsJSON string) (webBrowserAction, error) {
 		return webBrowserAction{}, errors.New("url user information is not allowed")
 	}
 	return webBrowserAction{Op: op, URL: raw, Payload: a.Payload, FormSelector: a.FormSelector, Fields: a.Fields, parsed: u}, nil
-}
-
-// host returns the target host for the gate's scope check: the URL hostname with
-// no userinfo and no port.
-func (a webBrowserAction) host() string {
-	if a.parsed != nil {
-		return a.parsed.Hostname()
-	}
-	if u, err := url.Parse(a.URL); err == nil {
-		return u.Hostname()
-	}
-	return ""
 }
 
 // webUntrustedTag wraps driver output as untrusted web content before it reaches
@@ -241,17 +216,6 @@ func webParseAPIRequest(argsJSON string) (webAPIRequest, error) {
 		return webAPIRequest{}, errors.New("url user information is not allowed")
 	}
 	return webAPIRequest{Method: method, URL: raw, Body: a.Body, Headers: a.Headers, parsed: u}, nil
-}
-
-// host returns the target host for the gate's scope check (no userinfo, no port).
-func (r webAPIRequest) host() string {
-	if r.parsed != nil {
-		return r.parsed.Hostname()
-	}
-	if u, err := url.Parse(r.URL); err == nil {
-		return u.Hostname()
-	}
-	return ""
 }
 
 func webSameOrigin(a, b string) bool {

@@ -67,6 +67,18 @@ type runCommandArgs struct {
 	Pipeline []pipelineStage `json:"pipeline,omitempty" desc:"optional: run a shell-free pipeline of 2-3 stages, each stdout piped to the next stdin; every stage is authorized independently; provide either a single binary+args OR a pipeline, not both"`
 }
 
+func networkNmapArgs(g *secgate.Gate, surface secgate.Surface, binary string, args []string) []string {
+	if g == nil || g.Policy == nil || surface != secgate.SurfaceNetwork || binary != "nmap" {
+		return args
+	}
+	for _, arg := range args {
+		if arg == "-n" || arg == "-R" {
+			return args
+		}
+	}
+	return append([]string{"-n"}, args...)
+}
+
 // runResult is the captured output of one execution.
 type runResult struct {
 	Output         string
@@ -124,14 +136,7 @@ func denyMessage(d secgate.Decision) string {
 	return msg
 }
 
-// newRunCommandTool builds the run_command tool. It executes ONLY when the gate
-// allows the command AND the exec-time scope re-check finds no out-of-scope
-// resolved address. activeTask names the task to attribute captured output to.
-func newRunCommandTool(g *secgate.Gate, capBytes int, timeout time.Duration, workDir string, activeTask func() string, capture func(taskID, output string)) tooldef.Tool {
-	return newRunCommandToolForTask(g, capBytes, timeout, workDir, activeTask, capture, secgate.Command{}, nil)
-}
-
-// newRunCommandToolForTask is newRunCommandTool with the engagement context
+// newRunCommandToolForTask builds run_command with the engagement context
 // (phase/surface/armed) in cmdCtx stamped onto every Command the tool builds, so
 // the gate derives the per-action tier for the task's phase (exploit/post-ex
 // require an armed task and force per-action confirmation). A zero cmdCtx is the
@@ -157,7 +162,7 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 				if !hasBinary {
 					return "run_command: invalid arguments: binary is required", nil
 				}
-				cmd := secgate.Command{TaskID: activeTask(), Binary: a.Binary, Args: a.Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed, Kind: cmdCtx.Kind, Target: cmdCtx.Target}
+				cmd := secgate.Command{TaskID: activeTask(), Binary: a.Binary, Args: networkNmapArgs(g, cmdCtx.Surface, a.Binary, a.Args), Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed, Kind: cmdCtx.Kind, Target: cmdCtx.Target}
 				// Help-grounding runs before the gate: a command using a flag or
 				// subcommand absent from the tool's real interface is rejected and
 				// re-grounded (never executed). An advisory note (grounding could
@@ -218,6 +223,7 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 			cmds := make([]secgate.Command, len(a.Pipeline))
 			stageStrs := make([]string, len(a.Pipeline))
 			for i := range a.Pipeline {
+				a.Pipeline[i].Args = networkNmapArgs(g, cmdCtx.Surface, a.Pipeline[i].Binary, a.Pipeline[i].Args)
 				cmds[i] = secgate.Command{TaskID: activeTask(), Binary: a.Pipeline[i].Binary, Args: a.Pipeline[i].Args, Phase: cmdCtx.Phase, Surface: cmdCtx.Surface, Armed: cmdCtx.Armed, Kind: cmdCtx.Kind, Target: cmdCtx.Target}
 				stageStrs[i] = strings.Join(append([]string{cmds[i].Binary}, cmds[i].Args...), " ")
 			}

@@ -252,6 +252,23 @@ func TestEngageAuditWriteFailureFailsClearly(t *testing.T) {
 	}
 }
 
+func TestEngageSessionPassesArmRequester(t *testing.T) {
+	stubEngageRunner(t)
+	req := &testArmRequester{decision: ArmSkip}
+	_, err := runEngageSession(context.Background(), engageRunInput{
+		Opts: engageOpts{workspace: t.TempDir()}, Cwd: testEngageRoE(t), Goal: "inspect the lab", ArmReq: req,
+		Run: func(_ context.Context, d engageDeps, _ string) (string, error) {
+			if d.ArmReq != req {
+				return "", errors.New("arm requester did not reach the executor")
+			}
+			return "done", nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEngageRunnerSetupFailureLeavesWorkspaceEmpty(t *testing.T) {
 	previous := newEngageRunnerForRun
 	newEngageRunnerForRun = func(context.Context, *RoE) (*engageRunner, error) {
@@ -375,5 +392,41 @@ func TestEngageWebDecisionsReachTranscriptAndReport(t *testing.T) {
 	markdown, err := os.ReadFile(filepath.Join(workspace, "report.md"))
 	if err != nil || !strings.Contains(string(markdown), "## Policy denials") || !strings.Contains(string(markdown), "deny:roe-action") {
 		t.Fatalf("denials missing from Markdown report: %q %v", markdown, err)
+	}
+}
+
+func TestEngageProbeDenialHasProbeStatusAndArgv(t *testing.T) {
+	stubEngageRunner(t)
+	workspace := t.TempDir()
+	run := func(ctx context.Context, d engageDeps, _ string) (string, error) {
+		if _, message := authorizeCommand(ctx, d.Gate, secgate.Command{Binary: "nmap", Args: []string{"--help"}, InternalProbe: true}); message == "" {
+			return "", errors.New("unbounded help command was allowed")
+		}
+		return "done", nil
+	}
+	_, err := runEngageSession(context.Background(), engageRunInput{Opts: engageOpts{workspace: workspace}, Cwd: testEngageRoE(t), Goal: "inspect", Run: run})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(workspace, "actions.jsonl"))
+	if err != nil || !strings.Contains(string(data), `"kind":"probe"`) || !strings.Contains(string(data), `"status":"denied"`) || !strings.Contains(string(data), `nmap\u0000--help`) || strings.Contains(string(data), `"kind":"command"`) {
+		t.Fatalf("probe action record=%q err=%v", data, err)
+	}
+}
+
+func TestEngageExecAuditIsAttemptedAction(t *testing.T) {
+	stubEngageRunner(t)
+	workspace := t.TempDir()
+	run := func(_ context.Context, d engageDeps, _ string) (string, error) {
+		d.Gate.Audit("exec", "nmap\x00-p\x0080")
+		return "done", nil
+	}
+	_, err := runEngageSession(context.Background(), engageRunInput{Opts: engageOpts{workspace: workspace}, Cwd: testEngageRoE(t), Goal: "inspect", Run: run})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(workspace, "actions.jsonl"))
+	if err != nil || !strings.Contains(string(data), `"kind":"action"`) || !strings.Contains(string(data), `"status":"attempted"`) {
+		t.Fatalf("exec action record=%q err=%v", data, err)
 	}
 }

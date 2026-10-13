@@ -204,7 +204,7 @@ func (e containerExecutor) containerRunReconPhase(ctx context.Context, task enga
 			{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(dom.Prompt)}},
 			{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(containerTierPrompt(task, asset, tier, sel, skew))}},
 		}
-		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8}); err != nil {
+		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8, StopReason: engageStopOnPolicy(e.d.Gate)}); err != nil {
 			return tierOutcome{}, err
 		}
 		// Code-side evidence capture (captureTierEvidence): do not rely on the
