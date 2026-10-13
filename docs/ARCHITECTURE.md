@@ -243,6 +243,8 @@ them across resume. Native chat holds observations for one turn. A web action wi
 performs a scoped TCP connect before sending application data. When direct reachability fails,
 a loopback intercept proxy may establish the port through a bounded CONNECT to the validated IP.
 This service check adds to the RoE and network scope controls; it does not expand either one.
+Explicit local terminal actions and configured MCP server tools are separate execution paths and
+do not inherit this built-in target tool service check.
 
 The declared foothold is the one deliberate exception to the network half, and it is bounded. A
 command carried to an operator-declared foothold runs on a host whose egress is not ours to filter,
