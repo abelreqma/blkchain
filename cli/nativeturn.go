@@ -32,7 +32,12 @@ type turnRequest struct {
 	ForceRag bool
 	// WebOnly answers from the public web for this turn only.
 	WebOnly bool
-	Preface string
+	// WebFirst requires a live search before answering a question with target details.
+	WebFirst bool
+	Preface  string
+	// History is the caller's own conversation memory. A session turn reads its
+	// memory from the session store instead and ignores this field.
+	History []priorTurn
 	// Stream receives answer bytes as they arrive; nil collects silently.
 	Stream func([]byte)
 	// Stage receives pipeline and tool progress text for display.
@@ -191,7 +196,10 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 	if err != nil {
 		return turnResult{}, err
 	}
-	history := turnHistory(sess)
+	history := req.History
+	if sess != nil {
+		history = turnHistory(sess)
+	}
 
 	ctx, metrics := withCallMetrics(ctx)
 	started := time.Now()
@@ -209,6 +217,7 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		Preface:    req.Preface,
 		NoWeb:      !prefs.Web,
 		WebOnly:    req.WebOnly,
+		WebFirst:   req.WebFirst,
 		Stream:     req.Stream,
 		Stage:      req.Stage,
 		Action: func(tool, status string) {
