@@ -55,6 +55,13 @@ func TestMain(m *testing.M) {
 			panic("hermetic test state: " + err.Error())
 		}
 	}
+	// An operator who configures a role model would otherwise have every test
+	// in this suite drive that model instead of the one the test names.
+	for _, name := range []string{"BLKCHAIN_ROUTER_MODEL", "BLKCHAIN_ASSESSMENT_MODEL"} {
+		if err := os.Unsetenv(name); err != nil {
+			panic("hermetic test state: " + err.Error())
+		}
+	}
 	code := m.Run()
 	os.RemoveAll(dir) // os.Exit runs no deferred call, so clean up first.
 	os.Exit(code)

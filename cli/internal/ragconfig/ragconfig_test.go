@@ -2,6 +2,7 @@ package ragconfig
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -395,5 +396,54 @@ func TestAnswerBudgetDefaults(t *testing.T) {
 	}
 	if d.AnswerMaxChunks != 6 {
 		t.Errorf("AnswerMaxChunks default = %d, want 6", d.AnswerMaxChunks)
+	}
+}
+
+func TestEveryConfigKeyIsPresentInTheContractFile(t *testing.T) {
+	// The existing drift test overlays rag.json onto builtinDefaults(), so a
+	// field that code knows and rag.json omits keeps its built-in value and
+	// passes. This is the other direction: rag.json is the documented contract
+	// the Python side reads, so every field code carries must appear in it.
+	root, err := repoRootForTest()
+	if err != nil {
+		t.Skip("repo root not found")
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "blkchain", "contract", "rag.json"))
+	if err != nil {
+		t.Fatalf("read rag.json: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("parse rag.json: %v", err)
+	}
+	typ := reflect.TypeOf(Config{})
+	for i := 0; i < typ.NumField(); i++ {
+		tag := typ.Field(i).Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		if _, ok := keys[tag]; !ok {
+			t.Errorf("rag.json has no %q key for Config.%s", tag, typ.Field(i).Name)
+		}
+	}
+}
+
+func TestRoleModelsDefaultToEmptyAndTakeEnvOverrides(t *testing.T) {
+	// Empty is the documented value that means "use default_model", so the
+	// contract ships empty and an install that sets neither uses default_model
+	// for every call.
+	def := builtinDefaults()
+	if def.RouterModel != "" || def.AssessmentModel != "" {
+		t.Fatalf("role models should ship empty: router=%q assessment=%q", def.RouterModel, def.AssessmentModel)
+	}
+	t.Setenv("BLKCHAIN_ROUTER_MODEL", "router-id")
+	t.Setenv("BLKCHAIN_ASSESSMENT_MODEL", "assessment-id")
+	cfg := def
+	envOverrides(&cfg)
+	if cfg.RouterModel != "router-id" {
+		t.Errorf("RouterModel: got %q want %q", cfg.RouterModel, "router-id")
+	}
+	if cfg.AssessmentModel != "assessment-id" {
+		t.Errorf("AssessmentModel: got %q want %q", cfg.AssessmentModel, "assessment-id")
 	}
 }
