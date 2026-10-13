@@ -145,7 +145,7 @@ func TestPlainDefaultNativeThenExplicitHermes(t *testing.T) {
 		return "native-fixture", nil, false, nil, 1, "skip", nil
 	}
 	input := filepath.Join(t.TempDir(), "input")
-	if err := os.WriteFile(input, []byte("first question\n/mode\nsecond question\n/quit\n"), 0600); err != nil {
+	if err := os.WriteFile(input, []byte("first question\n/hermes second question\n/quit\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	file, err := os.Open(input)

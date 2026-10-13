@@ -13,80 +13,6 @@ import (
 	"blkchain/cli/internal/retrieval"
 )
 
-// plainAgentTurn runs one plain-REPL agent turn through the transport wiring the
-// TUI uses: the hermes gateway when it is reachable, else the hermes subprocess.
-// Tool activity and commentary print as they arrive, while the answer deltas are
-// accumulated so the finished turn can be printed and returned for persistence.
-// The one-shot `hermes -z` path this replaces streamed the child's stdout
-// straight to the terminal and returned only an error, so the answer was never
-// captured and the turn reached neither the transcript nor the history store.
-func plainAgentTurn(ctx context.Context, m *model, message string) (string, error) {
-	started := time.Now()
-	var full strings.Builder
-	var tokens int
-	onEvent := func(ev agentEvent) {
-		switch ev.kind {
-		case agentText:
-			full.WriteString(ev.text)
-		case agentCommentary:
-			fmt.Println(plainAgentNote(oneLine(ev.text)))
-		case agentToolActivity:
-			fmt.Println(plainAgentNote(sanitizeTerminal(ev.tool) + " " + sanitizeTerminal(ev.text)))
-		case agentModelInfo:
-			if strings.TrimSpace(ev.text) != "" {
-				m.agentModel = ev.text
-			}
-		case agentTerminal:
-			// The terminal final text is the answer only when nothing streamed.
-			if ev.text != "" && full.Len() == 0 {
-				full.WriteString(ev.text)
-			}
-			if ev.tokens > 0 {
-				tokens = ev.tokens
-			}
-		}
-	}
-	err := streamPlainAgent(ctx, m, message, onEvent)
-	answer := full.String()
-	if strings.TrimSpace(answer) == "" {
-		if err != nil && errors.Is(err, errHermesMissing) {
-			return "", errors.New("agent mode unavailable: run `hermes gateway`, or install the hermes CLI")
-		}
-		return "", err
-	}
-	cost := turnCost{elapsed: time.Since(started), completionTokens: tokens}
-	fmt.Println(formatAgentAnswer(answer, cost.elapsed, terminalWidth()))
-	fmt.Println(costFooter(cost))
-	m.lastCost, m.lastCostSet = cost, true
-	return answer, err
-}
-
-// plainAgentNote is the muted progress line for tool activity and commentary.
-func plainAgentNote(text string) string {
-	return "   " + Meta.Render(Glyph(GlyphBullet)+" "+text)
-}
-
-// streamPlainAgent picks the transport for one plain-REPL agent turn and caches
-// the gateway conversation handle on m, so the next turn continues the same
-// conversation. The handle is cached before the stream runs, matching the TUI,
-// so a turn that fails part-way does not orphan the conversation it created.
-func streamPlainAgent(ctx context.Context, m *model, message string, onEvent func(agentEvent)) error {
-	if hermesAvailable(ctx) {
-		id := m.agentSession
-		if id == "" {
-			created, err := ensureSession(ctx)
-			if err != nil {
-				fmt.Println(plainAgentNote("gateway session failed, using hermes subprocess"))
-				return StreamAgentSubprocess(ctx, message, onEvent)
-			}
-			id = created
-		}
-		m.agentSession = id
-		return StreamAgent(ctx, id, message, m.agentModel, m.reasoning, onEvent)
-	}
-	return StreamAgentSubprocess(ctx, message, onEvent)
-}
-
 func plainSlashError(cmd string) error {
 	name := strings.ToLower(strings.TrimPrefix(cmd, "/"))
 	if _, ok := slashCommand(name); ok {
@@ -96,9 +22,8 @@ func plainSlashError(cmd string) error {
 }
 
 // plainAsk answers one plain-REPL turn, printing it and returning the answer so
-// the caller can persist it. m carries the conversation state an agent turn
-// reads and updates (the gateway handle and the model the agent reported).
-func plainAsk(m *model, mode, query string, c *replClient, history []priorTurn, preface string, force bool) (string, error) {
+// the caller can persist it. m carries the conversation state the turn reads.
+func plainAsk(m *model, query string, c *replClient, history []priorTurn, preface string, force bool) (string, error) {
 	c.metrics = &callMetrics{}
 	c.started = time.Now()
 	first, rest := splitFirst(query)
@@ -106,38 +31,51 @@ func plainAsk(m *model, mode, query string, c *replClient, history []priorTurn, 
 	if webOnly {
 		query = rest
 	}
-	if mode == "agent" && !force && !webOnly {
-		if preface != "" {
-			query = preface + "\n\n" + query
-		}
-		return plainAgentTurn(context.Background(), m, query)
-	}
 	var rc *retrieval.Client
-	var err error
 	if !webOnly {
-		rc, err = c.get()
+		got, err := c.get()
 		if err != nil {
 			return "", err
 		}
-	}
-	args := []string{query}
-	if force {
-		args = []string{"--rag", query}
-	}
-	if webOnly {
-		args = []string{"--web", query}
-	}
-	args = append([]string{"--agent", c.agent}, args...)
-	if c.toolHost != "" {
-		args = append([]string{"--tool-host", c.toolHost}, args...)
-	}
-	if c.browserCDP != "" {
-		args = append([]string{"--browser-cdp", c.browserCDP}, args...)
+		rc = followPrefs(got, loadPrefs())
 	}
 	if c.browser == nil {
 		c.browser = &chatBrowserState{}
 	}
-	return askWithPreface(rc, history, args, preface, !force, c.browser, c.metrics)
+	var full strings.Builder
+	res, err := runNativeTurn(context.Background(), rc, m.cfg, turnRequest{
+		Question:   query,
+		Agent:      c.agent,
+		ToolHost:   c.toolHost,
+		BrowserCDP: c.browserCDP,
+		ForceRag:   force,
+		WebOnly:    webOnly,
+		WebFirst:   !force,
+		Preface:    preface,
+		Browser:    c.browser,
+		History:    history,
+		Stream:     newAskStream(os.Stdout, &full),
+		Stage: func(stage string) {
+			if strings.HasPrefix(stage, "tool ") {
+				fmt.Fprintln(os.Stderr, sanitizeTerminal(stage))
+			}
+		},
+		Persona: func(domain string) {
+			fmt.Println(Meta.Render("answering as " + personaLabel(domain)))
+		},
+	})
+	if errors.Is(err, ErrNoResults) {
+		return "", reportNoResults(os.Stderr, false, resolveModel(m.cfg))
+	}
+	err = timeoutOrErr(err)
+	if err != nil && full.Len() == 0 {
+		return "", err
+	}
+	if !strings.HasSuffix(full.String(), "\n") {
+		fmt.Println()
+	}
+	printSources(res.Citations, res.UsedWeb, rc != nil && rc.SkipRerank)
+	return full.String(), err
 }
 
 func plainEditor(before string) (string, error) {

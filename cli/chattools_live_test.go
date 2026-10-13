@@ -54,7 +54,7 @@ func TestChatToolsLocalLLME2E(t *testing.T) {
 	plain := &replClient{agent: "auto"}
 	defer plain.close()
 	before = hits.Load()
-	answer, err = plainAsk(&model{}, "rag", question, plain, nil, "", false)
+	answer, err = plainAsk(&model{}, question, plain, nil, "", false)
 	if err != nil || hits.Load() <= before || !strings.Contains(answer, "201") {
 		t.Fatalf("plain REPL did not run the API action: hits=%d answer=%q err=%v", hits.Load(), answer, err)
 	}
