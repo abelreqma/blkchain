@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"blkchain/cli/internal/retrieval"
 )
@@ -234,6 +235,11 @@ func (s *serveServer) handleTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 	res, err := s.serveRunTurn(r.Context(), id, in, s.callerVantage(r), nil, nil)
+	// The result is written while the slot is held, so a client that stops
+	// reading must not be able to block the write past serveWriteTimeout.
+	ctl := http.NewResponseController(w)
+	_ = ctl.SetWriteDeadline(time.Now().Add(serveWriteTimeout))
+	defer func() { _ = ctl.SetWriteDeadline(time.Time{}) }()
 	if err != nil && strings.TrimSpace(res.Answer) == "" {
 		code, msg := serveTurnRefusal(err)
 		serveRefuse(w, code, msg)
@@ -269,17 +275,26 @@ func (s *serveServer) handleTurnStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	ctl := http.NewResponseController(w)
 	_ = ctl.Flush()
+	// The deadline each write sets stays on the connection, so it is cleared
+	// before a kept-alive connection carries its next request.
+	defer func() { _ = ctl.SetWriteDeadline(time.Time{}) }()
 
 	// The turn's callbacks run inside runNativeTurn on this goroutine, so one
-	// event is written at a time. A write that fails is dropped: the turn is
-	// bounded by its own deadline and the request context ends the stream.
+	// event is written at a time.
+	//
+	// A write that fails ends the turn. The server sets no WriteTimeout, so each
+	// write carries its own deadline: a client that keeps the connection open
+	// and stops reading would otherwise block a write once the socket buffers
+	// fill, where neither the turn's deadline nor the request context, which a
+	// live connection never cancels, can reach it, and the turn would hold its
+	// slot indefinitely.
 	//
 	// Reaching the byte cap ends the turn as well. Past the cap every event is
 	// dropped, so a turn left running would spend the rest of its deadline
 	// producing output nothing writes.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	st := &serveSSEStream{w: w, flush: ctl.Flush, onCap: cancel}
+	st := &serveSSEStream{w: w, flush: ctl.Flush, deadline: ctl.SetWriteDeadline, stop: cancel}
 
 	// The status is already 200, so a panic would end a chunked body with no
 	// terminal event, which a client cannot tell from a connection cut. The
@@ -348,18 +363,26 @@ const serveSSECapError = "the stream reached its byte limit and was cut"
 // reserve room for it and the total stays inside the cap.
 var serveSSECapFrame = serveSSEFrame("run.failed", map[string]string{"error": serveSSECapError})
 
+// serveWriteTimeout bounds one write to a turn's client. A client that is
+// reading takes a frame in far less; one that is not is cut at this bound
+// rather than holding its turn's slot.
+var serveWriteTimeout = 30 * time.Second
+
 // serveSSEStream writes one bounded Server-Sent Events stream. written counts
 // the framing as well as the payload, because the cap bounds what goes on the
 // wire and not what the payloads happen to hold.
 type serveSSEStream struct {
 	w     io.Writer
 	flush func() error
-	// onCap, when set, is called once the cap has been reached, after the
-	// terminal event is written. It ends the turn whose output the stream can no
-	// longer carry.
-	onCap   func()
+	// deadline, when set, is given serveWriteTimeout from now before each write.
+	deadline func(time.Time) error
+	// stop, when set, is called once, when the cap has been reached after the
+	// terminal event is written or when a write fails. It ends the turn whose
+	// output the stream can no longer carry.
+	stop    func()
 	written int
 	capped  bool
+	failed  bool
 }
 
 // emit writes one event. The event that would carry the total past the cap is
@@ -367,7 +390,7 @@ type serveSSEStream struct {
 // event is dropped, so a client is told the stream was cut rather than left to
 // read a truncated answer as a whole one.
 func (st *serveSSEStream) emit(name string, payload any) {
-	if st.capped {
+	if st.capped || st.failed {
 		return
 	}
 	frame := serveSSEFrame(name, payload)
@@ -377,20 +400,31 @@ func (st *serveSSEStream) emit(name string, payload any) {
 	if st.written+len(frame)+len(serveSSECapFrame) > serveMaxSSEBytes {
 		st.capped = true
 		st.write(serveSSECapFrame)
-		if st.onCap != nil {
-			st.onCap()
+		if !st.failed && st.stop != nil {
+			st.stop()
 		}
 		return
 	}
 	st.write(frame)
 }
 
-// write counts what the writer took, so a short write counts short.
+// write counts what the writer took, so a short write counts short. A write or
+// flush that fails marks the stream failed and stops the turn: nothing later
+// can reach the client.
 func (st *serveSSEStream) write(frame []byte) {
+	if st.deadline != nil {
+		_ = st.deadline(time.Now().Add(serveWriteTimeout))
+	}
 	n, err := st.w.Write(frame)
 	st.written += n
 	if err == nil && st.flush != nil {
-		_ = st.flush()
+		err = st.flush()
+	}
+	if err != nil {
+		st.failed = true
+		if st.stop != nil {
+			st.stop()
+		}
 	}
 }
 

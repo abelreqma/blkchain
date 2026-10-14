@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -517,4 +520,107 @@ func TestServeRefusesAnEmptyMessageTheSameWayOnBothRoutes(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestServeReleasesATurnWhoseClientStopsReading pins that a client which keeps
+// its connection open and stops reading cannot hold a turn slot. The server has
+// no WriteTimeout, so without a per-write deadline a write blocks once the
+// socket buffers fill, the turn's own deadline cannot unblock it, and the
+// request context is never cancelled because the connection is alive: four such
+// clients would refuse every later turn until restart.
+//
+// The client is a raw TCP connection with a small receive buffer that sends one
+// request and never reads. Both routes are covered: the stream writes a frame
+// per delta, and the JSON route writes the whole result once the turn ends.
+func TestServeReleasesATurnWhoseClientStopsReading(t *testing.T) {
+	prev := serveWriteTimeout
+	serveWriteTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { serveWriteTimeout = prev })
+
+	const delta = 256 << 10
+	chunk := strings.Repeat("a", delta)
+	for _, tc := range []struct {
+		name   string
+		suffix string
+		router serveTurnRouter
+	}{
+		{"stream", serveTurnsStreamSuffix, serveTurnRouter{answer: "an answer", deltas: slices.Repeat([]string{chunk}, 100), tokens: 1}},
+		{"json", serveTurnsSuffix, serveTurnRouter{answer: strings.Repeat(chunk, 64), tokens: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, id := serveTurnServer(t, serveOpts{}, "")
+			calls := installServeTurnRouter(t, tc.router)
+			srv := httptest.NewServer(s.handler())
+			conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				conn.Close()
+				srv.Close()
+			})
+			if err := conn.(*net.TCPConn).SetReadBuffer(4096); err != nil {
+				t.Fatal(err)
+			}
+			body := `{"message":"q"}`
+			fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+				serveBoundsTurnPath(id, tc.suffix), srv.Listener.Addr().String(), len(body), body)
+
+			deadline := time.Now().Add(10 * time.Second)
+			for calls.ran.Load() == 0 && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if calls.ran.Load() == 0 {
+				t.Fatal("the turn never started")
+			}
+			for time.Now().Before(deadline) {
+				release, err := s.turns.acquire(id)
+				if err == nil {
+					release()
+					if tc.suffix == serveTurnsStreamSuffix && calls.streamed.Load() >= int32(len(tc.router.deltas)) {
+						t.Errorf("the router offered all %d deltas, so the failed write did not end the turn", len(tc.router.deltas))
+					}
+					return
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			t.Fatal("a client that stopped reading still holds the session's turn slot")
+		})
+	}
+}
+
+// TestServeSSEStreamStopsAtAFailedWrite pins the stream's side of the bound: a
+// write that fails, which is what a passed deadline produces, ends the turn and
+// drops every later event, and each write is preceded by a fresh deadline.
+func TestServeSSEStreamStopsAtAFailedWrite(t *testing.T) {
+	w := &serveFailingWriter{failAfter: 1}
+	stopped := 0
+	deadlines := 0
+	st := &serveSSEStream{w: w, stop: func() { stopped++ }, deadline: func(time.Time) error { deadlines++; return nil }}
+	st.emit("assistant.delta", map[string]string{"delta": "one"})
+	st.emit("assistant.delta", map[string]string{"delta": "two"})
+	st.emit("assistant.delta", map[string]string{"delta": "three"})
+	if w.writes != 2 {
+		t.Errorf("the stream attempted %d writes, want 2: the one that succeeded and the one that failed", w.writes)
+	}
+	if stopped != 1 {
+		t.Errorf("stop ran %d times, want once", stopped)
+	}
+	if deadlines != 2 {
+		t.Errorf("%d deadlines were set for 2 writes", deadlines)
+	}
+}
+
+// serveFailingWriter accepts failAfter writes and fails every one after.
+type serveFailingWriter struct {
+	failAfter int
+	writes    int
+}
+
+func (w *serveFailingWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes > w.failAfter {
+		return 0, errors.New("write deadline exceeded")
+	}
+	return len(p), nil
 }
