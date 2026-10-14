@@ -1,10 +1,11 @@
 #!/bin/sh
-# Regenerates packages-<arch>.lock: the sha256-pinned apk dependency closure of
-# packages.list for one Docker architecture. Run from this directory, once per
-# arch, and commit the result:
+# Regenerates the sha256-pinned apk dependency closure for one architecture.
+# Run from this directory for both runtime and build packages:
 #
 #   ./gen-lock.sh arm64
 #   ./gen-lock.sh amd64
+#   ./gen-lock.sh arm64 build
+#   ./gen-lock.sh amd64 build
 #
 # The closure is resolved by apk inside the same base image the Dockerfile pins,
 # and the repository release is read from that image, so the lock always matches
@@ -22,20 +23,25 @@ arm64 | amd64) arch=$1 ;;
 	;;
 esac
 
+case "${2:-runtime}" in
+runtime) manifest=packages.list; out="packages-$arch.lock" ;;
+build) manifest=build-packages.list; out="build-packages-$arch.lock" ;;
+*) echo "usage: $0 arm64|amd64 [runtime|build]" >&2; exit 2 ;;
+esac
+
 cd "$(dirname "$0")"
-base=$(sed -n '1s/^FROM //p' Dockerfile)
+base=$(sed -n '1s/^FROM \([^ ]*\).*/\1/p' Dockerfile)
 if [ -z "$base" ]; then
 	echo "cannot read the base image from Dockerfile" >&2
 	exit 1
 fi
 
-out="packages-$arch.lock"
 docker run --rm --platform "linux/$arch" \
-	-v "$PWD:/mnt:ro" --entrypoint /bin/sh "$base" -eu -c '
+	-v "$PWD:/mnt:ro" -e "MANIFEST=$manifest" --entrypoint /bin/sh "$base" -eu -c '
 cdn="https://dl-cdn.alpinelinux.org/alpine/v$(cut -d. -f1,2 /etc/alpine-release)"
 printf "%s\n%s\n" "$cdn/main" "$cdn/community" > /etc/apk/repositories
 apk update --quiet
-set -- $(sed -e "s/#.*//" /mnt/packages.list)
+set -- $(sed -e "s/#.*//" "/mnt/$MANIFEST")
 mkdir /fetch
 apk fetch --recursive --quiet --output /fetch "$@"
 apk fetch --recursive --simulate --url "$@" | while read -r url; do

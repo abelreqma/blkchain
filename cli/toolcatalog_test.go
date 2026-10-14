@@ -64,6 +64,9 @@ var infrastructurePackages = map[string]string{
 	"openssh-client": "the ssh foothold carrier, invoked only by the code-built transport in foothold.go and absent from the catalog so the model cannot reach it",
 	"nmap-nselibs":   "nmap's service detection and script runtime data",
 	"nmap-scripts":   "nmap's packaged scripts for bounded service enumeration",
+	"nghttp3":        "curl's HTTP/3 response layer",
+	"ngtcp2":         "curl's QUIC transport layer",
+	"ngtcp2-gnutls":  "curl's QUIC TLS backend",
 }
 
 func readPackagesList(t *testing.T) []string {

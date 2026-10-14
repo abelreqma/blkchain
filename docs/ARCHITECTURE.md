@@ -251,8 +251,10 @@ candidate. Only a complete final HTTP response promotes that exact source-port r
 the ordinary route stays separate. Nping UDP payloads require prior UDP port evidence and never
 promote a service state by packet count alone.
 A later closed result removes the permission. A command that cannot expose its connection route
-fails closed. `curl --http3-only` needs UDP evidence and `--http3` needs TCP and UDP evidence;
-the pinned runner curl currently lacks HTTP/3 support and cannot execute those probes.
+fails closed. `curl --http3-only` needs UDP evidence and `--http3` needs TCP and UDP evidence.
+The source-built runner curl supports HTTP/3; a completed HTTP/3 response with included headers
+promotes only that UDP route. A bounded `ike-scan --ikev2` handshake or notify can promote the
+observed UDP/500 or NAT-T UDP/4500 candidate. Silence and packet counts cannot promote either.
 An explicit DNS server needs evidence for both UDP and its possible TCP retry unless `dig +ignore`
 keeps it on UDP. DoT and DoH use TCP/853 and TCP/443 by default; `dig +trace` is denied because
 later name servers cannot be verified before dispatch.
@@ -267,10 +269,17 @@ The pinned runner permits single-host `nmap -sn` discovery and bounded Nping pac
 Nping accepts one literal IP, at most three rounds at one packet per second, one TCP or UDP port,
 and at most 512 hex payload bytes in UDP mode. Its raw modes run with `NET_RAW` after the native
 chat firewall is installed, or in the engagement raw worker. Nping output never creates service
-permission. The runner has no `ike-scan` or HTTP/3-capable curl. Large port ranges must be
+permission. Completed scanner forms are recorded with the full argv and vantage, and an exact
+repeat is denied for one hour. Firewall diagnostic scans require a completed ordinary same-vantage
+port baseline. The runner builds a checksum-pinned `ike-scan` and HTTP/3-capable curl. Large port ranges must be
 partitioned into scans that finish within the command timeout; no partial result proves a full
 inventory.
 This service check adds to the RoE and network scope controls; it does not expand either one.
+Network recon coverage uses the authorized command and its completed output. TCP and UDP sweeps
+are separate dimensions; a version scan and a default-script scan cover their own dimensions.
+Recorded prose or an incomplete scan cannot mark them complete. Without a current open or
+`open|filtered` port on a literal IP, version and script checks are audited as not applicable.
+An alternate source-port candidate still reaches the protocol-validation tier.
 Explicit local terminal actions and configured MCP server tools are separate execution paths and
 do not inherit this built-in target tool service check.
 

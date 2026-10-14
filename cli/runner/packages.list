@@ -1,8 +1,7 @@
 # Top-level packages installed into the isolated runner image. The per-arch
 # .lock files are the digest-pinned dependency closure of this list; regenerate
-# them with gen-lock.sh after any change here. cli/toolcatalog.go declares which
-# binary each entry provides, and TestCatalogPackagesAreDeclared asserts the two
-# agree.
+# them with gen-lock.sh after any change here. cli/toolcatalog.go declares the
+# runnable binaries, and TestCatalogPackagesMatchPackagesList checks the list.
 
 # base: shell-free execution, scratch handling, and the guard firewall
 bash
@@ -22,6 +21,9 @@ openssh-client
 # network and DNS reconnaissance
 bind-tools
 curl
+nghttp3
+ngtcp2
+ngtcp2-gnutls
 nmap
 nmap-nselibs
 nmap-scripts
@@ -30,6 +32,7 @@ nmap-nping
 tcpdump
 
 # service enumeration
+mount
 net-snmp-tools
 nbtscan
 nfs-utils

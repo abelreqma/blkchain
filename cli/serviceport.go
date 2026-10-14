@@ -138,6 +138,18 @@ func serviceRequirement(c secgate.Command) ([]serviceEndpoint, bool, error) {
 		return nil, true, nil
 	case "nping":
 		return npingPayloadRequirement(c)
+	case "ike-scan":
+		if d := secgate.Classify(c); !d.Allowed {
+			return nil, false, errors.New(d.Reason)
+		}
+		port := 500
+		for _, arg := range c.Args {
+			if arg == "--nat-t" {
+				port = 4500
+			}
+		}
+		out, err := singleTarget(c, "udp", port)
+		return out, false, err
 	case "dig", "host", "nslookup":
 		return dnsRequirement(c)
 	case "curl":

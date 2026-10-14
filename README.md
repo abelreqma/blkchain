@@ -77,15 +77,17 @@ The harness stores tasks, dependencies, provenance, exact evidence quotes, actio
 
 Service-specific commands and web requests require a host, transport, and port observed from the same execution vantage within the past hour. Naming a URL is not evidence. When needed, blkChain runs a bounded discovery probe through the same gate. Scope and RoE checks apply to every action.
 
-A completed Nmap TCP `open` result permits protocol checks. UDP `open|filtered` permits a protocol-correct probe but does not prove a response; a completed version scan can promote that candidate to `open`. ACK, FIN, NULL, Xmas, idle, fragmented, and source-port scans remain diagnostic. Masscan is unavailable because its raw Ethernet packets bypassed the worker destination firewall in a local fixture. Decoys, source-address spoofing, raw Ethernet, and MAC spoofing are denied for the same scope reason.
+A completed Nmap TCP `open` result permits protocol checks. UDP `open|filtered` permits a protocol-correct probe but does not prove a response; a completed version scan, IKEv2 response, or HTTP/3 response can promote the matching candidate to `open`. ACK, FIN, NULL, Xmas, idle, fragmented, and source-port scans remain diagnostic. Firewall diagnostic scans require a completed ordinary scan of the same port from the same vantage. Masscan is unavailable because its raw Ethernet packets bypassed the worker destination firewall in a local fixture. Decoys, source-address spoofing, raw Ethernet, and MAC spoofing are denied for the same scope reason.
 
 A source-port SYN result creates only a candidate for that exact route. One bounded, direct curl GET from the same source port can confirm an HTTP response and store that route separately. Nping UDP hex payloads require prior UDP port evidence. A packet reply or TCP handshake alone is not an application response.
 
-An explicit DNS server requires UDP and TCP evidence when the client can retry over TCP. `dig +ignore` stays on UDP; `+tls` and `+https` use TCP/853 and TCP/443. A single scoped `curl --resolve host:port:IP` retains Host and SNI while pinning the connected address. A loopback proxy CONNECT is logged as another view and cannot authorize the worker or web broker path. HTTP/3 requires UDP evidence, and curl's fallback mode also requires TCP evidence. The pinned runner curl lacks HTTP/3 support.
+An explicit DNS server requires UDP and TCP evidence when the client can retry over TCP. `dig +ignore` stays on UDP; `+tls` and `+https` use TCP/853 and TCP/443. A single scoped `curl --resolve host:port:IP` retains Host and SNI while pinning the connected address. A loopback proxy CONNECT is logged as another view and cannot authorize the worker or web broker path. The pinned runner builds HTTP/3-capable curl with ngtcp2 and nghttp3. `--http3-only` requires UDP evidence; `--http3` also requires TCP evidence because it can fall back. A completed `--http3-only --include` response promotes only the observed UDP route.
 
-Engagement scanner observations retain exact output and source identity across resume. Native chat keeps observations for one turn. A later closed result revokes earlier port evidence.
+Engagement scanner observations retain exact output and source identity across resume. Native chat keeps observations for one turn. Completed Nmap, Nping, and IKE scan forms are recorded by their full command and vantage; an exact repeat within one hour is denied. Changing the port set or technique remains available when it answers a new question. Incomplete Nmap output does not count as a completed pass. A later closed result revokes earlier port evidence.
 
-The runner supports bounded Nmap TCP, UDP, SCTP, IP-protocol, and diagnostic scans, but only validated TCP and UDP states can unlock its current service clients. SCTP and IP protocol results stay in their own namespaces. The pinned runner includes bounded Nping TCP, TCP-connect, UDP, and ICMP diagnostics for one literal IP. Nping raw modes use only `NET_RAW`; native chat and `blk engage` keep their destination guards. A packet response or TCP handshake remains diagnostic until a protocol-correct request succeeds on the same path. `ike-scan` is absent from the pinned Alpine release, so IKEv2 NAT-T validation requires an operator-supplied tool outside this runner. Split large ranges into scans that fit the command timeout; a partial run does not establish a complete inventory.
+The runner supports bounded Nmap TCP, UDP, SCTP, IP-protocol, and diagnostic scans, but only validated TCP and UDP states can unlock its current service clients. SCTP and IP protocol results stay in their own namespaces. The pinned runner includes bounded Nping TCP, TCP-connect, UDP, and ICMP diagnostics for one literal IP. Nping raw modes use only `NET_RAW`; native chat and `blk engage` keep their destination guards. The source-built `ike-scan` sends bounded IKEv2 probes to one observed IPv4 UDP/500 endpoint, or UDP/4500 with `--nat-t` and its non-ESP marker. A returned handshake or notify confirms that exact UDP service; silence remains inconclusive. Split large ranges into scans that fit the command timeout; a partial run does not establish a complete inventory.
+
+The network recon ladder credits a completed TCP sweep, UDP sweep, version check, and default-script check separately from the actual command output. A recorded quote alone cannot mark those checks complete. When no current open or `open|filtered` port is observed for a literal IP, version and script checks are audited as not applicable. A source-port candidate still reaches the validation tier. Coverage means the selected bounded scans completed; it does not imply every possible port or firewall path was tested.
 
 ### Executor coverage
 
@@ -733,8 +735,9 @@ blk engage setup
 blk help engage
 ```
 
-The build uses the embedded Dockerfile, a digest-pinned base, and architecture-specific package
-locks with verified download hashes. Setup then downloads OSV archives for Go, npm, PyPI, Maven,
+The build uses the embedded Dockerfile, a digest-pinned base, architecture-specific package
+locks, and checksum-verified curl and ike-scan sources. The build toolchain stays outside the runtime image.
+Setup then downloads OSV archives for Go, npm, PyPI, Maven,
 crates.io, RubyGems, Packagist, NuGet, Alpine, and Debian, and asks Grype to update its database.
 It needs outbound HTTPS, a writable cache, and several GiB of free disk. The cache is
 `$XDG_CACHE_HOME/blkchain/vulndb` when `XDG_CACHE_HOME` is set, otherwise

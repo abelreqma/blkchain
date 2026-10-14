@@ -71,6 +71,147 @@ func TestServiceDispatchNeedsMatchingDiscovery(t *testing.T) {
 	}
 }
 
+func TestIKEScanDispatchNeedsMatchingUDPPort(t *testing.T) {
+	ctx := context.Background()
+	d := newServiceDispatcher(nil)
+	base := []string{"--ikev2", "--nodns", "--sport=0", "--retry=1", "--timeout=1000", "192.0.2.10"}
+	ike := secgate.Command{Binary: "ike-scan", Args: base}
+	nat := secgate.Command{Binary: "ike-scan", Args: append([]string{"--nat-t"}, base...)}
+	if reason := d.Check(ctx, ike); !strings.Contains(reason, "udp/500") {
+		t.Fatalf("IKEv2 without discovery = %q", reason)
+	}
+	if reason := d.Check(ctx, nat); !strings.Contains(reason, "udp/4500") {
+		t.Fatalf("NAT-T without discovery = %q", reason)
+	}
+	probe := secgate.Command{Binary: "nmap", Args: []string{"-n", "-Pn", "-sU", "-p", "500", "192.0.2.10"}}
+	if err := d.Observe(ctx, probe, "Nmap scan report for 192.0.2.10\nPORT STATE SERVICE\n500/udp open|filtered isakmp\n"+nmapDone); err != nil {
+		t.Fatal(err)
+	}
+	if reason := d.Check(ctx, ike); reason != "" {
+		t.Fatalf("IKEv2 after UDP/500 observation denied: %s", reason)
+	}
+	if reason := d.Check(ctx, nat); !strings.Contains(reason, "udp/4500") {
+		t.Fatalf("UDP/500 unlocked NAT-T on UDP/4500: %s", reason)
+	}
+	probe.Args[4] = "4500"
+	if err := d.Observe(ctx, probe, "Nmap scan report for 192.0.2.10\nPORT STATE SERVICE\n4500/udp open|filtered ipsec-nat-t\n"+nmapDone); err != nil {
+		t.Fatal(err)
+	}
+	if reason := d.Check(ctx, nat); reason != "" {
+		t.Fatalf("NAT-T after UDP/4500 observation denied: %s", reason)
+	}
+}
+
+func TestCompletedScanSkipsExactRepeatAcrossResume(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	if _, err := st.Apply(engagement.Delta{Upserts: []engagement.Task{{ID: "t1", Kind: "recon", Surface: engagement.SurfaceNetwork, Status: engagement.StatusActive}}}); err != nil {
+		t.Fatal(err)
+	}
+	d := newServiceDispatcher(st)
+	cmd := secgate.Command{TaskID: "t1", Surface: secgate.SurfaceNetwork, Binary: "nmap", Args: []string{"-n", "-Pn", "-sT", "-p", "80", "192.0.2.10"}}
+	if reason := d.Check(ctx, cmd); reason != "" {
+		t.Fatal(reason)
+	}
+	incomplete := "Nmap scan report for 192.0.2.10\nPORT STATE SERVICE\n80/tcp open http\n"
+	if err := d.Observe(ctx, cmd, incomplete); err != nil {
+		t.Fatal(err)
+	}
+	if reason := d.Check(ctx, cmd); reason != "" {
+		t.Fatalf("incomplete scan blocked retry: %s", reason)
+	}
+	if err := d.Observe(ctx, cmd, incomplete+nmapDone); err != nil {
+		t.Fatal(err)
+	}
+	fresh := newServiceDispatcher(st)
+	if reason := fresh.Check(ctx, cmd); !strings.Contains(reason, "already completed") {
+		t.Fatalf("exact repeat permitted after resume: %s", reason)
+	}
+	changedPort := cmd
+	changedPort.Args = []string{"-n", "-Pn", "-sT", "-p", "443", "192.0.2.10"}
+	if reason := fresh.Check(ctx, changedPort); reason != "" {
+		t.Fatalf("new port denied: %s", reason)
+	}
+	changedMethod := cmd
+	changedMethod.Args = []string{"-n", "-Pn", "-sS", "-p", "80", "192.0.2.10"}
+	if reason := fresh.Check(ctx, changedMethod); reason != "" {
+		t.Fatalf("different scan method denied: %s", reason)
+	}
+	fresh.vantage = func(secgate.Command) string { return "approved-foothold" }
+	if reason := fresh.Check(ctx, cmd); reason != "" {
+		t.Fatalf("different vantage denied: %s", reason)
+	}
+}
+
+func TestFirewallDiagnosticNeedsSameVantageBaseline(t *testing.T) {
+	ctx := context.Background()
+	d := newServiceDispatcher(nil)
+	baseline := secgate.Command{Binary: "nmap", Args: []string{"-sT", "-Pn", "-n", "-p", "80", "192.0.2.10"}}
+	ack := secgate.Command{Binary: "nmap", Args: []string{"-sA", "-Pn", "-n", "-p", "80", "192.0.2.10"}}
+	if reason := d.Check(ctx, ack); !strings.Contains(reason, "ordinary port baseline") {
+		t.Fatalf("ACK scan before baseline = %q", reason)
+	}
+	if err := d.Observe(ctx, baseline, "Nmap scan report for 192.0.2.10\nPORT STATE SERVICE\n80/tcp filtered http\n"+nmapDone); err != nil {
+		t.Fatal(err)
+	}
+	if reason := d.Check(ctx, ack); reason != "" {
+		t.Fatalf("ACK scan after baseline denied: %s", reason)
+	}
+	d.vantage = func(secgate.Command) string { return "foothold" }
+	if reason := d.Check(ctx, ack); !strings.Contains(reason, "ordinary port baseline") {
+		t.Fatalf("worker baseline leaked to foothold: %q", reason)
+	}
+}
+
+func TestProtocolRepliesPromoteOnlyMatchingUDPCandidate(t *testing.T) {
+	ctx := context.Background()
+	d := newServiceDispatcher(nil)
+	for _, port := range []int{4500, 8443} {
+		probe := secgate.Command{Binary: "nmap", Args: []string{"-sU", "-Pn", "-n", "-p", strconv.Itoa(port), "192.0.2.10"}}
+		output := "Nmap scan report for 192.0.2.10\nPORT STATE SERVICE\n" + strconv.Itoa(port) + "/udp open|filtered unknown\n" + nmapDone
+		if err := d.Observe(ctx, probe, output); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ike := secgate.Command{Binary: "ike-scan", Args: []string{"--ikev2", "--nat-t", "--nodns", "--sport=0", "--retry=1", "--timeout=1000", "192.0.2.10"}}
+	ikeDone := "Ending ike-scan 1.9.6: 1 hosts scanned in 0.320 seconds (3.12 hosts/sec).  0 returned handshake; 1 returned notify\n"
+	for _, output := range []string{
+		"192.0.2.11\tNotify message 14 (NO-PROPOSAL-CHOSEN)\n" + ikeDone,
+		"192.0.2.10\tNotify message 14 (NO-PROPOSAL-CHOSEN)\n",
+		"192.0.2.10\tNotify message 14 (NO-PROPOSAL-CHOSEN)\nEnding ike-scan 1.9.6: 1 hosts scanned in 0.320 seconds (3.12 hosts/sec).  0 returned handshake; 0 returned notify\n",
+	} {
+		if err := d.Observe(ctx, ike, output); err != nil {
+			t.Fatal(err)
+		}
+		state, _ := d.portState(ctx, d.key(ike, serviceEndpoint{host: "192.0.2.10", transport: "udp", port: 4500}))
+		if state != "open|filtered" {
+			t.Fatalf("unverified IKE output promoted port: %q", state)
+		}
+	}
+	if err := d.Observe(ctx, ike, "192.0.2.10\tNotify message 14 (NO-PROPOSAL-CHOSEN)\n"+ikeDone); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := d.portState(ctx, d.key(ike, serviceEndpoint{host: "192.0.2.10", transport: "udp", port: 4500}))
+	if state != "open" {
+		t.Fatalf("IKE notify did not promote UDP/4500: %q", state)
+	}
+	h3 := secgate.Command{Binary: "curl", Args: []string{"--http3-only", "--include", "https://192.0.2.10:8443/"}}
+	if err := d.Observe(ctx, h3, "HTTP/2 200 OK\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = d.portState(ctx, d.key(h3, serviceEndpoint{host: "192.0.2.10", transport: "udp", port: 8443}))
+	if state != "open|filtered" {
+		t.Fatalf("HTTP/2 output promoted HTTP/3 port: %q", state)
+	}
+	if err := d.Observe(ctx, h3, "HTTP/3 200 OK\r\ncontent-type: text/plain\r\n\r\nok"); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = d.portState(ctx, d.key(h3, serviceEndpoint{host: "192.0.2.10", transport: "udp", port: 8443}))
+	if state != "open" {
+		t.Fatalf("HTTP/3 response did not promote UDP/8443: %q", state)
+	}
+}
+
 func TestServiceDispatchPersistsAcrossEngagementResume(t *testing.T) {
 	ctx := context.Background()
 	st := openStore(t)

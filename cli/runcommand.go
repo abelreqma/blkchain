@@ -145,6 +145,10 @@ func denyMessage(d secgate.Decision) string {
 // hallucinated flag is rejected and re-grounded, not executed); nil disables
 // grounding.
 func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Duration, workDir string, activeTask func() string, capture func(taskID, output string), cmdCtx secgate.Command, grounder *helpGrounder) tooldef.Tool {
+	return newObservedRunCommandToolForTask(g, capBytes, timeout, workDir, activeTask, capture, cmdCtx, grounder, nil)
+}
+
+func newObservedRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Duration, workDir string, activeTask func() string, capture func(taskID, output string), cmdCtx secgate.Command, grounder *helpGrounder, observe func(secgate.Command, runResult)) tooldef.Tool {
 	return newStoreTool("run_command",
 		"Run a bounded, shell-free security tool command against an in-scope target. Provide a bare binary name and literal args (no shell, no pipes or redirection). For a multi-stage filter, pass a structured `pipeline` of 2-3 stages (each a bare binary + literal args); stages are piped stdout to stdin with no shell, and every stage is authorized independently. Output is returned as untrusted data.",
 		runCommandArgs{},
@@ -186,6 +190,9 @@ func newRunCommandToolForTask(g *secgate.Gate, capBytes int, timeout time.Durati
 				res := runAuthorized(ctx, g, run.Binary, run.Args, workDir, capBytes, timeout, actionOrigin{TaskID: activeTask(), Surface: run.Surface})
 				if capture != nil {
 					capture(activeTask(), res.Output)
+				}
+				if observe != nil {
+					observe(run, res)
 				}
 				var b strings.Builder
 				if res.TimedOut {

@@ -22,6 +22,7 @@ var auditedBinaries = map[string]string{
 	"nc":          "secgate: execFlag denies -e/-c and the long exec options in bundled and glued forms, fileaccess bounds -o",
 	"ncat":        "secgate: execFlag denies -e/-c/--exec/--sh-exec/--lua-exec in bundled, glued and abbreviated forms",
 	"nping":       "secgate/nping_test.go: npingViolation accepts only one literal IP, one probe mode, at most three rounds at one packet per second, one destination port for TCP or UDP, an optional numeric source port, and at most 512 hex payload bytes in UDP mode; every file, echo, interface, multi-target, unknown, and unbounded option is denied",
+	"ike-scan":    "secgate/ikescan_test.go: ikeScanViolation accepts one literal IPv4 target, IKEv2, optional NAT-T, a random source port, and bounded retry and timeout; every file, spoofing, custom payload, alternate destination, multi-target, and unknown option is denied",
 	"dig":         "secgate: enumConfigDeny denies -f/-k/-y with its value-taking letters accounted for",
 	"host":        "secgate/dnsenum_test.go: no file, exec, or config flag; the target is positional and scope-checked",
 	"nslookup":    "secgate/dnsenum_test.go: no file, exec, or config flag; the target is positional and scope-checked",

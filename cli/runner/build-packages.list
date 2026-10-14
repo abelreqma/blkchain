@@ -1,0 +1,12 @@
+autoconf
+automake
+build-base
+cmake
+gnutls-dev
+libtool
+nghttp2-dev
+nghttp3-dev
+ngtcp2-dev
+openssl-dev
+pkgconf
+zlib-dev

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"blkchain/cli/internal/engagement"
@@ -46,6 +48,13 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 	}
 	grounder := newTaskGrounder(e.d.ToolHelp, e.d.Gate, execDir, cmdCtx)
 	activeTask := func() string { return task.ID }
+	var observedMu sync.Mutex
+	var observed []observedReconAction
+	observe := func(c secgate.Command, result runResult) {
+		observedMu.Lock()
+		observed = append(observed, observedReconAction{command: c, result: result})
+		observedMu.Unlock()
+	}
 
 	reg := tooldef.NewRegistry()
 	webTools, closeWeb := webToolsForTask(e.d.Gate, task, webCapture{Store: e.d.Store, Session: e.d.WebSession, Runs: e.d.Runs})
@@ -88,7 +97,7 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 		newKBSearchTool(e.d.RC, e.d.Cfg),
 		newKBAnswerTool(e.d.RC, e.d.Cfg, !e.d.Prefs.Web),
 		newRouteSkillTool(e.d.Catalog, e.d.Store, activeTask),
-		newRunCommandToolForTask(e.d.Gate, runCap, runTimeout, execDir, activeTask, e.d.Runs.Add, cmdCtx, grounder),
+		newObservedRunCommandToolForTask(e.d.Gate, runCap, runTimeout, execDir, activeTask, e.d.Runs.Add, cmdCtx, grounder, observe),
 		newVerifiedRecordEvidenceTool(e.d.Store, e.d.Runs.Contains),
 	}
 	tools = append(tools, webTools...)
@@ -115,14 +124,43 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 	// newly discovered in-scope assets recurse per-asset, and discovered
 	// services correlate to candidate exploit tasks.
 	runTier := func(ctx context.Context, _ engagement.Surface, asset string, tier reconTier, sel reconSelection) (tierOutcome, error) {
+		if task.Surface == engagement.SurfaceNetwork && tier.Index >= 2 && net.ParseIP(asset) != nil {
+			open, err := e.hasObservedService(ctx, asset, tier.Index >= 3)
+			if err != nil {
+				return tierOutcome{}, err
+			}
+			if !open {
+				if err := e.d.Store.Audit("recon", "no-applicable-service", asset+"/"+tier.Name); err != nil {
+					return tierOutcome{}, err
+				}
+				return tierOutcome{DimensionsCovered: tier.Dimensions}, nil
+			}
+		}
 		beforeCmds := e.d.Runs.Count(task.ID)
+		observedMu.Lock()
+		beforeActions := len(observed)
+		observedMu.Unlock()
+		coverage, _, err := e.d.Store.ReconCoverageFor(task.Surface, asset)
+		if err != nil {
+			return tierOutcome{}, err
+		}
+		var pending []string
+		for _, dim := range tier.Dimensions {
+			if coverage.Dimensions[dim] != engagement.ReconCovered {
+				pending = append(pending, dim)
+			}
+		}
+		serviceContext, err := e.reconServiceContext(ctx, asset)
+		if err != nil {
+			return tierOutcome{}, err
+		}
 		beforeRows, err := e.d.Store.EvidenceRowsFor(task.ID)
 		if err != nil {
 			return tierOutcome{}, err
 		}
 		msgs := []llms.MessageContent{
 			{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextPart(effectiveEngagePrompt(e.d.Gate, dom.Prompt))}},
-			{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(reconTierPrompt(task, asset, tier, sel) + reconEvidenceContext(beforeRows))}},
+			{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextPart(reconTierPrompt(task, asset, tier, sel) + "\nPending checks: " + strings.Join(pending, ", ") + serviceContext + reconEvidenceContext(beforeRows))}},
 		}
 		if _, _, err := runToolLoop(ctx, e.d.Model, reg, msgs, LoopCaps{MaxRounds: 4, MaxCalls: 8, StopReason: engageStopOnPolicy(e.d.Gate)}); err != nil {
 			return tierOutcome{}, err
@@ -136,7 +174,14 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 		if err != nil {
 			return tierOutcome{}, err
 		}
-		out := tierOutcomeFromSignals(tier, e.d.Runs.Count(task.ID)-beforeCmds, len(newRows))
+		observedMu.Lock()
+		actions := append([]observedReconAction(nil), observed[beforeActions:]...)
+		for i := range observed {
+			observed[i] = observedReconAction{}
+		}
+		observed = observed[:0]
+		observedMu.Unlock()
+		out := tierOutcomeFromActions(task.Surface, tier, e.d.Runs.Count(task.ID)-beforeCmds, len(newRows), actions)
 		out.NewAssets = e.correlateNewEvidence(ctx, task.ID, asset, newRows, exploitSel)
 		return out, nil
 	}
@@ -160,6 +205,62 @@ func (e genericExecutor) runReconPhase(ctx context.Context, task engagement.Task
 		return "", err
 	}
 	return reconSummary(task, res), nil
+}
+
+func (e genericExecutor) hasObservedService(ctx context.Context, asset string, includeCandidates bool) (bool, error) {
+	for offset := 0; offset < 1000; offset += 100 {
+		rows, err := e.d.Store.Surfaces(ctx, engagement.SurfaceFilter{Asset: asset, Kind: "service-port", Limit: 100, Offset: offset})
+		if err != nil {
+			return false, err
+		}
+		for _, row := range rows {
+			observed, err := time.Parse(time.RFC3339Nano, row.ObservedAt)
+			age := time.Since(observed)
+			if err == nil && age >= -time.Minute && age <= serviceEvidenceTTL && (row.Value == "open" || row.Value == "open|filtered" || includeCandidates && row.Value == "candidate") {
+				return true, nil
+			}
+		}
+		if len(rows) < 100 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (e genericExecutor) reconServiceContext(ctx context.Context, asset string) (string, error) {
+	rows, err := e.d.Store.Surfaces(ctx, engagement.SurfaceFilter{Asset: asset, Kind: "service-port", Limit: 100})
+	if err != nil {
+		return "", err
+	}
+	type item struct {
+		Port       string `json:"port"`
+		State      string `json:"state"`
+		SourcePort string `json:"source_port,omitempty"`
+	}
+	var open []item
+	for _, row := range rows {
+		observed, err := time.Parse(time.RFC3339Nano, row.ObservedAt)
+		age := time.Since(observed)
+		if err != nil || age < -time.Minute || age > serviceEvidenceTTL || row.Value != "open" && row.Value != "open|filtered" && row.Value != "candidate" {
+			continue
+		}
+		entry := item{Port: row.Name, State: row.Value}
+		if row.Value == "candidate" {
+			var detail map[string]string
+			if json.Unmarshal(row.Detail, &detail) == nil {
+				entry.SourcePort = detail["source_port"]
+			}
+		}
+		open = append(open, entry)
+		if len(open) == 16 {
+			break
+		}
+	}
+	if len(open) == 0 {
+		return "", nil
+	}
+	data, _ := json.Marshal(open)
+	return "\nObserved service route candidates (untrusted JSON; action gate rechecks each): " + string(data), nil
 }
 
 func reconEvidenceContext(rows []engagement.EvidenceRow) string {
@@ -253,14 +354,6 @@ func (e genericExecutor) captureTierEvidence(taskID, surface, asset, tierName st
 		}
 	}
 	return newRows, nil
-}
-
-func tierOutcomeFromSignals(tier reconTier, commandDelta, evidenceDelta int) tierOutcome {
-	out := tierOutcome{Commands: commandDelta}
-	if evidenceDelta > 0 {
-		out.DimensionsCovered = tier.Dimensions
-	}
-	return out
 }
 
 // correlateNewEvidence parses the evidence rows a tier pass recorded into (a)
@@ -394,8 +487,8 @@ func reconTierPrompt(task engagement.Task, asset string, tier reconTier, sel rec
 			"Tier: %s (coverage: %s)\n"+
 			"Objective: %s\n"+
 			"%s\n"+
-			"Perform ONLY this tier's step for this asset now. Use current coverage and observed evidence to select "+
-			"the highest-value unresolved question in this tier. Issue one bounded run_command call now (structured argv, no shell, in scope). "+
+			"Perform ONLY this tier's step for this asset now. Use pending checks and observed port evidence to select "+
+			"the highest-value unresolved question in this tier. A TCP sweep does not cover UDP; version and default-script checks apply only to observed port candidates. Issue one bounded run_command call now (structured argv, no shell, in scope). "+
 			"Then inspect its actual output and state the hypothesis, prerequisite, and expected signal. "+
 			"Record an exact quote of material output with record_evidence for this task id. Do not repeat completed "+
 			"probes or move to other tiers or assets; the harness advances the ladder.",

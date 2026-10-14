@@ -256,6 +256,9 @@ func classifyNonStructuralExternal(c Command) Decision {
 	if d, tripped := npingViolation(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); tripped {
 		return d
 	}
+	if d, tripped := ikeScanViolation(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); tripped {
+		return d
+	}
 	if d, tripped := socatViolation(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); tripped {
 		return d
 	}
@@ -373,6 +376,9 @@ func ClassifyLocal(c Command) Decision {
 	if d, tripped := npingViolation(name, c.Args); tripped {
 		return d
 	}
+	if d, tripped := ikeScanViolation(name, c.Args); tripped {
+		return d
+	}
 	if a, bad := readOnlyForms(name, c.Args); bad {
 		return Decision{
 			Allowed:    false,
@@ -398,6 +404,9 @@ func ClassifyLocalConfirmed(c Command) Decision {
 		return d
 	}
 	if d, tripped := npingViolation(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); tripped {
+		return d
+	}
+	if d, tripped := ikeScanViolation(strings.ToLower(baseName(strings.TrimSpace(c.Binary))), c.Args); tripped {
 		return d
 	}
 	return Decision{Allowed: true}

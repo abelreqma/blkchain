@@ -120,8 +120,8 @@ func TestReconLoopNoveltyGateStops(t *testing.T) {
 		t.Fatalf("StopReason = %q, want novelty-zero", res.StopReason)
 	}
 	cov, _, _ := st.ReconCoverageFor(engagement.SurfaceNetwork, "10.0.0.1")
-	if cov.Dimensions["ports"] == engagement.ReconCovered {
-		t.Fatalf("ports covered; the novelty gate should have stopped with the checklist still open")
+	if cov.Dimensions["tcp-sweep"] == engagement.ReconCovered {
+		t.Fatalf("TCP sweep covered; the novelty gate should have stopped with the checklist still open")
 	}
 }
 

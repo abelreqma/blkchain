@@ -26,7 +26,7 @@ type reconLadder []reconTier
 var surfaceLadders = map[engagement.Surface]reconLadder{
 	engagement.SurfaceNetwork: {
 		{Index: 0, Name: "host-discovery", Dimensions: []string{"hosts"}},
-		{Index: 1, Name: "port-service-sweep", Dimensions: []string{"ports", "services"}},
+		{Index: 1, Name: "port-service-sweep", Dimensions: []string{"tcp-sweep", "udp-sweep"}},
 		{Index: 2, Name: "version-safe-script-enum", Dimensions: []string{"versions", "safe-scripts"}},
 		{Index: 3, Name: "finding-driven-probes", Dimensions: []string{"probes"}},
 	},

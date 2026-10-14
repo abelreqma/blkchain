@@ -12,6 +12,18 @@ import (
 
 var scanPortLine = regexp.MustCompile(`^([0-9]{1,5})/(tcp|udp)\s+(open\|filtered|open|closed|filtered)\s+`)
 var nmapDoneLine = regexp.MustCompile(`^Nmap done: [1-9][0-9]* IP address(?:es)? \([1-9][0-9]* hosts? up\) scanned in .+ seconds$`)
+var nmapFinishedLine = regexp.MustCompile(`^Nmap done: [1-9][0-9]* IP address(?:es)? \([0-9]+ hosts? up\) scanned in .+ seconds$`)
+var ikeDoneLine = regexp.MustCompile(`^Ending ike-scan [0-9.]+: 1 hosts scanned in .+\.  ([0-9]+) returned handshake; ([0-9]+) returned notify$`)
+
+func nmapFinished(output string) bool {
+	trimmed := strings.TrimSpace(output)
+	return nmapFinishedLine.MatchString(trimmed[strings.LastIndex(trimmed, "\n")+1:])
+}
+
+func nmapHostUp(output string) bool {
+	trimmed := strings.TrimSpace(output)
+	return nmapDoneLine.MatchString(trimmed[strings.LastIndex(trimmed, "\n")+1:])
+}
 
 func nmapDiagnostic(args []string) bool {
 	for _, arg := range args {
@@ -19,6 +31,25 @@ func nmapDiagnostic(args []string) bool {
 			return true
 		}
 		for _, flag := range []string{"-f", "-D", "-S", "-g", "-e", "--source-port", "--mtu", "--scanflags", "--spoof-mac", "--badsum", "--ip-options"} {
+			if arg == flag || strings.HasPrefix(arg, flag+"=") || len(flag) == 2 && strings.HasPrefix(arg, flag) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func nmapFirewallDiagnostic(args []string) bool {
+	for _, arg := range args {
+		if arg == "-sY" || arg == "-sZ" || arg == "-sO" || arg == "-sn" {
+			return false
+		}
+	}
+	for _, arg := range args {
+		if arg == "-sA" || arg == "-sF" || arg == "-sN" || arg == "-sX" || arg == "-sW" || arg == "-sM" || strings.HasPrefix(arg, "-f") && !strings.HasPrefix(arg, "--") {
+			return true
+		}
+		for _, flag := range []string{"-g", "--source-port", "--mtu", "--scanflags", "--badsum", "--ip-options"} {
 			if arg == flag || strings.HasPrefix(arg, flag+"=") || len(flag) == 2 && strings.HasPrefix(arg, flag) {
 				return true
 			}
@@ -76,9 +107,7 @@ func scanServiceObservations(c secgate.Command, output string) []serviceObservat
 	if nmapDiagnostic(c.Args) {
 		return nil
 	}
-	trimmed := strings.TrimSpace(output)
-	last := trimmed[strings.LastIndex(trimmed, "\n")+1:]
-	if !nmapDoneLine.MatchString(last) {
+	if !nmapHostUp(output) {
 		return nil
 	}
 	hosts, nets, ok := secgate.ExtractTargetSet(c)
@@ -168,4 +197,39 @@ func scanSourcePortCandidates(c secgate.Command, output string) []serviceObserva
 		out = append(out, observation)
 	}
 	return out
+}
+
+func scanIKEObservations(c secgate.Command, output string) []serviceObservation {
+	if !strings.EqualFold(filepath.Base(c.Binary), "ike-scan") {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) == 0 {
+		return nil
+	}
+	done := ikeDoneLine.FindStringSubmatch(strings.TrimSpace(lines[len(lines)-1]))
+	if done == nil || done[1] == "0" && done[2] == "0" {
+		return nil
+	}
+	hosts, nets, ok := secgate.ExtractTargetSet(c)
+	if !ok || len(nets) != 0 || len(hosts) != 1 {
+		return nil
+	}
+	port := 500
+	for _, arg := range c.Args {
+		if arg == "--nat-t" {
+			port = 4500
+		}
+	}
+	prefix := hosts[0] + "\t"
+	for _, line := range lines {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		message := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		if strings.HasPrefix(message, "IKE Handshake returned") || strings.HasPrefix(message, "Notify message ") {
+			return []serviceObservation{{endpoint: serviceEndpoint{host: hosts[0], transport: "udp", port: port}, state: "open"}}
+		}
+	}
+	return nil
 }

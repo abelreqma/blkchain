@@ -35,8 +35,23 @@ CREATE INDEX IF NOT EXISTS surface_task ON surface_record(task_id);
 func SurfaceKinds() []string {
 	return []string{
 		"tls-protocol", "tls-certificate", "http-header", "http-cookie",
-		"http-cors", "http-method", "http-path", "dns-name", "service-port",
+		"http-cors", "http-method", "http-path", "dns-name", "service-port", "scan-pass",
 	}
+}
+
+func (s *Store) ScanPassState(ctx context.Context, id string) (time.Time, error) {
+	if s == nil || s.db == nil {
+		return time.Time{}, errors.New("engagement store unavailable")
+	}
+	var observedAt string
+	err := s.db.QueryRowContext(ctx, `SELECT observed_at FROM surface_record WHERE kind='scan-pass' AND id=?`, id).Scan(&observedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Parse(time.RFC3339Nano, observedAt)
 }
 
 func (s *Store) ServicePortState(ctx context.Context, id string) (string, time.Time, error) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -50,10 +51,11 @@ type serviceDispatcher struct {
 	label     func(secgate.Command) string
 	state     map[serviceKey]serviceState
 	attempted map[serviceKey]bool
+	scanned   map[string]time.Time
 }
 
 func newServiceDispatcher(store *engagement.Store) *serviceDispatcher {
-	return &serviceDispatcher{store: store, state: make(map[serviceKey]serviceState), attempted: make(map[serviceKey]bool)}
+	return &serviceDispatcher{store: store, state: make(map[serviceKey]serviceState), attempted: make(map[serviceKey]bool), scanned: make(map[string]time.Time)}
 }
 
 func attachServiceDispatcher(g *secgate.Gate, store *engagement.Store) {
@@ -110,7 +112,33 @@ func (d *serviceDispatcher) Check(ctx context.Context, c secgate.Command) string
 	if err != nil {
 		return "service dispatch: " + err.Error()
 	}
+	if id := d.scanID(c); id != "" {
+		observed, err := d.scanTime(ctx, id)
+		if err != nil {
+			return "service dispatch: cannot read scan coverage: " + err.Error()
+		}
+		if age := time.Since(observed); age >= -time.Minute && age <= serviceEvidenceTTL {
+			return "service dispatch: this exact scan already completed from the same vantage; choose a new port, transport, technique, or wait for the evidence to expire"
+		}
+	}
 	if discovery {
+		if nmapFirewallDiagnostic(c.Args) && strings.EqualFold(filepath.Base(c.Binary), "nmap") {
+			ports, _, err := nmapRequiredEndpoints(c)
+			if err != nil {
+				return "service dispatch: " + err.Error()
+			}
+			for _, ep := range ports {
+				key := d.key(c, ep)
+				key.sourcePort = 0
+				state, err := d.portState(ctx, key)
+				if err != nil {
+					return "service dispatch: cannot read baseline port evidence: " + err.Error()
+				}
+				if state == "" {
+					return fmt.Sprintf("service dispatch: %s/%d on %s needs a completed ordinary port baseline before a firewall diagnostic", ep.transport, ep.port, ep.host)
+				}
+			}
+		}
 		return ""
 	}
 	for _, ep := range endpoints {
@@ -132,6 +160,66 @@ func (d *serviceDispatcher) Check(ctx context.Context, c secgate.Command) string
 			}
 			return fmt.Sprintf("service dispatch: %s/%d on %s lacks an observed open port; run bounded port discovery first", ep.transport, ep.port, ep.host)
 		}
+	}
+	return ""
+}
+
+func (d *serviceDispatcher) scanID(c secgate.Command) string {
+	name := strings.ToLower(filepath.Base(c.Binary))
+	if name != "nmap" && name != "nping" && name != "ike-scan" {
+		return ""
+	}
+	vantage := "worker"
+	if d.vantage != nil {
+		vantage = d.vantage(c)
+	}
+	payload, _ := json.Marshal(struct {
+		Vantage string   `json:"vantage"`
+		Binary  string   `json:"binary"`
+		Args    []string `json:"args"`
+	}{vantage, name, c.Args})
+	hash := sha256.Sum256(payload)
+	return fmt.Sprintf("scan-%x", hash)
+}
+
+func (d *serviceDispatcher) scanTime(ctx context.Context, id string) (time.Time, error) {
+	var stored time.Time
+	if d.store != nil {
+		var err error
+		stored, err = d.store.ScanPassState(ctx, id)
+		if err != nil {
+			return time.Time{}, err
+		}
+	}
+	d.mu.RLock()
+	observed := d.scanned[id]
+	d.mu.RUnlock()
+	if observed.After(stored) {
+		return observed, nil
+	}
+	return stored, nil
+}
+
+func (d *serviceDispatcher) scanComplete(c secgate.Command, output string) bool {
+	if d.scanID(c) == "" || strings.TrimSpace(output) == "" {
+		return false
+	}
+	if strings.EqualFold(filepath.Base(c.Binary), "nmap") {
+		return nmapFinished(output)
+	}
+	return true
+}
+
+func scanAsset(c secgate.Command) string {
+	hosts, nets, ok := secgate.ExtractTargetSet(c)
+	if !ok {
+		return ""
+	}
+	if len(hosts) > 0 {
+		return hosts[0]
+	}
+	if len(nets) > 0 {
+		return nets[0].String()
 	}
 	return ""
 }
@@ -195,36 +283,52 @@ func (d *serviceDispatcher) Ensure(ctx context.Context, c secgate.Command, g *se
 			continue
 		}
 
+		if key.sourcePort != 0 && ep.transport == "tcp" {
+			ordinary := key
+			ordinary.sourcePort = 0
+			ordinaryState, err := d.portState(ctx, ordinary)
+			if err != nil {
+				continue
+			}
+			if ordinaryState == "" {
+				d.runServiceDiscovery(ctx, c, g, ep, "-sT", 0)
+				ordinaryState, err = d.portState(ctx, ordinary)
+				if err != nil || ordinaryState == "" {
+					continue
+				}
+			}
+		}
 		scan := "-sT"
 		if ep.transport == "udp" {
 			scan = "-sU"
 		} else if key.sourcePort != 0 {
 			scan = "-sS"
 		}
-		probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		args := []string{"-n", "-Pn", scan, "-p", strconv.Itoa(ep.port), ep.host}
-		if key.sourcePort != 0 {
-			args = []string{"-n", "-Pn", scan, "--source-port", strconv.Itoa(key.sourcePort), "-p", strconv.Itoa(ep.port), ep.host}
-		}
-		probe := secgate.Command{TaskID: c.TaskID, Binary: "nmap", Args: args, Phase: secgate.PhaseRecon, Surface: c.Surface}
-		decision := g.Authorize(probeCtx, probe)
-		if !decision.Allowed {
-			cancel()
-			continue
-		}
-		dir, err := os.MkdirTemp(g.Scratch, "service-probe-")
-		if err != nil {
-			cancel()
-			continue
-		}
-		result := runAuthorized(probeCtx, g, probe.Binary, probe.Args, dir, 64<<10, 12*time.Second, actionOrigin{TaskID: c.TaskID, Surface: c.Surface})
-		if result.Err != nil && g.Audit != nil {
-			g.Audit("service-probe-gap", ep.host+":"+strconv.Itoa(ep.port)+" :: "+result.Err.Error())
-		}
-		releaseEngageWorker(ctx, dir)
-		_ = os.RemoveAll(dir)
-		cancel()
+		d.runServiceDiscovery(ctx, c, g, ep, scan, key.sourcePort)
 	}
+}
+
+func (d *serviceDispatcher) runServiceDiscovery(ctx context.Context, c secgate.Command, g *secgate.Gate, ep serviceEndpoint, scan string, sourcePort int) {
+	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	args := []string{"-n", "-Pn", scan, "-p", strconv.Itoa(ep.port), ep.host}
+	if sourcePort != 0 {
+		args = []string{"-n", "-Pn", scan, "--source-port", strconv.Itoa(sourcePort), "-p", strconv.Itoa(ep.port), ep.host}
+	}
+	probe := secgate.Command{TaskID: c.TaskID, Binary: "nmap", Args: args, Phase: secgate.PhaseRecon, Surface: c.Surface}
+	if decision := g.Authorize(probeCtx, probe); !decision.Allowed {
+		return
+	}
+	dir, err := os.MkdirTemp(g.Scratch, "service-probe-")
+	if err != nil {
+		return
+	}
+	result := runAuthorized(probeCtx, g, probe.Binary, probe.Args, dir, 64<<10, 12*time.Second, actionOrigin{TaskID: c.TaskID, Surface: c.Surface})
+	if result.Err != nil && g.Audit != nil {
+		g.Audit("service-probe-gap", ep.host+":"+strconv.Itoa(ep.port)+" :: "+result.Err.Error())
+	}
+	releaseEngageWorker(ctx, dir)
+	_ = os.RemoveAll(dir)
 }
 
 func (d *serviceDispatcher) source(c secgate.Command) string {
@@ -331,14 +435,20 @@ func (d *serviceDispatcher) Observe(ctx context.Context, c secgate.Command, outp
 	}
 	endpoints, discovery, err := serviceRequirement(c)
 	name := strings.ToLower(filepath.Base(c.Binary))
-	if err != nil || !discovery && name != "nmap" && !(name == "curl" && commandSourcePort(c) != 0) {
+	if err != nil || !discovery && name != "nmap" && name != "nping" && name != "ike-scan" && !(name == "curl" && (commandSourcePort(c) != 0 || curlHTTP3Only(c.Args))) {
 		return err
 	}
 	observations := scanServiceObservations(c, output)
 	if name == "nmap" && commandSourcePort(c) != 0 {
 		observations = scanSourcePortCandidates(c, output)
 	}
+	if name == "ike-scan" {
+		observations = scanIKEObservations(c, output)
+	}
 	if name == "curl" && commandSourcePort(c) != 0 && len(endpoints) == 1 && sourcePortHTTPResponse(output) {
+		observations = []serviceObservation{{endpoint: endpoints[0], state: "open"}}
+	}
+	if name == "curl" && curlHTTP3Only(c.Args) && len(endpoints) == 1 && strings.HasPrefix(output, "HTTP/3 ") && sourcePortHTTPResponse(output) {
 		observations = []serviceObservation{{endpoint: endpoints[0], state: "open"}}
 	}
 	if !discovery {
@@ -355,16 +465,21 @@ func (d *serviceDispatcher) Observe(ctx context.Context, c secgate.Command, outp
 		}
 		observations = verified
 	}
-	if len(observations) == 0 {
+	complete := d.scanComplete(c, output)
+	if len(observations) == 0 && !complete {
 		return nil
 	}
+	observedAt := time.Now().UTC()
 	if d.store == nil || c.TaskID == "" {
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		for _, o := range observations {
 			key := d.key(c, o.endpoint)
-			d.state[key] = serviceState{value: o.state, observedAt: time.Now().UTC()}
+			d.state[key] = serviceState{value: o.state, observedAt: observedAt}
 			delete(d.attempted, key)
+		}
+		if complete {
+			d.scanned[d.scanID(c)] = observedAt
 		}
 		return nil
 	}
@@ -388,8 +503,31 @@ func (d *serviceDispatcher) Observe(ctx context.Context, c secgate.Command, outp
 			return err
 		}
 		d.mu.Lock()
-		d.state[key] = serviceState{value: o.state, observedAt: time.Now().UTC()}
+		d.state[key] = serviceState{value: o.state, observedAt: observedAt}
 		delete(d.attempted, key)
+		d.mu.Unlock()
+	}
+	if complete {
+		id := d.scanID(c)
+		asset := scanAsset(c)
+		if asset == "" {
+			return errors.New("scan target cannot be verified")
+		}
+		vantage := "worker"
+		if d.vantage != nil {
+			vantage = d.vantage(c)
+		}
+		detail, _ := json.Marshal(map[string]string{"vantage": vantage})
+		_, err := d.store.SaveSurface(ctx, engagement.SurfaceRecord{
+			ID: id, TaskID: c.TaskID, Surface: engagement.Surface(c.Surface), Asset: asset,
+			Kind: "scan-pass", Name: name, Value: "complete", Detail: detail,
+			Source: name, EvidenceID: evidenceID,
+		})
+		if err != nil {
+			return err
+		}
+		d.mu.Lock()
+		d.scanned[id] = observedAt
 		d.mu.Unlock()
 	}
 	return nil

@@ -140,10 +140,26 @@ func sourcePortHTTPResponse(output string) bool {
 	if strings.HasPrefix(output, "HTTP/2 ") {
 		output = "HTTP/2.0" + strings.TrimPrefix(output, "HTTP/2")
 	}
+	if strings.HasPrefix(output, "HTTP/3 ") {
+		output = "HTTP/3.0" + strings.TrimPrefix(output, "HTTP/3")
+	}
 	response, err := http.ReadResponse(bufio.NewReader(strings.NewReader(output)), nil)
 	if err != nil {
 		return false
 	}
 	defer response.Body.Close()
 	return response.StatusCode >= 200 && response.StatusCode <= 599
+}
+
+func curlHTTP3Only(args []string) bool {
+	http3, include := false, false
+	for _, arg := range args {
+		if arg == "--http3-only" {
+			http3 = true
+		}
+		if arg == "--include" {
+			include = true
+		}
+	}
+	return http3 && include
 }

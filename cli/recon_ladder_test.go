@@ -13,7 +13,7 @@ func TestLadderForNetworkIsReferenceLadder(t *testing.T) {
 		dims []string
 	}{
 		{"host-discovery", []string{"hosts"}},
-		{"port-service-sweep", []string{"ports", "services"}},
+		{"port-service-sweep", []string{"tcp-sweep", "udp-sweep"}},
 		{"version-safe-script-enum", []string{"versions", "safe-scripts"}},
 		{"finding-driven-probes", []string{"probes"}},
 	}
@@ -76,8 +76,8 @@ func covWith(dims map[string]engagement.ReconDimStatus) engagement.ReconCoverage
 func TestChecklistCompleteTrueWhenAllCovered(t *testing.T) {
 	l := ladderFor(engagement.SurfaceNetwork)
 	cov := covWith(map[string]engagement.ReconDimStatus{
-		"hosts": engagement.ReconCovered, "ports": engagement.ReconCovered,
-		"services": engagement.ReconCovered, "versions": engagement.ReconCovered,
+		"hosts": engagement.ReconCovered, "tcp-sweep": engagement.ReconCovered,
+		"udp-sweep": engagement.ReconCovered, "versions": engagement.ReconCovered,
 		"safe-scripts": engagement.ReconCovered, "probes": engagement.ReconCovered,
 	})
 	if !checklistComplete(l, cov) {
@@ -88,7 +88,7 @@ func TestChecklistCompleteTrueWhenAllCovered(t *testing.T) {
 func TestChecklistCompleteFalseWhenAnyPending(t *testing.T) {
 	l := ladderFor(engagement.SurfaceNetwork)
 	cov := covWith(map[string]engagement.ReconDimStatus{
-		"hosts": engagement.ReconCovered, "ports": engagement.ReconPending,
+		"hosts": engagement.ReconCovered, "tcp-sweep": engagement.ReconPending,
 	})
 	if checklistComplete(l, cov) {
 		t.Fatalf("checklistComplete = true, want false when a dimension is pending/missing")
@@ -108,8 +108,8 @@ func TestNextTierReturnsFirstIncomplete(t *testing.T) {
 	}
 
 	full := covWith(map[string]engagement.ReconDimStatus{
-		"hosts": engagement.ReconCovered, "ports": engagement.ReconCovered,
-		"services": engagement.ReconCovered, "versions": engagement.ReconCovered,
+		"hosts": engagement.ReconCovered, "tcp-sweep": engagement.ReconCovered,
+		"udp-sweep": engagement.ReconCovered, "versions": engagement.ReconCovered,
 		"safe-scripts": engagement.ReconCovered, "probes": engagement.ReconCovered,
 	})
 	if _, ok := nextTier(l, full); ok {

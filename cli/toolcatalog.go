@@ -64,8 +64,7 @@ const (
 type tool struct {
 	// Binary is the basename as executed.
 	Binary string
-	// Package is the apk package that provides it, empty for a binary the base
-	// image already carries.
+	// Package is the apk package that provides it, empty for a base or source-built binary.
 	Package string
 	// Personas are the domains whose prompt may name this tool.
 	Personas []string
@@ -112,6 +111,13 @@ var toolCatalog = []tool{
 		Probe:     []string{"--version"},
 		ProbeWant: "Nping version",
 		Note:      "bounded one-address packet diagnostics; raw TCP, UDP and ICMP use the raw worker, while TCP connect stays unprivileged",
+	},
+	{
+		Binary: "ike-scan", Tier: tierEnum,
+		Personas:  []string{"recon"},
+		Probe:     []string{"--version"},
+		ProbeWant: "ike-scan 1.9.6",
+		Note:      "one IPv4 IKEv2 probe on UDP/500 or UDP/4500 with NAT-T after matching UDP port evidence; the bundled version supports only its default IKEv2 proposal",
 	},
 	{
 		Binary: "nc", Tier: tierEnum,
@@ -212,8 +218,8 @@ var toolCatalog = []tool{
 		Binary: "curl", Package: "curl", Tier: tierEnum,
 		Personas:  []string{"recon", "web", "ad", "cloud", "k8s", "container", "ai-security", "vuln-analysis", "generic"},
 		Probe:     []string{"--version"},
-		ProbeWant: "curl 8",
-		Note:      "HTTP/3 is unavailable in the pinned image; source-port HTTP checks require the bounded direct GET form",
+		ProbeWant: "HTTP3",
+		Note:      "HTTP/3 uses the source-built ngtcp2 backend; --http3-only needs UDP evidence and --http3 needs both TCP and UDP evidence. Source-port HTTP checks require the bounded direct GET form",
 	},
 	{
 		Binary: "ffuf", Package: "ffuf", Tier: tierEnum,
@@ -304,7 +310,7 @@ var toolCatalog = []tool{
 	{Binary: "hostname", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: ""},
 	{Binary: "uname", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{"-a"}, ProbeWant: "Linux"},
 	{Binary: "stat", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local", "target-analysis"}, Probe: []string{"/etc/hostname"}, ProbeWant: "File:"},
-	{Binary: "mount", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: " on "},
+	{Binary: "mount", Package: "mount", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: " on "},
 	{Binary: "ps", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: "PID"},
 	{Binary: "netstat", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{"-ln"}, ProbeWant: "Active"},
 	{Binary: "lsof", Tier: tierEnum, Reach: reachLocal, Personas: []string{"local"}, Probe: []string{}, ProbeWant: ""},
@@ -446,7 +452,6 @@ var unavailableTools = map[string]string{
 	"hashcat":     "needs an OpenCL runtime the image does not carry; john covers offline cracking",
 	"trivy":       "no Alpine package on either architecture; grype and osv-scanner cover image and dependency scanning, and cli/vulnscan.go parses trivy JSON so a report produced elsewhere can be imported",
 	"masscan":     "raw Ethernet packets bypass the worker destination guard; bounded Nmap scans provide guarded port discovery",
-	"ike-scan":    "no package in the pinned Alpine 3.23 runner; a bounded Nping UDP payload can carry operator-supplied IKEv2 bytes, but no native IKEv2 adapter verifies the response",
 	"syft":        "an SBOM generator rather than a scanner: grype reads the same sources directly, so the extra stage buys nothing",
 	// Named by the per-finding exploit-tier catalog in exploitallow.go, which
 	// predates the image work. None is installed, so none can run.

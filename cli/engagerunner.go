@@ -23,7 +23,7 @@ import (
 	"time"
 )
 
-//go:embed runner/Dockerfile runner/execute.py runner/packages-amd64.lock runner/packages-arm64.lock
+//go:embed runner/Dockerfile runner/execute.py runner/packages-amd64.lock runner/packages-arm64.lock runner/build-packages-amd64.lock runner/build-packages-arm64.lock
 var engageRunnerFiles embed.FS
 
 type engageRunner struct {

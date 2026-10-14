@@ -77,7 +77,7 @@ func TestRunReconPhaseDrivesLadderAndPersistsCoverage(t *testing.T) {
 	d.Gate = autoGate(t)
 	d.Runs = NewRunOutputs()
 	withStubExec(t, func(_ context.Context, _ string, _ []string, _ string, _ int, _ time.Duration) runResult {
-		return runResult{Output: "banner-xyz 22/tcp open"}
+		return runResult{Output: "Nmap scan report for 10.0.0.5\nPORT STATE SERVICE\n22/tcp open ssh banner-xyz\n" + nmapDone}
 	})
 	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{
 		ID: "t1", Kind: "recon", Target: "10.0.0.5", Objective: "enumerate",
@@ -183,7 +183,7 @@ func TestRunReconPhaseConsultsCorpusSelector(t *testing.T) {
 	}}
 	d.RC = rc
 	withStubExec(t, func(_ context.Context, _ string, _ []string, _ string, _ int, _ time.Duration) runResult {
-		return runResult{Output: "banner-xyz 22/tcp open"}
+		return runResult{Output: "Nmap scan report for 10.0.0.5\nPORT STATE SERVICE\n22/tcp open ssh banner-xyz\n" + nmapDone}
 	})
 	if _, err := d.Store.Apply(engagement.Delta{Upserts: []engagement.Task{{
 		ID: "t1", Kind: "recon", Target: "10.0.0.5", Objective: "enumerate",
