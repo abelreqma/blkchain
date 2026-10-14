@@ -46,6 +46,7 @@ data/
 *.log
 
 # OS & editor cruft
+/.claude/
 .DS_Store
 Thumbs.db
 *.swp
