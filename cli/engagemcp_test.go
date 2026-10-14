@@ -210,21 +210,21 @@ func TestEngageMCPTargetReadsTheMethodAndURLFromTheArguments(t *testing.T) {
 		{
 			name:       "https read",
 			tool:       "send_http1_request",
-			args:       engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: x\r\n\r\n`, "app.example", 443, true),
+			args:       engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: app.example\r\n\r\n`, "app.example", 443, true),
 			wantMethod: "GET",
 			wantURL:    "https://app.example:443/a",
 		},
 		{
 			name:       "plain http",
 			tool:       "send_http1_request",
-			args:       engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: x\r\n\r\n`, "app.example", 80, false),
+			args:       engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: app.example\r\n\r\n`, "app.example", 80, false),
 			wantMethod: "GET",
 			wantURL:    "http://app.example:80/a",
 		},
 		{
 			name:       "state changing method",
 			tool:       "send_http1_request",
-			args:       engageMCPRequestArgs(`POST /login HTTP/1.1\r\nHost: x\r\n\r\n`, "app.example", 443, true),
+			args:       engageMCPRequestArgs(`POST /login HTTP/1.1\r\nHost: app.example\r\n\r\n`, "app.example", 443, true),
 			wantMethod: "POST",
 			wantURL:    "https://app.example:443/login",
 		},
@@ -254,7 +254,7 @@ func TestEngageMCPTargetReadsTheMethodAndURLFromTheArguments(t *testing.T) {
 	// Intruder fuzzes the request whatever verb its request line carries, so a
 	// GET request line still reaches the gate as active.
 	target, err := engageMCPTargetFromArgs("send_to_intruder",
-		engageMCPRequestArgs(`GET /search HTTP/1.1\r\nHost: x\r\n\r\n`, "10.0.0.5", 443, true))
+		engageMCPRequestArgs(`GET /search HTTP/1.1\r\nHost: 10.0.0.5\r\n\r\n`, "10.0.0.5", 443, true))
 	if err != nil {
 		t.Fatalf("engageMCPTargetFromArgs: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestEngageMCPTargetReadsTheMethodAndURLFromTheArguments(t *testing.T) {
 	// The same request line through a send tool is recon, which is what makes the
 	// case above a statement about send_to_intruder and not about the parser.
 	read, err := engageMCPTargetFromArgs("send_http1_request",
-		engageMCPRequestArgs(`GET /search HTTP/1.1\r\nHost: x\r\n\r\n`, "10.0.0.5", 443, true))
+		engageMCPRequestArgs(`GET /search HTTP/1.1\r\nHost: 10.0.0.5\r\n\r\n`, "10.0.0.5", 443, true))
 	if err != nil {
 		t.Fatalf("engageMCPTargetFromArgs: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestEngageMCPTargetCarriesTheRequestTarget(t *testing.T) {
 	for _, c := range []struct {
 		name, content, wantURL string
 	}{
-		{"path and query", `GET /a/b?q=1 HTTP/1.1\r\nHost: x\r\n\r\n`, "https://app.example:443/a/b?q=1"},
+		{"path and query", `GET /a/b?q=1 HTTP/1.1\r\nHost: app.example\r\n\r\n`, "https://app.example:443/a/b?q=1"},
 		{"root", `GET / HTTP/1.1`, "https://app.example:443/"},
 		{"absolute form", `GET http://evil.target/x HTTP/1.1`, "https://app.example:443"},
 		{"authority form", `CONNECT evil.target:443 HTTP/1.1`, "https://app.example:443"},
@@ -386,7 +386,7 @@ func TestEngageMCPTargetCarriesTheRequestTarget(t *testing.T) {
 		t.Fatal("a request tool with a gate must be registered")
 	}
 	out, err := tool.Call(context.Background(),
-		engageMCPRequestArgs(`GET /a/b?q=1 HTTP/1.1\r\nHost: x\r\n\r\n`, "10.0.0.5", 443, true))
+		engageMCPRequestArgs(`GET /a/b?q=1 HTTP/1.1\r\nHost: 10.0.0.5\r\n\r\n`, "10.0.0.5", 443, true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestGatedMCPToolDeniesARequestToolWithNoGate(t *testing.T) {
 	inner := &recordingMCPTool{name: "mcp__burp__send_http1_request", output: "sent"}
 	tool := gatedMCPTool{inner: inner, server: "burp", remote: "send_http1_request"}
 	out, err := tool.Call(context.Background(),
-		engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: x\r\n\r\n`, "10.0.0.5", 443, true))
+		engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: 10.0.0.5\r\n\r\n`, "10.0.0.5", 443, true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,7 +500,7 @@ func TestGatedMCPToolRefusesAnOutOfScopeHost(t *testing.T) {
 		t.Fatal("a request tool with a gate must be registered")
 	}
 	out, err := tool.Call(context.Background(),
-		engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: x\r\n\r\n`, "8.8.8.8", 443, true))
+		engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: 8.8.8.8\r\n\r\n`, "8.8.8.8", 443, true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,7 +519,7 @@ func TestGatedMCPToolRefusesAStateChangingMethodOnAnUnarmedTask(t *testing.T) {
 		t.Fatal("a request tool with a gate must be registered")
 	}
 	out, err := tool.Call(context.Background(),
-		engageMCPRequestArgs(`POST /login HTTP/1.1\r\nHost: x\r\n\r\n`, "10.0.0.5", 443, true))
+		engageMCPRequestArgs(`POST /login HTTP/1.1\r\nHost: 10.0.0.5\r\n\r\n`, "10.0.0.5", 443, true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,7 +537,7 @@ func TestGatedMCPToolAllowsAReadMethodAtAnInScopeHost(t *testing.T) {
 	if !ok {
 		t.Fatal("a request tool with a gate must be registered")
 	}
-	args := engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: x\r\n\r\n`, "10.0.0.5", 443, true)
+	args := engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: 10.0.0.5\r\n\r\n`, "10.0.0.5", 443, true)
 	out, err := tool.Call(context.Background(), args)
 	if err != nil {
 		t.Fatal(err)
@@ -690,8 +690,8 @@ func TestEngageMCPHTTP2ReadsThePseudoHeaders(t *testing.T) {
 // remote tool.
 func TestGatedMCPRequestToolRefusesAPivotedWebSurface(t *testing.T) {
 	args := map[string]string{
-		"send_http1_request": engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: x\r\n\r\n`, "10.0.0.5", 443, true),
-		"send_to_intruder":   engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: x\r\n\r\n`, "10.0.0.5", 443, true),
+		"send_http1_request": engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: 10.0.0.5\r\n\r\n`, "10.0.0.5", 443, true),
+		"send_to_intruder":   engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: 10.0.0.5\r\n\r\n`, "10.0.0.5", 443, true),
 		"send_http2_request": engageMCPHTTP2Args(t, map[string]any{":method": "GET", ":path": "/a"}, "10.0.0.5", 443, true),
 	}
 	for remote, call := range args {
@@ -721,5 +721,82 @@ func TestGatedMCPRequestToolRefusesAPivotedWebSurface(t *testing.T) {
 		if direct.calls != 1 {
 			t.Errorf("%s: the same call with no foothold reached the remote tool %d times, want 1", remote, direct.calls)
 		}
+	}
+}
+
+// TestEngageMCPTargetReadsTheAuthoritiesARequestNames pins which hosts a request
+// names besides its connection target: the Host header, an absolute-form or
+// CONNECT request target, and on HTTP/2 the :authority pseudo-header and a host
+// header. A server routes on these, so each is a destination the gate has to
+// see. Two Host headers are refused, because servers disagree about which wins.
+func TestEngageMCPTargetReadsTheAuthoritiesARequestNames(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		tool string
+		args string
+		want []string
+		err  error
+	}{
+		{"host header", "send_http1_request", engageMCPRequestArgs(`GET / HTTP/1.1\r\nHost: app.example\r\n\r\n`, "10.0.0.5", 443, true), []string{"app.example"}, nil},
+		{"host header with a port and case", "send_http1_request", engageMCPRequestArgs(`GET / HTTP/1.1\r\nhost: App.Example:8443\r\n\r\n`, "10.0.0.5", 443, true), []string{"app.example"}, nil},
+		{"ipv6 host header", "send_http1_request", engageMCPRequestArgs(`GET / HTTP/1.1\r\nHost: [fd00::1]:80\r\n\r\n`, "10.0.0.5", 443, true), []string{"fd00::1"}, nil},
+		{"absolute-form target", "send_http1_request", engageMCPRequestArgs(`GET http://evil.target/x HTTP/1.1\r\nHost: app.example\r\n\r\n`, "10.0.0.5", 80, false), []string{"evil.target", "app.example"}, nil},
+		{"connect target", "send_to_intruder", engageMCPRequestArgs(`CONNECT evil.target:443 HTTP/1.1\r\n\r\n`, "10.0.0.5", 443, true), []string{"evil.target"}, nil},
+		{"no host header", "send_http1_request", engageMCPRequestArgs(`GET / HTTP/1.0\r\n\r\n`, "10.0.0.5", 443, true), nil, nil},
+		{"two host headers", "send_http1_request", engageMCPRequestArgs(`GET / HTTP/1.1\r\nHost: 10.0.0.5\r\nHost: evil.target\r\n\r\n`, "10.0.0.5", 443, true), nil, errEngageMCPHostHeaders},
+		{"unreadable host header", "send_http1_request", engageMCPRequestArgs(`GET / HTTP/1.1\r\nHost: a b\r\n\r\n`, "10.0.0.5", 443, true), nil, errEngageMCPAuthority},
+		{"http2 authority and host header", "send_http2_request", `{"headers":{"Host":"other.target"},"pseudoHeaders":{":method":"GET",":path":"/",":authority":"Evil.Target:443"},"requestBody":"","targetHostname":"10.0.0.5","targetPort":443,"usesHttps":true}`, []string{"evil.target", "other.target"}, nil},
+		{"http2 host header that is not a string", "send_http2_request", `{"headers":{"host":["a"]},"pseudoHeaders":{":method":"GET"},"targetHostname":"10.0.0.5","targetPort":443}`, nil, errEngageMCPAuthority},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			target, err := engageMCPTargetFromArgs(c.tool, c.args)
+			if !errors.Is(err, c.err) {
+				t.Fatalf("error = %v, want %v", err, c.err)
+			}
+			if c.err == nil && !slices.Equal(target.Authorities, c.want) {
+				t.Errorf("authorities = %q, want %q", target.Authorities, c.want)
+			}
+		})
+	}
+}
+
+// TestGatedMCPRequestToolScopesTheAuthorityItNames pins that a request tool may
+// name only an in-scope host, or its own connection target, in the authorities
+// a server routes on. Without this a send to an in-scope address could carry an
+// out-of-scope virtual host behind it. The refusal comes before the gate, so a
+// refused call spends nothing, and the in-scope control reaches the remote tool.
+func TestGatedMCPRequestToolScopesTheAuthorityItNames(t *testing.T) {
+	for _, c := range []struct {
+		name, tool, args string
+		allowed          bool
+	}{
+		{"out-of-scope host header", "send_http1_request", engageMCPRequestArgs(`GET / HTTP/1.1\r\nHost: out-of-scope.example\r\n\r\n`, "10.0.0.5", 443, true), false},
+		{"out-of-scope absolute-form target", "send_http1_request", engageMCPRequestArgs(`GET http://out-of-scope.example/ HTTP/1.1\r\nHost: 10.0.0.5\r\n\r\n`, "10.0.0.5", 443, true), false},
+		{"out-of-scope http2 authority", "send_http2_request", engageMCPHTTP2Args(t, map[string]any{":method": "GET", ":path": "/", ":authority": "out-of-scope.example"}, "10.0.0.5", 443, true), false},
+		{"in-scope address in the host header", "send_http1_request", engageMCPRequestArgs(`GET / HTTP/1.1\r\nHost: 10.0.0.6\r\n\r\n`, "10.0.0.5", 443, true), true},
+		{"host header naming the target", "send_http1_request", engageMCPRequestArgs(`GET / HTTP/1.1\r\nHost: 10.0.0.5:443\r\n\r\n`, "10.0.0.5", 443, true), true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			inner := &recordingMCPTool{name: "mcp__burp__" + c.tool, output: "sent"}
+			tool, ok := newGatedMCPTool(inner, "burp", c.tool, autoGate(t), false)
+			if !ok {
+				t.Fatal("a request tool with a gate must be registered")
+			}
+			out, err := tool.Call(context.Background(), c.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.allowed && inner.calls != 1 {
+				t.Fatalf("an in-scope authority was refused: %q", out)
+			}
+			if !c.allowed {
+				if inner.calls != 0 {
+					t.Fatal("an out-of-scope authority reached the remote tool")
+				}
+				if !strings.Contains(out, "out-of-scope.example") || !strings.Contains(out, "not in scope") {
+					t.Errorf("refusal %q must name the authority and say it is not in scope", out)
+				}
+			}
+		})
 	}
 }

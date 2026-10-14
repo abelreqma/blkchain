@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -117,9 +118,14 @@ func engageMCPClassify(server, tool string) engageMCPAction {
 }
 
 // engageMCPRequestTarget is the method and absolute URL one request tool's
-// arguments resolve to, as the gate reads them.
+// arguments resolve to, as the gate reads them, and the hosts the request names
+// for a server to route on.
 type engageMCPRequestTarget struct {
 	Method, URL string
+	// Authorities are the hosts the request itself names: the Host header, an
+	// absolute-form or CONNECT request target, and on HTTP/2 the :authority
+	// pseudo-header and a host header. Each is lower-cased, without its port.
+	Authorities []string
 }
 
 var (
@@ -131,6 +137,8 @@ var (
 	errEngageMCPHTTP2Content  = errors.New("send_http2_request takes its request line as pseudoHeaders, not content")
 	errEngageMCPPseudoHeaders = errors.New("pseudoHeaders must be an object whose :method and :path are strings")
 	errEngageMCPPivotedWeb    = errors.New("a foothold carries the web surface and this tool sends from this host, not through the foothold; use the web tools")
+	errEngageMCPHostHeaders   = errors.New("the request carries more than one Host header")
+	errEngageMCPAuthority     = errors.New("the request names a host that is not an IP address or a hostname")
 )
 
 const (
@@ -270,6 +278,10 @@ func engageMCPTargetFromArgs(tool, args string) (engageMCPRequestTarget, error) 
 	if err != nil {
 		return engageMCPRequestTarget{}, err
 	}
+	authorities, err := engageMCPRequestAuthorities(tool, values)
+	if err != nil {
+		return engageMCPRequestTarget{}, err
+	}
 	scheme := "http"
 	if https, ok := values["usesHttps"].(bool); ok && https {
 		scheme = "https"
@@ -295,7 +307,125 @@ func engageMCPTargetFromArgs(tool, args string) (engageMCPRequestTarget, error) 
 	if tool == "send_to_intruder" {
 		method = engageMCPIntruderMethod
 	}
-	return engageMCPRequestTarget{Method: method, URL: raw}, nil
+	return engageMCPRequestTarget{Method: method, URL: raw, Authorities: authorities}, nil
+}
+
+// engageMCPRequestAuthorities returns the hosts a request names for a server to
+// route on, which can differ from the connection target the gate checks: a
+// shared host or a CDN at an in-scope address serves whichever virtual host the
+// request names. Callers have already validated content or pseudoHeaders.
+func engageMCPRequestAuthorities(tool string, values map[string]any) ([]string, error) {
+	var named []string
+	add := func(authority string) error {
+		host, err := engageMCPAuthorityHost(authority)
+		if err == nil {
+			named = append(named, host)
+		}
+		return err
+	}
+	if tool == "send_http2_request" {
+		pseudo, _ := values["pseudoHeaders"].(map[string]any)
+		if raw, present := pseudo[":authority"]; present {
+			value, ok := raw.(string)
+			if !ok {
+				return nil, errEngageMCPAuthority
+			}
+			if err := add(value); err != nil {
+				return nil, err
+			}
+		}
+		headers, _ := values["headers"].(map[string]any)
+		keys := make([]string, 0, len(headers))
+		for key := range headers {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		for _, key := range keys {
+			if !strings.EqualFold(key, "host") {
+				continue
+			}
+			value, ok := headers[key].(string)
+			if !ok {
+				return nil, errEngageMCPAuthority
+			}
+			if err := add(value); err != nil {
+				return nil, err
+			}
+		}
+		return named, nil
+	}
+	content, _ := values["content"].(string)
+	lines := strings.Split(strings.ReplaceAll(strings.TrimLeft(content, " \t\r\n"), "\r\n", "\n"), "\n")
+	if fields := strings.Fields(lines[0]); len(fields) >= 2 {
+		target := fields[1]
+		switch {
+		case strings.Contains(target, "://"):
+			parsed, err := url.Parse(target)
+			if err != nil || parsed.Host == "" {
+				return nil, errEngageMCPAuthority
+			}
+			if err := add(parsed.Host); err != nil {
+				return nil, err
+			}
+		case strings.EqualFold(fields[0], "CONNECT"):
+			if err := add(target); err != nil {
+				return nil, err
+			}
+		}
+	}
+	hosts := 0
+	for _, line := range lines[1:] {
+		if line == "" {
+			break
+		}
+		name, value, ok := strings.Cut(line, ":")
+		if !ok || !strings.EqualFold(strings.TrimSpace(name), "host") {
+			continue
+		}
+		if hosts++; hosts > 1 {
+			return nil, errEngageMCPHostHeaders
+		}
+		if err := add(strings.TrimSpace(value)); err != nil {
+			return nil, err
+		}
+	}
+	return named, nil
+}
+
+// engageMCPAuthorityHost reduces one authority to its host, lower-cased and
+// without a port, brackets or a trailing dot, and refuses anything that is not
+// an IP address or a DNS name.
+func engageMCPAuthorityHost(authority string) (string, error) {
+	authority = strings.TrimSpace(authority)
+	host := authority
+	if h, _, err := net.SplitHostPort(authority); err == nil {
+		host = h
+	} else if strings.HasPrefix(authority, "[") && strings.HasSuffix(authority, "]") {
+		host = authority[1 : len(authority)-1]
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "" || (net.ParseIP(host) == nil && !engageMCPHostPattern.MatchString(host)) {
+		return "", errEngageMCPAuthority
+	}
+	return host, nil
+}
+
+// engageMCPOutOfScopeAuthority returns the first host the request names that is
+// neither its own connection target, which the gate checks, nor in scope, or ""
+// when there is none.
+func engageMCPOutOfScopeAuthority(target engageMCPRequestTarget, scope *secgate.Scope) string {
+	parsed, err := url.Parse(target.URL)
+	if err != nil {
+		return "unparsed request URL"
+	}
+	connected := strings.ToLower(parsed.Hostname())
+	for _, host := range target.Authorities {
+		if host == connected || (scope != nil && scope.InScope(host)) {
+			continue
+		}
+		return host
+	}
+	return ""
 }
 
 // engageMCPRequestLine reads the method and origin-form path one request tool
@@ -381,6 +511,11 @@ func (t gatedMCPTool) Call(ctx context.Context, args string) (string, error) {
 		// read per call because one can be attached while the task runs.
 		if t.gate.EffectiveFoothold().Covers(secgate.SurfaceWeb) {
 			return t.Name() + ": " + errEngageMCPPivotedWeb.Error(), nil
+		}
+		// A server routes on the hosts the request names, so each one is held to
+		// scope here, before the gate spends anything on the connection target.
+		if host := engageMCPOutOfScopeAuthority(target, t.gate.Scope); host != "" {
+			return t.Name() + ": the request names " + host + ", which is not in scope", nil
 		}
 		decision := t.gate.AuthorizeAPIRequest(ctx, secgate.APIRequest{
 			Method: target.Method,
