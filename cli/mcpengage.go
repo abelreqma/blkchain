@@ -23,8 +23,8 @@ import (
 // mcpengage.go adds the `engage` MCP tool: it runs the gated agentic
 // orchestrator to completion for a goal in an ephemeral per-call workspace and
 // returns the final answer plus an engagement snapshot. Confirmation adapts to
-// MCP: `confirm="elicit"` (default) asks the client to approve each command via
-// elicitation; `confirm="auto"` runs /auto where the gate is the whole control.
+// MCP: `confirm="auto"` (default) runs /auto where the gate is the whole control;
+// `confirm="elicit"` asks the client to approve each command via elicitation.
 // Every command still flows through the unchanged secgate.Gate.
 
 // mcpEngageIn is the engage tool input. Scope is required inline content, never
@@ -33,7 +33,7 @@ type mcpEngageIn struct {
 	Goal    string `json:"goal" jsonschema:"the engagement goal"`
 	RoE     string `json:"roe" jsonschema:"complete inline ROE.md Markdown with scope, allowed actions, exclusions, resource caps and runner"`
 	Scope   string `json:"scope,omitempty" jsonschema:"retired inline scope format; use roe"`
-	Confirm string `json:"confirm,omitempty" jsonschema:"confirmation model: 'elicit' (default, per-command approval via elicitation) or 'auto' (no per-command approval; the gate is the whole control)"`
+	Confirm string `json:"confirm,omitempty" jsonschema:"confirmation model: 'auto' (default, no per-command approval; the gate is the whole control) or 'elicit' (per-command approval via elicitation)"`
 	Model   string `json:"model,omitempty" jsonschema:"chat model id (default: the resolved model)"`
 }
 
