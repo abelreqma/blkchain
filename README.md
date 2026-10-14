@@ -380,6 +380,36 @@ The server bounds its own work:
 | Request rate | 240 per minute with a burst of 32, shared by all callers of the server and refused with 429. |
 | Request head | 10 seconds to arrive. An idle kept-alive connection closes after 2 minutes. |
 
+### Operator instruments by surface
+
+The outbound MCP tools and the out-of-band tools reach both the chat surfaces and an engagement task, under different authorization. On the chat path, each server's `allow_tools` list in `mcp-clients.json` is the whole boundary. In an engagement, every outbound MCP tool is classified in code, and a tool that sends a request at a host is authorized by the same gate as a native web request. Burp's server registers only for a task on the web surface, so a task on the network, local, Active Directory, cloud, container or AI-application surface is offered none of its tools.
+
+| Tool | Chat surfaces | Engagement task on the web surface |
+| --- | --- | --- |
+| `send_http1_request`, `send_http2_request`, `send_to_intruder` | Available if allowlisted. No code-side gate. | Gated on engagement scope, phase tier and the task's arm state. |
+| Burp's nine read tools, `get_proxy_http_history` through `get_collaborator_interactions` | Available if allowlisted. | Available. A read is not filtered by engagement scope. |
+| Burp's six pure tools: the four encoders, `generate_random_string` and `generate_collaborator_payload` | Available if allowlisted. | Available. |
+| Burp's seven instrument-state tools: the five `set_*` forms and the two `create_repeater_tab` forms | Available if allowlisted. | Denied. |
+| `output_project_options`, `output_user_options` | Available if allowlisted. | Denied. |
+| A tool, or a server, this code does not classify | Available if allowlisted. | Not registered. |
+| `oob_payload`, `oob_interactions` | Available on a turn that names a target. | Available on every surface. No scope check. |
+
+A request tool's call goes through the same `secgate` path as the native `web_api` tool, so an out-of-scope host is denied, a state-changing method is tiered as exploit and needs an armed task, and the host, transport and port still need an observation from the same vantage, which the gate's own bounded probe can supply. The authority comes from the call's own `targetHostname` and `targetPort` rather than the request's `Host` header, because the connection target is what the packet reaches; a request whose `Host` disagrees is scoped on the connection target anyway. An origin-form request target read from the raw request line is carried into the URL, so a confirmation names a path rather than an authority alone; a target that is not origin form, or that holds `//`, contributes no path and the authority is confirmed alone. `send_to_intruder` reaches the gate as `web-api:INTRUDER-FUZZ`, which the gate tiers as active whatever the request line says.
+
+`output_project_options` and `output_user_options` dump configuration that can carry upstream-proxy credentials, platform-authentication credentials and API keys. The chat path keeps them, where an operator sees the call and decides. An engagement task runs without that attention and its output reaches the engagement transcript, so an ungated read there writes the operator's own credentials into the record of an engagement against someone else's estate. Proxy history is readable without them.
+
+The classification denies by default: a tool this code does not name, and every tool of a server it does not name, is not registered for an engagement task. A GitHub or filesystem MCP server therefore reaches a chat turn and not an engagement task until it is classified. That friction is deliberate, because an autonomous task inherits only what has been reasoned about rather than whatever is wired for interactive use.
+
+An MCP server that cannot be opened costs that server's tools and not the task. The task runs on with its own tools, no `mcp__*` tool is registered, and `mcp-unavailable` is recorded in the engagement's `audit.jsonl`; a failure to write that record fails the task, because a silent degradation is what the record exists to prevent. A malformed `mcp-clients.json` fails the task, because a config written wrongly is not a transient instrument state. On the chat path both are fatal and the operator driving the turn sees the error.
+
+`oob_payload` and `oob_interactions` register for every engagement surface, because any surface can be made to call out and a blind callback from a cloud metadata probe or an Active Directory relay is as much a finding as one from a web parameter. They take no scope check: the interactsh server is the operator's own infrastructure, in the same class as the model server and the vector store, so a check keyed on engagement targets would deny it. Their bounds are the control: four servers, four payloads, fifty interactions per report, a 256 KiB window over the recorded interactions, an 8 KiB client log and a thirty-minute session. Injecting a payload into a target is a separate action the gate authorizes. They register only where `BLKCHAIN_OOB_SERVER` names an interactsh server and an `interactsh-client` binary is available.
+
+Two exposures remain. The proxy-history tools return the whole Burp project's history, which is not filtered by engagement scope and can hold the operator's own browsing and another engagement's traffic, credentials in headers included; `get_active_editor_contents` returns whatever request is open in the instrument. Filtering that from outside Burp is not possible, and reading what Burp saw is the point of the integration. And `get_collaborator_interactions` is classified as a read yet does cause outbound traffic, because Burp polls its Collaborator server to answer it, though the destination is not caller-controlled.
+
+Burp's tools inform a task; they do not produce its evidence. Where these tools register, `record_evidence` accepts only a quote the task's own captured output already holds, which the `run_command` tools and the native web capture path write. The outbound MCP tools write nothing there, so a finding resting on proxy history, a scanner issue, a Collaborator interaction or the output of an authorized `send_http1_request` has to be reproduced through `run_command` or the web tools before it can be recorded.
+
+Burp's traffic routing is separate from its MCP tools and is not what authorizes one. The engagement web stack sends its own requests through a loopback intercepting proxy when one is listening, so Burp and equivalents see the requests that stack makes from a direct surface; a pivoted surface takes no upstream proxy, because it dials through the foothold carrier that an upstream proxy would replace. The proxy is on by default at `127.0.0.1:8080`, and off when `BLKCHAIN_WEB_PROXY` is `off`, when nothing is listening, or when the value is not a loopback IP address and a TCP port. The trust anchor is whatever is listening on that address, so the notice names the CA subject it accepted. `BLKCHAIN_WEB_PROXY_CA` reads the certificate from a file instead of fetching it through the proxy.
+
 ## Architecture
 
 | Component | Responsibility |
