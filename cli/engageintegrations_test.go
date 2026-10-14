@@ -46,16 +46,38 @@ var engageMCPFixtureRegistered = []string{
 // engageOOBRegistered is the out-of-band pair, sorted.
 var engageOOBRegistered = []string{"oob_interactions", "oob_payload"}
 
+// engageMCPWriteConfig writes one MCP client config naming server and points
+// chatMCPConfigEnv at it.
+func engageMCPWriteConfig(t *testing.T, server chatMCPServer) {
+	t.Helper()
+	data, err := json.Marshal(chatMCPConfig{Servers: []chatMCPServer{server}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "mcp-clients.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(chatMCPConfigEnv, path)
+}
+
 // engageMCPFixtureServer starts an MCP server offering tools over a loopback
-// HTTP listener and points BLKCHAIN_MCP_CLIENT_CONFIG at a config naming it
-// server.
+// HTTP listener and allowlists exactly what it offers.
 func engageMCPFixtureServer(t *testing.T, server string, tools []string) {
+	t.Helper()
+	engageMCPFixtureServerAllowing(t, server, tools, tools)
+}
+
+// engageMCPFixtureServerAllowing starts an MCP server offering offered over a
+// loopback HTTP listener and allowlists allowed, which lets a test configure an
+// allowlist the server does not satisfy.
+func engageMCPFixtureServerAllowing(t *testing.T, server string, offered, allowed []string) {
 	t.Helper()
 	fixture := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1"}, nil)
 	type input struct {
 		Message string `json:"message"`
 	}
-	for _, name := range tools {
+	for _, name := range offered {
 		mcp.AddTool(fixture, &mcp.Tool{Name: name, Description: "fixture tool"},
 			func(_ context.Context, _ *mcp.CallToolRequest, in input) (*mcp.CallToolResult, any, error) {
 				return nil, map[string]any{"echo": in.Message}, nil
@@ -65,46 +87,27 @@ func engageMCPFixtureServer(t *testing.T, server string, tools []string) {
 		func(*http.Request) *mcp.Server { return fixture },
 		&mcp.StreamableHTTPOptions{JSONResponse: true}))
 	t.Cleanup(endpoint.Close)
-	data, err := json.Marshal(chatMCPConfig{Servers: []chatMCPServer{{
-		Name: server, Transport: "http", URL: endpoint.URL, AllowTools: tools,
-	}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "mcp-clients.json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", path)
+	engageMCPWriteConfig(t, chatMCPServer{
+		Name: server, Transport: "http", URL: endpoint.URL, AllowTools: allowed,
+	})
 }
 
-// engageMCPClosedServer points the MCP client config at a server on a loopback
-// port with nothing listening, which is how a configured Burp looks while Burp
-// is closed. The listener is started only to take a port and is closed before
-// the config naming it is written, so the test reaches nothing.
+// engageMCPClosedServer points the MCP client config at a loopback URL on port
+// 0, which is how a configured Burp looks while Burp is closed. Port 0 can hold
+// no listener, so the dial fails inside the kernel: nothing is listening, and no
+// port has to stay free for that to hold.
 func engageMCPClosedServer(t *testing.T, server string, tools []string) {
 	t.Helper()
-	endpoint := httptest.NewServer(http.NotFoundHandler())
-	closed := endpoint.URL
-	endpoint.Close()
-	data, err := json.Marshal(chatMCPConfig{Servers: []chatMCPServer{{
-		Name: server, Transport: "http", URL: closed, AllowTools: tools,
-	}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "mcp-clients.json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", path)
+	engageMCPWriteConfig(t, chatMCPServer{
+		Name: server, Transport: "http", URL: "http://127.0.0.1:0", AllowTools: tools,
+	})
 }
 
 // engageNoMCPConfig points the MCP client config at an absent file, which is how
 // an operator with no outbound MCP server configured looks.
 func engageNoMCPConfig(t *testing.T) {
 	t.Helper()
-	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", filepath.Join(t.TempDir(), "absent.json"))
+	t.Setenv(chatMCPConfigEnv, filepath.Join(t.TempDir(), "absent.json"))
 }
 
 // engageIntegrationDeps builds the deps a gated executor holds: a real gate over
@@ -203,8 +206,31 @@ func TestEngageIntegrationsRegisterNoRequestToolWithoutAGate(t *testing.T) {
 // mcp__ tool, and the degradation is in the audit record. The chat path's fatal
 // handling is unchanged, which is the difference between an attended turn and a
 // task.
+//
+// The two cases fail at different points of the session walk. A server that
+// cannot be reached fails before any tool is built. A server that does not offer
+// an allowlisted tool fails in the check that runs after its tool loop, once the
+// tools it did offer have already reached the sink, so it is the case that shows
+// those tools were not registered. mcp-clients.example.json's own note makes the
+// second the expected one: the allowlist has to match the Burp version.
 func TestEngageIntegrationsDegradeWhenAnMCPServerCannotBeOpened(t *testing.T) {
-	engageMCPClosedServer(t, engageMCPWebInstrument, engageMCPFixtureTools)
+	t.Run("the server cannot be reached", func(t *testing.T) {
+		engageMCPClosedServer(t, engageMCPWebInstrument, engageMCPFixtureTools)
+		assertEngageMCPDegradesWithNoToolRegistered(t)
+	})
+	t.Run("the server does not offer an allowlisted tool", func(t *testing.T) {
+		absent := append(append([]string{}, engageMCPFixtureTools...), "send_http2_request")
+		engageMCPFixtureServerAllowing(t, engageMCPWebInstrument, engageMCPFixtureTools, absent)
+		assertEngageMCPDegradesWithNoToolRegistered(t)
+	})
+}
+
+// assertEngageMCPDegradesWithNoToolRegistered registers the integrations over
+// whatever MCP client config the caller set up and asserts the three parts of
+// the degrade: no error, nothing in the registry but the executor's own tool,
+// and the audit record.
+func assertEngageMCPDegradesWithNoToolRegistered(t *testing.T) {
+	t.Helper()
 	ws, err := engagement.OpenWorkspace(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
