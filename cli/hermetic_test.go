@@ -62,6 +62,12 @@ func TestMain(m *testing.M) {
 			panic("hermetic test state: " + err.Error())
 		}
 	}
+	// An operator with a serve token exported would otherwise have the whole
+	// suite authenticate, so a request a test builds without one would be
+	// refused for a reason the test never set up.
+	if err := os.Unsetenv(serveTokenEnv); err != nil {
+		panic("hermetic test state: " + err.Error())
+	}
 	code := m.Run()
 	os.RemoveAll(dir) // os.Exit runs no deferred call, so clean up first.
 	os.Exit(code)
