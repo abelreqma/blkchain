@@ -104,12 +104,7 @@ func TestBurpProxyCapturesEngageWebCollect(t *testing.T) {
 		_, _ = w.Write([]byte("<html><body>burp acceptance fixture</body></html>"))
 	}))
 	defer target.Close()
-	forgetWebProxy(webProxyDefaultAddress)
-	t.Setenv(webProxyEnv, webProxyDefaultAddress)
-	t.Cleanup(func() { forgetWebProxy(webProxyDefaultAddress) })
-	if upstream := webUpstreamProxy(); upstream == nil {
-		t.Skipf("no proxy listening at %s; start Burp's proxy listener", webProxyDefaultAddress)
-	}
+	useBurpE2EProxy(t)
 	roePath := filepath.Join(t.TempDir(), "ROE.md")
 	if err := os.WriteFile(roePath, []byte("## In Scope\n127.0.0.1\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -158,12 +153,7 @@ func TestBurpWebSocketHistoryCapturesAcquisition(t *testing.T) {
 		_ = conn.WriteMessage(websocket.TextMessage, []byte("burp acceptance fixture"))
 	}))
 	defer target.Close()
-	forgetWebProxy(webProxyDefaultAddress)
-	t.Setenv(webProxyEnv, webProxyDefaultAddress)
-	t.Cleanup(func() { forgetWebProxy(webProxyDefaultAddress) })
-	if upstream := webUpstreamProxy(); upstream == nil {
-		t.Skipf("no proxy listening at %s; start Burp's proxy listener", webProxyDefaultAddress)
-	}
+	useBurpE2EProxy(t)
 	scope, err := secgate.ParseScope(strings.NewReader("127.0.0.1\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -200,4 +190,23 @@ func TestBurpWebSocketHistoryCapturesAcquisition(t *testing.T) {
 		t.Fatalf("the sent frame was not found in Burp's WebSocket history (%d bytes of history matched)", len(out))
 	}
 	t.Logf("a WebSocket frame sent to %s was found in Burp's WebSocket history", target.URL)
+}
+
+// burpE2EProxyAddress is Burp's default proxy listener.
+const burpE2EProxyAddress = "127.0.0.1:8080"
+
+// useBurpE2EProxy routes the web stack through Burp's listener, skipping the
+// test when the listener or the operator-exported Burp CA named by
+// webProxyCAEnv is missing.
+func useBurpE2EProxy(t *testing.T) {
+	t.Helper()
+	if os.Getenv(webProxyCAEnv) == "" {
+		t.Skipf("set %s to Burp's exported CA certificate", webProxyCAEnv)
+	}
+	forgetWebProxy(burpE2EProxyAddress)
+	t.Setenv(webProxyEnv, burpE2EProxyAddress)
+	t.Cleanup(func() { forgetWebProxy(burpE2EProxyAddress) })
+	if upstream := webUpstreamProxy(); upstream == nil {
+		t.Skipf("no usable proxy at %s; start Burp's proxy listener", burpE2EProxyAddress)
+	}
 }

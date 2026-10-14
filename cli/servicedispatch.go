@@ -400,12 +400,9 @@ func probeWebEndpoint(ctx context.Context, g *secgate.Gate, ep serviceEndpoint) 
 }
 
 func probeLoopbackProxy(ctx context.Context, ip net.IP, port int) bool {
-	setting := strings.TrimSpace(os.Getenv("BLKCHAIN_WEB_PROXY"))
-	if strings.EqualFold(setting, "off") {
-		return false
-	}
+	setting := webProxyAddress()
 	if setting == "" {
-		setting = "127.0.0.1:8080"
+		return false
 	}
 	host, proxyPort, err := net.SplitHostPort(setting)
 	proxyIP := net.ParseIP(host)

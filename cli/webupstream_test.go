@@ -24,13 +24,12 @@ import (
 	"blkchain/cli/internal/webacquire"
 )
 
-// proxyStandIn is a loopback stand-in for an intercepting proxy. It serves a CA
-// certificate at the endpoint Burp uses, answers absolute-form requests itself,
-// and records what it was handed.
+// proxyStandIn is a loopback stand-in for an intercepting proxy. It answers
+// absolute-form requests itself and records what it was handed. It also counts
+// requests to the endpoint Burp serves its CA on, which blk never fetches.
 type proxyStandIn struct {
 	server    *httptest.Server
 	ca        []byte
-	caStatus  int
 	caFetches atomic.Int32
 	mu        sync.Mutex
 	requests  []string
@@ -42,10 +41,6 @@ func newProxyStandIn(t *testing.T) *proxyStandIn {
 	p.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Host == "burp" && r.URL.Path == "/cert" {
 			p.caFetches.Add(1)
-			if p.caStatus != 0 {
-				w.WriteHeader(p.caStatus)
-				return
-			}
 			_, _ = w.Write(p.ca)
 			return
 		}
@@ -67,10 +62,18 @@ func (p *proxyStandIn) seen() []string {
 }
 
 // useProxyStandIn points the web stack at the stand-in and clears the per-address
-// resolution so the test sees its own probe and certificate fetch.
-func useProxyStandIn(t *testing.T, address string) {
+// resolution so the test sees its own probe. A non-nil ca is written to a file
+// named by webProxyCAEnv, the only source of the proxy's trust anchor.
+func useProxyStandIn(t *testing.T, address string, ca []byte) {
 	t.Helper()
 	t.Setenv(webProxyEnv, address)
+	if ca != nil {
+		path := filepath.Join(t.TempDir(), "proxy-ca.der")
+		if err := os.WriteFile(path, ca, 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(webProxyCAEnv, path)
+	}
 	forgetWebProxy(address)
 	t.Cleanup(func() { forgetWebProxy(address) })
 }
@@ -149,7 +152,7 @@ func TestWebProxyUnreachableFallsBackToDirect(t *testing.T) {
 		t.Fatal(err)
 	}
 	notices := captureProxyNotices(t)
-	useProxyStandIn(t, address)
+	useProxyStandIn(t, address, testCACertificate(t))
 	if upstream := webUpstreamProxy(); upstream != nil {
 		t.Fatalf("a closed port resolved a proxy: %+v", upstream)
 	}
@@ -158,31 +161,50 @@ func TestWebProxyUnreachableFallsBackToDirect(t *testing.T) {
 	}
 }
 
-// TestWebProxyWithoutACertificateFallsBackToDirect pins that a proxy whose CA
-// cannot be obtained is not used. The alternative would be to send target
-// traffic through it without verifying the leaves it re-signs.
-func TestWebProxyWithoutACertificateFallsBackToDirect(t *testing.T) {
-	proxy := newProxyStandIn(t)
-	proxy.caStatus = http.StatusInternalServerError
+// TestWebProxyIsOffUnlessConfigured pins that no proxy is used, and none is
+// probed, until the operator names one. A default address would hand engagement
+// traffic to whatever local process listens on it, another account's included.
+func TestWebProxyIsOffUnlessConfigured(t *testing.T) {
 	notices := captureProxyNotices(t)
-	useProxyStandIn(t, proxy.address())
+	t.Setenv(webProxyEnv, "")
+	t.Setenv(webProxyCAEnv, "")
 	if upstream := webUpstreamProxy(); upstream != nil {
-		t.Fatalf("a proxy with no CA resolved anyway: %+v", upstream)
+		t.Fatalf("an unset proxy setting resolved a proxy: %+v", upstream)
 	}
-	if proxy.caFetches.Load() != 1 {
-		t.Fatalf("the certificate endpoint was asked %d times", proxy.caFetches.Load())
+	if len(*notices) != 0 {
+		t.Fatalf("an unset proxy setting produced notices: %v", *notices)
 	}
-	if len(*notices) != 1 || !strings.Contains((*notices)[0], "no usable CA certificate") {
-		t.Fatalf("the fallback was not reported: %v", *notices)
+	if probeLoopbackProxy(context.Background(), net.ParseIP("127.0.0.1"), 9) {
+		t.Fatal("the service probe used a proxy the operator did not name")
 	}
 }
 
-// TestWebProxyFetchesTheCertificateOncePerProcess pins the cache: the CA is
-// sourced on the first resolution and reused afterwards.
-func TestWebProxyFetchesTheCertificateOncePerProcess(t *testing.T) {
+// TestWebProxyRequiresAnOperatorCertificate pins that a configured proxy is
+// used only with a CA the operator supplied. The certificate is never fetched
+// from the listener, because whatever is listening would then choose the trust
+// anchor for every leaf it re-signs.
+func TestWebProxyRequiresAnOperatorCertificate(t *testing.T) {
+	proxy := newProxyStandIn(t)
+	notices := captureProxyNotices(t)
+	t.Setenv(webProxyCAEnv, "")
+	useProxyStandIn(t, proxy.address(), nil)
+	if upstream := webUpstreamProxy(); upstream != nil {
+		t.Fatalf("a proxy with no operator CA resolved anyway: %+v", upstream)
+	}
+	if proxy.caFetches.Load() != 0 {
+		t.Fatalf("the certificate endpoint was asked %d times", proxy.caFetches.Load())
+	}
+	if len(*notices) != 1 || !strings.Contains((*notices)[0], webProxyCAEnv) {
+		t.Fatalf("the fallback did not name %s: %v", webProxyCAEnv, *notices)
+	}
+}
+
+// TestWebProxyResolvesOncePerProcess pins the cache: the proxy is probed and
+// its CA read on the first resolution and reused afterwards.
+func TestWebProxyResolvesOncePerProcess(t *testing.T) {
 	proxy := newProxyStandIn(t)
 	captureProxyNotices(t)
-	useProxyStandIn(t, proxy.address())
+	useProxyStandIn(t, proxy.address(), proxy.ca)
 	upstream := webUpstreamProxy()
 	if upstream == nil || upstream.Address != proxy.address() || upstream.RootCAs == nil {
 		t.Fatalf("a reachable proxy did not resolve: %+v", upstream)
@@ -190,7 +212,7 @@ func TestWebProxyFetchesTheCertificateOncePerProcess(t *testing.T) {
 	if again := webUpstreamProxy(); again != upstream {
 		t.Fatalf("the resolution was repeated: %+v then %+v", upstream, again)
 	}
-	if proxy.caFetches.Load() != 1 {
+	if proxy.caFetches.Load() != 0 {
 		t.Fatalf("the certificate endpoint was asked %d times", proxy.caFetches.Load())
 	}
 }
@@ -201,7 +223,7 @@ func TestWebProxyFetchesTheCertificateOncePerProcess(t *testing.T) {
 func TestWebProxyReportsTheAddressAndCAItAccepted(t *testing.T) {
 	proxy := newProxyStandIn(t)
 	notices := captureProxyNotices(t)
-	useProxyStandIn(t, proxy.address())
+	useProxyStandIn(t, proxy.address(), proxy.ca)
 	if upstream := webUpstreamProxy(); upstream == nil {
 		t.Fatal("a reachable proxy did not resolve")
 	}
@@ -232,14 +254,13 @@ func TestWebProxySubjectStaysOneBoundedLine(t *testing.T) {
 
 func TestWebProxyReadsAnOperatorSuppliedCertificate(t *testing.T) {
 	proxy := newProxyStandIn(t)
-	proxy.caStatus = http.StatusNotFound
 	path := filepath.Join(t.TempDir(), "ca.pem")
 	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: proxy.ca}), 0600); err != nil {
 		t.Fatal(err)
 	}
 	captureProxyNotices(t)
 	t.Setenv(webProxyCAEnv, path)
-	useProxyStandIn(t, proxy.address())
+	useProxyStandIn(t, proxy.address(), nil)
 	upstream := webUpstreamProxy()
 	if upstream == nil || upstream.RootCAs == nil {
 		t.Fatalf("an operator-supplied CA did not resolve: %+v", upstream)
@@ -261,7 +282,7 @@ func TestWebBrokerCarriesEngagementRequestsThroughTheProxy(t *testing.T) {
 	defer target.Close()
 	proxy := newProxyStandIn(t)
 	captureProxyNotices(t)
-	useProxyStandIn(t, proxy.address())
+	useProxyStandIn(t, proxy.address(), proxy.ca)
 	scope, err := secgate.ParseScope(strings.NewReader("127.0.0.1\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -331,7 +352,7 @@ func TestWebBrokerKeepsTheDirectPathWhenProxyingIsOff(t *testing.T) {
 func TestEngageWebCollectTraversesTheProxy(t *testing.T) {
 	proxy := newProxyStandIn(t)
 	captureProxyNotices(t)
-	useProxyStandIn(t, proxy.address())
+	useProxyStandIn(t, proxy.address(), proxy.ca)
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte("<html><body>never reached directly</body></html>"))
