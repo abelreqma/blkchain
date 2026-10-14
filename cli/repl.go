@@ -78,10 +78,9 @@ func plainREPL() error {
 	// the history store).
 	var convo []priorTurn
 	// turnErr is the error the answer path returned for this exchange, nil when
-	// the turn finished cleanly. A failed turn stays in this process's memory and
-	// is not recorded: the transcript and the memory rows are read back by a
-	// later turn in this session, on any surface, so a partial answer must not
-	// reach them.
+	// the turn finished cleanly. A failed turn is neither remembered nor
+	// recorded: convo, the transcript and the memory rows are all read back by a
+	// later turn, so a partial answer must reach none of them.
 	recordConvo := func(q, ans string, turnErr error) {
 		if rc.metrics != nil {
 			calls, partial := rc.metrics.snapshot()
@@ -97,11 +96,11 @@ func plainREPL() error {
 		if strings.TrimSpace(ans) == "" {
 			return
 		}
-		convo = append(convo, priorTurn{Role: "human", Content: q}, priorTurn{Role: "ai", Content: ans})
 		pm.pendingQ, pm.lastAnswer = q, ans
 		if turnErr != nil {
 			return
 		}
+		convo = append(convo, priorTurn{Role: "human", Content: q}, priorTurn{Role: "ai", Content: ans})
 		if err := pm.recordTurn(ans); err != nil {
 			printErr(fmt.Errorf("conversation save failed: %w", err))
 		}
