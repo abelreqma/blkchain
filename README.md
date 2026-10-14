@@ -333,9 +333,9 @@ provides schema-validated JSON generation.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | `{"status":"ok","version":...}`. |
-| `POST /v1/sessions` | Create a session and return its listing fields with status 201. This server may run turns on it. A new session reads as 404 until its first turn writes a transcript. |
+| `POST /v1/sessions` | Create a session and return its listing fields with status 201. This server may run turns on it. A new session reads with no turns until its first turn writes a transcript. |
 | `GET /v1/sessions` | List sessions from every surface, newest first, as `{"sessions":[...],"truncated":bool}`. At most 50 are listed, and `truncated` is true when more exist. |
-| `GET /v1/sessions/{id}` | Read a session's `id`, `title`, `msg_count`, `model` and newest `turns` in a body of at most 256 KiB. `trimmed` is present and true when turns or content were dropped to fit. |
+| `GET /v1/sessions/{id}` | Read a session's `id`, `title`, `msg_count`, `model` and newest `turns` in a body of at most 256 KiB. `trimmed` is present and true when turns or content were dropped to fit. An id that names no session is refused with 404. |
 | `POST /v1/sessions/{id}/turns` | Run a turn and return the turn result as JSON: `answer`, `citations`, `used_web`, `model` and `usage`, plus `session_id`, `agent`, `route`, `actions` and `results` when set. |
 | `POST /v1/sessions/{id}/turns/stream` | Run a turn and stream it as Server-Sent Events. |
 

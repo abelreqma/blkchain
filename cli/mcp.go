@@ -141,6 +141,15 @@ func (o *chatSessionOwner) touch(id string) bool {
 	return true
 }
 
+// has reports whether this server created the session without changing the
+// order, so a read cannot keep an id in the write set that no write has used.
+func (o *chatSessionOwner) has(id string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	_, ok := o.ids[id]
+	return ok
+}
+
 // mcpChatIn is chat's tool input. An empty SessionID opens a new session;
 // supplying one continues it. ToolHost accepts local and BrowserCDP accepts an
 // endpoint only from a local caller (see clientVantage). ForceRag and WebOnly

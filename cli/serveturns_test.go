@@ -99,11 +99,12 @@ type serveTurnRouter struct {
 	err     error
 }
 
-// serveTurnCalls records what reached the router: how many turns ran, and the
-// options the last one carried.
+// serveTurnCalls records what reached the router: how many turns ran, how many
+// deltas the router offered, and the options the last turn carried.
 type serveTurnCalls struct {
-	ran  atomic.Int32
-	opts AnswerOpts
+	ran      atomic.Int32
+	streamed atomic.Int32
+	opts     AnswerOpts
 }
 
 // installServeTurnRouter replaces the router for one test. A test asserts on
@@ -113,13 +114,19 @@ func installServeTurnRouter(t *testing.T, f serveTurnRouter) *serveTurnCalls {
 	calls := &serveTurnCalls{}
 	prev := adaptiveAnswerFn
 	t.Cleanup(func() { adaptiveAnswerFn = prev })
-	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+	adaptiveAnswerFn = func(ctx context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
 		calls.ran.Add(1)
 		calls.opts = opts
+		// A cancelled turn stops offering deltas, as a model call does, so a
+		// test can tell a turn that was cut from one that ran to its end.
 		for _, d := range f.deltas {
+			if ctx.Err() != nil {
+				break
+			}
 			if opts.Stream != nil {
 				opts.Stream([]byte(d))
 			}
+			calls.streamed.Add(1)
 		}
 		for _, a := range f.actions {
 			if opts.Action != nil {
@@ -202,6 +209,12 @@ func TestServeTurnReturnsTheSameShapeAsAskJSON(t *testing.T) {
 	// added there and not carried here fails this test instead of letting the
 	// two surfaces drift apart. The turn nests under usage what ask reports
 	// flat, so serveJSONKeys descends into turnUsage.
+	//
+	// Two drifts that does not catch: the key set is flat, so a key moved
+	// between nesting levels leaves it unchanged, and the body check below
+	// asserts only that no key appears which the result does not define, not
+	// that a defined key is present, so a key that gained omitempty and stopped
+	// being emitted still passes.
 	turnKeys := serveJSONKeys(reflect.TypeFor[turnResult]())
 	for key := range serveJSONKeys(reflect.TypeFor[answerResponse]()) {
 		if !turnKeys[key] {
@@ -246,7 +259,10 @@ func TestServeTurnRefusesASessionItDidNotCreate(t *testing.T) {
 	foreign := writeSessionOnDisk(t, "", turnRecord{Role: roleUser, Content: "elsewhere"})
 	path := serveSessionsPath + "/" + foreign + serveTurnsSuffix
 
-	_, _, err := s.serveTurnGate(serveTurnPost(t, path, "127.0.0.1:54321", `{"message":"q"}`), serveTurnsSuffix)
+	_, _, release, err := s.serveTurnGate(serveTurnPost(t, path, "127.0.0.1:54321", `{"message":"q"}`), serveTurnsSuffix)
+	if release != nil {
+		release()
+	}
 	if !errors.Is(err, errChatForeignSession) {
 		t.Fatalf("gate error = %v, want errChatForeignSession", err)
 	}
@@ -284,7 +300,10 @@ func TestServeTurnRefusesLocalToolHostFromANonLoopbackPeer(t *testing.T) {
 			calls := installServeTurnRouter(t, serveTurnRouter{answer: "an answer"})
 			path := serveSessionsPath + "/" + id + serveTurnsSuffix
 
-			_, _, err := s.serveTurnGate(serveTurnPost(t, path, peer, tc.body), serveTurnsSuffix)
+			_, _, release, err := s.serveTurnGate(serveTurnPost(t, path, peer, tc.body), serveTurnsSuffix)
+			if release != nil {
+				release()
+			}
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("gate error = %v, want %v", err, tc.want)
 			}
