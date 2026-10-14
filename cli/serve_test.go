@@ -197,6 +197,12 @@ func TestServeRequiresTheTokenWhenOneIsSet(t *testing.T) {
 	}
 }
 
+// serveIsBasicLit reports whether an expression is a literal.
+func serveIsBasicLit(e ast.Expr) bool {
+	_, ok := e.(*ast.BasicLit)
+	return ok
+}
+
 func TestServeComparesTheTokenInConstantTimeAndNeverEchoesIt(t *testing.T) {
 	// Half one: the comparison goes through crypto/subtle. No response can show
 	// the difference between a constant-time compare and ==, so the path itself
@@ -216,24 +222,57 @@ func TestServeComparesTheTokenInConstantTimeAndNeverEchoesIt(t *testing.T) {
 	if fn == nil {
 		t.Fatal("requireBearerToken is not declared in serve.go")
 	}
-	constantTime := false
+	// The constant-time call has to be what decides the refusal, so the
+	// condition is what gets pinned. A call whose result is discarded satisfies
+	// the call's presence while something else decides.
+	constantTimeDecides := false
 	ast.Inspect(fn, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
+		stmt, ok := n.(*ast.IfStmt)
 		if !ok {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
+		ast.Inspect(stmt.Cond, func(c ast.Node) bool {
+			call, ok := c.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "subtle" && sel.Sel.Name == "ConstantTimeCompare" {
+				constantTimeDecides = true
+			}
 			return true
-		}
-		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "subtle" && sel.Sel.Name == "ConstantTimeCompare" {
-			constantTime = true
-		}
+		})
 		return true
 	})
-	if !constantTime {
-		t.Error("requireBearerToken does not compare the token with subtle.ConstantTimeCompare")
+	if !constantTimeDecides {
+		t.Error("requireBearerToken does not refuse on the result of subtle.ConstantTimeCompare")
 	}
+
+	// No == or != in this function may compare two non-literal operands. Every
+	// variable-time leak available here is one: `want != got` beside the
+	// constant-time call, which Go short-circuits so the fast comparison
+	// decides; a discarded call followed by `if want != got`; and
+	// `presented != token` placed ahead of the block. Comparing against a
+	// literal, as the configured-token check and the compare's own result do,
+	// reveals nothing about either token's bytes.
+	ast.Inspect(fn, func(n ast.Node) bool {
+		bin, ok := n.(*ast.BinaryExpr)
+		if !ok {
+			return true
+		}
+		if bin.Op != token.EQL && bin.Op != token.NEQ {
+			return true
+		}
+		if serveIsBasicLit(bin.X) || serveIsBasicLit(bin.Y) {
+			return true
+		}
+		t.Errorf("requireBearerToken decides a %s between two non-literal operands at %s, which runs in variable time",
+			bin.Op, fset.Position(bin.OpPos))
+		return true
+	})
 
 	// Half two: neither token reaches the caller, in the body or in any header.
 	s := newServeTestServer(t, serveOpts{}, serveTestToken)
@@ -346,24 +385,83 @@ func TestServeRejectsANonLoopbackHostHeader(t *testing.T) {
 	}
 }
 
+func TestServeKeysTheHostCheckOnTheBind(t *testing.T) {
+	// The Host rule follows the bind the server opened. --allow-remote says
+	// something about the bind, not about the Host: passed alongside a loopback
+	// bind it leaves a loopback listener that a page the operator has open can
+	// still reach, so the rebinding defense stays on there. The rule relaxes
+	// for a wildcard bind alone, where a legitimate client's Host is not
+	// predictable. A concrete bind that is not loopback is predictable, so a
+	// request has to address it.
+	//
+	// Every case here passes --allow-remote, and a bind that is not loopback
+	// also needs the token serveBindCheck requires of that mode.
+	for _, tc := range []struct {
+		name  string
+		bind  string
+		token string
+		host  string
+		want  int
+		admit bool
+	}{
+		{"loopback bind refuses another Host", serveDefaultBind, "", "evil.example", http.StatusMisdirectedRequest, false},
+		{"loopback bind admits loopback", serveDefaultBind, "", "127.0.0.1:8787", http.StatusOK, true},
+		{"wildcard bind admits any Host", "0.0.0.0:8787", serveTestToken, "evil.example", http.StatusOK, true},
+		{"wildcard v6 bind admits any Host", "[::]:8787", serveTestToken, "evil.example", http.StatusOK, true},
+		{"bind with no host admits any Host", ":8787", serveTestToken, "evil.example", http.StatusOK, true},
+		{"concrete remote bind admits the bind host", "10.0.0.5:8787", serveTestToken, "10.0.0.5:8787", http.StatusOK, true},
+		{"concrete remote bind refuses another Host", "10.0.0.5:8787", serveTestToken, "evil.example", http.StatusMisdirectedRequest, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newServeTestServer(t, serveOpts{bind: tc.bind, allowRemote: true}, tc.token)
+			srv, stub := serveChain(t, s)
+			req := serveJSONPost(t, srv.URL)
+			req.Host = tc.host
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			resp, body := serveSend(t, req)
+			if resp.StatusCode != tc.want {
+				t.Errorf("bind %q, Host %q: status = %d, want %d; body %q", tc.bind, tc.host, resp.StatusCode, tc.want, body)
+			}
+			if got := stub.ran.Load(); got != tc.admit {
+				t.Errorf("bind %q, Host %q: handler ran = %v, want %v", tc.bind, tc.host, got, tc.admit)
+			}
+		})
+	}
+}
+
 func TestServeRejectsAnyOriginHeader(t *testing.T) {
 	// No origin is allowed, not even a loopback one. A loopback Origin is still
 	// a browser, which is the caller the operator did not choose when they
 	// accepted loopback exposure for local processes. A command-line client
 	// sends no Origin at all, so refusing every one costs the real caller
 	// nothing.
-	for _, origin := range []string{"http://evil.example", "http://127.0.0.1:8787", "null"} {
-		t.Run(origin, func(t *testing.T) {
+	//
+	// The header is read with Values, not Get, so an Origin sent with an empty
+	// value is refused too: Get reports it as the empty string, which is what a
+	// request carrying no Origin at all reports.
+	for _, tc := range []struct {
+		name   string
+		values []string
+	}{
+		{"a remote origin", []string{"http://evil.example"}},
+		{"a loopback origin", []string{"http://127.0.0.1:8787"}},
+		{"the opaque origin", []string{"null"}},
+		{"an empty value", []string{""}},
+		{"two headers", []string{"http://evil.example", "http://127.0.0.1:8787"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			s := newServeTestServer(t, serveOpts{}, "")
 			srv, stub := serveChain(t, s)
 			req := serveJSONPost(t, srv.URL)
-			req.Header.Set("Origin", origin)
+			req.Header["Origin"] = tc.values
 			resp, body := serveSend(t, req)
 			if resp.StatusCode != http.StatusForbidden {
-				t.Errorf("Origin %q: status = %d, want %d; body %q", origin, resp.StatusCode, http.StatusForbidden, body)
+				t.Errorf("Origin %q: status = %d, want %d; body %q", tc.values, resp.StatusCode, http.StatusForbidden, body)
 			}
 			if stub.ran.Load() {
-				t.Errorf("Origin %q reached the handler", origin)
+				t.Errorf("Origin %q reached the handler", tc.values)
 			}
 		})
 	}
@@ -386,6 +484,53 @@ func TestServeAdmitsACommandLineClient(t *testing.T) {
 	}
 	if !stub.ran.Load() {
 		t.Error("a command-line request did not reach the handler")
+	}
+}
+
+func TestServeHandlerGuardsEveryRoute(t *testing.T) {
+	// The tests above wrap a stub in s.guard, which says what the chain does
+	// and nothing about whether the served tree applies it. This one goes
+	// through s.handler() for every route the table has, so the guard coming
+	// off handler() fails here rather than shipping. An Origin is the probe:
+	// no route handler refuses one, so a 403 can only come from the chain.
+	//
+	// A route added to the table belongs in this list.
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"health", http.MethodGet, "/health", ""},
+		{"create session", http.MethodPost, serveSessionsPath, `{}`},
+		{"list sessions", http.MethodGet, serveSessionsPath, ""},
+		{"read session", http.MethodGet, serveSessionsPath + "/20260101-000000-abcdef", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The session handlers reach the store whenever the guard admits a
+			// request, so the store is a temporary directory here too.
+			isolateUserDirs(t)
+			s := newServeTestServer(t, serveOpts{}, "")
+			srv := httptest.NewServer(s.handler())
+			t.Cleanup(srv.Close)
+
+			var body io.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			req, err := http.NewRequest(tc.method, srv.URL+tc.path, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			req.Header.Set("Origin", "http://evil.example")
+			resp, got := serveSend(t, req)
+			if resp.StatusCode != http.StatusForbidden {
+				t.Errorf("%s %s with an Origin: status = %d, want %d; body %q", tc.method, tc.path, resp.StatusCode, http.StatusForbidden, got)
+			}
+		})
 	}
 }
 

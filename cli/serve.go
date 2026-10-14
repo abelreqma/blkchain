@@ -28,8 +28,8 @@ import (
 // The exposure is loopback with an optional bearer token. A browser can reach
 // loopback too, and a page the operator has open is not the caller they chose,
 // so three defenses close the API against it: a body must be JSON, the Host
-// must be loopback, and any Origin at all is refused. Each one stands on its
-// own; one of the three holding is not the control.
+// must be one the bind serves, and any Origin at all is refused. Each one
+// stands on its own; one of the three holding is not the control.
 
 const (
 	// serveDefaultBind serves loopback only, so nothing is exposed off the
@@ -102,6 +102,52 @@ func serveIsLoopbackHost(host string) bool {
 	return name == "localhost" || strings.HasSuffix(name, ".localhost")
 }
 
+// serveIsWildcardHost reports whether a host from a bind address is the
+// wildcard, meaning the server accepts connections on every local address. An
+// empty host is the wildcard as net.Listen reads it; any unspecified literal
+// address is the same thing written out.
+func serveIsWildcardHost(host string) bool {
+	if host == "" {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsUnspecified()
+}
+
+// serveHostMode is the rule a request's Host must satisfy. It is decided from
+// the bind alone, so the per-request check cannot disagree with the exposure
+// the server actually opened.
+type serveHostMode int
+
+const (
+	// serveHostLoopback requires a loopback Host. It is the rule for a loopback
+	// bind, where it defeats DNS rebinding.
+	serveHostLoopback serveHostMode = iota
+	// serveHostBind requires the Host to name the bind's own host. It is the
+	// rule for a concrete bind that is not loopback: a legitimate client
+	// addresses the one address the operator chose to serve, so that authority
+	// is predictable and remains a usable control.
+	serveHostBind
+	// serveHostAny admits every Host. It is the rule for a wildcard bind only,
+	// where the address a legitimate client reaches this server on is not
+	// predictable from the bind, so no Host value can be required of it.
+	serveHostAny
+)
+
+// serveHostModeFor decides the Host rule for a bind. The bind has already
+// passed serveBindCheck, so it is a HOST:PORT address here.
+func serveHostModeFor(bind string) serveHostMode {
+	host := serveHostOnly(bind)
+	switch {
+	case serveIsLoopbackHost(host):
+		return serveHostLoopback
+	case serveIsWildcardHost(host):
+		return serveHostAny
+	default:
+		return serveHostBind
+	}
+}
+
 // serveBindCheck is the exposure decision on its own, separate from serving, so
 // a refusal is decidable without opening a listener. A bind that is not
 // loopback needs the explicit flag and, in that mode, a token: loopback
@@ -131,6 +177,9 @@ type serveServer struct {
 	cat   *skillcat.Catalog
 	opts  serveOpts
 	token string
+	// hostMode is the Host rule, computed once from the bind so no request ever
+	// gets a weaker check than the bind that was opened calls for.
+	hostMode serveHostMode
 	// owned is the set of session ids this server created, one set per server
 	// instance as newMCPServer keeps one, so a test's server owns only its own
 	// turns.
@@ -143,7 +192,15 @@ func newServeServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Ca
 	if err := serveBindCheck(o.bind, o.allowRemote, token); err != nil {
 		return nil, err
 	}
-	return &serveServer{rc: rc, cfg: cfg, cat: cat, opts: o, token: token, owned: newChatSessionOwner()}, nil
+	return &serveServer{
+		rc:       rc,
+		cfg:      cfg,
+		cat:      cat,
+		opts:     o,
+		token:    token,
+		hostMode: serveHostModeFor(o.bind),
+		owned:    newChatSessionOwner(),
+	}, nil
 }
 
 // handler is the served tree: the route table wrapped in the guard chain.
@@ -175,7 +232,7 @@ func (s *serveServer) guard(next http.Handler) http.Handler {
 		checks := []func() (int, string){
 			func() (int, string) { return boundRequestBody(w, r) },
 			func() (int, string) { return requireJSONBody(r) },
-			func() (int, string) { return requireLoopbackHost(r, s.opts.allowRemote, s.opts.bind) },
+			func() (int, string) { return requireBindHost(r, s.hostMode, s.opts.bind) },
 			func() (int, string) { return rejectAnyOrigin(r) },
 			func() (int, string) { return requireBearerToken(r, s.token) },
 		}
@@ -217,23 +274,32 @@ func requireJSONBody(r *http.Request) (int, string) {
 	return 0, ""
 }
 
-// requireLoopbackHost rejects a Host header that is not loopback, which defeats
+// requireBindHost rejects a Host header the bind does not serve, which defeats
 // DNS rebinding: a name that resolves to 127.0.0.1 still arrives with its own
 // Host. 421 is the status for a request addressed to an authority this server
 // does not serve (RFC 9110 section 15.5.22); 400 would read as a malformed
 // request, which this is not.
 //
-// An operator who passed --allow-remote chose to serve an address that is not
-// loopback, and serveBindCheck required a token for that mode, so the authority
-// a client addresses is not the control there and every Host is admitted.
-func requireLoopbackHost(r *http.Request, allowRemote bool, bind string) (int, string) {
-	if allowRemote {
+// The rule comes from the bind, not from --allow-remote. The flag is also
+// accepted alongside a loopback bind, where the exposure is still loopback and
+// a page the operator has open can still reach it, so keying the check on the
+// flag would turn the rebinding defense off on the default address.
+func requireBindHost(r *http.Request, mode serveHostMode, bind string) (int, string) {
+	host := serveHostOnly(r.Host)
+	switch mode {
+	case serveHostAny:
 		return 0, ""
+	case serveHostBind:
+		if strings.EqualFold(host, serveHostOnly(bind)) {
+			return 0, ""
+		}
+		return http.StatusMisdirectedRequest, "the request Host must name the bind " + bind
+	default:
+		if serveIsLoopbackHost(host) {
+			return 0, ""
+		}
+		return http.StatusMisdirectedRequest, "the request Host must be loopback, matching the bind " + bind
 	}
-	if serveIsLoopbackHost(serveHostOnly(r.Host)) {
-		return 0, ""
-	}
-	return http.StatusMisdirectedRequest, "the request Host must be loopback, matching the bind " + bind
 }
 
 // rejectAnyOrigin rejects a request carrying an Origin header. No origin is
@@ -256,6 +322,12 @@ func rejectAnyOrigin(r *http.Request) (int, string) {
 // and cannot leak the configured token's length, and the refusal carries
 // neither token. The scheme is matched case-insensitively per RFC 9110 section
 // 11.1.
+//
+// The refusal carries no WWW-Authenticate, which departs from RFC 9110 section
+// 15.5.2 deliberately. That header makes a browser prompt the operator for the
+// credential and then attach it to every later request to this origin, which
+// would hand a page the operator has open the authentication this API relies
+// on. A command-line client does not need the challenge to know the scheme.
 func requireBearerToken(r *http.Request, token string) (int, string) {
 	if token == "" {
 		return 0, ""
