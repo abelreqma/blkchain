@@ -224,12 +224,12 @@ func paritySurfaces(t *testing.T) []paritySurface {
 			return err
 		}},
 		{name: "blk serve", run: func(t *testing.T, c parityCase) error {
-			// The bind is the default and the request's peer is a loopback
-			// address, so a case asking for the operator's reach is granted it
-			// here as on the three local surfaces. The gate and the turn runner
-			// are the two handleTurn calls, and a refusal the gate makes is
-			// returned as the surface's error rather than hidden.
-			s, err := newServeServer(nil, loadConfig(), serveOpts{bind: serveDefaultBind}, "")
+			// The bind is the default, a token is set and the request's peer is a
+			// loopback address, so a case asking for the operator's reach is
+			// granted it here as on the three local surfaces. The gate and the
+			// turn runner are the two handleTurn calls, and a refusal the gate
+			// makes is returned as the surface's error rather than hidden.
+			s, err := newServeServer(nil, loadConfig(), serveOpts{bind: serveDefaultBind}, serveTestToken)
 			if err != nil {
 				t.Fatalf("newServeServer: %v", err)
 			}
@@ -260,6 +260,7 @@ func parityServeSession(t *testing.T, s *serveServer) string {
 	req := httptest.NewRequest(http.MethodPost, serveSessionsPath, nil)
 	req.Host = serveTurnTestHost
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer "+serveTestToken)
 	rec := httptest.NewRecorder()
 	s.handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
