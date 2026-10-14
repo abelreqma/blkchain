@@ -78,6 +78,28 @@ func engageMCPFixtureServer(t *testing.T, server string, tools []string) {
 	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", path)
 }
 
+// engageMCPClosedServer points the MCP client config at a server on a loopback
+// port with nothing listening, which is how a configured Burp looks while Burp
+// is closed. The listener is started only to take a port and is closed before
+// the config naming it is written, so the test reaches nothing.
+func engageMCPClosedServer(t *testing.T, server string, tools []string) {
+	t.Helper()
+	endpoint := httptest.NewServer(http.NotFoundHandler())
+	closed := endpoint.URL
+	endpoint.Close()
+	data, err := json.Marshal(chatMCPConfig{Servers: []chatMCPServer{{
+		Name: server, Transport: "http", URL: closed, AllowTools: tools,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "mcp-clients.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", path)
+}
+
 // engageNoMCPConfig points the MCP client config at an absent file, which is how
 // an operator with no outbound MCP server configured looks.
 func engageNoMCPConfig(t *testing.T) {
@@ -173,6 +195,44 @@ func TestEngageIntegrationsRegisterNoRequestToolWithoutAGate(t *testing.T) {
 	noRuns.Runs = nil
 	if got := engageIntegrationNames(t, noRuns, task); len(got) != 0 {
 		t.Errorf("a task with no captured-output store registered %v, want nothing", got)
+	}
+}
+
+// TestEngageIntegrationsDegradeWhenAnMCPServerCannotBeOpened pins the
+// unattended handling: the task keeps its own tools and runs on, it gains no
+// mcp__ tool, and the degradation is in the audit record. The chat path's fatal
+// handling is unchanged, which is the difference between an attended turn and a
+// task.
+func TestEngageIntegrationsDegradeWhenAnMCPServerCannotBeOpened(t *testing.T) {
+	engageMCPClosedServer(t, engageMCPWebInstrument, engageMCPFixtureTools)
+	ws, err := engagement.OpenWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	ctx = withEngageTelemetry(ctx, newEngageTelemetry(ws, cancel))
+
+	reg := tooldef.NewRegistry()
+	if err := reg.Register(&recordingMCPTool{name: "run_command"}); err != nil {
+		t.Fatal(err)
+	}
+	closeIntegrations, err := registerEngageIntegrations(ctx, reg, engageIntegrationDeps(t),
+		engagement.Task{ID: "t-web", Surface: engagement.SurfaceWeb, Target: "10.0.0.5"})
+	if err != nil {
+		t.Fatalf("a server that cannot be opened took the task down: %v", err)
+	}
+	defer closeIntegrations()
+	if got := reg.Names(); !reflect.DeepEqual(got, []string{"run_command"}) {
+		t.Errorf("registry = %v, want the executor's own tool and no mcp__ tool", got)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("the episode was stopped: %v", context.Cause(ctx))
+	}
+	data, err := os.ReadFile(filepath.Join(ws.Dir, "audit.jsonl"))
+	if err != nil || !strings.Contains(string(data), engageMCPUnavailableAction) {
+		t.Fatalf("audit err=%v data=%q, want a %s record", err, data, engageMCPUnavailableAction)
 	}
 }
 

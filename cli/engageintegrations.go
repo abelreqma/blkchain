@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"blkchain/cli/internal/engagement"
+	"blkchain/cli/internal/secgate"
 	"blkchain/cli/internal/tooldef"
 )
 
@@ -29,6 +30,31 @@ import (
 // executor would therefore hand Burp's tools to a cloud task that fell back to
 // the generic executor.
 const engageMCPWebInstrument = "burp"
+
+// engageMCPUnavailableAction is the audit action recorded when an outbound MCP
+// server cannot be opened and the task runs without its tools.
+const engageMCPUnavailableAction = "mcp-unavailable"
+
+// openEngageMCPTools opens one session per server and registers every tool
+// newGatedMCPTool reports ok for. It returns the closer for the sessions it
+// opened, and on an error it has closed them itself.
+func openEngageMCPTools(ctx context.Context, reg *tooldef.Registry, servers []chatMCPServer, gate *secgate.Gate, armed bool) (func(), error) {
+	// The sandbox workspace is the root the chat path resolves with no explicit
+	// tool host, and it is what a stdio server's command runs in. The engagement
+	// scratch directory is where run_command executes and is not an MCP
+	// workspace.
+	root, err := chatWorkspaceRoot(chatToolHostSandbox)
+	if err != nil {
+		return nil, err
+	}
+	return openMCPSessions(ctx, servers, root, func(server, remote string, tool tooldef.Tool) error {
+		gated, ok := newGatedMCPTool(tool, server, remote, gate, armed)
+		if !ok {
+			return nil
+		}
+		return reg.Register(gated)
+	})
+}
 
 // registerEngageIntegrations adds the outbound MCP tools and the out-of-band
 // tools to one executor's registry, and returns the closer for every session it
@@ -57,23 +83,25 @@ func registerEngageIntegrations(ctx context.Context, reg *tooldef.Registry, d en
 	}
 	closeMCP := func() {}
 	if len(servers) > 0 {
-		// The sandbox workspace is the root the chat path resolves with no
-		// explicit tool host, and it is what a stdio server's command runs in.
-		// The engagement scratch directory is where run_command executes and is
-		// not an MCP workspace.
-		root, rootErr := chatWorkspaceRoot(chatToolHostSandbox)
-		if rootErr != nil {
-			return nil, rootErr
-		}
-		closeMCP, err = openMCPSessions(ctx, servers, root, func(server, remote string, tool tooldef.Tool) error {
-			gated, ok := newGatedMCPTool(tool, server, remote, d.Gate, task.Armed)
-			if !ok {
-				return nil
+		opened, openErr := openEngageMCPTools(ctx, reg, servers, d.Gate, task.Armed)
+		if openErr != nil {
+			// A task runs without per-action operator attention, so a server that
+			// cannot be opened costs that server's tools and not the task: an
+			// engagement whose own work does not depend on Burp still runs when
+			// Burp is closed. The chat path keeps its fatal handling, where the
+			// failure is immediate feedback to an operator driving the turn.
+			//
+			// The degradation is recorded, so a task that ran without the tools is
+			// distinguishable from one that had them. A failure to record it is
+			// fatal, because a silent degradation is what the record exists to
+			// prevent.
+			if observe := engageTelemetryFromContext(ctx); observe != nil {
+				if auditErr := observe(engageMCPUnavailableAction, openErr.Error()); auditErr != nil {
+					return nil, auditErr
+				}
 			}
-			return reg.Register(gated)
-		})
-		if err != nil {
-			return nil, err
+		} else {
+			closeMCP = opened
 		}
 	}
 	kept := false

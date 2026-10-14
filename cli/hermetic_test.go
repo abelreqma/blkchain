@@ -68,6 +68,13 @@ func TestMain(m *testing.M) {
 	if err := os.Unsetenv(serveTokenEnv); err != nil {
 		panic("hermetic test state: " + err.Error())
 	}
+	// A web-surface executor registry opens the outbound MCP servers this
+	// variable names. An operator with it exported would otherwise have a test
+	// that builds one connect to their real servers, start a stdio server's
+	// command, and drive their own Burp.
+	if err := os.Unsetenv("BLKCHAIN_MCP_CLIENT_CONFIG"); err != nil {
+		panic("hermetic test state: " + err.Error())
+	}
 	code := m.Run()
 	os.RemoveAll(dir) // os.Exit runs no deferred call, so clean up first.
 	os.Exit(code)

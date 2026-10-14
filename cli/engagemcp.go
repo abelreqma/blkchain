@@ -52,7 +52,10 @@ var engageMCPActions = map[string]map[string]engageMCPAction{
 		"send_http2_request": engageMCPRequest,
 		"send_to_intruder":   engageMCPRequest,
 
-		// Reads the instrument's own state and sends nothing.
+		// Reads the instrument's own state and sends nothing at a target.
+		// get_collaborator_interactions does cause outbound traffic, because Burp
+		// polls its Collaborator server to answer it; the destination is not
+		// caller-controlled, so it is in the same class as the interactsh server.
 		"get_proxy_http_history":            engageMCPRead,
 		"get_proxy_http_history_regex":      engageMCPRead,
 		"get_proxy_websocket_history":       engageMCPRead,
@@ -62,8 +65,6 @@ var engageMCPActions = map[string]map[string]engageMCPAction{
 		"get_scanner_issues":                engageMCPRead,
 		"get_active_editor_contents":        engageMCPRead,
 		"get_collaborator_interactions":     engageMCPRead,
-		"output_project_options":            engageMCPRead,
-		"output_user_options":               engageMCPRead,
 
 		// Transforms its arguments and reaches nothing.
 		// generate_collaborator_payload allocates on Collaborator infrastructure
@@ -80,6 +81,15 @@ var engageMCPActions = map[string]map[string]engageMCPAction{
 		// none of it is evidence about a target. create_repeater_tab and its
 		// HTTP/2 variant take the same four arguments as the send tools and do
 		// not send: they leave a staged request in the operator's Repeater.
+		//
+		// output_project_options and output_user_options are denied for a
+		// different reason: they dump configuration that can carry upstream-proxy
+		// credentials, platform-authentication credentials and API keys. On the
+		// chat path, which keeps them, an operator sees the call and decides. A
+		// task runs without that attention and its output reaches the engagement
+		// transcript, so an ungated read there writes the operator's own
+		// credentials into a record of an engagement against someone else's
+		// estate. Proxy history is readable without them.
 		"create_repeater_tab":             engageMCPDenied,
 		"create_repeater_tab_http2":       engageMCPDenied,
 		"set_active_editor_contents":      engageMCPDenied,
@@ -87,6 +97,8 @@ var engageMCPActions = map[string]map[string]engageMCPAction{
 		"set_proxy_intercept_state":       engageMCPDenied,
 		"set_task_execution_engine_state": engageMCPDenied,
 		"set_user_options":                engageMCPDenied,
+		"output_project_options":          engageMCPDenied,
+		"output_user_options":             engageMCPDenied,
 	},
 }
 
@@ -104,16 +116,47 @@ type engageMCPRequestTarget struct {
 }
 
 var (
-	errEngageMCPArgs    = errors.New("invalid arguments")
-	errEngageMCPHost    = errors.New("targetHostname must be a hostname or IP address")
+	errEngageMCPArgs = errors.New("invalid arguments")
+	errEngageMCPHost = errors.New("targetHostname must be an IP address or a hostname of at most " +
+		strconv.Itoa(engageMCPHostMaxBytes) + " bytes of letters, digits, dots and hyphens")
 	errEngageMCPPort    = errors.New("targetPort must be between 1 and 65535")
 	errEngageMCPContent = errors.New("content must be a string holding the raw request")
 )
 
-// engageMCPMethodPattern bounds the request-line token read as a method: HTTP
-// methods are letter tokens, and the token becomes part of the gate's audit
-// label, so an arbitrary run of bytes is not carried into it.
-var engageMCPMethodPattern = regexp.MustCompile(`^[A-Za-z]{1,24}$`)
+const (
+	// engageMCPHostMaxBytes is the length bound on targetHostname, the longest a
+	// DNS name can be. The host reaches the gate's scope check, its confirmation
+	// prompt and its audit record, and the argument is model-authored, so an
+	// unbounded run of bytes is not carried into any of them.
+	engageMCPHostMaxBytes = 253
+
+	// engageMCPRequestTargetMaxBytes is the length bound on the request target
+	// carried out of content, for the same reason. A longer target contributes no
+	// path rather than a truncated one, so the URL the gate authorizes is never a
+	// prefix of the path the request carries.
+	engageMCPRequestTargetMaxBytes = 2048
+)
+
+var (
+	// engageMCPHostPattern bounds a hostname to the bytes a DNS name is made of.
+	// secgate's own URL pattern ends its match at a quote while Go's host grammar
+	// permits one, so an unvalidated host lets the gate scope-check a prefix of
+	// what the argument named.
+	engageMCPHostPattern = regexp.MustCompile(`^[A-Za-z0-9.-]{1,` + strconv.Itoa(engageMCPHostMaxBytes) + `}$`)
+
+	// engageMCPOriginFormPattern matches an origin-form request target: a target
+	// that starts at the root and carries only bytes a URL may hold past the
+	// authority. Comma, quote and apostrophe are outside the set because
+	// secgate's URL pattern ends its match at each of them.
+	engageMCPOriginFormPattern = regexp.MustCompile(`^/[A-Za-z0-9._~%!$&()*+;:=@/?-]*$`)
+
+	// engageMCPMethodPattern bounds the request-line token read as a method: HTTP
+	// methods are letter tokens, and the token becomes part of the gate's audit
+	// label, so an arbitrary run of bytes is not carried into it. The sentinels
+	// below carry a hyphen, which this pattern cannot match, so no content can
+	// produce one.
+	engageMCPMethodPattern = regexp.MustCompile(`^[A-Za-z]{1,24}$`)
+)
 
 const (
 	// engageMCPUnparsedMethod is the method reported when content has no
@@ -122,14 +165,17 @@ const (
 	// tier. apiMethodActive already tiers every method outside GET, HEAD and
 	// OPTIONS as active, so this sentinel inherits the fail-safe direction
 	// instead of restating it.
-	engageMCPUnparsedMethod = "UNPARSED"
+	engageMCPUnparsedMethod = "NO-REQUEST-LINE"
 
 	// engageMCPIntruderMethod is the method reported for send_to_intruder
 	// whatever its request line says, because Intruder is a fuzzer. It is a
 	// sentinel the gate reads as active, not a substituted HTTP verb: the gate's
-	// label becomes web-api:INTRUDER, which states in the audit record what was
-	// dispatched rather than attributing a verb the dispatch does not keep.
-	engageMCPIntruderMethod = "INTRUDER"
+	// label becomes web-api:INTRUDER-FUZZ, which states in the audit record what
+	// was dispatched rather than attributing a verb the dispatch does not keep.
+	// Its hyphen is what keeps the label a statement: a content cannot forge it
+	// through engageMCPMethodPattern, so an approval of a send tool is not
+	// replayable as an approval of Intruder at the same authority.
+	engageMCPIntruderMethod = "INTRUDER-FUZZ"
 )
 
 // engageMCPMethod reads the method from the first whitespace-delimited token of
@@ -146,13 +192,44 @@ func engageMCPMethod(content string) string {
 	return strings.ToUpper(line)
 }
 
+// engageMCPRequestPath returns the origin-form request target of a raw HTTP
+// request, or the empty string when the request line carries none.
+//
+// The path is what makes a confirmation specific: with the authority alone the
+// prompt reads web-api:POST https://10.0.0.5:443, and one approval covers every
+// path and every body for that method class at that authority for the session.
+// The native web_api tool passes a full URL, so carrying the path also keeps the
+// two comparable in the audit.
+//
+// The authority still comes from the arguments, because that is what the packet
+// reaches. A target that does not start at the root, which is every absolute-form
+// and authority-form target, contributes no path rather than overriding the
+// authority. A target holding "//" contributes none either: both net/url and
+// secgate's URL pattern would read what follows as a second authority.
+func engageMCPRequestPath(content string) string {
+	line := strings.TrimLeft(content, " \t\r\n")
+	if i := strings.IndexAny(line, "\r\n"); i >= 0 {
+		line = line[:i]
+	}
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return ""
+	}
+	target := fields[1]
+	if len(target) > engageMCPRequestTargetMaxBytes || strings.Contains(target, "//") ||
+		!engageMCPOriginFormPattern.MatchString(target) {
+		return ""
+	}
+	return target
+}
+
 // engageMCPTargetFromArgs resolves one request tool's arguments to the method
 // and URL the gate authorizes.
 //
-// The URL is built from targetHostname and targetPort, not from the request's
-// own Host header: the connection target is what the packet reaches, so that is
-// what scope is checked against. A request whose Host header disagrees is still
-// scoped on the connection target.
+// The authority is built from targetHostname and targetPort, not from the
+// request's own Host header: the connection target is what the packet reaches,
+// so that is what scope is checked against. A request whose Host header
+// disagrees is still scoped on the connection target.
 func engageMCPTargetFromArgs(tool, args string) (engageMCPRequestTarget, error) {
 	// The same bound chatMCPTool.Call applies to the arguments, ahead of the
 	// decode this wrapper adds.
@@ -164,11 +241,11 @@ func engageMCPTargetFromArgs(tool, args string) (engageMCPRequestTarget, error) 
 		return engageMCPRequestTarget{}, errEngageMCPArgs
 	}
 	host, ok := values["targetHostname"].(string)
-	if !ok || host == "" {
+	if !ok || (net.ParseIP(host) == nil && !engageMCPHostPattern.MatchString(host)) {
 		return engageMCPRequestTarget{}, errEngageMCPHost
 	}
 	port, ok := values["targetPort"].(float64)
-	if !ok || port != float64(int(port)) || port < 1 || port > 65535 {
+	if !ok || port < 1 || port > 65535 || port != float64(int(port)) {
 		return engageMCPRequestTarget{}, errEngageMCPPort
 	}
 	content, ok := values["content"].(string)
@@ -179,13 +256,15 @@ func engageMCPTargetFromArgs(tool, args string) (engageMCPRequestTarget, error) 
 	if https, ok := values["usesHttps"].(bool); ok && https {
 		scheme = "https"
 	}
-	raw := scheme + "://" + net.JoinHostPort(host, strconv.Itoa(int(port)))
-	// The host is model-authored, so confirm the URL the gate scope-checks has
-	// the host and port given and nothing else: a host carrying a path, userinfo
-	// or a second authority would otherwise move the authority the gate reads.
+	raw := scheme + "://" + net.JoinHostPort(host, strconv.Itoa(int(port))) + engageMCPRequestPath(content)
+	// The host and the path are both model-authored, so confirm the URL the gate
+	// scope-checks reads back as the authority the arguments named. A userinfo
+	// form in the host moves the authority net/url reads to what follows the '@';
+	// a path in the host narrows it to the prefix before the '/'; a second
+	// authority in the path replaces it outright.
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.User != nil || parsed.Path != "" ||
-		!strings.EqualFold(parsed.Hostname(), strings.Trim(host, "[]")) ||
+	if err != nil || parsed.User != nil || parsed.Scheme != scheme ||
+		!strings.EqualFold(parsed.Hostname(), host) ||
 		parsed.Port() != strconv.Itoa(int(port)) {
 		return engageMCPRequestTarget{}, errEngageMCPHost
 	}
@@ -203,7 +282,11 @@ type gatedMCPTool struct {
 	inner          tooldef.Tool
 	server, remote string
 	gate           *secgate.Gate
-	armed          bool
+	// armed is the task's arm state when the tool set was built. Nothing clears
+	// Armed on a running task, and exploit.go arms before the registry exists, so
+	// the live form buys nothing here: webtool.go's func() bool closes over a
+	// by-value copy of the task and is a snapshot too.
+	armed bool
 }
 
 func (t gatedMCPTool) Name() string           { return t.inner.Name() }
@@ -220,6 +303,12 @@ func (t gatedMCPTool) Call(ctx context.Context, args string) (string, error) {
 		target, err := engageMCPTargetFromArgs(t.remote, args)
 		if err != nil {
 			return t.Name() + ": " + err.Error(), nil
+		}
+		// newGatedMCPTool registers no request tool without a gate, and the type
+		// is constructible by literal anywhere in the package, so the refusal
+		// stands here too rather than in the one constructor.
+		if t.gate == nil {
+			return t.Name() + ": no engagement gate to authorize a request", nil
 		}
 		decision := t.gate.AuthorizeAPIRequest(ctx, secgate.APIRequest{
 			Method: target.Method,
