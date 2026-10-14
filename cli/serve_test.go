@@ -490,55 +490,72 @@ func TestServeAdmitsACommandLineClient(t *testing.T) {
 func TestServeHandlerGuardsEveryRoute(t *testing.T) {
 	// The tests above wrap a stub in s.guard, which says what the chain does
 	// and nothing about whether the served tree applies it. This one goes
-	// through s.handler() for every route the table has, so the guard coming
-	// off handler() fails here rather than shipping. An Origin is the probe: no
-	// route handler refuses one.
+	// through s.handler() for the whole route table, so the guard coming off
+	// handler() fails here rather than shipping.
 	//
-	// A turn route also answers 403 on the caller's identity, so the body is
-	// checked as well as the status: only the chain's refusal names the origin.
+	// The table is serveRoutes itself rather than a list kept beside it, so a
+	// route added without a guard case cannot pass. And every check is probed
+	// on every route: probing one would pass a handler() that applied only that
+	// check while dropping the Host rule, the token and the body bound.
 	//
-	// A route added to the table belongs in this list.
-	for _, tc := range []struct {
-		name   string
-		method string
-		path   string
-		body   string
-	}{
-		{"health", http.MethodGet, "/health", ""},
-		{"create session", http.MethodPost, serveSessionsPath, `{}`},
-		{"list sessions", http.MethodGet, serveSessionsPath, ""},
-		{"read session", http.MethodGet, serveSessionsPath + "/20260101-000000-abcdef", ""},
-		{"run a turn", http.MethodPost, serveSessionsPath + "/20260101-000000-abcdef" + serveTurnsSuffix, `{"message":"q"}`},
-		{"stream a turn", http.MethodPost, serveSessionsPath + "/20260101-000000-abcdef" + serveTurnsStreamSuffix, `{"message":"q"}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			// The session handlers reach the store whenever the guard admits a
-			// request, so the store is a temporary directory here too.
-			isolateUserDirs(t)
-			s := newServeTestServer(t, serveOpts{}, "")
-			srv := httptest.NewServer(s.handler())
-			t.Cleanup(srv.Close)
+	// Each probe asserts the check's own refusal message as well as the status,
+	// because a turn route answers 403 and 415 on its own grounds too.
+	const probeID = "20260101T000000-abcdef"
+	oversize := `{"message":"` + strings.Repeat("a", serveMaxBody) + `"}`
+	for _, rt := range serveRoutes {
+		method, pattern, ok := strings.Cut(rt.pattern, " ")
+		if !ok {
+			t.Fatalf("route %q is not METHOD PATTERN", rt.pattern)
+		}
+		path := strings.Replace(pattern, "{id}", probeID, 1)
+		if strings.HasSuffix(path, "/") {
+			path += probeID
+		}
+		for _, probe := range []struct {
+			name  string
+			token string
+			body  string
+			want  int
+			says  string
+			shape func(*http.Request)
+		}{
+			{"an oversize body", "", oversize, http.StatusRequestEntityTooLarge, "exceeds", nil},
+			{"a body that is not JSON", "", `{}`, http.StatusUnsupportedMediaType, "must be application/json", func(r *http.Request) {
+				r.Header.Set("Content-Type", "text/plain")
+			}},
+			{"a Host the bind does not serve", "", `{}`, http.StatusMisdirectedRequest, "must be loopback", func(r *http.Request) {
+				r.Host = "rebound.example"
+			}},
+			{"an Origin", "", `{}`, http.StatusForbidden, "no browser origin", func(r *http.Request) {
+				r.Header.Set("Origin", "http://evil.example")
+			}},
+			{"no bearer token", serveTestToken, `{}`, http.StatusUnauthorized, "authorization required", nil},
+		} {
+			t.Run(method+" "+path+" with "+probe.name, func(t *testing.T) {
+				// The session handlers reach the store whenever the guard admits
+				// a request, so the store is a temporary directory here too.
+				isolateUserDirs(t)
+				s := newServeTestServer(t, serveOpts{}, probe.token)
+				srv := httptest.NewServer(s.handler())
+				t.Cleanup(srv.Close)
 
-			var body io.Reader
-			if tc.body != "" {
-				body = strings.NewReader(tc.body)
-			}
-			req, err := http.NewRequest(tc.method, srv.URL+tc.path, body)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if tc.body != "" {
+				req, err := http.NewRequest(method, srv.URL+path, strings.NewReader(probe.body))
+				if err != nil {
+					t.Fatal(err)
+				}
 				req.Header.Set("Content-Type", "application/json")
-			}
-			req.Header.Set("Origin", "http://evil.example")
-			resp, got := serveSend(t, req)
-			if resp.StatusCode != http.StatusForbidden {
-				t.Errorf("%s %s with an Origin: status = %d, want %d; body %q", tc.method, tc.path, resp.StatusCode, http.StatusForbidden, got)
-			}
-			if !strings.Contains(got, "no browser origin") {
-				t.Errorf("%s %s with an Origin: body = %q, want the chain's own refusal", tc.method, tc.path, got)
-			}
-		})
+				if probe.shape != nil {
+					probe.shape(req)
+				}
+				resp, got := serveSend(t, req)
+				if resp.StatusCode != probe.want {
+					t.Errorf("%s %s with %s: status = %d, want %d; body %q", method, path, probe.name, resp.StatusCode, probe.want, got)
+				}
+				if !strings.Contains(got, probe.says) {
+					t.Errorf("%s %s with %s: body = %q, want the check's own refusal naming %q", method, path, probe.name, got, probe.says)
+				}
+			})
+		}
 	}
 }
 
