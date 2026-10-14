@@ -297,7 +297,7 @@ controls, cancellation, and bounded queues.
 | `/agent auto` or `/agent NAME` | Select native answer routing and a research specialist. |
 | `/tool-host sandbox` or `/tool-host local` | Choose where native file and terminal tools run. |
 | `/browser-cdp URL` or `/browser-cdp off` | Explicitly select or clear a loopback signed-in browser source. |
-| `/model` | Select the model and reasoning level. |
+| `/model` | Select the model and reasoning level. The selected model answers every call of a turn, with no failover. |
 | `/models` | Inspect and administer native chat models, reranking, and web settings. |
 | `/hermes PROMPT` | Run one legacy Hermes turn. It writes no session. |
 | `/attach PATH` or `/context` | Queue, preview, or remove bounded context for the next question. URLs are references and are not fetched. |
@@ -482,6 +482,8 @@ the behavior described.
 | `BLKCHAIN_DOCKER_BIN` | `docker` | Container runtime binary used to run and inspect the isolated browser and proxy. Changing it changes what executes the sandbox. |
 | `BLKCHAIN_REPUTABLE_DOMAINS` | the list in `blkchain/contract/rag.json` | Comma-separated replacement for the domains a web result is treated as reputable from. |
 | `BLKCHAIN_POC_DOMAINS` | the list in `blkchain/contract/rag.json` | Comma-separated replacement for the domains permitted as proof-of-concept destinations. |
+| `BLKCHAIN_ROUTER_MODEL` | `router_model` in `blkchain/contract/rag.json`, empty | Model for the short decisions of a turn: action classification, routing, the corpus check, context grading and conversation compression. Empty uses the model the turn would otherwise resolve. |
+| `BLKCHAIN_ASSESSMENT_MODEL` | `assessment_model` in `blkchain/contract/rag.json`, empty | Model for the direct answer, the tool loop and grounded synthesis. Empty uses the model the turn would otherwise resolve. A call moves to the next model in the role's chain only on the [failures listed in the architecture notes](docs/ARCHITECTURE.md#the-rag-parameter-contract). |
 | `BLKCHAIN_WEB_FALLBACK` | unset | Set to `duckduckgo` to use DuckDuckGo when no Tavily key is configured. |
 | `BLKCHAIN_PLAYWRIGHT_HEADED` | unset | Must be `1` to permit a headed browser run, alongside an operator-provisioned headed container. |
 | `BLKCHAIN_ANALYZE_MAX_INPUT_BYTES` | 1048576 | Subject size cap for `blk analyze`. |

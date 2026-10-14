@@ -144,7 +144,7 @@ Rules:
 
 `blkchain/contract/rag.json` holds the parameters shared across languages: `top_k`, `pool_size`,
 `max_loops`, the answer and grade token and chunk caps, the temperatures, the answer sampling
-settings, the dense and sparse vector names, the sparse model, the Qdrant gRPC URL, the embedding
+settings, the default, router and assessment model ids, the dense and sparse vector names, the sparse model, the Qdrant gRPC URL, the embedding
 server URL, and the reputable-domain and proof-of-concept domain lists.
 
 The Go client loads it through `cli/internal/ragconfig` with precedence environment, then
@@ -157,6 +157,28 @@ Python does not read `rag.json`. It keeps its own copies of the few shared value
 indexing: `SPARSE_MODEL`, the dense and sparse vector names, and the embedding server URL, all in
 `config.py`. No test checks that they agree with `rag.json`, so change the matching Python constant
 in the same commit.
+
+A turn makes two kinds of model call. `router_model` answers action classification, routing, the
+corpus check, context grading and conversation compression. `assessment_model` answers the direct
+answer, the tool loop and grounded synthesis. `BLKCHAIN_ROUTER_MODEL` and
+`BLKCHAIN_ASSESSMENT_MODEL` override the file. An empty value uses the model the turn would otherwise
+resolve: `OMLX_MODEL`, else the first model the server lists, else `default_model`. An install that
+sets neither therefore runs as one model. When no model resolves, each role uses the other role's
+configured model.
+
+A role's chain is its configured model, then the resolved model. A call advances the chain on a
+transport failure, a timeout, an HTTP 5xx or a context-window rejection, and on nothing else: a
+cancellation and any other HTTP status return as they are, and no further model is tried once the
+turn's context has ended. A streamed answer does not advance once a byte has reached the reader, so a
+partial answer is never followed by a second one. A model named with `/model` in the TUI is the whole
+chain for both roles, because a turn reports the model that answered it.
+
+A tool loop that fails over restarts from its first message. A call with the same tool and arguments
+as one that already ran without error is answered from the turn's record instead of running again, so
+a tool with a side effect runs once per turn. The record holds at most 64 calls and 4 MiB of results,
+so a call past either bound runs again on a restart. A call that returned an error is not recorded,
+and two identical calls within one attempt both run. The record lives for one turn in one process and
+is never consulted on a later turn. Only the native chat tool loop keeps it.
 
 ### The command output contracts
 
