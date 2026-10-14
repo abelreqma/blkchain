@@ -216,6 +216,8 @@ func (s *serveServer) routes() *http.ServeMux {
 	mux.HandleFunc("POST "+serveSessionsPath, s.handleCreateSession)
 	mux.HandleFunc("GET "+serveSessionsPath, s.handleListSessions)
 	mux.HandleFunc("GET "+serveSessionsPath+"/", s.handleReadSession)
+	mux.HandleFunc("POST "+serveSessionsPath+"/{id}"+serveTurnsSuffix, s.handleTurn)
+	mux.HandleFunc("POST "+serveSessionsPath+"/{id}"+serveTurnsStreamSuffix, s.handleTurnStream)
 	return mux
 }
 

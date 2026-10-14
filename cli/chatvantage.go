@@ -24,7 +24,8 @@ const (
 	vantageRemote clientVantage = iota
 	// vantageLocal is a caller proven to be a local process. Two transports
 	// establish it: stdio, whose client is the process that spawned this one,
-	// and an HTTP request whose peer address is loopback.
+	// and a loopback HTTP request to a loopback-bound server, which is what
+	// serveServer.callerVantage decides.
 	vantageLocal
 )
 

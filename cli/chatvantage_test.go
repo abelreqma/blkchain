@@ -34,6 +34,18 @@ func TestVantageLocalAllowsBothAndStillValidates(t *testing.T) {
 	if err := checkChatVantage(vantageLocal, "", long); err == nil {
 		t.Error("an oversize browser endpoint was accepted")
 	}
+	// The length check runs before the endpoint is parsed, so an endpoint that
+	// is both oversize and malformed is refused on its size and a huge string
+	// never reaches url.Parse. An endpoint that is only oversize cannot show
+	// the order, because either check refuses it.
+	both := "not a url " + strings.Repeat("b", mcpChatMaxBrowserCDP)
+	err := checkChatVantage(vantageLocal, "", both)
+	if err == nil {
+		t.Fatal("an oversize malformed browser endpoint was accepted")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("an oversize malformed endpoint was refused as %q, want the length refusal", err)
+	}
 }
 
 func TestVantageForRemoteAddr(t *testing.T) {
