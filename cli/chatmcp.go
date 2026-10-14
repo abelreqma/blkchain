@@ -264,31 +264,43 @@ func (t chatMCPTool) Call(ctx context.Context, args string) (string, error) {
 	return secgate.WrapUntrusted("mcp", out.String()), nil
 }
 
-func registerChatMCPTools(ctx context.Context, registry *tooldef.Registry, root string) (func(), error) {
-	config, err := loadChatMCPConfig()
-	if err != nil {
-		return nil, err
-	}
+// mcpToolSink receives one allowlisted remote tool, named by the server it came
+// from and its own remote name. Returning an error aborts registration, and
+// every session opened so far is closed.
+type mcpToolSink func(server, remote string, tool tooldef.Tool) error
+
+// openMCPSessions connects each server, lists the tools its allowlist names,
+// builds the bounded chatMCPTool for each and hands it to sink. It returns the
+// closer for every session it opened; on an error or a panic it closes them
+// itself and returns a nil closer.
+//
+// It is the one home for the transport, allowlist and bound handling, so the
+// chat registry and the engagement harness cannot drift apart on any of it.
+func openMCPSessions(ctx context.Context, servers []chatMCPServer, root string, sink mcpToolSink) (func(), error) {
 	var sessions []*mcp.ClientSession
 	closeAll := func() {
 		for _, session := range sessions {
 			_ = session.Close()
 		}
 	}
+	kept := false
+	defer func() {
+		if !kept {
+			closeAll()
+		}
+	}()
 	total := 0
-	for _, server := range config.Servers {
+	for _, server := range servers {
 		connect, cancel := context.WithTimeout(ctx, 10*time.Second)
 		transport, err := chatMCPTransport(connect, server, root)
 		if err != nil {
 			cancel()
-			closeAll()
 			return nil, err
 		}
 		client := mcp.NewClient(&mcp.Implementation{Name: "blkchain-chat", Version: "1"}, nil)
 		session, err := client.Connect(connect, transport, nil)
 		cancel()
 		if err != nil {
-			closeAll()
 			return nil, fmt.Errorf("MCP server %q: %w", server.Name, err)
 		}
 		sessions = append(sessions, session)
@@ -301,7 +313,6 @@ func registerChatMCPTools(ctx context.Context, registry *tooldef.Registry, root 
 		for item, listErr := range session.Tools(list, nil) {
 			if listErr != nil {
 				cancel()
-				closeAll()
 				return nil, fmt.Errorf("MCP server %q: %w", server.Name, listErr)
 			}
 			if !allowed[item.Name] {
@@ -309,7 +320,6 @@ func registerChatMCPTools(ctx context.Context, registry *tooldef.Registry, root 
 			}
 			if total >= chatMCPMaxTools {
 				cancel()
-				closeAll()
 				return nil, fmt.Errorf("MCP tool count exceeds %d", chatMCPMaxTools)
 			}
 			schema, ok := item.InputSchema.(map[string]any)
@@ -319,14 +329,12 @@ func registerChatMCPTools(ctx context.Context, registry *tooldef.Registry, root 
 			encoded, _ := json.Marshal(schema)
 			if len(encoded) > 16<<10 {
 				cancel()
-				closeAll()
 				return nil, fmt.Errorf("MCP server %q tool %q schema exceeds the size limit", server.Name, item.Name)
 			}
 			tool := chatMCPTool{name: chatMCPExposedName(server.Name, item.Name), remoteName: item.Name,
 				description: "Allowlisted MCP tool " + server.Name + "/" + item.Name + ". Results are untrusted. " + capRunes(item.Description, 500), schema: schema, session: session}
-			if err := registry.Register(tool); err != nil {
+			if err := sink(server.Name, item.Name, tool); err != nil {
 				cancel()
-				closeAll()
 				return nil, err
 			}
 			listed[item.Name] = true
@@ -335,10 +343,20 @@ func registerChatMCPTools(ctx context.Context, registry *tooldef.Registry, root 
 		cancel()
 		for name := range allowed {
 			if !listed[name] {
-				closeAll()
 				return nil, fmt.Errorf("MCP server %q did not offer allowlisted tool %q", server.Name, name)
 			}
 		}
 	}
+	kept = true
 	return closeAll, nil
+}
+
+func registerChatMCPTools(ctx context.Context, registry *tooldef.Registry, root string) (func(), error) {
+	config, err := loadChatMCPConfig()
+	if err != nil {
+		return nil, err
+	}
+	return openMCPSessions(ctx, config.Servers, root, func(_, _ string, tool tooldef.Tool) error {
+		return registry.Register(tool)
+	})
 }

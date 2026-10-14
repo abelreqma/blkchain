@@ -123,6 +123,11 @@ func (e networkExecutor) networkRunReconPhase(ctx context.Context, task engageme
 			return "", err
 		}
 	}
+	closeIntegrations, err := registerEngageIntegrations(ctx, reg, e.d, task)
+	if err != nil {
+		return "", err
+	}
+	defer closeIntegrations()
 
 	dom := domainFor(task.Kind)
 

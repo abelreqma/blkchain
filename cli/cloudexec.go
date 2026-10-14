@@ -128,6 +128,11 @@ func (e cloudExecutor) cloudRunReconPhase(ctx context.Context, task engagement.T
 			return "", err
 		}
 	}
+	closeIntegrations, err := registerEngageIntegrations(ctx, reg, e.d, task)
+	if err != nil {
+		return "", err
+	}
+	defer closeIntegrations()
 
 	dom := cloudPersona()
 

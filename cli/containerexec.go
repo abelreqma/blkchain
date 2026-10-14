@@ -182,6 +182,11 @@ func (e containerExecutor) containerRunReconPhase(ctx context.Context, task enga
 			return "", err
 		}
 	}
+	closeIntegrations, err := registerEngageIntegrations(ctx, reg, e.d, task)
+	if err != nil {
+		return "", err
+	}
+	defer closeIntegrations()
 
 	dom := containerDomainFor(task.Kind)
 

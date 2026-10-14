@@ -132,6 +132,11 @@ func (e genericExecutor) Run(ctx context.Context, task engagement.Task) (string,
 			return "", err
 		}
 	}
+	closeIntegrations, err := registerEngageIntegrations(ctx, reg, e.d, task)
+	if err != nil {
+		return "", err
+	}
+	defer closeIntegrations()
 
 	proj, err := projectionText(ctx, e.d.Store)
 	if err != nil {
