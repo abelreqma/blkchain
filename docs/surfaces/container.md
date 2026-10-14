@@ -30,8 +30,8 @@ in `cli/domains.go` is its sibling for `k8s`-kind tasks). Surface:
   actions governed by arming. `docker` and `crictl` are host runtimes and are not
   in the worker.
 - Delegate dependency and container-image CVE work to a `vuln-analysis` task
-  (chained with `basis_ids`) rather than scanning inline, so the scanner persona
-  owns OSV and Grype and the advisory records.
+  carrying this task as its basis, rather than scanning inline, so the scanner
+  persona owns OSV and Grype and the advisory records.
 - Map each identity's allowed verbs and resources to concrete actions, and record
   the identity, resource, permission, request and response, and the boundary
   crossed, redacting token values.

@@ -108,10 +108,12 @@ func registerEngageIntegrations(ctx context.Context, reg *tooldef.Registry, d en
 	if len(servers) > 0 {
 		opened, openErr := openEngageMCPTools(ctx, reg, servers, d.Gate, task.Armed)
 		if openErr != nil {
-			// A task runs without per-action operator attention, so a server that
-			// cannot be opened costs that server's tools and not the task: an
-			// engagement whose own work does not depend on Burp still runs when
-			// Burp is closed. The chat path keeps its fatal handling, where the
+			// A task runs without per-action operator attention, so a failure to
+			// equip the instruments costs the task every outbound MCP tool and not
+			// the task itself: an engagement whose own work does not depend on Burp
+			// still runs when Burp is closed. The sessions open in one pass over
+			// every configured server, so the first failure in that pass discards
+			// all of them. The chat path keeps its fatal handling, where the
 			// failure is immediate feedback to an operator driving the turn.
 			//
 			// The degradation is recorded, so a task that ran without the tools is

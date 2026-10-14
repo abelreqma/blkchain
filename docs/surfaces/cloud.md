@@ -32,9 +32,13 @@ Provider CLIs:
   and `nmap` only.
 - A provider CLI is authorized by a separately approved cloud identity (an
   operator approval tied to engagement evidence and a credential file path on a
-  foothold that covers the matching cloud surface), not by a network target, so a
-  command under an approved identity is exempt from the no-target fail-closed and
-  is bounded instead by the operation and flag rules below.
+  foothold that covers the matching cloud surface), not by a network target. The
+  approval is what stands in for the two checks a provider CLI cannot satisfy: a
+  command under it is exempt from the no-target fail-closed, because its
+  destination is an account rather than an address, and from the binary
+  allowlist. It is bounded instead by the operation and flag rules below, and the
+  approval is matched per surface, so an AWS identity authorizes nothing on the
+  GCP surface.
 - Audited read-only operations run during recon without arming: for AWS,
   operations beginning `describe-`, `list-`, `get-`, `head-`, `lookup-`, or
   `search-`; for GCP, `projects list`/`describe`, `services list`,
@@ -49,11 +53,12 @@ Provider CLIs:
   `start-port-forwarding-session`, `send-command`, `execute-command`,
   `send-ssh-public-key`, `run-instances`, `start-command-execution`); and `cp`,
   `mv`, and `sync` (they take a local path the file-access bound cannot see, with
-  `s3api get-object --outfile` available instead). For `gcloud`: the
-  identity-override flags (`--account`, `--impersonate-service-account`,
-  `--access-token-file`, `--credential-file-override`, and similar) and the
-  `auth`, `config`, `components`, `alpha`, `beta`, `ssh`, `scp`, and
-  `start-iap-tunnel` subcommands.
+  `s3api get-object --outfile` available instead). For `gcloud`: the flags that change
+  the identity or the configuration the command runs under (`--account`,
+  `--impersonate-service-account`, `--access-token-file`,
+  `--credential-file-override`, `--flags-file`, `--configuration`, `--log-http`,
+  `--trace-token`, and `--verbosity`) and the `auth`, `config`, `components`,
+  `alpha`, `beta`, `ssh`, `scp`, and `start-iap-tunnel` subcommands.
 - The approval does not copy secret bytes into the workspace; the runner cannot
   verify the file's contents or identity on the remote host, and the CLI cannot
   prove every operation stays in one account or project. Credentials are never
