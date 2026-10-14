@@ -623,8 +623,8 @@ func TestServeRejectsAnOversizeBody(t *testing.T) {
 // the listener opens, so the address actually served can be wider than the text
 // reads: a localhost mapped to a routable address would be served under the
 // loopback rule, with no token required and the operator's reach granted to any
-// peer that reaches it. run re-derives the rule from the listener and refuses a
-// disagreement.
+// peer that reaches it. serveListener re-derives the rule from the listener and
+// refuses a disagreement.
 func TestServeRefusesAListenerTheBindDoesNotName(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -658,9 +658,8 @@ func TestServeRefusesAListenerTheBindDoesNotName(t *testing.T) {
 		})
 	}
 
-	// run applies the check: a loopback name whose resolved address agrees with
-	// it opens, serves, and shuts down on its context, so the check above is
-	// wired into the serving path and not merely present.
+	// A loopback name whose resolved address agrees with it opens, serves, and
+	// shuts down on its context.
 	s := newServeTestServer(t, serveOpts{bind: "localhost:0"}, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -674,4 +673,37 @@ func TestServeRefusesAListenerTheBindDoesNotName(t *testing.T) {
 	case <-time.After(serveShutdownTimeout + 10*time.Second):
 		t.Fatal("run did not return after its context was cancelled")
 	}
+
+	// serveListener is the body run reaches once the listener is open, and it
+	// refuses a listener whose address is not the exposure the bind names: that
+	// is what puts the check on the serving path rather than only in the table
+	// above. The bind names a routable address, which takes --allow-remote and a
+	// token, while the listener handed over is loopback on this machine, so
+	// nothing is opened off it. The context is already cancelled, so a build
+	// missing the check serves and shuts down instead of blocking.
+	t.Run("the serving path refuses a listener off the bind's exposure", func(t *testing.T) {
+		s := newServeTestServer(t, serveOpts{bind: "192.0.2.10:8787", allowRemote: true}, "a-token")
+		if s.hostMode != serveHostBind {
+			t.Fatalf("hostMode = %d, want serveHostBind (%d)", s.hostMode, serveHostBind)
+		}
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		addr := ln.Addr().String()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err = s.serveListener(ctx, ln)
+		if err == nil {
+			t.Fatalf("serveListener on %s = nil, want a listener off the bind's exposure refused", addr)
+		}
+		if !strings.Contains(err.Error(), addr) {
+			t.Errorf("err = %v, want the address actually opened (%s) named in it", err, addr)
+		}
+		if _, aerr := ln.Accept(); !errors.Is(aerr, net.ErrClosed) {
+			t.Errorf("Accept after the refusal = %v, want %v", aerr, net.ErrClosed)
+		}
+	})
 }
