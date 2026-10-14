@@ -64,9 +64,24 @@ func (s *serveServer) handleCreateSession(w http.ResponseWriter, _ *http.Request
 	serveWriteJSON(w, http.StatusCreated, sess.meta())
 }
 
+// sessionReadsAllowed refuses a session read when no token is set. The session
+// store holds every surface's conversations, and without a token any process on
+// the machine, another local account's included, can call a loopback server.
+// Once a token is set the guard chain has required it on every request.
+func (s *serveServer) sessionReadsAllowed(w http.ResponseWriter) bool {
+	if s.token != "" {
+		return true
+	}
+	serveRefuse(w, http.StatusForbidden, "reading sessions requires "+serveTokenEnv+" to be set")
+	return false
+}
+
 // handleListSessions lists sessions newest first, whichever surface created
 // them, capped at sessionResourceListCap. truncated says the cap hid some.
 func (s *serveServer) handleListSessions(w http.ResponseWriter, _ *http.Request) {
+	if !s.sessionReadsAllowed(w) {
+		return
+	}
 	metas, err := listSessions()
 	if err != nil {
 		serveRefuse(w, http.StatusInternalServerError, "the sessions could not be listed")
@@ -97,6 +112,9 @@ func (s *serveServer) handleListSessions(w http.ResponseWriter, _ *http.Request)
 // client that creates a session and reads it back would otherwise have to treat
 // 404 as "it may exist".
 func (s *serveServer) handleReadSession(w http.ResponseWriter, r *http.Request) {
+	if !s.sessionReadsAllowed(w) {
+		return
+	}
 	id, err := serveSessionIDFromPath(r.URL.Path)
 	if err != nil {
 		serveRefuse(w, http.StatusBadRequest, "invalid session id")
