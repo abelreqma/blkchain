@@ -32,14 +32,7 @@ func requireBurpE2E(t *testing.T) string {
 	if os.Getenv("BLKCHAIN_BURP_E2E") != "1" {
 		t.Skip("set BLKCHAIN_BURP_E2E=1 with Burp running, its MCP server enabled, and its proxy listener up")
 	}
-	path := os.Getenv("BLKCHAIN_MCP_CLIENT_CONFIG")
-	if path == "" {
-		t.Skip("set BLKCHAIN_MCP_CLIENT_CONFIG to the operator's MCP client config; its default location is redirected into a temporary directory under go test")
-	}
-	if _, err := os.Lstat(path); os.IsNotExist(err) {
-		t.Skipf("no MCP client config at %s; copy cli/mcp-clients.example.json and edit it", path)
-	}
-	return path
+	return useOperatorMCPConfig(t)
 }
 
 // TestBurpMCPServerRegistersItsAllowlistedTools pins that the operator's config

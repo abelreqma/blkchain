@@ -146,13 +146,7 @@ func TestMCPChatReachesAnOperatorConfiguredMCPServer(t *testing.T) {
 	if os.Getenv("BLKCHAIN_CHAT_MCP_OPERATOR_E2E") != "1" {
 		t.Skip("set BLKCHAIN_CHAT_MCP_OPERATOR_E2E=1 with an MCP client config naming a running server")
 	}
-	path := os.Getenv("BLKCHAIN_MCP_CLIENT_CONFIG")
-	if path == "" {
-		t.Skip("set BLKCHAIN_MCP_CLIENT_CONFIG to the operator's MCP client config; its default location is redirected into a temporary directory under go test")
-	}
-	if _, err := os.Lstat(path); os.IsNotExist(err) {
-		t.Skipf("no MCP client config at %s; create one with a server entry first", path)
-	}
+	path := useOperatorMCPConfig(t)
 	config, err := loadChatMCPConfig()
 	if err != nil {
 		t.Fatalf("MCP client config at %s: %v", path, err)
