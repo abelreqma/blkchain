@@ -213,16 +213,18 @@ type turnUsage struct {
 // turnResult is one turn's output, shaped so blk ask --json, the MCP chat tool
 // and the HTTP surface report the same fields.
 type turnResult struct {
-	SessionID string             `json:"session_id,omitempty"`
-	Answer    string             `json:"answer"`
-	Citations []citation         `json:"citations"`
-	UsedWeb   bool               `json:"used_web"`
-	Model     string             `json:"model"`
-	Agent     string             `json:"agent,omitempty"`
-	Route     string             `json:"route,omitempty"`
-	Actions   []turnAction       `json:"actions,omitempty"`
-	Usage     turnUsage          `json:"usage"`
-	Results   []retrieval.Result `json:"results,omitempty"`
+	SessionID string     `json:"session_id,omitempty"`
+	Answer    string     `json:"answer"`
+	Citations []citation `json:"citations"`
+	UsedWeb   bool       `json:"used_web"`
+	// Model is the model that answered, which is the model blk requested unless
+	// a failover moved the answer to the next model in the role's chain.
+	Model   string             `json:"model"`
+	Agent   string             `json:"agent,omitempty"`
+	Route   string             `json:"route,omitempty"`
+	Actions []turnAction       `json:"actions,omitempty"`
+	Usage   turnUsage          `json:"usage"`
+	Results []retrieval.Result `json:"results,omitempty"`
 }
 
 // runNativeTurn answers one turn. rc may be nil for a web-only turn or when the

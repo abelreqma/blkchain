@@ -77,8 +77,9 @@ type answerResponse struct {
 	Answer    string     `json:"answer"`
 	Citations []citation `json:"citations"`
 	UsedWeb   bool       `json:"used_web"`
-	// Model is the model blk requested for this answer. It is the id blk sent,
-	// not one the server reported back.
+	// Model is the model that answered, which is the model blk requested unless
+	// a failover moved the answer to the next model in the role's chain. It is
+	// an id blk sent, not one the server reported back.
 	Model   string             `json:"model"`
 	Agent   string             `json:"agent,omitempty"`
 	Results []retrieval.Result `json:"results,omitempty"`

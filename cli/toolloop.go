@@ -59,10 +59,20 @@ type LoopCaps struct {
 	Summarizer *ChainSummarizer
 	// ToolMemo, when set, carries the results of tool calls that ran to
 	// completion across the attempts of one turn, so a failover that restarts
-	// the loop replays them instead of running the tool again. nil (the
-	// default) runs every requested call, which is what the engagement
-	// executors want: each of their loops is its own step.
+	// the loop replays them instead of running the tool again. It spans every
+	// restart of the turn's loop, the required-action reminder retry included:
+	// that retry also restarts from the original messages, with a system
+	// reminder appended, and would otherwise run a side-effecting tool a second
+	// time. It also carries the turn's tool-call count, so MaxCalls bounds the
+	// turn rather than each attempt. nil (the default) runs every requested call
+	// and counts per loop, which is what the engagement executors want: each of
+	// their loops is its own step.
 	ToolMemo *toolMemo
+	// BeginAttempt, when set, is called before each attempt of the loop, so a
+	// caller that tracks what an attempt did drops that state when a failover
+	// restarts from the first message. nil (the default) is what a caller that
+	// tracks nothing per attempt passes.
+	BeginAttempt func()
 }
 
 // runToolLoop drives the model through tool-calling rounds. Each round it sends
@@ -72,7 +82,8 @@ type LoopCaps struct {
 // It stops at caps.MaxRounds rounds or once caps.MaxCalls calls have run. When
 // caps.ToolMemo is set, a call whose identical arguments already ran to
 // completion in an earlier attempt is answered from that record instead of
-// being run again.
+// being run again, and the memo's own call count is what caps.MaxCalls bounds,
+// so the cap covers the turn rather than this one loop.
 func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, msgs []llms.MessageContent, caps LoopCaps, extra ...llms.CallOption) (final string, rounds int, err error) {
 	if caps.Observe == nil {
 		caps.Observe = engageTelemetryFromContext(ctx)
@@ -103,7 +114,15 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 	}
 	idle := 0
 	opts := append([]llms.CallOption{llms.WithTools(reg.Specs())}, extra...)
+	// The call count lives in the memo when there is one, because the memo is
+	// the object with exactly one turn's lifetime: MaxCalls then bounds the
+	// turn's calls across the attempts a failover restarts, rather than each
+	// attempt's. Without a memo the count is this loop's own.
 	total := 0
+	calls, spend := func() int { return total }, func() { total++ }
+	if caps.ToolMemo != nil {
+		calls, spend = caps.ToolMemo.spent, caps.ToolMemo.spend
+	}
 	reviewedFinal := false
 	for rounds < caps.MaxRounds {
 		if err := ctx.Err(); err != nil {
@@ -185,7 +204,7 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 				}
 			}
 			result, outcome := "tool call skipped: call cap reached", ToolSkipped
-			if total < caps.MaxCalls {
+			if calls() < caps.MaxCalls {
 				key, replayed := "", false
 				if caps.ToolMemo != nil && tc.FunctionCall != nil {
 					key = toolCallKey(name, args)
@@ -204,9 +223,9 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 						}
 					}
 				}
-				// A replayed call spends a slot in this attempt's cap, so an
-				// attempt is bounded whether its calls ran or replayed.
-				total++
+				// A replayed call spends a slot like one that ran, so the cap
+				// bounds the calls whether they ran or replayed.
+				spend()
 			}
 			if caps.ObserveResult != nil {
 				caps.ObserveResult(name, outcome)
@@ -234,8 +253,8 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 				}
 			}
 		}
-		if total >= caps.MaxCalls {
-			return stop(fmt.Sprintf("tool call cap reached (%d calls)", total))
+		if calls() >= caps.MaxCalls {
+			return stop(fmt.Sprintf("tool call cap reached (%d calls)", calls()))
 		}
 		if caps.Progress != nil && caps.NoProgressRounds > 0 {
 			next, err := caps.Progress(ctx)

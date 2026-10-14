@@ -1490,6 +1490,17 @@ func (m model) currentModel() string {
 	return m.cfg.DefaultModel
 }
 
+// reportedModel is the model id the status ribbon names: the model the last
+// turn answered on, which is the only id that names the assessment model of a
+// role chain or a model reached by failover, and the picked or resolved model
+// before a turn has reported one.
+func (m model) reportedModel() string {
+	if id := strings.TrimSpace(m.answeredBy); id != "" {
+		return id
+	}
+	return m.currentModel()
+}
+
 // startEngageIntake opens the guided /engage intake: it seeds the flow with any
 // typed goal and opens the first clarify overlay (domain). Subsequent steps and
 // dispatch are driven by advanceEngageIntake from the clarifyResolvedMsg handler.
@@ -1636,6 +1647,9 @@ func (m *model) recordTurn(answer string) error {
 // the status-line health.
 func (m model) applyModel(modelID string) (tea.Model, tea.Cmd) {
 	m.ragModel = strings.TrimSpace(modelID)
+	// A pick is the whole chain for the next turn, so the model the previous
+	// turn answered on no longer names what the ribbon reports.
+	m.answeredBy = ""
 	note := "   " + Meta.Render("model: "+sanitizeTerminal(m.currentModel()))
 	return m, tea.Batch(tea.Println(note), m.healthCmd())
 }
@@ -3032,7 +3046,7 @@ func (m model) statusLine() string {
 	if m.persona != "" {
 		retrieval = append(retrieval, "persona "+m.persona)
 	}
-	return m.composeStatus(style.Render(statusMark(tone)), tone, "rag", m.currentModel(), label, retrieval)
+	return m.composeStatus(style.Render(statusMark(tone)), tone, "rag", m.reportedModel(), label, retrieval)
 }
 
 // webStatusSegment is the optional web entry in the rag status ribbon. It is

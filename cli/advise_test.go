@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -88,6 +89,42 @@ func TestAdviseLoopRejectsAnUnperformedExplicitAction(t *testing.T) {
 	answer, _, err := adviseLoop(context.Background(), fake, nil, kbTestCfg(), nil, "Scan 192.0.2.5", AnswerOpts{requiredAction: "target action"})
 	if err == nil || !strings.Contains(err.Error(), "no target action tool") || answer != "" {
 		t.Fatalf("unperformed action accepted: answer=%q err=%v", answer, err)
+	}
+}
+
+// TestAdviseLoopRejectsAnActionOnlyAnEarlierAttemptPerformed pins what the
+// required-action guard exists to prove: that the model whose answer is
+// returned saw the action's result. The first model runs the required command
+// and then fails for a reason that advances the chain; the second answers from
+// the original messages without requesting the tool, so its answer is not
+// grounded in the command's output and must not be returned.
+func TestAdviseLoopRejectsAnActionOnlyAnEarlierAttemptPerformed(t *testing.T) {
+	old := execRunner
+	ran := 0
+	execRunner = func(context.Context, string, []string, string, int, time.Duration) runResult {
+		ran++
+		return runResult{Output: "observed response"}
+	}
+	t.Cleanup(func() { execRunner = old })
+	first := &fakeModel{
+		queue: []*llms.ContentResponse{
+			callResp("c1", "run_command", `{"binary":"curl","args":["-I","http://192.0.2.5/"]}`),
+			textResp("I scanned it."),
+		},
+		errs: []error{nil, errors.New("API returned unexpected status code: 503: down")},
+	}
+	second := &fakeModel{queue: []*llms.ContentResponse{textResp("I scanned it.")}}
+	chain := &modelChain{ids: []string{"a", "b"}, clients: []toolLoopModel{first, second}}
+	answer, _, err := adviseLoop(context.Background(), first, nil, kbTestCfg(), nil, "Scan 192.0.2.5",
+		AnswerOpts{requiredAction: "target action", assessment: chain})
+	if err == nil || !strings.Contains(err.Error(), "no target action tool") {
+		t.Fatalf("an answer from a model that never called the tool was accepted: answer=%q err=%v", answer, err)
+	}
+	if answer != "" {
+		t.Errorf("answer = %q, want none", answer)
+	}
+	if ran != 1 {
+		t.Errorf("the command ran %d times, want 1", ran)
 	}
 }
 
