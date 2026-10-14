@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -433,5 +434,29 @@ func TestEngageMCPRejectsUnapprovedInlineRoE(t *testing.T) {
 	_, err := svc.handle(context.Background(), nil, mcpEngageIn{Goal: "inspect", RoE: "## In Scope\n8.8.8.8\n", Confirm: "auto"})
 	if err == nil || !strings.Contains(err.Error(), "differs from the operator-approved policy") || modelBuilt {
 		t.Fatalf("unapproved RoE reached execution: %v modelBuilt=%t", err, modelBuilt)
+	}
+}
+
+// TestEngageConfirmSchemaStatesTheDefault pins the confirm field's schema text,
+// which MCP clients read, to the default parseEngageInput applies. A client that
+// trusted text naming elicit as the default would expect per-command approval
+// that an empty confirm does not give.
+func TestEngageConfirmSchemaStatesTheDefault(t *testing.T) {
+	field, ok := reflect.TypeOf(mcpEngageIn{}).FieldByName("Confirm")
+	if !ok {
+		t.Fatal("mcpEngageIn has no Confirm field")
+	}
+	desc := field.Tag.Get("jsonschema")
+	got, err := parseEngageInput(mcpEngageIn{Goal: "g", RoE: "## In Scope\n10.0.0.5\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(desc, "'"+got.Confirm+"' (default") {
+		t.Errorf("confirm schema %q does not name %q, the applied default, as the default", desc, got.Confirm)
+	}
+	for _, other := range []string{"auto", "elicit"} {
+		if other != got.Confirm && strings.Contains(desc, "'"+other+"' (default") {
+			t.Errorf("confirm schema %q names %q as the default", desc, other)
+		}
 	}
 }
