@@ -206,7 +206,7 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 			result, outcome := "tool call skipped: call cap reached", ToolSkipped
 			if calls() < caps.MaxCalls {
 				key, replayed := "", false
-				if caps.ToolMemo != nil && tc.FunctionCall != nil {
+				if caps.ToolMemo != nil && tc.FunctionCall != nil && toolCallReplayable(name, args) {
 					key = toolCallKey(name, args)
 					if stored, hit := caps.ToolMemo.lookup(key); hit {
 						result, outcome, replayed = stored, ToolDone, true

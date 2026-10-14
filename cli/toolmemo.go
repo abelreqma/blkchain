@@ -124,6 +124,33 @@ func (t *toolMemo) record(key, result string) {
 	t.bytes += len(result)
 }
 
+// toolCallReplayable reports whether a completed call may be answered from the
+// memo on a later attempt. A call whose result is a reading of state that keeps
+// changing is not: oob_interactions reports callbacks that may have arrived
+// since it ran, and process_manage's list, poll, log and wait read a process
+// that kept running, so a replay would present the earlier reading as current.
+// Such a call reads and changes nothing, so running it again is safe.
+// process_manage's write and kill act on the process and are replayed, as is a
+// call whose arguments do not decode.
+func toolCallReplayable(name, args string) bool {
+	switch name {
+	case "oob_interactions":
+		return false
+	case "process_manage":
+		var in struct {
+			Action string `json:"action"`
+		}
+		if json.Unmarshal([]byte(args), &in) != nil {
+			return true
+		}
+		switch in.Action {
+		case "list", "poll", "log", "wait":
+			return false
+		}
+	}
+	return true
+}
+
 // toolCallKey is the memo key for one call: the tool name and a SHA-256 digest
 // of its whole canonicalized arguments. JSON arguments are decoded with numbers
 // kept as their literal text and re-encoded, which sorts object keys at every

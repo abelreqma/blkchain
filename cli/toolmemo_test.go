@@ -351,3 +351,42 @@ func TestToolLoopReplayStillSpendsACallSlot(t *testing.T) {
 		t.Errorf("a replayed call did not count against the call cap: final=%q", final)
 	}
 }
+
+// TestToolLoopRunsAPollAgainOnTheNextAttempt pins that a call whose result is a
+// reading of state that keeps changing is run again after a failover rather
+// than replayed. oob_interactions reports callbacks that may have arrived since
+// the first attempt polled, and process_manage's list, poll, log and wait read a
+// process that kept running, so a replay would answer with the earlier reading
+// as if it were current. process_manage's write and kill act on the process, so
+// they are replayed like any other completed call: running them again would
+// send the input twice.
+func TestToolLoopRunsAPollAgainOnTheNextAttempt(t *testing.T) {
+	for _, c := range []struct {
+		tool, args string
+		runs       int
+	}{
+		{"oob_interactions", `{}`, 2},
+		{"process_manage", `{"action":"list"}`, 2},
+		{"process_manage", `{"action":"poll","session_id":"p1"}`, 2},
+		{"process_manage", `{"action":"log","session_id":"p1"}`, 2},
+		{"process_manage", `{"action":"wait","session_id":"p1"}`, 2},
+		{"process_manage", `{"action":"write","session_id":"p1","data":"y\n"}`, 1},
+		{"process_manage", `{"action":"kill","session_id":"p1"}`, 1},
+		{"process_manage", `not json`, 1},
+		{"terminal", `{"command":"id"}`, 1},
+	} {
+		tool := &fakeTool{name: c.tool, fn: func(string) (string, error) { return "reading", nil }}
+		reg := newLoopReg(t, tool)
+		memo := newToolMemo()
+		caps := LoopCaps{MaxRounds: 5, MaxCalls: 5, ToolMemo: memo}
+		for i := 0; i < 2; i++ {
+			m := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", c.tool, c.args), textResp("done")}}
+			if _, _, err := runToolLoopAttempt(context.Background(), m, reg, userMsgs(), caps, memo); err != nil {
+				t.Fatalf("%s %s attempt %d: %v", c.tool, c.args, i, err)
+			}
+		}
+		if len(tool.ran) != c.runs {
+			t.Errorf("%s %s ran %d times across two attempts, want %d", c.tool, c.args, len(tool.ran), c.runs)
+		}
+	}
+}
