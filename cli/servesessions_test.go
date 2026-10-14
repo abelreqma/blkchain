@@ -14,11 +14,12 @@ import (
 // session store at its own temporary directory through isolateUserDirs, so no
 // test reads or writes the operator's sessions.
 
-// sessionTestServer serves the full route table behind the guard chain.
+// sessionTestServer serves the full route table behind the guard chain, with a
+// token set, because reading sessions requires one. sessionDo presents it.
 func sessionTestServer(t *testing.T) (*httptest.Server, *serveServer) {
 	t.Helper()
 	isolateUserDirs(t)
-	s := newServeTestServer(t, serveOpts{}, "")
+	s := newServeTestServer(t, serveOpts{}, serveTestToken)
 	srv := httptest.NewServer(s.handler())
 	t.Cleanup(srv.Close)
 	return srv, s
@@ -32,6 +33,7 @@ func sessionDo(t *testing.T, srv *httptest.Server, method, path string) (*http.R
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
+	req.Header.Set("Authorization", "Bearer "+serveTestToken)
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -367,5 +369,52 @@ func TestServeReadsASessionItDidNotCreate(t *testing.T) {
 	}
 	if s.owned.touch(id) {
 		t.Fatal("reading a session put it in the owner set")
+	}
+}
+
+// TestServeRefusesSessionReadsWithoutAToken pins that a server with no token
+// does not hand out transcripts. Any process on the machine, another local
+// account's included, can call a loopback server with no token, and the session
+// store holds every surface's conversations. Creating a session and running a
+// sandboxed turn stay open, so the server is still usable without one.
+func TestServeRefusesSessionReadsWithoutAToken(t *testing.T) {
+	isolateUserDirs(t)
+	s := newServeTestServer(t, serveOpts{}, "")
+	srv := httptest.NewServer(s.handler())
+	t.Cleanup(srv.Close)
+	other := writeSessionOnDisk(t, "", turnRecord{Role: roleUser, Content: "a question from the TUI"})
+
+	send := func(method, path string) (int, string) {
+		req, err := http.NewRequest(method, srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var sb strings.Builder
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := resp.Body.Read(buf)
+			sb.Write(buf[:n])
+			if rerr != nil {
+				break
+			}
+		}
+		return resp.StatusCode, sb.String()
+	}
+	for _, path := range []string{serveSessionsPath, serveSessionsPath + "/" + other} {
+		code, body := send(http.MethodGet, path)
+		if code != http.StatusForbidden || !strings.Contains(body, "BLKCHAIN_SERVE_TOKEN") {
+			t.Errorf("GET %s with no token: %d %q, want 403 naming BLKCHAIN_SERVE_TOKEN", path, code, body)
+		}
+		if strings.Contains(body, "a question from the TUI") {
+			t.Errorf("GET %s with no token returned a transcript", path)
+		}
+	}
+	if code, body := send(http.MethodPost, serveSessionsPath); code != http.StatusCreated {
+		t.Errorf("creating a session with no token: %d %q, want 201", code, body)
 	}
 }

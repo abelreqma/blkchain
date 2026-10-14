@@ -235,7 +235,7 @@ func commandSpecs() []cmdSpec {
 			desc: "serve the agent over a loopback HTTP API",
 			long: "Runs the local HTTP API for any client on this machine, offering the same agent turn as blk ask, the REPL, the TUI and blk mcp. " +
 				"It binds 127.0.0.1:8787 unless --bind names another address, and serving a bind that is not loopback takes the --allow-remote flag and a bearer token in BLKCHAIN_SERVE_TOKEN, which is required on every request once it is set, loopback included. " +
-				"A turn's tool_host local and browser_cdp grant the operator's own reach, so they are available only to a loopback caller on a loopback bind with BLKCHAIN_SERVE_TOKEN set, and are refused to every other caller; without that reach a turn also gets no file transfer and no MCP server outside the sandbox. " +
+				"A turn's tool_host local and browser_cdp grant the operator's own reach, so they are available only to a loopback caller on a loopback bind with BLKCHAIN_SERVE_TOKEN set, and are refused to every other caller; without that reach a turn also gets no file transfer and no MCP server outside the sandbox, and listing or reading sessions requires the token too. " +
 				"The API guards against a browser page: a request body must be application/json, the Host header must name an address the bind serves (a loopback bind accepts any loopback address, localhost and *.localhost; a bind on one other host accepts only that host; a wildcard bind accepts any), and any Origin header is refused.",
 			flags:    func(fs *flag.FlagSet) { defineServeFlags(fs, &serveOpts{}) },
 			examples: []string{"blk serve", "blk serve --bind 127.0.0.1:9000"},
