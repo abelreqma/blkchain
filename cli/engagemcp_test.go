@@ -45,6 +45,24 @@ func engageMCPRequestArgs(content, host string, port int, https bool) string {
 		`","targetPort":` + strconv.Itoa(port) + `,"usesHttps":` + scheme + `}`
 }
 
+// engageMCPHTTP2Args builds one send_http2_request argument object in Burp's
+// schema, which carries the request line as pseudo-headers and has no content.
+func engageMCPHTTP2Args(t *testing.T, pseudo map[string]any, host string, port int, https bool) string {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{
+		"headers":        map[string]any{},
+		"pseudoHeaders":  pseudo,
+		"requestBody":    "",
+		"targetHostname": host,
+		"targetPort":     port,
+		"usesHttps":      https,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 // engageMCPActiveTier reports whether the gate tiers a target as active, by
 // presenting it to a real gate on an unarmed task: an active web action requires
 // an armed task, so a tier denial means active and an allow means recon. The
@@ -205,8 +223,15 @@ func TestEngageMCPTargetReadsTheMethodAndURLFromTheArguments(t *testing.T) {
 		},
 		{
 			name:       "state changing method",
-			tool:       "send_http2_request",
+			tool:       "send_http1_request",
 			args:       engageMCPRequestArgs(`POST /login HTTP/1.1\r\nHost: x\r\n\r\n`, "app.example", 443, true),
+			wantMethod: "POST",
+			wantURL:    "https://app.example:443/login",
+		},
+		{
+			name:       "http2 state changing method",
+			tool:       "send_http2_request",
+			args:       engageMCPHTTP2Args(t, map[string]any{":method": "POST", ":path": "/login", ":scheme": "https", ":authority": "app.example"}, "app.example", 443, true),
 			wantMethod: "POST",
 			wantURL:    "https://app.example:443/login",
 		},
@@ -380,17 +405,20 @@ func TestEngageMCPMethodCannotForgeASentinel(t *testing.T) {
 			t.Errorf("the method pattern matches %q, so a request line can emit it", sentinel)
 		}
 	}
-	for _, content := range []string{`INTRUDER-FUZZ / HTTP/1.1`, `INTRUDER / HTTP/1.1`, `intruder-fuzz / HTTP/1.1`} {
-		for _, tool := range []string{"send_http1_request", "send_http2_request"} {
-			target, err := engageMCPTargetFromArgs(tool, engageMCPRequestArgs(content, "10.0.0.5", 443, true))
+	for _, method := range []string{`INTRUDER-FUZZ`, `INTRUDER`, `intruder-fuzz`} {
+		for tool, args := range map[string]string{
+			"send_http1_request": engageMCPRequestArgs(method+` / HTTP/1.1`, "10.0.0.5", 443, true),
+			"send_http2_request": engageMCPHTTP2Args(t, map[string]any{":method": method, ":path": "/"}, "10.0.0.5", 443, true),
+		} {
+			target, err := engageMCPTargetFromArgs(tool, args)
 			if err != nil {
-				t.Fatalf("content %q through %s: %v", content, tool, err)
+				t.Fatalf("method %q through %s: %v", method, tool, err)
 			}
 			if target.Method == engageMCPIntruderMethod {
-				t.Errorf("content %q through %s produced the Intruder label", content, tool)
+				t.Errorf("method %q through %s produced the Intruder label", method, tool)
 			}
 			if !engageMCPActiveTier(t, target) {
-				t.Errorf("content %q through %s must tier as active", content, tool)
+				t.Errorf("method %q through %s must tier as active", method, tool)
 			}
 		}
 	}
@@ -579,5 +607,77 @@ func TestNewGatedMCPToolRefusesToWrapARequestToolWithNoGate(t *testing.T) {
 		if ok || tool != nil {
 			t.Errorf("newGatedMCPTool(%q, nil gate) = (%v, %v), want (nil, false)", remote, tool, ok)
 		}
+	}
+}
+
+// TestEngageMCPHTTP2ReadsThePseudoHeaders pins that send_http2_request is read in
+// Burp's own schema. The request line travels as pseudo-headers, so the method
+// and path the gate authorizes come from :method and :path, and a content field,
+// which Burp's schema does not have, is refused rather than read: a call that
+// set content to a GET line would otherwise be tiered on it while Burp sent the
+// pseudo-headers' method.
+func TestEngageMCPHTTP2ReadsThePseudoHeaders(t *testing.T) {
+	target, err := engageMCPTargetFromArgs("send_http2_request",
+		engageMCPHTTP2Args(t, map[string]any{":method": "GET", ":path": "/a?q=1"}, "10.0.0.5", 443, true))
+	if err != nil {
+		t.Fatalf("a request in Burp's schema was refused: %v", err)
+	}
+	if target.Method != "GET" || target.URL != "https://10.0.0.5:443/a?q=1" {
+		t.Errorf("target = %+v, want GET https://10.0.0.5:443/a?q=1", target)
+	}
+	if engageMCPActiveTier(t, target) {
+		t.Error("a GET through send_http2_request must tier as recon")
+	}
+
+	forged := `{"content":"GET / HTTP/1.1","headers":{},"pseudoHeaders":{":method":"DELETE",":path":"/admin/users/1"},"requestBody":"","targetHostname":"10.0.0.5","targetPort":443,"usesHttps":true}`
+	if _, err := engageMCPTargetFromArgs("send_http2_request", forged); !errors.Is(err, errEngageMCPHTTP2Content) {
+		t.Fatalf("a content field on send_http2_request: error = %v, want %v", err, errEngageMCPHTTP2Content)
+	}
+	inner := &recordingMCPTool{name: "mcp__burp__send_http2_request", output: "sent"}
+	tool, ok := newGatedMCPTool(inner, "burp", "send_http2_request", autoGate(t), false)
+	if !ok {
+		t.Fatal("a request tool with a gate must be registered")
+	}
+	out, err := tool.Call(context.Background(), forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.calls != 0 {
+		t.Fatalf("a forged content field reached the remote tool, refusal %q", out)
+	}
+
+	for _, c := range []struct {
+		name string
+		args string
+		want error
+	}{
+		{"no pseudo-headers", `{"headers":{},"requestBody":"","targetHostname":"10.0.0.5","targetPort":443,"usesHttps":true}`, errEngageMCPPseudoHeaders},
+		{"pseudo-headers not an object", `{"pseudoHeaders":"GET /","targetHostname":"10.0.0.5","targetPort":443}`, errEngageMCPPseudoHeaders},
+		{"method not a string", `{"pseudoHeaders":{":method":5},"targetHostname":"10.0.0.5","targetPort":443}`, errEngageMCPPseudoHeaders},
+		{"path not a string", `{"pseudoHeaders":{":method":"GET",":path":["/"]},"targetHostname":"10.0.0.5","targetPort":443}`, errEngageMCPPseudoHeaders},
+	} {
+		if _, err := engageMCPTargetFromArgs("send_http2_request", c.args); !errors.Is(err, c.want) {
+			t.Errorf("%s: error = %v, want %v", c.name, err, c.want)
+		}
+	}
+
+	// A missing or unreadable method tiers as active, and a path that is not
+	// origin form contributes none, as on the content-carrying tools.
+	for _, pseudo := range []map[string]any{{":path": "/"}, {":method": "DE LETE", ":path": "/"}} {
+		target, err := engageMCPTargetFromArgs("send_http2_request", engageMCPHTTP2Args(t, pseudo, "10.0.0.5", 443, true))
+		if err != nil {
+			t.Fatalf("pseudo-headers %v: %v", pseudo, err)
+		}
+		if target.Method != engageMCPUnparsedMethod || !engageMCPActiveTier(t, target) {
+			t.Errorf("pseudo-headers %v: method %q must be the unparsed sentinel and tier as active", pseudo, target.Method)
+		}
+	}
+	second, err := engageMCPTargetFromArgs("send_http2_request",
+		engageMCPHTTP2Args(t, map[string]any{":method": "GET", ":path": "//evil.target/x"}, "10.0.0.5", 443, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.URL != "https://10.0.0.5:443" {
+		t.Errorf("a second authority in :path: url = %q, want the authority alone", second.URL)
 	}
 }

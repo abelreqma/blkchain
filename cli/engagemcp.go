@@ -126,8 +126,10 @@ var (
 	errEngageMCPArgs = errors.New("invalid arguments")
 	errEngageMCPHost = errors.New("targetHostname must be an IP address or a hostname of at most " +
 		strconv.Itoa(engageMCPHostMaxBytes) + " bytes of letters, digits, dots and hyphens")
-	errEngageMCPPort    = errors.New("targetPort must be between 1 and 65535")
-	errEngageMCPContent = errors.New("content must be a string holding the raw request")
+	errEngageMCPPort          = errors.New("targetPort must be between 1 and 65535")
+	errEngageMCPContent       = errors.New("content must be a string holding the raw request")
+	errEngageMCPHTTP2Content  = errors.New("send_http2_request takes its request line as pseudoHeaders, not content")
+	errEngageMCPPseudoHeaders = errors.New("pseudoHeaders must be an object whose :method and :path are strings")
 )
 
 const (
@@ -222,7 +224,12 @@ func engageMCPRequestPath(content string) string {
 	if len(fields) < 2 {
 		return ""
 	}
-	target := fields[1]
+	return engageMCPOriginForm(fields[1])
+}
+
+// engageMCPOriginForm returns target when it is an origin-form request target
+// within the length bound, or the empty string.
+func engageMCPOriginForm(target string) string {
 	if len(target) > engageMCPRequestTargetMaxBytes || strings.Contains(target, "//") ||
 		!engageMCPOriginFormPattern.MatchString(target) {
 		return ""
@@ -258,15 +265,15 @@ func engageMCPTargetFromArgs(tool, args string) (engageMCPRequestTarget, error) 
 	if !ok || port < 1 || port > 65535 || port != float64(int(port)) {
 		return engageMCPRequestTarget{}, errEngageMCPPort
 	}
-	content, ok := values["content"].(string)
-	if !ok {
-		return engageMCPRequestTarget{}, errEngageMCPContent
+	method, path, err := engageMCPRequestLine(tool, values)
+	if err != nil {
+		return engageMCPRequestTarget{}, err
 	}
 	scheme := "http"
 	if https, ok := values["usesHttps"].(bool); ok && https {
 		scheme = "https"
 	}
-	raw := scheme + "://" + net.JoinHostPort(host, strconv.Itoa(int(port))) + engageMCPRequestPath(content)
+	raw := scheme + "://" + net.JoinHostPort(host, strconv.Itoa(int(port))) + path
 	// The host and the path are both model-authored, so confirm the URL the gate
 	// scope-checks reads back as the authority the arguments named. A userinfo
 	// form in the host moves the authority net/url reads to what follows the '@';
@@ -284,11 +291,50 @@ func engageMCPTargetFromArgs(tool, args string) (engageMCPRequestTarget, error) 
 		parsed.Port() != strconv.Itoa(int(port)) {
 		return engageMCPRequestTarget{}, errEngageMCPHost
 	}
-	method := engageMCPMethod(content)
 	if tool == "send_to_intruder" {
 		method = engageMCPIntruderMethod
 	}
 	return engageMCPRequestTarget{Method: method, URL: raw}, nil
+}
+
+// engageMCPRequestLine reads the method and origin-form path one request tool
+// will send. send_http1_request and send_to_intruder carry a raw request in
+// content. send_http2_request carries the request line as pseudoHeaders and its
+// schema has no content, so a content field there is refused: the gate would
+// tier the call on it while Burp sent the pseudo-headers.
+func engageMCPRequestLine(tool string, values map[string]any) (method, path string, err error) {
+	if tool != "send_http2_request" {
+		content, ok := values["content"].(string)
+		if !ok {
+			return "", "", errEngageMCPContent
+		}
+		return engageMCPMethod(content), engageMCPRequestPath(content), nil
+	}
+	if _, ok := values["content"]; ok {
+		return "", "", errEngageMCPHTTP2Content
+	}
+	pseudo, ok := values["pseudoHeaders"].(map[string]any)
+	if !ok {
+		return "", "", errEngageMCPPseudoHeaders
+	}
+	method, path = engageMCPUnparsedMethod, ""
+	if raw, present := pseudo[":method"]; present {
+		value, ok := raw.(string)
+		if !ok {
+			return "", "", errEngageMCPPseudoHeaders
+		}
+		if engageMCPMethodPattern.MatchString(value) {
+			method = strings.ToUpper(value)
+		}
+	}
+	if raw, present := pseudo[":path"]; present {
+		value, ok := raw.(string)
+		if !ok {
+			return "", "", errEngageMCPPseudoHeaders
+		}
+		path = engageMCPOriginForm(value)
+	}
+	return method, path, nil
 }
 
 // gatedMCPTool wraps one outbound MCP tool for the engagement harness. It
