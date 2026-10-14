@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -71,8 +72,15 @@ func serveTurnSessionID(p, suffix string) (string, error) {
 
 // serveTurnGate validates and gates one turn request, returning the session to
 // continue and the decoded body. Both routes share it, and every refusal it
-// makes happens before a turn runs. The order mirrors mcpChatResult's, so the
-// two transports refuse the same request for the same reason.
+// makes happens before a turn runs, which is what lets the stream route answer
+// a refusal as a status rather than as an event inside a 200.
+//
+// The order is not mcpChatResult's: ownership is checked before the vantage
+// gate here and after it there, so a request that is both a foreign session and
+// an operator-reach request from a remote peer is refused for a different
+// reason on each transport. Both refuse it, and the transport forces the
+// difference, because this one knows the session from the path before it has
+// read a body at all.
 func (s *serveServer) serveTurnGate(r *http.Request, suffix string) (string, serveTurnIn, error) {
 	var in serveTurnIn
 	id, err := serveTurnSessionID(r.URL.Path, suffix)
@@ -111,6 +119,13 @@ func (s *serveServer) serveTurnGate(r *http.Request, suffix string) (string, ser
 	}
 	if in.ForceRag && in.WebOnly {
 		return "", in, usageErr("turn: web_only cannot be combined with force_rag")
+	}
+	// An empty message is refused here rather than inside the turn, which raises
+	// its own missing-question error after the stream route has already sent its
+	// headers. The wording is runNativeTurn's, so the same bad request answers
+	// 400 with one message on both routes.
+	if strings.TrimSpace(in.Message) == "" {
+		return "", in, usageErr("turn: missing question")
 	}
 	if len(in.Message) > mcpChatMaxMessage {
 		return "", in, usageErr("turn: message exceeds %d bytes", mcpChatMaxMessage)
@@ -159,6 +174,10 @@ func serveTurnRefusal(err error) (int, string) {
 		return http.StatusBadRequest, "the request body is not a turn"
 	case errors.Is(err, errChatLocalHostRefused), errors.Is(err, errChatBrowserCDPRefused):
 		return http.StatusForbidden, "this option is available only to a local caller"
+	case errors.Is(err, errServeTurnInFlight):
+		return http.StatusConflict, "a turn is already in flight on this session"
+	case errors.Is(err, errServeBusy):
+		return http.StatusServiceUnavailable, fmt.Sprintf("%d turns are already in flight; retry when one finishes", serveMaxConcurrentTurns)
 	case errors.Is(err, errSessionNotFound):
 		return http.StatusNotFound, "session not found"
 	case errors.Is(err, errRequestTimeout):
@@ -180,6 +199,13 @@ func (s *serveServer) handleTurn(w http.ResponseWriter, r *http.Request) {
 		serveRefuse(w, code, msg)
 		return
 	}
+	release, err := s.turns.acquire(id)
+	if err != nil {
+		code, msg := serveTurnRefusal(err)
+		serveRefuse(w, code, msg)
+		return
+	}
+	defer release()
 	res, err := s.serveRunTurn(r.Context(), id, in, nil, nil)
 	if err != nil && strings.TrimSpace(res.Answer) == "" {
 		code, msg := serveTurnRefusal(err)
@@ -198,7 +224,9 @@ func (s *serveServer) handleTurn(w http.ResponseWriter, r *http.Request) {
 // a client written against that gateway reads this server unchanged.
 //
 // The status is written before the turn starts, so a turn that fails after the
-// first byte reports run.failed inside the stream rather than as a status.
+// first byte reports run.failed inside the stream rather than as a status. Every
+// refusal the gate and the turn bound make therefore happens before the headers
+// go out, and a panic past them still ends the stream on a terminal event.
 func (s *serveServer) handleTurnStream(w http.ResponseWriter, r *http.Request) {
 	id, in, err := s.serveTurnGate(r, serveTurnsStreamSuffix)
 	if err != nil {
@@ -206,6 +234,14 @@ func (s *serveServer) handleTurnStream(w http.ResponseWriter, r *http.Request) {
 		serveRefuse(w, code, msg)
 		return
 	}
+	release, err := s.turns.acquire(id)
+	if err != nil {
+		code, msg := serveTurnRefusal(err)
+		serveRefuse(w, code, msg)
+		return
+	}
+	defer release()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -216,35 +252,122 @@ func (s *serveServer) handleTurnStream(w http.ResponseWriter, r *http.Request) {
 	// The turn's callbacks run inside runNativeTurn on this goroutine, so one
 	// event is written at a time. A write that fails is dropped: the turn is
 	// bounded by its own deadline and the request context ends the stream.
-	emit := func(name string, payload any) {
-		if serveSSEEvent(w, name, payload) == nil {
-			_ = ctl.Flush()
+	st := &serveSSEStream{w: w, flush: ctl.Flush}
+
+	// The status is already 200, so a panic would end a chunked body with no
+	// terminal event, which a client cannot tell from a connection cut. The
+	// stream says the turn did not finish, then the panic goes on unwinding so
+	// net/http's own handling of it is unchanged. The release above is deferred
+	// first, so it still runs.
+	defer func() {
+		if p := recover(); p != nil {
+			st.emit("run.failed", map[string]string{"error": "the turn did not finish"})
+			panic(p)
 		}
-	}
+	}()
+
 	res, err := s.serveRunTurn(r.Context(), id, in,
 		func(chunk []byte) {
 			if len(chunk) > 0 {
-				emit("assistant.delta", map[string]string{"delta": string(chunk)})
+				st.emit("assistant.delta", map[string]string{"delta": string(chunk)})
 			}
 		},
 		func(tool, status string) {
 			if status == "running" {
-				emit("tool.started", map[string]string{"tool": tool})
+				st.emit("tool.started", map[string]string{"tool": tool})
 				return
 			}
+			// A call that did not run to completion says so on the wire. Without
+			// this a call the loop's own call cap skipped arrives with the key
+			// set of a call that ran, which is a false success signal in the
+			// event stream of a tool used to make findings. Only ToolDone omits
+			// the key, so an outcome added later reads as not completed rather
+			// than as a success.
 			payload := map[string]string{"tool": tool}
-			if status == string(ToolFailed) {
+			switch status {
+			case string(ToolDone):
+			case string(ToolFailed):
 				payload["error"] = "the tool call failed"
+			case string(ToolSkipped):
+				payload["error"] = "the tool call was skipped: the call cap was reached"
+			default:
+				payload["error"] = "the tool call did not complete"
 			}
-			emit("tool.completed", payload)
+			st.emit("tool.completed", payload)
 		})
 	if err != nil {
-		emit("run.failed", map[string]string{"error": sanitizeTerminal(err.Error())})
+		st.emit("run.failed", map[string]string{"error": sanitizeTerminal(err.Error())})
 		return
 	}
-	emit("run.completed", map[string]any{
+	st.emit("run.completed", map[string]any{
 		"usage": map[string]int{"completion_tokens": res.Usage.CompletionTokens},
 	})
+}
+
+// serveMaxSSEBytes bounds one stream's bytes. A turn's deltas are model output,
+// so nothing inside the turn bounds how much of it reaches the wire: one POST
+// can hold a connection while the turn marshals and writes an event per delta
+// for as long as its deadline allows. 32 MiB is past any answer a turn
+// produces, which is why reaching it is reported as a failure and not as the
+// end of an answer.
+const serveMaxSSEBytes = 32 << 20
+
+// serveSSECapError is the terminal event's message when a stream reaches
+// serveMaxSSEBytes. A stream that stopped without it would read as a complete
+// answer that happened to be short.
+const serveSSECapError = "the stream reached its byte limit and was cut"
+
+// serveSSECapFrame is that event's bytes, rendered once so the budget can
+// reserve room for it and the total stays inside the cap.
+var serveSSECapFrame = serveSSEFrame("run.failed", map[string]string{"error": serveSSECapError})
+
+// serveSSEStream writes one bounded Server-Sent Events stream. written counts
+// the framing as well as the payload, because the cap bounds what goes on the
+// wire and not what the payloads happen to hold.
+type serveSSEStream struct {
+	w       io.Writer
+	flush   func() error
+	written int
+	capped  bool
+}
+
+// emit writes one event. The event that would carry the total past the cap is
+// not written: the stream ends on the terminal event instead and every later
+// event is dropped, so a client is told the stream was cut rather than left to
+// read a truncated answer as a whole one.
+func (st *serveSSEStream) emit(name string, payload any) {
+	if st.capped {
+		return
+	}
+	frame := serveSSEFrame(name, payload)
+	if frame == nil {
+		return
+	}
+	if st.written+len(frame)+len(serveSSECapFrame) > serveMaxSSEBytes {
+		st.capped = true
+		st.write(serveSSECapFrame)
+		return
+	}
+	st.write(frame)
+}
+
+// write counts what the writer took, so a short write counts short.
+func (st *serveSSEStream) write(frame []byte) {
+	n, err := st.w.Write(frame)
+	st.written += n
+	if err == nil && st.flush != nil {
+		_ = st.flush()
+	}
+}
+
+// serveSSEFrame renders one event's bytes, or nil for a payload that does not
+// encode.
+func serveSSEFrame(name string, payload any) []byte {
+	var b bytes.Buffer
+	if err := serveSSEEvent(&b, name, payload); err != nil {
+		return nil
+	}
+	return b.Bytes()
 }
 
 // serveSSEEvent writes one Server-Sent Event. The payload is JSON-encoded,
