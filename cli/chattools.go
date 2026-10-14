@@ -35,6 +35,20 @@ var chatFileExtensions = map[string]bool{
 	"toml": true, "ts": true, "txt": true, "yaml": true, "yml": true,
 }
 
+// chatLocalFile reports whether name is a regular file in the working
+// directory, so a request that names a local file is not read as naming a host.
+// The name comes from the request, so the lookup goes through os.Root, which
+// keeps it inside the working directory even through a symlink.
+func chatLocalFile(name string) bool {
+	root, err := os.OpenRoot(".")
+	if err != nil {
+		return false
+	}
+	defer root.Close()
+	info, err := root.Stat(name)
+	return err == nil && info.Mode().IsRegular()
+}
+
 func chatTargetEntries(question string, history []priorTurn) []string {
 	fromText := func(s string) []string {
 		var out []string
@@ -70,7 +84,7 @@ func chatTargetEntries(question string, history []priorTurn) []string {
 			if chatFileExtensions[strings.ToLower(parts[len(parts)-1])] {
 				continue
 			}
-			if info, err := os.Stat(host); err == nil && info.Mode().IsRegular() {
+			if chatLocalFile(host) {
 				continue
 			}
 			add(host)
