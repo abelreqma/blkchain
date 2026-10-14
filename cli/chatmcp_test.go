@@ -65,7 +65,7 @@ func TestChatMCPClientExposesOnlyAllowlistedHTTPTools(t *testing.T) {
 		defer cancel()
 		answer, _, _, _, _, _, err := adaptiveAnswer(ctx, nil, loadConfig(),
 			"Use the configured MCP fixture tool to send message blue and report its result.", enabledRoutes{}, false,
-			AnswerOpts{Agent: "auto", Stage: func(stage string) { stages = append(stages, stage) }})
+			AnswerOpts{Agent: "auto", Stage: func(stage string) { stages = append(stages, stage) }, vantage: vantageLocal})
 		if err != nil || !strings.Contains(strings.Join(stages, " "), "tool mcp__fixture__allowed") || !strings.Contains(answer, "blue") {
 			t.Fatalf("local model did not use the allowed MCP tool: stages=%v answer=%q err=%v", stages, answer, err)
 		}
