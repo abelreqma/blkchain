@@ -88,11 +88,11 @@ var errChatForeignSession = errors.New("chat: session was not created by this se
 
 // errChatLocalHostRefused refuses tool_host local to a caller that is not a
 // local process.
-var errChatLocalHostRefused = errors.New("chat: tool_host local is only available over the stdio transport")
+var errChatLocalHostRefused = errors.New("chat: tool_host local is only available to a local caller")
 
 // errChatBrowserCDPRefused refuses browser_cdp to a caller that is not a local
 // process.
-var errChatBrowserCDPRefused = errors.New("chat: browser_cdp is only available over the stdio transport")
+var errChatBrowserCDPRefused = errors.New("chat: browser_cdp is only available to a local caller")
 
 // chatSessionOwner is the set of session ids the chat tool created on one
 // server. It lives in memory only, so after a restart no earlier session can be
@@ -149,8 +149,8 @@ type mcpChatIn struct {
 	Message    string `json:"message" jsonschema:"the message for this turn"`
 	SessionID  string `json:"session_id,omitempty" jsonschema:"continue this session; omit to start a new one"`
 	Agent      string `json:"agent,omitempty" jsonschema:"native answer specialist name; omit for automatic selection"`
-	ToolHost   string `json:"tool_host,omitempty" jsonschema:"file and terminal host: sandbox (default) or local. local is permitted because this server speaks only over stdio to a local client that already holds the operator's privileges"`
-	BrowserCDP string `json:"browser_cdp,omitempty" jsonschema:"loopback CDP endpoint of a browser whose signed-in state the browser tools copy, for example http://127.0.0.1:9222. Permitted only because this server speaks only over stdio to a local client that already holds the operator's privileges: it hands the agent the operator's authenticated browser session"`
+	ToolHost   string `json:"tool_host,omitempty" jsonschema:"file and terminal host: sandbox (default) or local. local is permitted only to a local caller, meaning the stdio transport or a loopback HTTP request, because such a caller already holds the operator's privileges"`
+	BrowserCDP string `json:"browser_cdp,omitempty" jsonschema:"loopback CDP endpoint of a browser whose signed-in state the browser tools copy, for example http://127.0.0.1:9222. Permitted only to a local caller, meaning the stdio transport or a loopback HTTP request, because such a caller already holds the operator's privileges: it hands the agent the operator's authenticated browser session"`
 	ForceRag   bool   `json:"force_rag,omitempty" jsonschema:"skip adaptive routing and answer from the local knowledge base; cannot be combined with web_only"`
 	WebOnly    bool   `json:"web_only,omitempty" jsonschema:"answer from the public web only for this turn; cannot be combined with force_rag"`
 }

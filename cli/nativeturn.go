@@ -45,6 +45,10 @@ type turnRequest struct {
 	Stream func([]byte)
 	// Stage receives pipeline and tool progress text for display.
 	Stage func(stage string)
+	// Action receives one tool call's name with "running", then with the status
+	// the call settled on, so a streaming caller reports tool activity as it
+	// happens rather than only in the result's Actions.
+	Action func(tool, status string)
 	// Persona receives the chosen expert's domain key.
 	Persona func(domain string)
 	// Browser carries browser state across turns in one session.
@@ -321,6 +325,9 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		Stage:      req.Stage,
 		Action: func(tool, status string) {
 			actions = append(actions, turnAction{Tool: tool, Status: status})
+			if req.Action != nil {
+				req.Action(tool, status)
+			}
 		},
 		Persona: func(domain string) {
 			chosenAgent = answerAgentName(domain)
