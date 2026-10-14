@@ -1,12 +1,38 @@
 # blkChain
 
-blkChain is a security research and authorized assessment framework. It combines a searchable security knowledge base, model-assisted task orchestration, isolated command execution, browser and API analysis, and a persistent engagement evidence store. Its assessment core, `blk engage`, coordinates bounded tasks under operator-defined rules of engagement. The `blk` terminal client provides one-shot commands, an interactive session, an MCP server, and an HTTP API.
+blkChain is a local-first framework for security research and authorized security assessment. It
+combines a searchable security knowledge base, a native chat agent with bounded tools, a
+policy-governed assessment harness, browser and API analysis, and a persistent evidence store. Its
+assessment core, `blk engage`, plans and executes bounded tasks under an operator-defined rules of
+engagement (RoE) policy. The `blk` client provides one-shot commands, an interactive terminal
+session, an MCP server, and a loopback HTTP API.
 
-Use it to research techniques, understand an application's exposed sources and traffic, run scoped assessment tasks, and inspect the evidence behind a conclusion.
+> **Authorized use only.** blkChain executes real commands against real targets. Use it only
+> against systems the operator is authorized to test. The RoE defines the permitted targets,
+> actions, time window, and rate; code enforces them, and retrieved or model-generated text never
+> grants authority.
 
-Start with the [complete setup guide](#complete-setup-guide). For an existing installation, see [answer modes](#research-and-answer-modes), [external surface and advisory scans](#external-surface-and-advisory-scans), [web analysis](#web-application-analysis), and the [engagement store](#engagement-store-and-findings). For a per-surface reference, covering what each engagement surface does and how footholds, carriers, and vantage changes connect them, see [the assessment surfaces](docs/surfaces/README.md).
+## Contents
 
-## Capabilities
+- [Overview](#overview)
+- [Quick start](#quick-start)
+- [Research and answer modes](#research-and-answer-modes)
+- [Engagement harness](#engagement-harness)
+- [Web application analysis](#web-application-analysis)
+- [Engagement store and findings](#engagement-store-and-findings)
+- [Terminal, MCP, and HTTP interfaces](#terminal-mcp-and-http-interfaces)
+- [Operator instruments by surface](#operator-instruments-by-surface)
+- [Complete setup guide](#complete-setup-guide)
+- [Security and data handling](#security-and-data-handling)
+- [License](#license)
+
+Related documents: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for contributors,
+[the assessment surfaces reference](docs/surfaces/README.md) for each engagement surface and the
+foothold, carrier, and vantage chain, and [SECURITY.md](SECURITY.md) for vulnerability reporting.
+
+## Overview
+
+### Capabilities
 
 | Area | Current implementation |
 | --- | --- |
@@ -17,11 +43,145 @@ Start with the [complete setup guide](#complete-setup-guide). For an existing in
 | Operator interfaces | Keyboard-driven terminal UI, plain REPL, history, draft editing, context attachments, queued questions, source inspection, model controls, and service diagnostics. |
 | Integration | Native MCP tools, an HTTP API, and schema-validated JSON generation through the same Go implementation. |
 
+### System map
+
+![blkChain system map: five entry points share one Go control plane; research and answers, the control plane, and authorized execution feed the assessment surfaces and the SQLite evidence store](docs/blkchain-system-map.svg)
+
+The component diagram below shows how a request moves through the system. Every chat surface runs
+the same native turn, and every assessment action crosses the Go gate before it reaches a worker, a
+broker, an instrument, or a foothold.
+
+```mermaid
+flowchart TB
+  subgraph Interfaces["Interfaces"]
+    Terminal["blk ask, REPL, TUI"]
+    MCPServer["blk mcp<br/>stdio"]
+    HTTPAPI["blk serve<br/>loopback HTTP API"]
+  end
+
+  subgraph Chat["Native turn"]
+    Turn["runNativeTurn<br/>session, history, routing, persistence"]
+    Vantage["Caller vantage<br/>decides host-reaching tools"]
+    Roles["Router and assessment models<br/>ordered failover chains"]
+    ChatTools["Chat tool registry<br/>KB, files, terminal, browser, MCP clients"]
+  end
+
+  subgraph Research["Research"]
+    Index["Python offline ingestion"]
+    MLX["MLX embedding and reranking"]
+    Qdrant["Qdrant dense + sparse index"]
+    Retrieval["Go retrieval + RRF"]
+    Web["Live web search"]
+  end
+
+  Hermes["Hermes one-shot<br/>legacy, separate permissions"]
+
+  subgraph Assessment["Authorized assessment: blk engage"]
+    Roe["Sealed RoE"]
+    Approval["Operator approvals<br/>private CIDR, carrier, cloud identity"]
+    Plan["Task graph<br/>cited techniques are advisory"]
+    Gate["Go gate<br/>scope, action, command, service evidence, limits"]
+    Worker["Isolated worker<br/>network, AD, local, containers/K8s, AI<br/>offline OSV + Grype"]
+    Broker["Scoped web/API broker<br/>per-hop resolve, check, pin"]
+    Proxy["Loopback intercepting proxy<br/>direct web surface only"]
+    Instruments["Burp MCP and interactsh<br/>classified and gated"]
+    Pivot["Foothold command carriers"]
+    Cloud["AWS/GCP CLI on foothold"]
+    Store["Engagement store<br/>SQLite, actions, artifacts"]
+    Review["Findings, coverage, KG, reports"]
+  end
+
+  Terminal --> Turn
+  MCPServer --> Turn
+  HTTPAPI --> Turn
+  Terminal --> Hermes
+  Terminal --> Plan
+  MCPServer --> Plan
+  Turn --> Vantage
+  Turn --> Roles
+  Vantage --> ChatTools
+  Roles --> ChatTools
+  Turn --> Retrieval
+  Turn --> Web
+  Index --> MLX
+  Index --> Qdrant
+  Retrieval --> MLX
+  Retrieval --> Qdrant
+  Roe --> Gate
+  Approval --> Gate
+  Plan --> Gate
+  Gate --> Worker
+  Gate --> Broker
+  Gate --> Instruments
+  Gate --> Pivot
+  Broker --> Proxy
+  Pivot --> Cloud
+  Worker --> Store
+  Broker --> Store
+  Pivot --> Store
+  Cloud --> Store
+  Store --> Review
+
+  style Interfaces fill:#f8fafc,stroke:#475569,stroke-width:1px
+  style Chat fill:#f7fffd,stroke:#0f766e,stroke-width:1px
+  style Research fill:#f7fffd,stroke:#0f766e,stroke-width:1px
+  style Assessment fill:#f7fdf9,stroke:#15803d,stroke-width:1px
+  classDef entry fill:#f1f5f9,stroke:#475569,color:#0f172a,font-size:16px
+  classDef research fill:#e6fffb,stroke:#0f766e,color:#123434,font-size:16px
+  classDef control fill:#ecfdf5,stroke:#15803d,color:#12301e,font-size:16px
+  classDef execution fill:#eff6ff,stroke:#2563eb,color:#102a43,font-size:16px
+  classDef evidence fill:#f5f3ff,stroke:#7c3aed,color:#2e1065,font-size:16px
+  class Terminal,MCPServer,HTTPAPI entry
+  class Turn,Roles,ChatTools,Index,MLX,Qdrant,Retrieval,Web,Hermes research
+  class Vantage,Roe,Approval,Plan,Gate control
+  class Worker,Broker,Proxy,Instruments,Pivot,Cloud execution
+  class Store,Review evidence
+```
+
+### Components
+
+| Component | Responsibility |
+| --- | --- |
+| `cli/` | Go retrieval, answers, terminal interfaces, engagement orchestration, policy enforcement, web analysis, storage, reports, MCP, and the HTTP API. |
+| `blkchain/` | Python MLX embedding/reranking service, offline ingestion/indexing, and evaluation harnesses. |
+| Qdrant | Persistent dense and sparse index. |
+| OpenAI-compatible LLM endpoint | Separately managed native answer and engagement inference. |
+| Hermes | Separately configured legacy backend for explicit one-shot turns. |
+
+Go owns query-time retrieval, answering, engagement execution, MCP, and the HTTP API. Python serves the MLX models
+and builds the index offline. Models and corpus content are supplied by the operator.
+
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) documents what a change has to hold to: the language
+boundary, the two cross-language contracts, the command output shapes the evaluation harness parses,
+the security invariants, and the testing and commit conventions. Read it before changing the
+retrieval path, the engagement harness, or the embedding service.
+
+## Quick start
+
+These commands assume the host prerequisites, model files, and a running OpenAI-compatible chat
+server from the [complete setup guide](#complete-setup-guide).
+
+```sh
+uv sync --locked
+(cd cli && go build -o blk .) && cli/blk install
+blk up
+.venv/bin/python -c "from blkchain import index; print(index.build_index(snapshot_version='v1'))"
+blk health --json
+blk ask "Explain contextual output encoding"
+blk
+```
+
+`blk up` starts Qdrant and the embedding service, the indexer builds the knowledge base from the
+configured corpus, and bare `blk` opens the terminal UI. Engagements additionally need the command
+runner from `blk engage setup` and an operator-owned `ROE.md`.
+
 ## Research and answer modes
 
 The research index combines dense embeddings and BM25 sparse vectors in Qdrant. Go queries both vectors, fuses their results with Qdrant RRF, and optionally reranks the candidate pool with a local cross-encoder. Source, type, and payload filters constrain retrieval.
 
 The native answer loop grades source sufficiency, can rewrite the query, and synthesizes an answer from bounded source passages. It supports conversation context, specialist prompts, streaming, per-call usage metrics, and an explicit no-results response. Exact-CVE research can add NVD details and public research when web permission is enabled.
+
+### Answer entry points
 
 Bare `blk` starts the REPL or TUI in native auto mode. `blk ask QUESTION` also uses native auto by default. Native auto selects a research specialist from the question, then retrieved metadata when the question is ambiguous. Interactive public research turns search live sources before answering when web is enabled:
 
@@ -38,9 +198,13 @@ Bare `blk` starts the REPL or TUI in native auto mode. `blk ask QUESTION` also u
 
 `--json` and `--sources` work with the default native `ask` path. In the interactive session, `/agent NAME` selects a native specialist and `/agent auto` restores dynamic selection. `/hermes PROMPT` runs one legacy Hermes turn. Research specialists change answer guidance. Engagement executors are selected separately from task kind and surface.
 
+### Sessions
+
 `blk ask`, the plain REPL, the TUI, the `chat` tool of `blk mcp`, and the turn endpoints of `blk serve` run the same native turn. One function resolves the session, loads its history, assembles the answer options, routes the question, records tool actions, and saves the turn, so every surface gets the same routing, tools, and persistence. `--hermes` cannot be combined with `--session`, `--agent`, `--rag`, `--web`, `--json`, or `--sources`.
 
 Each session is one append-only JSONL transcript plus a row in the local history database. Every blk process shares them, and a transcript is reconciled with the database when a session is reopened. A session started over MCP or `blk serve` is an ordinary session, so `blk ask --session ID` continues it.
+
+### Native chat tools
 
 Native chat shares a bounded tool registry across those surfaces. It offers knowledge-base search, playbook routing, file operations, terminal and process control, public web search and extraction, browser control, screenshot analysis, and allowlisted MCP client tools.
 
@@ -50,15 +214,21 @@ File and terminal tools use an empty, persistent Docker sandbox for the current 
 
 Native `file_read` does not extract PDF text or preview SQLite databases. The signed-in browser path copies storage state into an isolated context; it does not control the source browser tabs. Raw CDP commands and JavaScript dialog control are not exposed.
 
-When the user names an IP, host, network, or HTTP URL in the current turn, or refers to a target from the immediately preceding user turn, native chat can run isolated security commands and target-bound API or browser actions. It can choose these tools when the user asks for an action or clearly implies one. Target commands use the audited binary catalog and isolated runner; API and browser requests recheck destinations and redirects. The project `denied_binaries` list still applies. Native chat uses a temporary target scope from the user's own words and does not require `ROE.md`. `blk engage` continues to require its sealed RoE and approvals.
+### Target actions in chat
+
+When the operator names an IP, host, network, or HTTP URL in the current turn, or refers to a target from the immediately preceding operator turn, native chat can run isolated security commands and target-bound API or browser actions. It can choose these tools when the request asks for an action or clearly implies one. Target commands use the audited binary catalog and isolated runner; API and browser requests recheck destinations and redirects. The project `denied_binaries` list still applies. Native chat uses a temporary target scope from the operator's own words and does not require `ROE.md`. `blk engage` continues to require its sealed RoE and approvals.
 
 A named target supplies scope for the turn, not service evidence. Before a service-specific action, native chat makes a bounded port-discovery probe and admits the requested action only when that host, transport, and port qualify. The observation lasts for the turn. Explicit local terminal access and configured MCP servers execute outside the built-in target tool gate.
 
-Native chat classifies the user's intent without matching fixed request phrases. A requested tool action gets one retry if the model answers without calling the relevant tool. If it still makes no such call, the turn returns an error instead of reporting an unperformed action as complete. A target action without a user-named target fails before execution.
+Native chat classifies the operator's intent without matching fixed request phrases. A requested tool action gets one retry if the model answers without calling the relevant tool. If it still makes no such call, the turn returns an error instead of reporting an unperformed action as complete. A target action without a named target fails before execution.
+
+### Public web research
 
 A fresh REPL/TUI profile enables public web research on first launch. Native one-shot CLI and MCP calls do not enable it automatically. An existing saved `web off` remains off until `blk web on` enables it. `blk web off` disables public research searches, not target-bound chat API or browser actions. Providers include DuckDuckGo and Tavily; Tavily reads `TAVILY_API_KEY` or `TAVILY_SETUP_TOKEN`. Use `blk web provider duckduckgo`, `blk web provider tavily`, or `blk web provider auto` to choose a provider. Permission and provider settings persist locally. Interactive public research turns fail clearly when a required live search is unavailable rather than present local or model knowledge as current. Web-first answer search sends the current question, never attachments or conversation history. The `web_search` tool can send a model-generated query after filtering recognized target identifiers and secret-shaped data. Target-specific advisor turns stay local; explicit `/web search` sends the query the operator enters.
 
 When a native chat turn explicitly calls `web_search` or `web_extract`, blkChain returns the bounded source results as the final answer. It does not substitute an unsupported model summary for those results.
+
+### MCP client servers
 
 MCP client servers are configured in `~/.config/blkchain/mcp-clients.json`, or the path named by `BLKCHAIN_MCP_CLIENT_CONFIG`. Each server must list `allow_tools`. Stdio servers run in the chat sandbox unless `host` is set to `local` with an absolute command. HTTP servers require HTTPS or a loopback HTTP URL. `env` maps child environment names to existing environment variable names, and `token_env` names an environment variable for HTTP bearer authentication. For example:
 
@@ -66,11 +236,13 @@ MCP client servers are configured in `~/.config/blkchain/mcp-clients.json`, or t
 {"servers":[{"name":"notes","transport":"stdio","command":"/work/notes-server","allow_tools":["search_notes"]}]}
 ```
 
-Import the executable into the sandbox before using this stdio example. MCP tool results are treated as untrusted data. The MCP client configuration is separate from the `blk mcp` server.
+Import the executable into the sandbox before using this stdio example. MCP tool results are treated as untrusted data. The MCP client configuration is separate from the `blk mcp` server. A caller that is not local, such as a `blk serve` client without a token, is offered only the stdio servers that run in the sandbox.
 
 `cli/mcp-clients.example.json` is a fuller template: a Burp Suite Pro entry reached over the stdio proxy jar Burp ships, with `host` set to `local` because a sandboxed stdio server has no network and could never reach Burp on loopback. Its `allow_tools` lists every tool that server advertises. Seven of them are hazardous and listed deliberately. `send_http1_request` and `send_http2_request` carry the largest consequence: they send requests out through Burp and reach no code-side gate at all. They do not pass the engagement web scope check, the RoE, or Safe-mode approval, so the `allow_tools` list is the only authorization boundary for them, and leaving them in grants a chat turn the ability to reach any host Burp can reach. The injection chain is direct: `get_proxy_http_history_regex` and `get_proxy_websocket_history_regex` return target-controlled bytes into the same turn that can call those two send tools. The remaining five: `output_project_options` and `output_user_options` dump configuration that can carry credentials into model context, `set_project_options` and `set_user_options` rewrite it, and `set_task_execution_engine_state` pauses or resumes the scanner. Remove all seven for a read-mostly setup. Registration fails if a listed tool is absent, so the list has to match the server's version.
 
 The same hazard note belongs in the operator's own `~/.config/blkchain/mcp-clients.json`, since that is the file whose list gets trimmed. The loader ignores unknown top-level keys, so a `_README` string alongside `servers` is carried without affecting configuration.
+
+### Hermes (legacy)
 
 Hermes is a legacy one-shot, reached through `blk hermes`, `/hermes`, and `blk ask --hermes`. It has its own provider, tools, and permissions, and it writes no blk session. Native web settings and engagement Safe/Auto settings do not control Hermes's own tool execution.
 
@@ -78,11 +250,17 @@ Hermes is a legacy one-shot, reached through `blk hermes`, `/hermes`, and `blk a
 
 `blk engage` plans and executes tasks under an operator-owned rules of engagement (RoE) policy. The model proposes tasks and structured tool arguments. Code applies scope checks, action permissions, command denials, resource limits, and execution routing. Retrieved techniques and citations supply advisory context; they do not grant authority.
 
+### Rules of engagement and modes
+
 Auto is the default and runs actions permitted by the RoE without per-action prompts. Safe requires an interactive approval channel. The RoE names in-scope and excluded targets, permitted action classes, command denials, resource caps, and runner settings. A goal such as "recon only" does not replace those policy permissions. Use explicit action and command restrictions for the intended assessment.
 
 If no policy is found, `blk engage` writes a commented `ROE.md` template in the current directory and stops. Configure its targets and allowed actions before starting a run. Existing policies are not overwritten. `--roe PATH` selects a policy kept elsewhere.
 
+### Workspaces and isolation
+
 The harness stores tasks, dependencies, provenance, exact evidence quotes, action transcripts, policy decisions, and coverage records in a workspace. Command workers have destination filtering, a read-only root filesystem, bounded writable scratch space, a restricted environment, and CPU, memory, process, output, and time limits. Commands needing raw sockets use a separate worker with that capability. Resume retains the sealed policy, original deadline, and recorded usage. `blk engage --resume WORKSPACE` resumes a run; `blk engage stop --workspace PATH` stops one.
+
+### Service evidence
 
 Service-specific commands and web requests require a host, transport, and port observed from the same execution vantage within the past hour. Naming a URL is not evidence. When needed, blkChain runs a bounded discovery probe through the same gate. Scope and RoE checks apply to every action.
 
@@ -102,12 +280,12 @@ The network recon ladder credits a completed TCP sweep, UDP sweep, version check
 
 | Surface | Current behavior |
 | --- | --- |
-| Network | Tiered asset and service discovery, fingerprinting, finding parsers, and evidence-linked candidate tasks. |
+| Network | Tiered asset and service discovery, fingerprinting, and evidence-linked candidate tasks correlated from completed Nmap output. |
 | Web | HTTP and browser collection, source analysis, role-aware observations, and replay through the scoped broker. |
 | Local | Identity, privilege, permission, capability, scheduled-task, and service enumeration; focused executable inspection. Without a declared foothold, local work describes the isolated runner. |
 | Active Directory | External discovery and enumeration of exposed directory services, with authenticated and finding-driven task paths using shared gated tools. |
-| Cloud | AWS, Azure, and GCP reconnaissance ladders over shared gated tools. |
-| Container | Container and Kubernetes task paths through specialized reconnaissance and shared execution. |
+| Cloud | AWS, Azure, and GCP reconnaissance ladders over shared gated tools. Metadata, storage, and IAM probes run over curl; the AWS and GCP provider CLIs run on a foothold after a cloud identity approval, and Azure has no provider CLI path. |
+| Container | Container and Kubernetes reconnaissance over curl and Nmap; `kubectl` is available at the exploit tier. |
 | AI application | Endpoint and model discovery, capability checks, and evidence-derived follow-on candidates. |
 
 ### External surface and advisory scans
@@ -287,6 +465,8 @@ For a network task that requests an HTTP banner, the recon executor follows an o
 
 ## Terminal, MCP, and HTTP interfaces
 
+### Terminal UI and REPL
+
 Bare `blk` starts the interactive session. A terminal uses the keyboard-driven UI; redirected input
 uses the plain REPL. Finished answers remain in normal terminal scrollback. The UI supports
 multiline drafts, external editing, history search, context previews, source inspection, model
@@ -309,6 +489,8 @@ controls, cancellation, and bounded queues.
 The plain REPL uses text commands. The terminal UI adds picker overlays and asynchronous question
 queues. Model and web preferences, conversation history, and engagement state are separate stores.
 
+### MCP server
+
 `blk mcp` serves these tools over stdio:
 
 | Tool | Purpose |
@@ -327,6 +509,8 @@ The server also serves saved sessions as read-only `session://{id}` resources. A
 MCP engagement defaults to Auto. `confirm=elicit` requires compatible client elicitation support.
 The tool returns workspace, transcript, report, and policy references. `blk analyze --schema NAME`
 provides schema-validated JSON generation.
+
+### HTTP API
 
 `blk serve` offers the same turn over HTTP. It listens on `127.0.0.1:8787` unless `--bind` names another address.
 
@@ -353,11 +537,17 @@ The stream ends on `run.completed` or `run.failed` unless the connection is cut.
 
 A turn can be run only on a session this server process created with `POST /v1/sessions`, as with `chat` over MCP, and any other well-formed id answers 403. The server tracks its 128 most recently used session ids in memory, so a session that falls out of them, or that predates a restart, answers 403 too. Any session on disk can be listed and read, whichever surface created it.
 
-A bind that is not loopback needs `--allow-remote` and a bearer token. The token comes only from `BLKCHAIN_SERVE_TOKEN`, is compared in constant time, and is never logged or returned. A token that is set is required on every request, loopback included, and a request without it is refused with 401. With none set, any process on this machine can call the API.
+#### Exposure and authentication
+
+A bind that is not loopback needs `--allow-remote` and a bearer token. The token comes only from `BLKCHAIN_SERVE_TOKEN`, is compared in constant time, and is never logged or returned. A token that is set is required on every request, loopback included, and a request without it is refused with 401. With none set, any process on this machine can call the API, and every turn runs sandboxed: see below.
 
 The bind's text decides that exposure, and a name in it resolves only when the listener opens, so the address actually opened is checked against the bind once the listener is up and a disagreement refuses to serve, naming both. `--bind NAME:8787 --allow-remote` with a token is refused when `NAME` resolves to a loopback address, as is `--bind localhost:8787` on a resolver that answers with a routable one.
 
-`tool_host: local` and `browser_cdp` grant the operator's own reach: the host's terminal and files outside the sandbox, and the signed-in browser. A turn may use them only when the bind is loopback and the request's peer address is loopback. On a bind that is not loopback they are refused to every caller with 403, because behind a tunnel, a published container port or a local proxy a loopback peer address does not show who sent the request. On a loopback bind with no token, any local process qualifies.
+`tool_host: local` and `browser_cdp` grant the operator's own reach: the host's terminal and files outside the sandbox, and the signed-in browser. A turn may use them only when the bind is loopback, `BLKCHAIN_SERVE_TOKEN` is set, and the request's peer address is loopback. Without a token they are refused with 403: any process on this machine can reach loopback, another local account's included, so a loopback peer address does not show that the operator sent the request. On a bind that is not loopback they are refused to every caller with 403, because behind a tunnel, a published container port or a local proxy a loopback peer address does not show who sent the request.
+
+A turn refused that reach is still a full sandboxed turn, with two more tools withheld because they also reach this host: `file_import` and `file_export`, which read and write the server's working directory, and every MCP server that does not run in the sandbox container, which is a host-local stdio server or an HTTP server.
+
+#### Browser defenses
 
 Three controls guard the API against a web page the operator has open, which can reach loopback. Each stands on its own:
 
@@ -366,6 +556,8 @@ Three controls guard the API against a web page the operator has open, which can
 - Any `Origin` header is refused with 403, a loopback origin included. This defeats a cross-origin request from a page's script, which a browser marks with `Origin`, and the preflight that would authorize one.
 
 These checks are on request headers. A request without an `Origin` header passes the third, whoever sends it, and a local process that sends a JSON body, an accepted `Host` and no `Origin` passes all three. Only the token stops it.
+
+#### Bounds
 
 The server bounds its own work:
 
@@ -380,13 +572,13 @@ The server bounds its own work:
 | Request rate | 240 per minute with a burst of 32, shared by all callers of the server and refused with 429. |
 | Request head | 10 seconds to arrive. An idle kept-alive connection closes after 2 minutes. |
 
-### Operator instruments by surface
+## Operator instruments by surface
 
-The outbound MCP tools and the out-of-band tools reach both the chat surfaces and an engagement task, under different authorization. On the chat path, each server's `allow_tools` list in `mcp-clients.json` is the whole of the authorization; the call is still bounded in arguments, output and deadline, and its result is wrapped as untrusted. In an engagement, every outbound MCP tool is classified in code, and a tool that sends a request at a host is authorized by the same gate as a native web request. Burp's server registers only for a task on the web surface, so a task on the network, local, Active Directory, cloud, container or AI-application surface is offered none of its tools. Nothing registers at all on an executor built without a gate and an engagement store, which is the same path on which `record_evidence` does not verify its quote.
+The outbound MCP tools and the out-of-band tools reach both the chat surfaces and an engagement task, under different authorization. On the chat path, each server's `allow_tools` list in `mcp-clients.json` is the whole of the authorization, and a caller that is not local is offered only servers that run in the sandbox; the call is still bounded in arguments, output and deadline, and its result is wrapped as untrusted. In an engagement, every outbound MCP tool is classified in code, and a tool that sends a request at a host is authorized by the same gate as a native web request. Burp's server registers only for a task on the web surface, so a task on the network, local, Active Directory, cloud, container or AI-application surface is offered none of its tools. Nothing registers at all on an executor built without a gate and an engagement store, which is the same path on which `record_evidence` does not verify its quote.
 
 | Tool | Chat surfaces | Engagement task on the web surface |
 | --- | --- | --- |
-| `send_http1_request`, `send_http2_request`, `send_to_intruder` | Available if allowlisted. No code-side gate. | Gated on engagement scope, the phase tier with its armed-task requirement, and an observed open port. |
+| `send_http1_request`, `send_http2_request`, `send_to_intruder` | Available if allowlisted. No code-side gate. | Gated on engagement scope, the phase tier with its armed-task requirement, and an observed open port. Refused while a foothold carries the web surface. |
 | Burp's nine read tools, `get_proxy_http_history` through `get_collaborator_interactions` | Available if allowlisted. | Available. A read is not filtered by engagement scope. |
 | Burp's six pure tools: the four encoders, `generate_random_string` and `generate_collaborator_payload` | Available if allowlisted. | Available. |
 | Burp's seven instrument-state tools: the five `set_*` forms and the two `create_repeater_tab` forms | Available if allowlisted. | Not registered. |
@@ -396,7 +588,9 @@ The outbound MCP tools and the out-of-band tools reach both the chat surfaces an
 
 A request tool's call goes through the same `secgate` path as the native `web_api` tool, so four controls apply. An out-of-scope host is denied. A state-changing method is tiered as exploit and denied from a task that is not armed. The RoE's own action list must permit the class, `api-read` for a read and `api-write` for a state change. And the host, transport and port need an observation from the same vantage: a send at a port recon has not seen is refused with `lacks an observed open port; run bounded port discovery first`, the gate attempts one bounded connect per host, port and vantage, and after that attempt the refusal becomes `was not observed open after bounded discovery`.
 
-The authority comes from the call's own `targetHostname` and `targetPort` rather than the request's `Host` header, because the connection target is what the packet reaches; a request whose `Host` disagrees is scoped on the connection target anyway. An origin-form request target read from the raw request line is carried into the URL, so a confirmation names a path rather than an authority alone; a target that is not origin form, or that holds `//`, contributes no path and the authority is confirmed alone.
+The authority comes from the call's own `targetHostname` and `targetPort` rather than the request's `Host` header, because the connection target is what the packet reaches; a request whose `Host` disagrees is scoped on the connection target anyway. An origin-form request target read from the raw request line is carried into the URL, so a confirmation names a path rather than an authority alone; a target that is not origin form, or that holds `//`, contributes no path and the authority is confirmed alone. `send_http2_request` carries no raw request: its method and path come from `pseudoHeaders` (`:method` and `:path`), and a `content` field on it is refused rather than read.
+
+While a foothold carries the web surface, every request tool is refused with a pointer to the web tools. Burp sends from the operator's host, not through the foothold, and the pivot scope that surface is authorized against admits private networks that the operator's host would reach on its own interfaces.
 
 `send_to_intruder` reaches the gate as `web-api:INTRUDER-FUZZ`, which the gate tiers as active whatever the request line says. It stages the request in an Intruder tab rather than sending it: the fuzzing traffic leaves when an operator starts the attack in Burp, outside this gate and outside the engagement's caps. The gate authorizes the staging, and `set_task_execution_engine_state` is not registered, so a task cannot start the attack itself.
 
@@ -413,24 +607,6 @@ Two exposures remain. The proxy-history tools return the whole Burp project's hi
 Burp's tools inform a task; they do not produce its evidence. Where these tools register, `record_evidence` accepts only a quote the task's own captured output already holds, which the `run_command` tools and the native web capture path write. The outbound MCP tools write nothing there, so a finding resting on proxy history, a scanner issue, a Collaborator interaction or the output of an authorized `send_http1_request` has to be reproduced through `run_command` or the web tools before it can be recorded.
 
 Burp's traffic routing is separate from its MCP tools and is not what authorizes one. On a direct web surface the stack's brokered HTTP and WebSocket requests go through a loopback intercepting proxy when one is listening, so Burp and equivalents see those requests; the isolated browser's own page loads are not proxied, so a `web_browser` action leaves no Burp history even when the proxy is in use. A pivoted surface takes no upstream proxy at all, because it dials through the foothold carrier that an upstream proxy would replace. The proxy is on by default at `127.0.0.1:8080`, and off when `BLKCHAIN_WEB_PROXY` is `off`, when the value is not a loopback IP address and a TCP port, when nothing is listening, and when the CA certificate cannot be sourced from the address. That last case is the likely one for a proxy other than Burp, because the certificate is fetched from `http://burp/cert` through the proxy: set `BLKCHAIN_WEB_PROXY_CA` to read it from a file instead. Each of those cases prints a notice naming the reason, and requests go direct. The trust anchor is whatever is listening on that address, so the notice names the CA subject it accepted.
-
-## Architecture
-
-| Component | Responsibility |
-| --- | --- |
-| `cli/` | Go retrieval, answers, terminal interfaces, engagement orchestration, policy enforcement, web analysis, storage, reports, MCP, and the HTTP API. |
-| `blkchain/` | Python MLX embedding/reranking service, offline ingestion/indexing, and evaluation harnesses. |
-| Qdrant | Persistent dense and sparse index. |
-| OpenAI-compatible LLM endpoint | Separately managed native answer and engagement inference. |
-| Hermes | Separately configured legacy backend for explicit one-shot turns. |
-
-Go owns query-time retrieval, answering, engagement execution, MCP, and the HTTP API. Python serves the MLX models
-and builds the index offline. Models and corpus content are supplied by the operator.
-
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) documents what a change has to hold to: the language
-boundary, the two cross-language contracts, the command output shapes the evaluation harness parses,
-the security invariants, and the testing and commit conventions. Read it before changing the
-retrieval path, the engagement harness, or the embedding service.
 
 ## Complete setup guide
 
@@ -449,7 +625,7 @@ command runner for engagements and the browser container for runtime web collect
 
 Choose a chat model that fits alongside the embedder, reranker, Docker, and the operating system.
 Long contexts also consume memory. The guide uses a small MLX chat model for initial setup; select a
-larger model when your hardware and workload support it. Reserve disk space for weights, corpus
+larger model when the hardware and workload support it. Reserve disk space for weights, corpus
 files, Qdrant storage, evidence, and the chat server's cache.
 
 ### 1. Install the host prerequisites
@@ -491,7 +667,7 @@ Container images and model downloads require internet access during provisioning
 ### 2. Get the repository and build blk
 
 Download or clone this repository from its distribution location, then enter the checkout. Replace
-the path below with your own. Keep this shell in the repository root for the remaining core steps:
+the path below with the checkout's location. Keep this shell in the repository root for the remaining core steps:
 
 ```sh
 cd /absolute/path/to/blkChain
@@ -508,7 +684,7 @@ cli/blk version
 `cli/go.sum` provide the Go module versions and checksums. Keep CGO enabled; the Go client uses
 SQLite and syntax-tree dependencies that need the C compiler.
 
-Install the binary and add its directory to your shell path:
+Install the binary and add its directory to the shell path:
 
 ```sh
 cli/blk install
@@ -516,7 +692,7 @@ export PATH="$HOME/.local/bin:$PATH"
 blk version
 ```
 
-Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile if needed. For the default macOS
+Add `export PATH="$HOME/.local/bin:$PATH"` to the shell profile if needed. For the default macOS
 shell, use `~/.zshrc`. Optional shell completion is available through `blk completion zsh` or
 `blk completion bash`.
 
@@ -541,7 +717,7 @@ export OMLX_BASE_URL=http://127.0.0.1:8000/v1
 export OMLX_MODEL=Qwen3-4B-Instruct-2507-4bit
 ```
 
-Copy non-secret settings into `.env` if you want them loaded by blk on later runs. Use absolute paths
+Copy non-secret settings into `.env` to have blk load them on later runs. Use absolute paths
 for custom model and corpus directories. Process environment values take precedence over `.env`.
 Keep credentials in the process environment or a secret manager and leave `.env` untracked.
 
@@ -560,8 +736,8 @@ Python indexing client, Go retrieval client, and stack lifecycle checks together
 bound to loopback for local operation. The Go retrieval parameters live in
 `blkchain/contract/rag.json`; Python indexing settings live in `blkchain/config.py`.
 
-These settings are read but are not part of the guide's path above. Leave them unset unless you need
-the behavior described.
+These settings are read but are not part of the guide's path above. Leave them unset unless the
+behavior described is needed.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
@@ -569,7 +745,7 @@ the behavior described.
 | `BLKCHAIN_REPUTABLE_DOMAINS` | the list in `blkchain/contract/rag.json` | Comma-separated replacement for the domains a web result is treated as reputable from. |
 | `BLKCHAIN_POC_DOMAINS` | the list in `blkchain/contract/rag.json` | Comma-separated replacement for the domains permitted as proof-of-concept destinations. |
 | `BLKCHAIN_ROUTER_MODEL` | `router_model` in `blkchain/contract/rag.json`, empty | Model for the short decisions of a turn: action classification, routing, the corpus check, context grading and conversation compression. Empty uses the model the turn would otherwise resolve. |
-| `BLKCHAIN_ASSESSMENT_MODEL` | `assessment_model` in `blkchain/contract/rag.json`, empty | Model for the direct answer, the tool loop and grounded synthesis. Empty uses the model the turn would otherwise resolve. A call moves to the next model in the role's chain only on the [failures listed in the architecture notes](docs/ARCHITECTURE.md#the-rag-parameter-contract). |
+| `BLKCHAIN_ASSESSMENT_MODEL` | `assessment_model` in `blkchain/contract/rag.json`, empty | Model for the direct answer, the tool loop and grounded synthesis. Empty uses the model the turn would otherwise resolve. A call moves to the next model in the role's chain only on the [failures listed in the architecture notes](docs/ARCHITECTURE.md#model-roles-and-failover). |
 | `BLKCHAIN_WEB_FALLBACK` | unset | Set to `duckduckgo` to use DuckDuckGo when no Tavily key is configured. |
 | `BLKCHAIN_PLAYWRIGHT_HEADED` | unset | Must be `1` to permit a headed browser run, alongside an operator-provisioned headed container. |
 | `BLKCHAIN_ANALYZE_MAX_INPUT_BYTES` | 1048576 | Subject size cap for `blk analyze`. |
@@ -624,7 +800,7 @@ path and weights must match that choice.
 Both default models are Apache-2.0. The reranker alternatives are not equivalent in licensing:
 `BLKCHAIN_RERANKER_KIND=qwen3` uses Qwen3-Reranker-0.6B, which is Apache-2.0, and
 `BLKCHAIN_RERANKER_KIND=jina` uses jina-reranker-v3, which is CC-BY-NC-4.0 and permits
-non-commercial use only. Select the jina backend only where that license fits your use. See NOTICE.
+non-commercial use only. Select the jina backend only where that license fits the intended use. See NOTICE.
 
 ### 5. Start Qdrant and the embedding service
 
@@ -648,9 +824,9 @@ both managed services.
 If image access is denied, authenticate with `docker login dhi.io`, then retry `blk up`. Keep the
 repository's digest rather than substituting a floating image tag.
 
-### 6. Add your corpus and build the index
+### 6. Add a corpus and build the index
 
-blkChain does not download a security corpus automatically. Start with your own Markdown notes.
+blkChain does not download a security corpus automatically. Start with local Markdown notes.
 The manifest reads the `notes/` directory below `BLKCHAIN_SOURCES_DIR`.
 
 For a fresh setup, create a small document to verify indexing:
@@ -671,7 +847,7 @@ blk search --json --top-k 5 "contextual output encoding"
 Confirm that `sources` reports indexed chunks and that search returns the setup document with its
 source pointer. Re-running the indexer resumes by content hash.
 
-Populate the source directories you use before building a larger index:
+Populate the source directories in use before building a larger index:
 
 | Location under the corpus root | Content |
 | --- | --- |
@@ -704,8 +880,8 @@ brew install jundot/omlx/omlx
 omlx serve --help
 ```
 
-For a fresh foreground server, create an API key in your password manager and enter it securely.
-The following `read` hides the value while you type it; press Enter when finished:
+For a fresh foreground server, create an API key in a password manager and enter it securely.
+The following `read` hides the value while it is typed; press Enter when finished:
 
 ```sh
 read -r -s OMLX_API_KEY
@@ -714,7 +890,7 @@ omlx serve --model-dir "$BLKCHAIN_MODELS_DIR/chat" --host 127.0.0.1 --port 8000
 ```
 
 Keep that terminal open. In a second terminal, enter the repository, repeat the exports from step 3,
-and export the same `OMLX_API_KEY` from your secret manager. An existing oMLX installation can use
+and export the same `OMLX_API_KEY` from the secret manager. An existing oMLX installation can use
 its configured API key and model directory instead. Confirm the server's actual model ID before
 setting `OMLX_MODEL`.
 
@@ -744,10 +920,10 @@ blk ask --agent auto --rag "Explain contextual output encoding"
 
 The model list must include the ID configured in `OMLX_MODEL`. `health --json` should report
 `ok: true` with all three native services available. The answer command should return text and
-source references from your corpus. This verifies the native answer path without requiring Hermes.
+source references from the indexed corpus. This verifies the native answer path without requiring Hermes.
 Use a tool-calling model and a supporting server configuration for engagement orchestration.
 
-### 8. Set up Hermes and connect the knowledge base
+### 8. Optional: set up Hermes and connect the knowledge base
 
 Hermes provides an optional legacy backend for one-shot `blk hermes`, `/hermes`, and `blk ask --hermes` turns. Install it using the
 [official quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/).
@@ -775,7 +951,7 @@ OpenAI-compatible endpoint and enter:
 | Context | At least 64,000 tokens, supported by the selected model and server. |
 
 Add this server entry to `~/.hermes/config.yaml` under `mcp_servers`. Merge it into any existing
-mapping rather than replacing the file. Replace the root path with your checkout:
+mapping rather than replacing the file. Replace the root path with the checkout's location:
 
 ```yaml
 mcp_servers:
@@ -802,7 +978,7 @@ Verify the integration:
 ```sh
 hermes --version
 blk doctor
-blk ask --hermes "Use kb_search to explain contextual output encoding from my local notes"
+blk ask --hermes "Use kb_search to explain contextual output encoding from the local notes"
 ```
 
 `hermes --version` checks that the installed launcher runs; `doctor` checks that it is on `PATH`
@@ -827,7 +1003,7 @@ crates.io, RubyGems, Packagist, NuGet, Alpine, and Debian, and asks Grype to upd
 It needs outbound HTTPS, a writable cache, and several GiB of free disk. The cache is
 `$XDG_CACHE_HOME/blkchain/vulndb` when `XDG_CACHE_HOME` is set, otherwise
 `~/.cache/blkchain/vulndb`. Setup prints the path it uses. Re-run setup after rebuilding blk when
-runner assets change, or when you need fresh scanner data.
+runner assets change, or when fresh scanner data is needed.
 
 Check setup output for `scanner database update failed`; the command's exit status alone does not
 prove every database was warmed. A failed download leaves a gap for scans that need it; rerun setup
@@ -1010,7 +1186,7 @@ blk web on
 blk web status
 ```
 
-For Tavily, export `TAVILY_API_KEY` or `TAVILY_SETUP_TOKEN` from your secret manager, then select
+For Tavily, export `TAVILY_API_KEY` or `TAVILY_SETUP_TOKEN` from a secret manager, then select
 `blk web provider tavily`. `blk web off` revokes native web permission. `NVD_API_KEY` is optional for
 CVE lookups. Hermes provider and tool permissions are configured separately.
 
@@ -1030,7 +1206,7 @@ CVE lookups. Hermes provider and tool permissions are configured separately.
 | A feature binary reads another checkout's configuration | Set `BLKCHAIN_ROOT` to the intended worktree before running that binary. |
 | Browser provisioning is rejected | Check all driver exports, archive/launcher hashes, the read-only package mount, and the required container settings. |
 
-## Ingestion and data handling
+## Security and data handling
 
 The indexer accepts supplied Markdown, code/text, PDFs, supported JSON techniques, and catalog-only
 wordlist metadata. Stable chunk identifiers and content hashes support resumable indexing. Resume
@@ -1039,7 +1215,7 @@ limits. Public URL ingestion validates destinations, pins resolution,
 rechecks redirects, and records external provenance.
 
 Use `blk add /absolute/path/to/notes --source my-notes` for a separately managed addition. Relative
-paths resolve against your current directory. Re-adding an input updates that input's chunks while
+paths resolve against the current directory. Re-adding an input updates that input's chunks while
 preserving other inputs with the same source label. The completion message reports additions,
 updates, skipped embeddings, and deletions.
 
@@ -1052,6 +1228,10 @@ resolved address.
 Engagement artifacts can contain raw responses, request bodies, credentials, and candidate secrets.
 Display redaction does not make every saved artifact or exact export safe to share. Review selected
 records and exported files before distribution and apply an appropriate retention policy.
+
+Report a vulnerability in blkChain itself through the process in [SECURITY.md](SECURITY.md). The
+security invariants a change must preserve are listed in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#security-invariants).
 
 ## License
 

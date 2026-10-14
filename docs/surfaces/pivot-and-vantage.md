@@ -59,7 +59,10 @@ they cover the web surface. Raw, Metasploit RPC, and HTTP form carriers do not
 provide that stream and cover command surfaces only. On a pivoted web surface the
 host-side broker validates every request and redirect against the pivot scope,
 resolves hostnames through the foothold, and dials the checked IP through the
-carrier.
+carrier. Tools that send from the operator's host instead of the carrier are
+refused there: the upstream intercepting proxy is not used, and Burp's request
+tools return a refusal that points to the web tools, because the pivot scope
+admits private networks the operator's host would reach on its own interfaces.
 
 ## The control property
 

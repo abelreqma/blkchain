@@ -25,7 +25,7 @@ and the engagement's policy defines the permitted targets, actions, time window 
 scope, action authorization, task identity, resource limits and execution; retrieved text is advisory
 context and never grants authority.
 
-## Before you change anything
+## Before changing anything
 
 - Go is the single implementation for search, ask, health, MCP and the HTTP API. Python serves the
   MLX models and builds the index offline. Python has no query-time code, and none should be added.
@@ -41,6 +41,9 @@ context and never grants authority.
   technique or citation.
 - Scope fails closed. An empty or ambiguous scope permits nothing, and a hostname entry does not
   authorize the address it resolves to.
+- A turn's caller vantage decides which tools may reach this host. A surface that does not
+  establish its caller is remote, and a remote caller gets no host terminal, signed-in browser, file
+  transfer, or MCP server outside the sandbox.
 - Bound every resource: requests, output, rate, duration and total work. Secrets come from the
   environment only.
 - Dependencies are pinned. Python with `==`, models to a revision, container images to a digest, and
@@ -81,7 +84,7 @@ removed.
 - Simplicity first. The minimum code that solves the problem, no speculative abstractions, no
   configuration for fixed values, and no error handling for impossible states.
 - Surgical changes. Touch what the task needs, match the surrounding style, and remove only the
-  names your own change orphaned.
+  names the change itself orphaned.
 - Comments state what the code does, or why a non-obvious choice is necessary, in plain present
   tense. If the code already says it, delete the comment. Objective identifiers that describe a real
   contract stay: spec ids, CVE ids, RFC numbers, algorithm names.

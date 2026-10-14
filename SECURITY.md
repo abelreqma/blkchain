@@ -13,9 +13,9 @@ Do not open a public issue or pull request for a security report, and do not pos
 discussion.
 
 A useful report names the invariant it defeats, the version or commit it was found on, and the
-shortest sequence that reproduces it. A proof of concept against a target you own or a local
-fixture is welcome. Do not include data obtained from a third party, and do not test against a
-system you are not authorized to test in order to demonstrate a finding here.
+shortest sequence that reproduces it. A proof of concept against a target the reporter owns or a
+local fixture is welcome. Do not include data obtained from a third party, and do not test against a
+system without authorization in order to demonstrate a finding here.
 
 The project is maintained by one person. Expect an acknowledgement within a week. A fix lands on
 `main` with a regression test in the suite that covers its area.
@@ -47,6 +47,9 @@ particular:
 - A resource bound or the operator stop control failing to hold.
 - A sealed policy accepted for a resume that changes its scope, permitted actions, limits, or
   declared foothold.
+- A `blk serve` caller gaining the operator's reach (`tool_host: local`, `browser_cdp`, file
+  transfer, or an MCP server outside the sandbox) without the configured token or from a bind that
+  is not loopback.
 
 ## Not a vulnerability
 
@@ -60,6 +63,8 @@ particular:
   data.
 - A local service reachable by a process already running as the operator on the operator's own
   machine.
+- A local process running a sandboxed turn through a loopback `blk serve` that has no token set.
+  The API documents that exposure; setting `BLKCHAIN_SERVE_TOKEN` closes it.
 - Findings that require the operator to run the tool against a system they were not authorized to
   test.
 - Dependency advisories with no reachable call path. OSV and Grype version matches are leads, not
@@ -69,6 +74,6 @@ particular:
 ## Using this project
 
 The operator's authorization for a given target is the premise this tool runs on. It does not verify
-that authorization and cannot grant it. Running it against systems you have no permission to test is
+that authorization and cannot grant it. Running it against systems without permission to test them is
 unlawful in most jurisdictions and is outside both the intended use and the license. The software
 is provided without warranty under the terms in [LICENSE](LICENSE).

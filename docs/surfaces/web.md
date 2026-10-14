@@ -79,7 +79,10 @@ Burp, where the operator runs one:
   server, and only a web-surface task is. Its three request tools go through the
   same gate as a native web request, so an out-of-scope host, an unarmed
   state-changing method, an action class the RoE does not list, and a port recon
-  has not observed are each refused. Its reads of proxy history, scanner issues
+  has not observed are each refused. `send_http2_request` is read in Burp's own
+  schema, with its method and path taken from `pseudoHeaders`. All three are
+  refused while a foothold carries the web surface, because Burp sends from the
+  operator's host rather than through the foothold. Its reads of proxy history, scanner issues
   and Collaborator interactions are available and are not filtered by engagement
   scope. Its instrument-state and configuration-dump tools are not registered.
 - `send_to_intruder` stages a request in an Intruder tab; the fuzzing traffic
