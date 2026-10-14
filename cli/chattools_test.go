@@ -55,6 +55,25 @@ func TestChatTargetsDoNotTreatLocalFilesAsHosts(t *testing.T) {
 	}
 }
 
+// TestChatTargetsCheckLocalFilesInsideTheWorkingDirectoryOnly pins that the
+// local-file check cannot reach outside the working directory. The name comes
+// from the request, and a symlink there that points elsewhere is not followed,
+// so an outside file cannot decide whether a name is treated as a host.
+func TestChatTargetsCheckLocalFilesInsideTheWorkingDirectoryOnly(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "secret.data")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	if err := os.Symlink(outside, "escape.internal"); err != nil {
+		t.Fatal(err)
+	}
+	got := chatTargetEntries("Check escape.internal", nil)
+	if len(got) != 1 || got[0] != "escape.internal" {
+		t.Fatalf("a symlink out of the working directory decided the name: %v", got)
+	}
+}
+
 func TestChatRegistryExposesActionsOnlyForNamedTargets(t *testing.T) {
 	ctx := context.Background()
 	plain, closePlain, err := newChatToolRegistry(ctx, nil, ragconfig.Config{}, nil, "Explain AD CS", nil, AnswerOpts{})
