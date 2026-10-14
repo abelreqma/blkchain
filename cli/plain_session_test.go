@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -315,6 +316,67 @@ func TestPlainREPLDoesNotRecordAnErroredTurn(t *testing.T) {
 			recs, _ := loadMessages(meta.ID)
 			t.Fatalf("an errored turn reached the transcript of %s: %+v", meta.ID, recs)
 		}
+	}
+}
+
+// A failed turn's partial answer is not carried into the next turn's memory
+// either. It reached the operator's screen, but a later turn that read it back
+// would treat a truncated answer as something the model said.
+func TestPlainREPLDoesNotRememberAFailedAnswer(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	t.Chdir(t.TempDir())
+	prev := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = prev })
+	var histories [][]priorTurn
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, question string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		histories = append(histories, slices.Clone(opts.History))
+		answer, err := "later answer", error(nil)
+		switch question {
+		case "failing question":
+			answer, err = "partial answer", errors.New("router exploded")
+		case "first question":
+			answer = "first answer"
+		}
+		// The plain REPL keeps what streamed, so the stub streams its answer.
+		if opts.Stream != nil {
+			opts.Stream([]byte(answer))
+		}
+		return answer, nil, false, nil, 1, "rag", err
+	}
+
+	input := filepath.Join(t.TempDir(), "input")
+	if err := os.WriteFile(input, []byte("/agent auto\nfirst question\nfailing question\nnext question\n/quit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	previous := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() { os.Stdin = previous })
+	captureStdout(t, func() {
+		captureStderr(t, func() {
+			if err := plainREPL(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	})
+	if len(histories) != 3 {
+		t.Fatalf("the router ran %d turns, want 3", len(histories))
+	}
+	next := histories[2]
+	for _, turn := range next {
+		if strings.Contains(turn.Content, "partial answer") || strings.Contains(turn.Content, "failing question") {
+			t.Fatalf("the next turn's memory carries the failed exchange: %+v", next)
+		}
+	}
+	// The memory is still carried, so the absence above is the failed turn's
+	// and not every turn's.
+	if !slices.ContainsFunc(next, func(turn priorTurn) bool { return turn.Content == "first answer" }) {
+		t.Errorf("the next turn's memory lost the successful exchange: %+v", next)
 	}
 }
 
