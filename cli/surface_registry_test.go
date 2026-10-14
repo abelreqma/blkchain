@@ -222,7 +222,7 @@ func paritySurfaces(t *testing.T) []paritySurface {
 		}},
 		{name: "MCP chat", run: func(t *testing.T, c parityCase) error {
 			_, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(),
-				mcpChatIn{Message: c.question, ToolHost: c.host, BrowserCDP: c.cdp})
+				mcpChatIn{Message: c.question, ToolHost: c.host, BrowserCDP: c.cdp}, vantageLocal)
 			return err
 		}},
 	}
@@ -232,7 +232,6 @@ func TestEverySurfaceOffersTheToolsOfTheClassifiedAction(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
 	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", t.TempDir()+"/absent.json")
-	setMCPServesStdio(t, true)
 	pm := newParityModel(t)
 
 	for _, name := range pendingParitySurfaces {

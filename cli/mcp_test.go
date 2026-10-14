@@ -195,7 +195,7 @@ func TestMCPServerRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := newMCPServer(&retrieval.Client{}, ragconfig.Config{}, cat)
+	srv := newMCPServer(&retrieval.Client{}, ragconfig.Config{}, cat, vantageRemote)
 
 	ctx := context.Background()
 	st, ct := mcp.NewInMemoryTransports()
