@@ -156,6 +156,9 @@ func (s *serveServer) handler() http.Handler {
 func (s *serveServer) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("POST "+serveSessionsPath, s.handleCreateSession)
+	mux.HandleFunc("GET "+serveSessionsPath, s.handleListSessions)
+	mux.HandleFunc("GET "+serveSessionsPath+"/", s.handleReadSession)
 	return mux
 }
 
