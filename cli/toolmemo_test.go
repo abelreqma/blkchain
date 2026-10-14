@@ -35,12 +35,40 @@ func TestToolCallKeyIgnoresArgumentFormattingButNotArgumentValues(t *testing.T) 
 	}
 }
 
-func TestToolCallKeyBoundsTheArgumentBytesItDigests(t *testing.T) {
-	// Two long arguments that share their first toolMemoMaxArgBytes bytes must
-	// not collide: the key carries the total length as well as the prefix.
-	base := strings.Repeat("x", toolMemoMaxArgBytes+16)
+func TestToolCallKeyDistinguishesLongArguments(t *testing.T) {
+	base := strings.Repeat("x", 1<<20+16)
 	if toolCallKey("t", base) == toolCallKey("t", base+"y") {
-		t.Error("two long arguments sharing a prefix produced the same key")
+		t.Error("two long arguments of different length produced the same key")
+	}
+	// Same length, same first megabyte, differing only in the last byte.
+	a := strings.Repeat("x", 2<<20) + "a"
+	b := strings.Repeat("x", 2<<20) + "b"
+	if toolCallKey("t", a) == toolCallKey("t", b) {
+		t.Error("two long arguments differing only in their last byte produced the same key")
+	}
+	ja := `{"v":"` + strings.Repeat("x", 2<<20) + `a"}`
+	jb := `{"v":"` + strings.Repeat("x", 2<<20) + `b"}`
+	if toolCallKey("t", ja) == toolCallKey("t", jb) {
+		t.Error("two long JSON arguments differing only in their last byte produced the same key")
+	}
+}
+
+func TestToolCallKeyKeepsLargeIntegersExact(t *testing.T) {
+	a := toolCallKey("t", `{"n":9007199254740992}`)
+	b := toolCallKey("t", `{"n":9007199254740993}`)
+	if a == b {
+		t.Error("two integers beyond float64 precision produced the same key")
+	}
+	if c := toolCallKey("t", "{ \"n\" :  9007199254740992 }"); c != a {
+		t.Error("the same integer with different spacing produced a different key")
+	}
+}
+
+func TestToolCallKeySortsNestedObjectKeys(t *testing.T) {
+	a := toolCallKey("t", `{"a":{"y":1,"x":[{"q":1,"p":2}]},"b":3}`)
+	b := toolCallKey("t", `{"b":3,"a":{"x":[{"p":2,"q":1}],"y":1}}`)
+	if a != b {
+		t.Error("nested object key order changed the key")
 	}
 }
 
@@ -83,6 +111,40 @@ func TestToolMemoReplaysInCallOrder(t *testing.T) {
 	b, _ := m.lookup(key)
 	if a != "first" || b != "second" {
 		t.Errorf("replay order: got %q then %q want %q then %q", a, b, "first", "second")
+	}
+}
+
+func TestToolMemoKeepsReplayOrderAcrossAttempts(t *testing.T) {
+	m := newToolMemo()
+	m.beginAttempt()
+	key := toolCallKey("run_command", `{"cmd":"date"}`)
+	m.record(key, "first")
+	m.record(key, "second")
+	m.beginAttempt()
+	if got, hit := m.lookup(key); !hit || got != "first" {
+		t.Fatalf("attempt 2 first replay: got %q hit=%v want %q true", got, hit, "first")
+	}
+	m.beginAttempt()
+	if got, _ := m.lookup(key); got != "first" {
+		t.Errorf("attempt 3 first replay: got %q want %q", got, "first")
+	}
+	if got, _ := m.lookup(key); got != "second" {
+		t.Errorf("attempt 3 second replay: got %q want %q", got, "second")
+	}
+}
+
+func TestToolMemoHitDoesNotChangeWhatItHolds(t *testing.T) {
+	m := newToolMemo()
+	m.beginAttempt()
+	key := toolCallKey("t", "{}")
+	m.record(key, "abc")
+	count, size := m.count, m.bytes
+	m.beginAttempt()
+	if _, hit := m.lookup(key); !hit {
+		t.Fatal("no replay")
+	}
+	if m.count != count || m.bytes != size {
+		t.Errorf("a hit changed the accounting: count %d->%d bytes %d->%d", count, m.count, size, m.bytes)
 	}
 }
 
@@ -172,6 +234,34 @@ func TestToolLoopReplaysAgainOnAThirdAttempt(t *testing.T) {
 	}
 	if len(tool.ran) != 1 {
 		t.Errorf("tool ran %d times across three attempts, want 1", len(tool.ran))
+	}
+}
+
+func TestToolLoopKeepsReplayOrderAcrossThreeAttempts(t *testing.T) {
+	n := 0
+	tool := &fakeTool{name: "t", fn: func(string) (string, error) {
+		n++
+		return "r" + string(rune('0'+n)), nil
+	}}
+	reg := newLoopReg(t, tool)
+	memo := newToolMemo()
+	caps := LoopCaps{MaxRounds: 5, MaxCalls: 5, ToolMemo: memo}
+	twice := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "t", "{}"), callResp("c2", "t", "{}"), textResp("done")}}
+	if _, _, err := runToolLoopAttempt(context.Background(), twice, reg, userMsgs(), caps, memo); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 2; attempt <= 3; attempt++ {
+		once := callThenAnswer()
+		if _, _, err := runToolLoopAttempt(context.Background(), once, reg, userMsgs(), caps, memo); err != nil {
+			t.Fatal(err)
+		}
+		got := toolResults(once)
+		if len(got) != 1 || got[0].Content != "r1" {
+			t.Errorf("attempt %d first replay: %+v want r1", attempt, got)
+		}
+	}
+	if len(tool.ran) != 2 {
+		t.Errorf("tool ran %d times, want 2", len(tool.ran))
 	}
 }
 

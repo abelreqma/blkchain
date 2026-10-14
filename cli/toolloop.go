@@ -190,9 +190,6 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 				if caps.ToolMemo != nil && tc.FunctionCall != nil {
 					key = toolCallKey(name, args)
 					if stored, hit := caps.ToolMemo.lookup(key); hit {
-						// Re-record at this attempt so a further failover can
-						// replay it again.
-						caps.ToolMemo.record(key, stored)
 						result, outcome, replayed = stored, ToolDone, true
 					}
 				}
@@ -207,8 +204,8 @@ func runToolLoop(ctx context.Context, m toolLoopModel, reg *tooldef.Registry, ms
 						}
 					}
 				}
-				// A replayed call still spends a call slot, so the cap bounds
-				// the whole turn's calls rather than each attempt's.
+				// A replayed call spends a slot in this attempt's cap, so an
+				// attempt is bounded whether its calls ran or replayed.
 				total++
 			}
 			if caps.ObserveResult != nil {

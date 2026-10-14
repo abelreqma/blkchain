@@ -1,19 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"io"
 	"sync"
 )
 
 const (
-	// toolMemoMaxArgBytes caps the argument bytes that enter one memo key. A
-	// longer argument is keyed by the digest of its first toolMemoMaxArgBytes
-	// bytes together with its total length, so two long arguments sharing a
-	// prefix do not collide on the prefix alone.
-	toolMemoMaxArgBytes = 1 << 20
 	// toolMemoMaxEntries caps the recorded calls one memo holds.
 	toolMemoMaxEntries = 64
 	// toolMemoMaxBytes caps the result bytes one memo holds.
@@ -26,11 +22,13 @@ const (
 // proxied request or a terminal command therefore executes once per turn even
 // when the model that drove it is replaced mid-turn.
 //
-// A lookup matches only a result recorded by an earlier attempt, and consumes
-// it, so the nth identical call of a replay matches the nth identical call of
-// the attempt that ran them. Two identical calls inside one attempt both run: a
-// deliberate repeat is not a replay, and answering it from memory would
-// manufacture a false "nothing changed".
+// A lookup matches only a result recorded by an earlier attempt and re-stamps
+// it to the current attempt in place, so the nth identical call of a replay
+// matches the nth identical call of the attempt that ran them, in the same order
+// on every later attempt. A re-stamped entry is not matched again in the same
+// attempt, and a repeat beyond the recorded count runs the tool. Two identical
+// calls inside one attempt both run: a deliberate repeat is not a replay, and
+// answering it from memory would manufacture a false "nothing changed".
 //
 // Scope is one turn in one process. Nothing here is persisted and nothing is
 // consulted on a later turn: a stored result would otherwise stand in for an
@@ -62,8 +60,9 @@ func (t *toolMemo) beginAttempt() {
 	t.mu.Unlock()
 }
 
-// lookup returns the oldest result recorded for key by an earlier attempt and
-// consumes it.
+// lookup returns the first result recorded for key by an earlier attempt and
+// stamps that entry with the current attempt, leaving its position, the entry
+// count and the byte count unchanged.
 func (t *toolMemo) lookup(key string) (string, bool) {
 	if t == nil {
 		return "", false
@@ -71,14 +70,12 @@ func (t *toolMemo) lookup(key string) (string, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	entries := t.done[key]
-	for i, e := range entries {
-		if e.attempt >= t.attempt {
+	for i := range entries {
+		if entries[i].attempt >= t.attempt {
 			continue
 		}
-		t.done[key] = append(entries[:i:i], entries[i+1:]...)
-		t.count--
-		t.bytes -= len(e.result)
-		return e.result, true
+		entries[i].attempt = t.attempt
+		return entries[i].result, true
 	}
 	return "", false
 }
@@ -100,24 +97,35 @@ func (t *toolMemo) record(key, result string) {
 	t.bytes += len(result)
 }
 
-// toolCallKey is the memo key for one call: the tool name and a digest of its
-// canonicalized arguments. JSON arguments are round-tripped through
-// encoding/json, which sorts object keys at every depth, so key order and
-// whitespace do not change the key while a changed value does. Arguments that
-// are not JSON are digested as received.
+// toolCallKey is the memo key for one call: the tool name and a SHA-256 digest
+// of its whole canonicalized arguments. JSON arguments are decoded with numbers
+// kept as their literal text and re-encoded, which sorts object keys at every
+// depth, so key order and whitespace do not change the key while a changed value
+// does, including an integer beyond float64 precision. Arguments that are not
+// JSON are digested as received.
+//
+// The digest covers every byte of the canonical form. Truncating it would let
+// two long arguments sharing a prefix collide, and would save nothing: decoding
+// and re-encoding materialize the whole argument regardless, and the argument
+// itself arrives inside a model response whose body llmTransport caps at
+// llmMaxBodyBytes.
+//
+// json.Marshal replaces invalid UTF-8 inside a string with U+FFFD, so two
+// arguments that differ only in invalid UTF-8 bytes share a key. That is
+// accepted: tool arguments arrive from the model as JSON, and such a string is
+// already malformed.
 func toolCallKey(name, args string) string {
 	raw := []byte(args)
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var v any
-	if json.Unmarshal(raw, &v) == nil {
-		if b, err := json.Marshal(v); err == nil {
-			raw = b
+	if dec.Decode(&v) == nil {
+		if _, err := dec.Token(); err == io.EOF {
+			if b, err := json.Marshal(v); err == nil {
+				raw = b
+			}
 		}
 	}
-	h := sha256.New()
-	fmt.Fprintf(h, "%d:", len(raw))
-	if len(raw) > toolMemoMaxArgBytes {
-		raw = raw[:toolMemoMaxArgBytes]
-	}
-	h.Write(raw)
-	return name + "\x00" + hex.EncodeToString(h.Sum(nil))
+	sum := sha256.Sum256(raw)
+	return name + "\x00" + hex.EncodeToString(sum[:])
 }
