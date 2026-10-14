@@ -13,13 +13,14 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"blkchain/cli/internal/ragconfig"
 	"blkchain/cli/internal/retrieval"
-	"blkchain/cli/internal/skillcat"
 )
 
 // serve.go is blkChain's HTTP transport (`blk serve`). It offers the same
@@ -292,11 +293,24 @@ func serveBindCheck(bind string, allowRemote bool, token string) error {
 	return nil
 }
 
+// serveCheckListenerMode compares the Host rule the bind's text produced with
+// the one the opened address produces. A name resolves at listen time, so the
+// address actually opened can be wider than the text reads: localhost mapped to
+// a routable address opens a listener off this machine while
+// serveHostModeFor's text pass calls it loopback, which would serve a remote
+// peer with no token and the relaxed loopback Host rule. The two have to agree
+// or the exposure the operator chose is not the one that was opened.
+func serveCheckListenerMode(bind string, mode serveHostMode, addr string) error {
+	if serveHostModeFor(addr) == mode {
+		return nil
+	}
+	return fmt.Errorf("serve: --bind %q opened %s, which is not the exposure that bind names; refusing to serve it", bind, addr)
+}
+
 // serveServer holds one HTTP transport's state.
 type serveServer struct {
 	rc    *retrieval.Client
 	cfg   ragconfig.Config
-	cat   *skillcat.Catalog
 	opts  serveOpts
 	token string
 	// hostMode is the Host rule, computed once from the bind so no request ever
@@ -315,14 +329,13 @@ type serveServer struct {
 
 // newServeServer builds the transport's state. The exposure decision is run
 // here too, so no serveServer value can exist for a bind that was refused.
-func newServeServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Catalog, o serveOpts, token string) (*serveServer, error) {
+func newServeServer(rc *retrieval.Client, cfg ragconfig.Config, o serveOpts, token string) (*serveServer, error) {
 	if err := serveBindCheck(o.bind, o.allowRemote, token); err != nil {
 		return nil, err
 	}
 	return &serveServer{
 		rc:       rc,
 		cfg:      cfg,
-		cat:      cat,
 		opts:     o,
 		token:    token,
 		hostMode: serveHostModeFor(o.bind),
@@ -545,6 +558,10 @@ func (s *serveServer) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := serveCheckListenerMode(s.opts.bind, s.hostMode, ln.Addr().String()); err != nil {
+		_ = ln.Close()
+		return err
+	}
 	srv := &http.Server{
 		Handler:           s.handler(),
 		ReadHeaderTimeout: serveReadHeaderTimeout,
@@ -590,14 +607,13 @@ func runServe(args []string) error {
 	}
 	defer rc.Close()
 
-	cat, err := loadEngageCatalog()
+	s, err := newServeServer(rc, cfg, o, token)
 	if err != nil {
 		return err
 	}
-
-	s, err := newServeServer(rc, cfg, cat, o, token)
-	if err != nil {
-		return err
-	}
-	return s.run(context.Background())
+	// An interrupt cancels the context the server watches, so in-flight turns
+	// get serveShutdownTimeout to finish instead of ending with the process.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return s.run(ctx)
 }
