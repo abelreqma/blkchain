@@ -558,8 +558,10 @@ HTTP API (`blk serve`):
   reach of the turn's deadline and of a request context a live connection never cancels, and hold
   its turn slot. A failed stream write ends the turn.
 - `blk serve` runs a turn only on a session id in its own `chatSessionOwner`, the type `chat`
-  over MCP uses: the 128 most recently used ids it created, held in memory. Any session on disk is
-  readable. Bounds, all in code: a 1 MiB request body, a 256 KiB message, one turn in flight per
+  over MCP uses: the 128 most recently used ids it created, held in memory. With a token set, any
+  session on disk is readable; without one, listing and reading sessions are refused
+  (`serveServer.sessionReadsAllowed`), because the store holds every surface's conversations and
+  any local process can reach a loopback server. Bounds, all in code: a 1 MiB request body, a 256 KiB message, one turn in flight per
   session, four across the server with no queue, the request timeout per turn (300 seconds by
   default), 32 MiB per stream, and 240 requests per minute with a burst of 32 for the whole
   process rather than per peer.
@@ -572,8 +574,11 @@ Engagement instruments:
   until it is classified. The server is still opened for the task, its stdio command launched and
   its allowlist checked, and only its tools are discarded. Every registered Burp tool goes through
   `gatedMCPTool`; its read and pure branches pass through, and its request branch resolves the
-  method and URL from the call's own `targetHostname` and `targetPort` rather than the request's
-  `Host` header, because the connection target is what the packet reaches, and authorizes them
+  method and URL from the call's own `targetHostname` and `targetPort`, because the connection
+  target is what the packet reaches. The hosts the request names for a server to route on, its
+  `Host` header, an absolute-form or `CONNECT` request target, and on HTTP/2 the `:authority`
+  pseudo-header and a `host` header, must each be that connection target or in scope, and two
+  `Host` headers are refused; these checks run before the gate. It authorizes the target
   through `Gate.AuthorizeAPIRequest`, the same path the native `web_api` tool uses: scope, the
   phase tier with its armed-task requirement for a state-changing method, the RoE action class, the
   service check, confirmation, rate, recheck, and audit. The origin-form request target from the raw
@@ -631,16 +636,18 @@ Engagement instruments:
   that will not start fails the task, so a configured callback server that cannot be used is not
   mistaken for one that found nothing.
 - A direct web surface's brokered HTTP and WebSocket requests go through a loopback intercepting
-  proxy when one is listening (`cli/webupstream.go`), on by default at `127.0.0.1:8080` and off when
-  `BLKCHAIN_WEB_PROXY` is `off`, when the value is not a loopback IP address and a TCP port, when
-  nothing is listening, and when the CA certificate cannot be sourced from the address. A hostname is
-  refused because the address it resolves to is not checked again before the proxy carries
-  engagement traffic. The isolated browser's own page loads take no proxy, so a browser action
-  leaves no history in it. A pivoted surface takes none at all (`cli/webisolation.go`), because the
-  foothold carrier it dials through is what an upstream proxy would replace. The trust anchor is
-  whatever is listening on that address, so the notice names the CA subject it accepted, and the
-  certificate is fetched from `http://burp/cert` through the proxy unless `BLKCHAIN_WEB_PROXY_CA`
-  names a file.
+  proxy only when the operator configures one (`cli/webupstream.go`): `BLKCHAIN_WEB_PROXY` names a
+  loopback IP address and TCP port, and `BLKCHAIN_WEB_PROXY_CA` names the proxy's CA certificate.
+  There is no default address, because a default would hand engagement traffic to whatever local
+  process listens on it, and the certificate is never fetched from the listener, because that would
+  let the listener choose the trust anchor. A hostname address is refused because the address it
+  resolves to is not checked again before the proxy carries engagement traffic. A missing CA file
+  or a listener that does not answer falls back to direct requests with a notice. The proxy
+  resolves target hostnames itself, so the broker's resolve-and-pin check does not extend past it.
+  The isolated browser's own page loads take no proxy, so a browser action leaves no history in
+  it. A pivoted surface takes none at all (`cli/webisolation.go`), because the foothold carrier it
+  dials through is what an upstream proxy would replace. The service probe's loopback CONNECT
+  observation (`probeLoopbackProxy`) uses the same setting and runs only when a proxy is named.
 
 Vulnerability analysis:
 

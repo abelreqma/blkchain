@@ -71,8 +71,9 @@ External-surface sweep:
 Burp, where the operator runs one:
 
 - A direct surface's brokered HTTP and WebSocket requests traverse a loopback
-  intercepting proxy when one is listening, on by default at `127.0.0.1:8080`, so
-  Burp sees the requests the stack makes. The isolated browser's own page loads
+  intercepting proxy when the operator names one in `BLKCHAIN_WEB_PROXY` and its
+  CA certificate in `BLKCHAIN_WEB_PROXY_CA`, so Burp sees the requests the stack
+  makes. There is no default address. The isolated browser's own page loads
   are not proxied. A pivoted surface takes no upstream proxy, because the foothold
   carrier it dials through is what an upstream proxy would replace.
 - A web-surface task is additionally offered the tools of a configured Burp MCP
@@ -82,7 +83,9 @@ Burp, where the operator runs one:
   has not observed are each refused. `send_http2_request` is read in Burp's own
   schema, with its method and path taken from `pseudoHeaders`. All three are
   refused while a foothold carries the web surface, because Burp sends from the
-  operator's host rather than through the foothold. Its reads of proxy history, scanner issues
+  operator's host rather than through the foothold. A request that names a host
+  other than its connection target, in its `Host` header, request target or
+  `:authority`, is refused unless that host is in scope. Its reads of proxy history, scanner issues
   and Collaborator interactions are available and are not filtered by engagement
   scope. Its instrument-state and configuration-dump tools are not registered.
 - `send_to_intruder` stages a request in an Intruder tab; the fuzzing traffic
