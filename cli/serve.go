@@ -550,14 +550,22 @@ func serveWriteJSON(w http.ResponseWriter, code int, payload any) {
 	_, _ = w.Write(body)
 }
 
-// run listens on the configured bind and serves until ctx is cancelled. No read
-// or write deadline is set on the server because a streaming endpoint is long
-// lived; a turn is bounded by its own wall clock instead.
+// run listens on the configured bind and serves that listener until ctx is
+// cancelled.
 func (s *serveServer) run(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.opts.bind)
 	if err != nil {
 		return err
 	}
+	return s.serveListener(ctx, ln)
+}
+
+// serveListener checks the address ln actually opened against the exposure the
+// bind names, closing ln and refusing on a disagreement, and otherwise serves it
+// until ctx is cancelled. No read or write deadline is set on the server because
+// a streaming endpoint is long lived; a turn is bounded by its own wall clock
+// instead.
+func (s *serveServer) serveListener(ctx context.Context, ln net.Listener) error {
 	if err := serveCheckListenerMode(s.opts.bind, s.hostMode, ln.Addr().String()); err != nil {
 		_ = ln.Close()
 		return err

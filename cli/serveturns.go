@@ -238,9 +238,9 @@ func (s *serveServer) handleTurn(w http.ResponseWriter, r *http.Request) {
 	serveWriteJSON(w, http.StatusOK, out)
 }
 
-// handleTurnStream runs one turn and streams it as Server-Sent Events. The
-// event names and payload keys are the ones blk's own gateway client dispatched
-// on, and a subset of what that client parsed.
+// handleTurnStream runs one turn and streams it as Server-Sent Events:
+// tool.started and tool.completed around each tool call, assistant.delta per
+// answer fragment, and one terminal run.completed or run.failed.
 //
 // The status is written before the turn starts, so a turn that fails after the
 // first byte reports run.failed inside the stream rather than as a status. Every

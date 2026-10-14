@@ -576,8 +576,10 @@ func TestServeTurnAnswers413ForAnOversizeChunkedBody(t *testing.T) {
 }
 
 func TestServeStreamEmitsTheEventNamesBlkParses(t *testing.T) {
-	// These names and payload keys are the ones blk's own gateway client
-	// dispatched on, and a subset of what that client parsed.
+	// One exchange carrying every event the stream emits except run.failed,
+	// which has its own test: the event names in order and each event's exact
+	// payload keys, so a key added or dropped is a failure rather than a change
+	// a client discovers.
 	s, id := serveTurnServer(t, serveOpts{}, "")
 	installServeTurnRouter(t, serveTurnRouter{
 		answer:  "hello",

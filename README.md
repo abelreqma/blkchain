@@ -355,6 +355,8 @@ A turn can be run only on a session this server process created with `POST /v1/s
 
 A bind that is not loopback needs `--allow-remote` and a bearer token. The token comes only from `BLKCHAIN_SERVE_TOKEN`, is compared in constant time, and is never logged or returned. A token that is set is required on every request, loopback included, and a request without it is refused with 401. With none set, any process on this machine can call the API.
 
+The bind's text decides that exposure, and a name in it resolves only when the listener opens, so the address actually opened is checked against the bind once the listener is up and a disagreement refuses to serve, naming both. `--bind NAME:8787 --allow-remote` with a token is refused when `NAME` resolves to a loopback address, as is `--bind localhost:8787` on a resolver that answers with a routable one.
+
 `tool_host: local` and `browser_cdp` grant the operator's own reach: the host's terminal and files outside the sandbox, and the signed-in browser. A turn may use them only when the bind is loopback and the request's peer address is loopback. On a bind that is not loopback they are refused to every caller with 403, because behind a tunnel, a published container port or a local proxy a loopback peer address does not show who sent the request. On a loopback bind with no token, any local process qualifies.
 
 Three controls guard the API against a web page the operator has open, which can reach loopback. Each stands on its own:
