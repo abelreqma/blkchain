@@ -17,17 +17,25 @@ import (
 // repeats the last response, so a "always calls a tool" model needs one entry.
 type fakeModel struct {
 	queue []*llms.ContentResponse
+	// errs, when set, is the error for call i. A nil entry and a call past the
+	// slice return the scripted response, so a model with no errs answers every
+	// call.
+	errs  []error
 	calls int
 	seen  [][]llms.MessageContent
 }
 
 func (f *fakeModel) GenerateContent(_ context.Context, msgs []llms.MessageContent, _ ...llms.CallOption) (*llms.ContentResponse, error) {
 	f.seen = append(f.seen, append([]llms.MessageContent(nil), msgs...))
-	i := f.calls
+	call := f.calls
+	f.calls++
+	if call < len(f.errs) && f.errs[call] != nil {
+		return nil, f.errs[call]
+	}
+	i := call
 	if i >= len(f.queue) {
 		i = len(f.queue) - 1
 	}
-	f.calls++
 	return f.queue[i], nil
 }
 

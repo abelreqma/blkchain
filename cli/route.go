@@ -181,9 +181,12 @@ func directAnswer(ctx context.Context, cfg ragconfig.Config, question string, op
 	if err != nil {
 		return "", 0, err
 	}
-	l, err := newOMLX(cfg, opts.Model)
-	if err != nil {
-		return "", 0, err
+	l := opts.llm
+	if l == nil {
+		l, err = newOMLX(cfg, opts.Model)
+		if err != nil {
+			return "", 0, err
+		}
 	}
 	if opts.Persona != nil {
 		opts.Persona(domain)
@@ -263,6 +266,23 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 	if _, err := parseAnswerAgent(opts.Agent); err != nil {
 		return "", nil, false, nil, 0, "", err
 	}
+	// The turn's two chains: the router answers the short decisions, the
+	// assessment chain answers the turn. A caller that carries them resolved
+	// them once for the whole turn; any other caller resolves them here.
+	routerChain, assessmentChain := opts.routerChain, opts.assessmentChain
+	if routerChain == nil || assessmentChain == nil {
+		routerIDs, assessmentIDs := roleChains(cfg, opts.Model)
+		var err error
+		if routerChain, err = newModelChain(cfg, routerIDs); err != nil {
+			return "", nil, false, nil, 0, "", err
+		}
+		if assessmentChain, err = newModelChain(cfg, assessmentIDs); err != nil {
+			return "", nil, false, nil, 0, "", err
+		}
+	}
+	opts.llm = assessmentChain
+	opts.router = routerChain
+	opts.assessment = assessmentChain
 	keepLocal := opts.WebFirst && !opts.WebOnly && (questionHasTargetDetails(question) || len(chatTargetEntries(question, opts.History)) > 0)
 	if keepLocal {
 		opts.NoWeb = true
@@ -271,24 +291,17 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 	// Compress carried-back conversation memory once, before any dispatch, so a
 	// long session stays within budget by condensing older turns rather than
 	// dropping them. Shared by the CLI, REPL, and TUI (all reach here through
-	// adaptiveAnswerFn). A client is built only when the history actually exceeds
-	// the budget; otherwise this is a cheap length check.
+	// adaptiveAnswerFn). The model is only called when the history actually
+	// exceeds the budget; otherwise this is a cheap length check.
 	if budget := conversationBudget(); conversationChars(opts.History) > budget {
-		if cl, err := newOMLX(cfg, opts.Model); err == nil {
-			opts.History = compressTurns(ctx, cl, opts.History, budget)
-		} else {
-			opts.History = boundTurns(opts.History, budget)
-		}
+		opts.History = compressTurns(ctx, routerChain, opts.History, budget)
 	}
 	if !force && !opts.WebOnly {
-		l, err := newOMLX(cfg, opts.Model)
-		if err != nil {
-			return "", nil, false, nil, 0, "", err
-		}
+		var err error
 		kind := routeAdvise
 		hasTarget := len(chatTargetEntries(question, opts.History)) > 0
 		if !isPureArithmetic(question) {
-			opts.requiredAction, err = classifyChatAction(ctx, l, question, hasTarget)
+			opts.requiredAction, err = classifyChatAction(ctx, routerChain, question, hasTarget)
 			if err != nil {
 				return "", nil, false, nil, 0, "", err
 			}
@@ -297,7 +310,7 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 			}
 		}
 		if !hasTarget && opts.requiredAction == "" {
-			kind, _ = routeQuery(ctx, l, cfg, question, enabled)
+			kind, _ = routeQuery(ctx, routerChain, cfg, question, enabled)
 		}
 		if kind == routeAdvise && opts.WebFirst && enabled.Web && !opts.NoWeb && !hasTarget && opts.requiredAction == "" {
 			kind = routeGround
@@ -311,7 +324,7 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 		if kind == routeSkip && enabled.Local && !isPureArithmetic(question) {
 			// Do not answer ungrounded until the local LLM confirms the corpus
 			// cannot ground it; if it can, ground instead.
-			if skipGroundsInCorpus(ctx, l, rc, cfg, question) {
+			if skipGroundsInCorpus(ctx, routerChain, rc, cfg, question) {
 				kind = routeGround
 			}
 		}
@@ -321,13 +334,11 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 		}
 		if kind == routeAdvise {
 			// Tool-using native chat shares this path across interactive and CLI turns.
-			opts.llm = l
 			cat, _ := loadEngageCatalog()
-			ans, tokens, aerr := adviseLoop(ctx, l, rc, cfg, cat, question, opts)
+			ans, tokens, aerr := adviseLoop(ctx, assessmentChain, rc, cfg, cat, question, opts)
 			return ans, []citation{}, false, []retrieval.Result{}, tokens, "rag", aerr
 		}
 		opts.NoLocal = !enabled.Local
-		opts.llm = l
 	}
 	ans, cits, usedWeb, results, tokens, err := AnswerLoop(ctx, rc, cfg, question, opts)
 	route := "rag"
