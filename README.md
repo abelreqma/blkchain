@@ -1,6 +1,6 @@
 # blkChain
 
-blkChain is a security research and authorized assessment framework. It combines a searchable security knowledge base, model-assisted task orchestration, isolated command execution, browser and API analysis, and a persistent engagement evidence store. Its assessment core, `blk engage`, coordinates bounded tasks under operator-defined rules of engagement. The `blk` terminal client provides one-shot commands, an interactive session, and an MCP server.
+blkChain is a security research and authorized assessment framework. It combines a searchable security knowledge base, model-assisted task orchestration, isolated command execution, browser and API analysis, and a persistent engagement evidence store. Its assessment core, `blk engage`, coordinates bounded tasks under operator-defined rules of engagement. The `blk` terminal client provides one-shot commands, an interactive session, an MCP server, and an HTTP API.
 
 Use it to research techniques, understand an application's exposed sources and traffic, run scoped assessment tasks, and inspect the evidence behind a conclusion.
 
@@ -15,7 +15,7 @@ Start with the [complete setup guide](#complete-setup-guide). For an existing in
 | Web application analysis | Source and traffic collection, JavaScript and source-map analysis, API operation reconstruction, role sessions, workers, cached responses, WebSockets, and scoped replay. |
 | Engagement evidence | SQLite tasks, exact quotes, action records, surface observations, scanner advisories, coverage records, finding review states, provenance relationships, and local answers citing selected records. |
 | Operator interfaces | Keyboard-driven terminal UI, plain REPL, history, draft editing, context attachments, queued questions, source inspection, model controls, and service diagnostics. |
-| Integration | Native MCP tools and schema-validated JSON generation through the same Go implementation. |
+| Integration | Native MCP tools, an HTTP API, and schema-validated JSON generation through the same Go implementation. |
 
 ## Research and answer modes
 
@@ -38,9 +38,9 @@ Bare `blk` starts the REPL or TUI in native auto mode. `blk ask QUESTION` also u
 
 `--json` and `--sources` work with the default native `ask` path. In the interactive session, `/agent NAME` selects a native specialist and `/agent auto` restores dynamic selection. `/hermes PROMPT` runs one legacy Hermes turn. Research specialists change answer guidance. Engagement executors are selected separately from task kind and surface.
 
-`blk ask`, the plain REPL, the TUI, and the `chat` tool of `blk mcp` run the same native turn. One function resolves the session, loads its history, assembles the answer options, routes the question, records tool actions, and saves the turn, so every surface gets the same routing, tools, and persistence. `--hermes` cannot be combined with `--session`, `--agent`, `--rag`, `--web`, `--json`, or `--sources`.
+`blk ask`, the plain REPL, the TUI, the `chat` tool of `blk mcp`, and the turn endpoints of `blk serve` run the same native turn. One function resolves the session, loads its history, assembles the answer options, routes the question, records tool actions, and saves the turn, so every surface gets the same routing, tools, and persistence. `--hermes` cannot be combined with `--session`, `--agent`, `--rag`, `--web`, `--json`, or `--sources`.
 
-Each session is one append-only JSONL transcript plus a row in the local history database. Every blk process shares them, and a transcript is reconciled with the database when a session is reopened. A session started over MCP is an ordinary session, so `blk ask --session ID` continues it.
+Each session is one append-only JSONL transcript plus a row in the local history database. Every blk process shares them, and a transcript is reconciled with the database when a session is reopened. A session started over MCP or `blk serve` is an ordinary session, so `blk ask --session ID` continues it.
 
 Native chat shares a bounded tool registry across those surfaces. It offers knowledge-base search, playbook routing, file operations, terminal and process control, public web search and extraction, browser control, screenshot analysis, and allowlisted MCP client tools.
 
@@ -285,7 +285,7 @@ A workspace includes `engagement.db`, captured artifacts under `evidence/`, `act
 
 For a network task that requests an HTTP banner, the recon executor follows an observed open HTTP port with a bounded, gated HEAD request. It records the port line and exact `Server:` response line as evidence. The runner includes Nmap's service-detection data. Network Nmap calls add `-n` unless the command explicitly selects a DNS mode, avoiding reverse-DNS waits behind the worker's egress guard.
 
-## Terminal and MCP interfaces
+## Terminal, MCP, and HTTP interfaces
 
 Bare `blk` starts the interactive session. A terminal uses the keyboard-driven UI; redirected input
 uses the plain REPL. Finished answers remain in normal terminal scrollback. The UI supports
@@ -328,17 +328,67 @@ MCP engagement defaults to Auto. `confirm=elicit` requires compatible client eli
 The tool returns workspace, transcript, report, and policy references. `blk analyze --schema NAME`
 provides schema-validated JSON generation.
 
+`blk serve` offers the same turn over HTTP. It listens on `127.0.0.1:8787` unless `--bind` names another address.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | `{"status":"ok","version":...}`. |
+| `POST /v1/sessions` | Create a session and return its listing fields with status 201. This server may run turns on it. A new session reads as 404 until its first turn writes a transcript. |
+| `GET /v1/sessions` | List sessions from every surface, newest first, as `{"sessions":[...],"truncated":bool}`. At most 50 are listed, and `truncated` is true when more exist. |
+| `GET /v1/sessions/{id}` | Read a session's `id`, `title`, `msg_count`, `model` and newest `turns` in a body of at most 256 KiB. `trimmed` is present and true when turns or content were dropped to fit. |
+| `POST /v1/sessions/{id}/turns` | Run a turn and return the turn result as JSON: `answer`, `citations`, `used_web`, `model` and `usage`, plus `session_id`, `agent`, `route`, `actions` and `results` when set. |
+| `POST /v1/sessions/{id}/turns/stream` | Run a turn and stream it as Server-Sent Events. |
+
+A turn body is JSON with `message`, which is required and at most 256 KiB, and optional `agent`, `tool_host`, `browser_cdp`, `force_rag` and `web_only`. A turn without a body is refused with 415. A turn that produced an answer but did not finish cleanly returns it with status 200 and an `error` field. The stream sends five events:
+
+| Event | Payload |
+| --- | --- |
+| `tool.started` | `{"tool":NAME}` |
+| `tool.completed` | `{"tool":NAME}`, with `error` when the call failed, was skipped past the call cap, or did not complete. |
+| `assistant.delta` | `{"delta":TEXT}` |
+| `run.completed` | `{"usage":{"completion_tokens":N}}` |
+| `run.failed` | `{"error":TEXT}` |
+
+The stream ends on `run.completed` or `run.failed` unless the connection is cut. A request refused before the turn starts, such as a bad body, a session this server did not create or a turn already in flight, answers with a plain status. Once the turn starts the status is already 200, so a failure inside it arrives as `run.failed`.
+
+A turn can be run only on a session this server process created with `POST /v1/sessions`, as with `chat` over MCP, and any other well-formed id answers 403. The server tracks its 128 most recently used session ids in memory, so a session that falls out of them, or that predates a restart, answers 403 too. Any session on disk can be listed and read, whichever surface created it.
+
+A bind that is not loopback needs `--allow-remote` and a bearer token. The token comes only from `BLKCHAIN_SERVE_TOKEN`, is compared in constant time, and is never logged or returned. A token that is set is required on every request, loopback included, and a request without it is refused with 401. With none set, any process on this machine can call the API.
+
+`tool_host: local` and `browser_cdp` grant the operator's own reach: the host's terminal and files outside the sandbox, and the signed-in browser. A turn may use them only when the bind is loopback and the request's peer address is loopback. On a bind that is not loopback they are refused to every caller with 403, because behind a tunnel, a published container port or a local proxy a loopback peer address does not show who sent the request. On a loopback bind with no token, any local process qualifies.
+
+Three controls guard the API against a web page the operator has open, which can reach loopback. Each stands on its own:
+
+- A request body must be `application/json`, or the request is refused with 415. A cross-site form post or no-cors request cannot send that type, and a JSON request from a page needs a preflight this server refuses.
+- The `Host` header must name an address the bind serves, or the request is refused with 421. This defeats DNS rebinding, where a hostile name resolves to the server. A loopback bind accepts loopback addresses, `localhost` and `*.localhost`, and a bind on one other host accepts only that host. A wildcard bind accepts any `Host` because a client's `Host` cannot be predicted from it, so the control does not run there. The port is not compared.
+- Any `Origin` header is refused with 403, a loopback origin included. This defeats a cross-origin request from a page's script, which a browser marks with `Origin`, and the preflight that would authorize one.
+
+These checks are on request headers. A request without an `Origin` header passes the third, whoever sends it, and a local process that sends a JSON body, an accepted `Host` and no `Origin` passes all three. Only the token stops it.
+
+The server bounds its own work:
+
+| Bound | Value |
+| --- | --- |
+| Request body | 1 MiB, refused with 413. |
+| One turn's message | 256 KiB, refused with 400. |
+| Turns per session | 1 in flight. A second is refused with 409. |
+| Turns across the server | 4 in flight. A fifth is refused with 503. No request queues. |
+| One turn's wall clock | 300 seconds unless `BLKCHAIN_TIMEOUT_SECONDS` sets it. On the JSON route a turn with no answer at that point returns 504, and the stream ends on `run.failed`. |
+| One stream | 32 MiB on the wire, framing included. At the limit the stream ends on `run.failed`. |
+| Request rate | 240 per minute with a burst of 32, shared by all callers of the server and refused with 429. |
+| Request head | 10 seconds to arrive. An idle kept-alive connection closes after 2 minutes. |
+
 ## Architecture
 
 | Component | Responsibility |
 | --- | --- |
-| `cli/` | Go retrieval, answers, terminal interfaces, engagement orchestration, policy enforcement, web analysis, storage, reports, and MCP. |
+| `cli/` | Go retrieval, answers, terminal interfaces, engagement orchestration, policy enforcement, web analysis, storage, reports, MCP, and the HTTP API. |
 | `blkchain/` | Python MLX embedding/reranking service, offline ingestion/indexing, and evaluation harnesses. |
 | Qdrant | Persistent dense and sparse index. |
 | OpenAI-compatible LLM endpoint | Separately managed native answer and engagement inference. |
 | Hermes | Separately configured legacy backend for explicit one-shot turns. |
 
-Go owns query-time retrieval, answering, engagement execution, and MCP. Python serves the MLX models
+Go owns query-time retrieval, answering, engagement execution, MCP, and the HTTP API. Python serves the MLX models
 and builds the index offline. Models and corpus content are supplied by the operator.
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) documents what a change has to hold to: the language

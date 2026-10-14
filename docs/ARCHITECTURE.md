@@ -14,17 +14,17 @@ sealed RoE and separate operator approvals.
 Interactive web-first search uses the current question only. Detected target details and
 target-specific advisor turns stay local.
 
-Native chat is the default for `blk ask`, REPL, TUI, and the `chat` tool of `blk mcp`. They are thin
-adapters over one turn function, `runNativeTurn` in `cli/nativeturn.go`. It resolves the session,
-loads its history, assembles the answer options once, calls the router, records tool actions, and
-persists the turn, so routing, tools, and persistence are the same on every surface. It uses one
-tool registry across those interfaces. The user-named target in the current
+Native chat is the default for `blk ask`, REPL, TUI, the `chat` tool of `blk mcp`, and the turn
+endpoints of `blk serve`. They are thin adapters over one turn function, `runNativeTurn` in
+`cli/nativeturn.go`. It resolves the session, loads its history, assembles the answer options once,
+calls the router, records tool actions, and persists the turn, so routing, tools, and persistence
+are the same on every surface. It uses one tool registry across those interfaces. The user-named target in the current
 conversation supplies a temporary scope for isolated commands and web actions. This path has no
 RoE file. `blk engage` keeps its sealed RoE gate, task state, and operator approvals.
 
 ```mermaid
 flowchart TB
-  Entry["blk CLI / REPL / TUI / MCP"]
+  Entry["blk CLI / REPL / TUI / MCP / HTTP"]
 
   subgraph Research["Research and answers"]
     Index["Python offline ingestion"]
@@ -90,9 +90,9 @@ provide the TCP stream used by the internal web broker.
 
 ## The language boundary
 
-Go is the single implementation for search, ask, health, and MCP. The `blk` binary owns retrieval
-orchestration (Qdrant over gRPC plus the embedding server) and the bounded answer loop in
-`cli/rag.go`.
+Go is the single implementation for search, ask, health, MCP, and the HTTP API. The `blk` binary
+owns retrieval orchestration (Qdrant over gRPC plus the embedding server) and the bounded answer
+loop in `cli/rag.go`.
 
 Python serves the MLX models (`blkchain/embed_server.py`) and builds the index offline
 (`ingest.py`, `index.py`, `add.py`, reached through `blk add`). Python has no query-time code: there
@@ -102,7 +102,7 @@ is no Python search, answer, HTTP API, or MCP server. Do not add one.
 
 | Path | Contents |
 | --- | --- |
-| `cli/` | The `blk` terminal client: retrieval, the answer loop, the engagement harness, policy enforcement, web analysis, storage, reports, and the MCP server. |
+| `cli/` | The `blk` terminal client: retrieval, the answer loop, the engagement harness, policy enforcement, web analysis, storage, reports, the MCP server, and the HTTP API (`blk serve`). |
 | `cli/internal/` | Packages the binary shares: `secgate` (the command gate), `engagement` (the store), `histstore` (conversation memory and the session listing), `ragconfig` (the parameter contract), `retrieval` (the Qdrant and embedding clients), and the web analysis packages. |
 | `cli/runner/` | The isolated runner image: `Dockerfile`, the `execute.py` launcher, and the package locks. |
 | `blkchain/` | The MLX embedding and reranking service, offline indexing, and the evaluation harness. |
@@ -369,6 +369,30 @@ the other's reachability from its own response.
   model. Exposing it is a security decision to raise, not to implement quietly.
 - Secrets come from the environment only. Never hardcode or log a token. The local `.env` is
   untracked.
+- `blk serve` (`cli/serve.go`, `cli/servesessions.go`, `cli/serveturns.go`) binds `127.0.0.1:8787`
+  unless `--bind` says otherwise. A bind that is not loopback needs `--allow-remote` and a token
+  from `BLKCHAIN_SERVE_TOKEN`, which is compared in constant time and never logged. A token that is
+  set is required on loopback too; with none set, any local process can call the API. Every route
+  runs behind one guard chain (`serveServer.guard`) whose order is load-bearing: the body bound
+  and three browser controls, then the rate bound, then the token. The controls are a JSON content
+  type on any body (a cross-site form or no-cors request cannot send one, and a JSON request needs
+  a preflight this server refuses), a `Host` the bind serves (DNS rebinding), and a refusal of any
+  `Origin`. The `Host` rule follows the bind, not the flag: loopback names for a loopback bind,
+  the bind's own host for a bind on one other host, and none for a wildcard bind, where a client's `Host`
+  cannot be predicted. All three are header checks and a request without `Origin` passes the third,
+  so none authenticates a local process; only the token does.
+- `tool_host: local` and `browser_cdp` over `blk serve` are granted only when the bind is loopback
+  and the peer address is loopback (`serveServer.callerVantage`). On any other bind they are
+  refused to every caller, because behind a tunnel, a published container port, or a local proxy
+  the peer address does not identify the originator. The grant is honest on loopback only because
+  the guard chain ran first; a change that lets a handler run ahead of it breaks that. Without a
+  token, any local process on a loopback bind still qualifies.
+- `blk serve` runs a turn only on a session id in its own `chatSessionOwner`, the type `chat`
+  over MCP uses: the 128 most recently used ids it created, held in memory. Any session on disk is
+  readable. Bounds, all in code: a 1 MiB request body, a 256 KiB message, one turn in flight per
+  session, four across the server with no queue, the request timeout per turn (300 seconds by
+  default), 32 MiB per stream, and 240 requests per minute with a burst of 32 for the whole
+  process rather than per peer.
 - A dispatched `vuln-analysis` task with a recognized HTTP or HTTPS manifest URL fetches through
   the RoE command gate before model execution. The fixed `curl` request has a 10-second and 16 MiB
   transfer bound, does not follow redirects, and stages material only on HTTP 200. URL credentials,
