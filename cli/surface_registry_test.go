@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -58,10 +59,6 @@ type paritySurface struct {
 	name string
 	run  func(t *testing.T, c parityCase) error
 }
-
-// pendingParitySurfaces are surfaces specified but not yet built. Each is
-// reported as skipped so it is extended into paritySurfaces when it lands.
-var pendingParitySurfaces = []string{"blk serve"}
 
 // parityModel is the fake model server. It answers a request without tools with
 // the classification word for the question, and records the tool names of every
@@ -225,7 +222,53 @@ func paritySurfaces(t *testing.T) []paritySurface {
 				mcpChatIn{Message: c.question, ToolHost: c.host, BrowserCDP: c.cdp}, vantageLocal)
 			return err
 		}},
+		{name: "blk serve", run: func(t *testing.T, c parityCase) error {
+			// The bind is the default and the request's peer is a loopback
+			// address, so a case asking for the operator's reach is granted it
+			// here as on the three local surfaces. The gate and the turn runner
+			// are the two handleTurn calls, and a refusal the gate makes is
+			// returned as the surface's error rather than hidden.
+			s, err := newServeServer(nil, loadConfig(), serveOpts{bind: serveDefaultBind}, "")
+			if err != nil {
+				t.Fatalf("newServeServer: %v", err)
+			}
+			body, err := json.Marshal(serveTurnIn{Message: c.question, ToolHost: c.host, BrowserCDP: c.cdp})
+			if err != nil {
+				t.Fatalf("marshal the turn: %v", err)
+			}
+			id := parityServeSession(t, s)
+			req := httptest.NewRequest(http.MethodPost, serveSessionsPath+"/"+id+serveTurnsSuffix, bytes.NewReader(body))
+			req.Host = serveTurnTestHost
+			req.Header.Set("Content-Type", "application/json")
+			req.RemoteAddr = "127.0.0.1:54321"
+			gated, in, release, err := s.serveTurnGate(req, serveTurnsSuffix)
+			if err != nil {
+				return err
+			}
+			defer release()
+			_, err = s.serveRunTurn(context.Background(), gated, in, nil, nil)
+			return err
+		}},
 	}
+}
+
+// parityServeSession opens a session through blk serve's own collection route,
+// which is how a client of that surface gets an id it may run a turn on.
+func parityServeSession(t *testing.T, s *serveServer) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, serveSessionsPath, nil)
+	req.Host = serveTurnTestHost
+	req.RemoteAddr = "127.0.0.1:54321"
+	rec := httptest.NewRecorder()
+	s.handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create a session: status = %d, body %q", rec.Code, rec.Body.String())
+	}
+	var meta sessionMeta
+	if err := json.Unmarshal(rec.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("create a session: decode %q: %v", rec.Body.String(), err)
+	}
+	return meta.ID
 }
 
 func TestEverySurfaceOffersTheToolsOfTheClassifiedAction(t *testing.T) {
@@ -233,12 +276,6 @@ func TestEverySurfaceOffersTheToolsOfTheClassifiedAction(t *testing.T) {
 	isolateUserDirs(t)
 	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", t.TempDir()+"/absent.json")
 	pm := newParityModel(t)
-
-	for _, name := range pendingParitySurfaces {
-		t.Run(name, func(t *testing.T) {
-			t.Skipf("%s does not exist yet; add its adapter to paritySurfaces when it lands", name)
-		})
-	}
 
 	want := map[string][]string{}
 	for _, c := range parityCases {

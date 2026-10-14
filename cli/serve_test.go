@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"go/ast"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"blkchain/cli/internal/ragconfig"
 )
@@ -41,14 +43,14 @@ func (h *serveStub) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`{"admitted":true}`))
 }
 
-// newServeTestServer builds a server value without a retrieval client or a
-// catalog, neither of which the guard chain touches.
+// newServeTestServer builds a server value without a retrieval client, which
+// the guard chain does not touch.
 func newServeTestServer(t *testing.T, o serveOpts, tok string) *serveServer {
 	t.Helper()
 	if o.bind == "" {
 		o.bind = serveDefaultBind
 	}
-	s, err := newServeServer(nil, ragconfig.Config{}, nil, o, tok)
+	s, err := newServeServer(nil, ragconfig.Config{}, o, tok)
 	if err != nil {
 		t.Fatalf("newServeServer(%+v): %v", o, err)
 	}
@@ -614,5 +616,62 @@ func TestServeRejectsAnOversizeBody(t *testing.T) {
 	}
 	if stub.ran.Load() {
 		t.Error("an oversize body reached the handler")
+	}
+}
+
+// The Host rule is decided from the bind's text, and a name resolves only when
+// the listener opens, so the address actually served can be wider than the text
+// reads: a localhost mapped to a routable address would be served under the
+// loopback rule, with no token required and the operator's reach granted to any
+// peer that reaches it. run re-derives the rule from the listener and refuses a
+// disagreement.
+func TestServeRefusesAListenerTheBindDoesNotName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		bind string
+		addr string
+		ok   bool
+	}{
+		{"a loopback name on a loopback address", "localhost:8787", "127.0.0.1:8787", true},
+		{"a loopback name on an IPv6 loopback address", "localhost:8787", "[::1]:8787", true},
+		{"a loopback name on a routable address", "localhost:8787", "192.0.2.10:8787", false},
+		{"a subdomain of localhost on a routable address", "api.localhost:8787", "192.0.2.10:8787", false},
+		{"a wildcard bind on the wildcard address", "0.0.0.0:8787", "0.0.0.0:8787", true},
+		{"a wildcard bind on a concrete address", "0.0.0.0:8787", "192.0.2.10:8787", false},
+		{"a concrete bind on its own address", "192.0.2.10:8787", "192.0.2.10:8787", true},
+		{"a concrete bind on a loopback address", "192.0.2.10:8787", "127.0.0.1:8787", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := serveCheckListenerMode(tc.bind, serveHostModeFor(tc.bind), tc.addr)
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("err = %v, want the bind served", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("a listener the bind does not name was served")
+			}
+			if !strings.Contains(err.Error(), tc.addr) {
+				t.Errorf("err = %v, want the address actually opened named in it", err)
+			}
+		})
+	}
+
+	// run applies the check: a loopback name whose resolved address agrees with
+	// it opens, serves, and shuts down on its context, so the check above is
+	// wired into the serving path and not merely present.
+	s := newServeTestServer(t, serveOpts{bind: "localhost:0"}, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.run(ctx) }()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run on a loopback name = %v, want it served and shut down cleanly", err)
+		}
+	case <-time.After(serveShutdownTimeout + 10*time.Second):
+		t.Fatal("run did not return after its context was cancelled")
 	}
 }

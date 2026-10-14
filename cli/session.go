@@ -95,7 +95,7 @@ type sessionMeta struct {
 	MsgCount  int    `json:"msg_count"`
 	UpdatedAt int64  `json:"updated_at"`
 	Model     string `json:"model"`
-	Mode      string `json:"mode"`
+	Mode      string `json:"mode,omitempty"`
 }
 
 // session is a live handle to one transcript. The file and its index entry are

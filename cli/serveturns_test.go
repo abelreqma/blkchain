@@ -252,6 +252,59 @@ func TestServeTurnReturnsTheSameShapeAsAskJSON(t *testing.T) {
 	}
 }
 
+// The documented flow: a client creates a session through the collection route
+// and runs a turn on the id it got back. handleCreateSession writes a listing
+// row and no transcript, so the turn resolves through that row, which is a
+// different path from the turn tests that seed a transcript on disk.
+func TestServeRunsATurnOnASessionItJustCreated(t *testing.T) {
+	isolateUserDirs(t)
+	useDeadServices(t)
+	s := newServeTestServer(t, serveOpts{}, "")
+	installServeTurnRouter(t, serveTurnRouter{answer: "an answer", deltas: []string{"an answer"}, tokens: 9})
+
+	create := httptest.NewRequest(http.MethodPost, serveSessionsPath, nil)
+	create.Host = serveTurnTestHost
+	create.RemoteAddr = "127.0.0.1:54321"
+	rec := serveTurnDo(s, create)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d; body %q", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var meta sessionMeta
+	if err := json.Unmarshal(rec.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("create body is not a sessionMeta: %v: %q", err, rec.Body.String())
+	}
+	// The control: no transcript exists yet, so the turn below resolves the id
+	// through the listing row and not through a file another write left.
+	if sessionExists(meta.ID) {
+		t.Fatalf("the created session %q already has a transcript", meta.ID)
+	}
+	// mode is retired from the model, so a created session reports no mode
+	// rather than an empty one.
+	if strings.Contains(rec.Body.String(), `"mode"`) {
+		t.Errorf("the create body carries a mode: %q", rec.Body.String())
+	}
+
+	rec = serveTurnDo(s, serveTurnPost(t, serveSessionsPath+"/"+meta.ID+serveTurnsSuffix, "127.0.0.1:54321", `{"message":"q"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("turn status = %d, want %d; body %q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got turnResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode the turn %q: %v", rec.Body.String(), err)
+	}
+	if got.SessionID != meta.ID {
+		t.Errorf("the turn ran on session %q, want the created %q", got.SessionID, meta.ID)
+	}
+	if got.Answer != "an answer" {
+		t.Errorf("answer = %q, want %q", got.Answer, "an answer")
+	}
+	// And the turn was recorded, so the created session carries the exchange a
+	// later turn continues.
+	if !sessionExists(meta.ID) {
+		t.Errorf("the turn wrote no transcript for %q", meta.ID)
+	}
+}
+
 func TestServeTurnRefusesASessionItDidNotCreate(t *testing.T) {
 	s, _ := serveTurnServer(t, serveOpts{}, "")
 	calls := installServeTurnRouter(t, serveTurnRouter{answer: "an answer"})
@@ -278,10 +331,14 @@ func TestServeTurnRefusesASessionItDidNotCreate(t *testing.T) {
 		t.Errorf("a foreign session ran %d turns", calls.ran.Load())
 	}
 
-	// A malformed id is its own refusal, so the two are not one branch.
-	bad := serveTurnDo(s, serveTurnPost(t, serveSessionsPath+"/../etc/passwd"+serveTurnsSuffix, "127.0.0.1:54321", `{"message":"q"}`))
-	if bad.Code == http.StatusForbidden {
-		t.Errorf("a malformed id answered like a foreign session: %d %q", bad.Code, bad.Body.String())
+	// A malformed id is its own refusal, so the two are not one branch. The id
+	// is percent-encoded, so the route table neither cleans the path nor reads
+	// the escape as a separator: the id reaches the validation and is refused
+	// there, which is what makes the status below that refusal and not a route
+	// that matched nothing.
+	bad := serveTurnDo(s, serveTurnPost(t, serveSessionsPath+"/..%2F..%2Fetc%2Fpasswd"+serveTurnsSuffix, "127.0.0.1:54321", `{"message":"q"}`))
+	if bad.Code != http.StatusBadRequest || !strings.Contains(bad.Body.String(), "invalid session id") {
+		t.Errorf("a malformed id answered %d %q, want 400 and the id refusal", bad.Code, bad.Body.String())
 	}
 }
 
@@ -519,8 +576,8 @@ func TestServeTurnAnswers413ForAnOversizeChunkedBody(t *testing.T) {
 }
 
 func TestServeStreamEmitsTheEventNamesBlkParses(t *testing.T) {
-	// These names and payload keys are what blk's own gateway client parsed, so
-	// a client written against that gateway reads this server unchanged.
+	// These names and payload keys are the ones blk's own gateway client
+	// dispatched on, and a subset of what that client parsed.
 	s, id := serveTurnServer(t, serveOpts{}, "")
 	installServeTurnRouter(t, serveTurnRouter{
 		answer:  "hello",

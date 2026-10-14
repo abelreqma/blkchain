@@ -182,7 +182,7 @@ func TestServeBoundsATurnByTheRequestTimeout(t *testing.T) {
 	if cfg.RequestTimeout() != time.Second {
 		t.Fatalf("the configured timeout is %s, want 1s", cfg.RequestTimeout())
 	}
-	s, err := newServeServer(nil, cfg, nil, serveOpts{bind: serveDefaultBind}, "")
+	s, err := newServeServer(nil, cfg, serveOpts{bind: serveDefaultBind}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

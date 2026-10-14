@@ -379,8 +379,11 @@ the other's reachability from its own response.
   a preflight this server refuses), a `Host` the bind serves (DNS rebinding), and a refusal of any
   `Origin`. The `Host` rule follows the bind, not the flag: loopback names for a loopback bind,
   the bind's own host for a bind on one other host, and none for a wildcard bind, where a client's `Host`
-  cannot be predicted. All three are header checks and a request without `Origin` passes the third,
-  so none authenticates a local process; only the token does.
+  cannot be predicted. The rule is derived from the bind's text, which a name resolves only at listen
+  time, so it is re-derived from the opened listener's own address and a disagreement refuses to serve:
+  a `localhost` that resolves off this machine cannot be served under the loopback rule. All three are
+  header checks and a request without `Origin` passes the third, so none authenticates a local process;
+  only the token does.
 - `tool_host: local` and `browser_cdp` over `blk serve` are granted only when the bind is loopback
   and the peer address is loopback (`serveServer.callerVantage`). On any other bind they are
   refused to every caller, because behind a tunnel, a published container port, or a local proxy
