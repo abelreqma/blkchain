@@ -1,12 +1,122 @@
-# Architecture
+# blkChain Architecture
 
-This document is for people changing blkChain. For installing and running it, see the README.
-For a per-surface reference, covering what each engagement surface does and how footholds,
-carriers, and vantage changes connect them, see [the assessment surfaces](surfaces/README.md).
+This document describes how blkChain is built and the contracts a change must preserve. It is
+written for contributors. Installation and operation are covered in the [README](../README.md).
+Each engagement surface, including footholds, carriers, and vantage changes, is described in the
+[assessment surfaces reference](surfaces/README.md).
 
-## System Map
+## Contents
+
+- [System overview](#system-overview)
+- [The native turn](#the-native-turn)
+- [The language boundary](#the-language-boundary)
+- [Repository layout](#repository-layout)
+- [Cross-language contracts](#cross-language-contracts)
+- [Security invariants](#security-invariants)
+- [Runtime behavior](#runtime-behavior)
+- [Indexing behavior](#indexing-behavior)
+- [Testing](#testing)
+- [Evaluation](#evaluation)
+- [Contributing](#contributing)
+- [Known pitfalls](#known-pitfalls)
+
+## System overview
+
+blkChain separates the components that propose work from the components that authorize it.
+Models, retrieved text, and target responses supply advice and data. Go code owns scope, action
+authorization, task identity, resource limits, and execution, and nothing a model or a target
+produces can change those decisions.
 
 ![blkChain System Map showing hybrid retrieval and live web searches by default in interactive mode, Go control, authorized execution, assessment surfaces, and evidence](blkchain-system-map.svg)
+
+### Component diagram
+
+```mermaid
+flowchart TB
+  subgraph Interfaces["Interfaces"]
+    Terminal["blk ask, REPL, TUI"]
+    MCPServer["blk mcp<br/>stdio"]
+    HTTPAPI["blk serve<br/>loopback HTTP API"]
+  end
+
+  subgraph Chat["Native turn"]
+    Turn["runNativeTurn<br/>session, history, routing, persistence"]
+    Vantage["Caller vantage<br/>decides host-reaching tools"]
+    Roles["Router and assessment models<br/>ordered failover chains"]
+    ChatTools["Chat tool registry<br/>KB, files, terminal, browser, MCP clients"]
+  end
+
+  subgraph Research["Research"]
+    Index["Python offline ingestion"]
+    MLX["MLX embedding and reranking"]
+    Qdrant["Qdrant dense + sparse index"]
+    Retrieval["Go retrieval + RRF"]
+    Web["Live web search"]
+  end
+
+  Hermes["Hermes one-shot<br/>legacy, separate permissions"]
+
+  subgraph Assessment["Authorized assessment: blk engage"]
+    Roe["Sealed RoE"]
+    Approval["Operator approvals<br/>private CIDR, carrier, cloud identity"]
+    Plan["Task graph<br/>cited techniques are advisory"]
+    Gate["Go gate<br/>scope, action, command, service evidence, limits"]
+    Worker["Isolated worker<br/>network, AD, local, containers/K8s, AI<br/>offline OSV + Grype"]
+    Broker["Scoped web/API broker<br/>per-hop resolve, check, pin"]
+    Proxy["Loopback intercepting proxy<br/>direct web surface only"]
+    Instruments["Burp MCP and interactsh<br/>classified and gated"]
+    Pivot["Foothold command carriers"]
+    Cloud["AWS/GCP CLI on foothold"]
+    Store["Engagement store<br/>SQLite, actions, artifacts"]
+    Review["Findings, coverage, KG, reports"]
+  end
+
+  Terminal --> Turn
+  MCPServer --> Turn
+  HTTPAPI --> Turn
+  Terminal --> Hermes
+  Terminal --> Plan
+  MCPServer --> Plan
+  Turn --> Vantage
+  Turn --> Roles
+  Vantage --> ChatTools
+  Roles --> ChatTools
+  Turn --> Retrieval
+  Turn --> Web
+  Index --> MLX
+  Index --> Qdrant
+  Retrieval --> MLX
+  Retrieval --> Qdrant
+  Roe --> Gate
+  Approval --> Gate
+  Plan --> Gate
+  Gate --> Worker
+  Gate --> Broker
+  Gate --> Instruments
+  Gate --> Pivot
+  Broker --> Proxy
+  Pivot --> Cloud
+  Worker --> Store
+  Broker --> Store
+  Pivot --> Store
+  Cloud --> Store
+  Store --> Review
+
+  style Interfaces fill:#f8fafc,stroke:#475569,stroke-width:1px
+  style Chat fill:#f7fffd,stroke:#0f766e,stroke-width:1px
+  style Research fill:#f7fffd,stroke:#0f766e,stroke-width:1px
+  style Assessment fill:#f7fdf9,stroke:#15803d,stroke-width:1px
+  classDef entry fill:#f1f5f9,stroke:#475569,color:#0f172a,font-size:16px
+  classDef research fill:#e6fffb,stroke:#0f766e,color:#123434,font-size:16px
+  classDef control fill:#ecfdf5,stroke:#15803d,color:#12301e,font-size:16px
+  classDef execution fill:#eff6ff,stroke:#2563eb,color:#102a43,font-size:16px
+  classDef evidence fill:#f5f3ff,stroke:#7c3aed,color:#2e1065,font-size:16px
+  class Terminal,MCPServer,HTTPAPI entry
+  class Turn,Roles,ChatTools,Index,MLX,Qdrant,Retrieval,Web,Hermes research
+  class Vantage,Roe,Approval,Plan,Gate control
+  class Worker,Broker,Proxy,Instruments,Pivot,Cloud execution
+  class Store,Review evidence
+```
 
 ### Runtime flow
 
@@ -16,79 +126,90 @@ sealed RoE and separate operator approvals.
 Interactive web-first search uses the current question only. Detected target details and
 target-specific advisor turns stay local.
 
-Native chat is the default for `blk ask`, REPL, TUI, the `chat` tool of `blk mcp`, and the turn
-endpoints of `blk serve`. They are thin adapters over one turn function, `runNativeTurn` in
-`cli/nativeturn.go`. It resolves the session, loads its history, assembles the answer options once,
-calls the router, records tool actions, and persists the turn, so routing, tools, and persistence
-are the same on every surface. It uses one tool registry across those interfaces. The user-named target in the current
-conversation supplies a temporary scope for isolated commands and web actions. This path has no
-RoE file. `blk engage` keeps its sealed RoE gate, task state, and operator approvals.
-
-```mermaid
-flowchart TB
-  Entry["blk CLI / REPL / TUI / MCP / HTTP"]
-
-  subgraph Research["Research and answers"]
-    Index["Python offline ingestion"]
-    MLX["MLX embedding and reranking"]
-    Qdrant["Qdrant dense + sparse index"]
-    Native["Native cited answers"]
-    ChatTools["Native chat tools<br/>KB, files, named-target actions"]
-    Web["Live web search, interactive default"]
-    Retrieval["Go retrieval + RRF"]
-    Hermes["Hermes one-shot<br/>legacy, separate permissions"]
-  end
-
-  subgraph Assessment["Authorized assessment"]
-    Roe["Sealed RoE"]
-    Approval["Operator approvals<br/>private CIDR, carrier, cloud identity"]
-    Plan["Task graph<br/>cited techniques are advisory"]
-    Gate["Go gate<br/>scope/IP, action, command, limits"]
-    Worker["Isolated worker<br/>network, AD, local, containers/K8s, AI<br/>offline OSV + Grype"]
-    Broker["Scoped web/API broker<br/>browser traffic + surface checks"]
-    Pivot["Approved foothold command carriers"]
-    Cloud["AWS/GCP CLI on foothold"]
-    Store["Engagement store<br/>SQLite, actions, artifacts"]
-    Review["Findings, coverage, KG, reports"]
-  end
-
-  Entry --> Native
-  Entry --> Hermes
-  Entry --> Plan
-  Index --> MLX
-  Index --> Qdrant
-  Native --> Retrieval
-  Native --> ChatTools
-  Native --> Web
-  Retrieval --> MLX
-  Retrieval --> Qdrant
-  Roe --> Gate
-  Approval --> Gate
-  Plan --> Gate
-  Gate --> Worker
-  Gate --> Broker
-  Gate --> Pivot
-  Pivot --> Cloud
-  Worker --> Store
-  Broker --> Store
-  Pivot --> Store
-  Cloud --> Store
-  Store --> Review
-
-  style Research fill:#f7fffd,stroke:#0f766e,stroke-width:1px
-  style Assessment fill:#f7fdf9,stroke:#15803d,stroke-width:1px
-  classDef research fill:#e6fffb,stroke:#0f766e,color:#123434,font-size:16px
-  classDef control fill:#ecfdf5,stroke:#15803d,color:#12301e,font-size:16px
-  classDef execution fill:#eff6ff,stroke:#2563eb,color:#102a43,font-size:16px
-  classDef evidence fill:#f5f3ff,stroke:#7c3aed,color:#2e1065,font-size:16px
-  class Index,MLX,Qdrant,Native,ChatTools,Web,Retrieval,Hermes research
-  class Roe,Approval,Plan,Gate control
-  class Worker,Broker,Pivot,Cloud execution
-  class Store,Review evidence
-```
+Native chat is the default for `blk ask`, the plain REPL, the TUI, the `chat` tool of `blk mcp`,
+and the turn endpoints of `blk serve`. Each is a thin adapter over one turn function, described in
+[The native turn](#the-native-turn). A target named in the current conversation supplies a temporary
+scope for isolated commands and web actions; this path reads no RoE file. `blk engage` keeps its
+sealed RoE gate, task state, and operator approvals.
 
 Dynamically attached footholds require recorded access evidence. Only SSH and command carriers
 provide the TCP stream used by the internal web broker.
+
+## The native turn
+
+### Entry points and persistence
+
+`runNativeTurn` in `cli/nativeturn.go` is the single conversational entry. It resolves the session,
+loads its history, assembles the answer options once, calls the router, records tool actions, and
+persists the turn, so routing, tools, and persistence are the same on every surface. One tool
+registry serves all of them.
+
+A session is one append-only JSONL transcript under the blk data directory. The listing the resume
+and history pickers read is a row per session in the history database, so a picker does not open
+every transcript.
+
+The sessions directory is shared by every blk process, so these writes are cross-process. A turn
+appends its transcript lines and then commits the memory rows together with the transcript length
+they account for, in one transaction. That transaction is the turn's only commit point: bytes past
+the committed watermark belong to a turn that never committed, and the reader reconciles them away
+when the session is next opened. A listing row with no watermark recorded means the length is
+unknown, and then the whole transcript counts as committed and is never truncated.
+
+A turn that fails is neither persisted nor remembered. Its partial answer reaches the operator's
+screen, but no transcript line, memory row, or in-process conversation history records it, because
+each of those is read back by a later turn.
+
+### Caller vantage
+
+Every turn carries the vantage of its caller (`clientVantage` in `cli/chatvantage.go`). The zero
+value is remote, so a surface that does not establish its caller is treated as remote. The terminal
+surfaces and the stdio MCP server are local. A `blk serve` caller is local only when the bind is
+loopback, `BLKCHAIN_SERVE_TOKEN` is set, and the peer address is loopback.
+
+Vantage decides which tools may reach this host:
+
+- `tool_host: local` and `browser_cdp` grant the operator's own reach, the host's terminal and files
+  outside the sandbox and the signed-in browser, and are refused to a remote caller.
+- `file_import` and `file_export` read and write this host's working directory and are not offered
+  to a remote caller.
+- A remote caller is offered only the MCP servers that run in the sandbox container. A host-local
+  stdio server runs with this host's network, and an HTTP server is dialed from this host with the
+  operator's bearer token.
+
+`turnRequest.Vantage` carries the decision into the tool registry.
+
+### Model roles and failover
+
+A turn makes two kinds of model call. `router_model` answers action classification, routing, the
+corpus check, context grading and conversation compression. `assessment_model` answers the direct
+answer, the tool loop and grounded synthesis. `BLKCHAIN_ROUTER_MODEL` and
+`BLKCHAIN_ASSESSMENT_MODEL` override the file. An empty value uses the model the turn would otherwise
+resolve: `OMLX_MODEL`, else the first model the server lists, else `default_model`. An install that
+sets neither therefore runs as one model. When no model resolves, each role uses the other role's
+configured model.
+
+A role's chain is its configured model, then the resolved model. A call advances the chain on a
+transport failure, a timeout, an HTTP 5xx or a context-window rejection, and on nothing else: a
+cancellation and any other HTTP status return as they are, and no further model is tried once the
+turn's context has ended. A streamed answer does not advance once a byte has reached the reader, so a
+partial answer is never followed by a second one. A model named with `/model` in the TUI is the whole
+chain for both roles, because a turn reports the model that answered it.
+
+### Tool-call replay
+
+A tool loop that fails over restarts from its first message. A call with the same tool and arguments
+as one that already ran without error is answered from the turn's record instead of running again, so
+an identical call with a side effect runs once for the turn, while a call the next model reformulates
+runs. The record also carries the turn's tool-call count, so the call cap bounds every attempt
+together rather than each attempt. The record holds at most 64 calls and 4 MiB of results,
+so a call past either bound runs again on a restart. A call that returned an error is not recorded,
+and two identical calls within one attempt both run. The record lives for one turn in one process and
+is never consulted on a later turn. Only the native chat tool loop keeps it.
+
+A call whose result is a reading of changing state is never replayed. `oob_interactions` and the
+`list`, `poll`, `log`, and `wait` actions of `process_manage` run again on a later attempt, because a
+replay would present an earlier reading as current. They change nothing, so running them again is
+safe. The `write` and `kill` actions of `process_manage` are replayed like any other completed call.
 
 ## The language boundary
 
@@ -114,9 +235,10 @@ is no Python search, answer, HTTP API, or MCP server. Do not add one.
 Models and corpus live outside the repository and are ignored by git. Nothing here bundles model
 weights or corpus data.
 
-## The cross-language contracts
+## Cross-language contracts
 
-Two contracts are load-bearing. Both must stay stable and in lockstep across Go and Python.
+Two contracts are load-bearing. Both must stay stable and in lockstep across Go and Python. The
+command output shapes are a third contract, between the binary and the evaluation harness.
 
 ### The embedding server wire contract
 
@@ -152,37 +274,15 @@ server URL, and the reputable-domain and proof-of-concept domain lists.
 The Go client loads it through `cli/internal/ragconfig` with precedence environment, then
 `rag.json`, then a compiled-in fallback. The fallback must match `rag.json` byte for byte;
 `TestBuiltinDefaultsMatchContractFile` enforces that, so a standalone `blk` binary behaves the same
-as one run from the repository. When you change a value in `rag.json`, update `builtinDefaults()` in
-the same commit or that test fails.
+as one run from the repository. A change to a value in `rag.json` must update `builtinDefaults()`
+in the same commit, or that test fails.
 
 Python does not read `rag.json`. It keeps its own copies of the few shared values it still needs for
 indexing: `SPARSE_MODEL`, the dense and sparse vector names, and the embedding server URL, all in
 `config.py`. No test checks that they agree with `rag.json`, so change the matching Python constant
 in the same commit.
 
-A turn makes two kinds of model call. `router_model` answers action classification, routing, the
-corpus check, context grading and conversation compression. `assessment_model` answers the direct
-answer, the tool loop and grounded synthesis. `BLKCHAIN_ROUTER_MODEL` and
-`BLKCHAIN_ASSESSMENT_MODEL` override the file. An empty value uses the model the turn would otherwise
-resolve: `OMLX_MODEL`, else the first model the server lists, else `default_model`. An install that
-sets neither therefore runs as one model. When no model resolves, each role uses the other role's
-configured model.
-
-A role's chain is its configured model, then the resolved model. A call advances the chain on a
-transport failure, a timeout, an HTTP 5xx or a context-window rejection, and on nothing else: a
-cancellation and any other HTTP status return as they are, and no further model is tried once the
-turn's context has ended. A streamed answer does not advance once a byte has reached the reader, so a
-partial answer is never followed by a second one. A model named with `/model` in the TUI is the whole
-chain for both roles, because a turn reports the model that answered it.
-
-A tool loop that fails over restarts from its first message. A call with the same tool and arguments
-as one that already ran without error is answered from the turn's record instead of running again, so
-an identical call with a side effect runs once for the turn, while a call the next model reformulates
-runs. The record also carries the turn's tool-call count, so the call cap bounds every attempt
-together rather than each attempt. The record holds at most 64 calls and 4 MiB of results,
-so a call past either bound runs again on a restart. A call that returned an error is not recorded,
-and two identical calls within one attempt both run. The record lives for one turn in one process and
-is never consulted on a later turn. Only the native chat tool loop keeps it.
+The model role keys are described in [Model roles and failover](#model-roles-and-failover).
 
 ### The command output contracts
 
@@ -206,9 +306,10 @@ Every payload carries `cwe_class`, as `""` when the indexed chunk has no concept
 
 ## Security invariants
 
-Do not weaken these.
+Do not weaken these. Each is a floor rather than a checklist: a change that keeps the wording of an
+invariant while defeating its purpose is a regression.
 
-### Authorization and operator safety
+### Authorization model
 
 `blk engage` is an autonomous assessment tool. The operator's authorization is the premise for
 target testing; the active engagement's rules of engagement define the allowed targets, actions,
@@ -217,28 +318,34 @@ perform it autonomously within those bounds. Per-action human confirmation is no
 security control. Require an operator decision when the policy does not authorize an action or when
 its bounds are ambiguous.
 
+### Native chat actions
+
 Normal native chat has a separate action path. It builds a bounded per-turn scope from IPs,
-hostnames, networks, and URLs named by the user, never from model output or retrieved material.
+hostnames, networks, and URLs named in the request, never from model output or retrieved material.
 Its command tool uses the audited binary list and the isolated executor; its web tools use the
 broker's destination and redirect checks. It reads no RoE policy. A missing target exposes no
 active tools, and the project's explicit binary denials still apply. This path does not alter
 `blk engage` authorization. Native chat classifies action intent without fixed request phrases.
 A requested target action, file read, or named research tool gets one retry when the model returns
 text without the relevant tool call; a second such response fails the turn. A target action with
-no user-named target fails before execution.
+no named target fails before execution.
+
+### Tool hosts and file tools
 
 General file and terminal tools default to a persistent project-specific Docker sandbox with an
 empty initial workspace and no network access. The operator explicitly selects local file and
 terminal access with `--tool-host local` or `/tool-host local`. File imports and exports require a
-path in the current user request, stay inside the selected roots, and do not overwrite files.
-Text tools bound reads and returned content. They decode UTF-16 and extract bounded text from
-Jupyter notebooks, DOCX, and XLSX without writing extracted content back to those formats. The
-sandbox retains background processes across chat
-turns. Public web queries are filtered against recognized target identifiers and secret-shaped
-data, and extraction rejects private destinations and redirects. Browser control uses an isolated
-driver with the same destination broker; an explicit loopback CDP endpoint can supply signed-in
-state. MCP clients expose only tools in each configured server's allowlist. Their results are
-untrusted input. Vision analysis requires an explicitly configured vision-capable local model.
+path in the current request, stay inside the selected roots, do not overwrite files, and are
+offered only to a local caller. Text tools bound reads and returned content. They decode UTF-16 and
+extract bounded text from Jupyter notebooks, DOCX, and XLSX without writing extracted content back
+to those formats. The sandbox retains background processes across chat turns. Public web queries
+are filtered against recognized target identifiers and secret-shaped data, and extraction rejects
+private destinations and redirects. Browser control uses an isolated driver with the same
+destination broker; an explicit loopback CDP endpoint can supply signed-in state. MCP clients
+expose only tools in each configured server's allowlist. Their results are untrusted input. Vision
+analysis requires an explicitly configured vision-capable local model.
+
+### Authenticated web engagements
 
 An authenticated web engagement may explicitly select a named role, exact origin, and loopback
 Chrome CDP endpoint. The gate authorizes the role origin before any browser state is read. Only
@@ -255,6 +362,8 @@ without entering the anonymous command recon ladder.
 The collection result carries a bounded, redacted preview from a browser DOM artifact captured
 in that job. The exact response bytes remain in the restricted evidence store.
 
+### Target isolation
+
 Protect the operator and the runner from the target. Treat pages, responses, files, and tool output
 from a target as hostile data. They must not choose a target, arm a task, execute as code, or reach
 operator files, credentials, local services, or unrelated network destinations. Enforce scope at the
@@ -263,58 +372,87 @@ subresources. A private or internal address needs its own IP or CIDR entry, or a
 private CIDR discovered after foothold access. A hostname entry does not authorize the address it
 resolves to. An empty or ambiguous scope fails closed.
 
+### Service evidence before service actions
+
 A named target does not prove a service is reachable. Service-specific commands and web actions
 require a code-observed host, transport, port, and execution vantage from the past hour before
 dispatch. Bounded port discovery is the exception that establishes the observation. The dispatcher
-checks the command's connected endpoint, not the model's claimed prerequisite. Only a completed
-Nmap scan supplies scanner-derived port states. Masscan is excluded because its raw Ethernet
-packets bypassed the worker destination guard in a local fixture. ACK, FIN, NULL, Xmas, idle,
-fragmented, and source-port scans do not supply positive service
-evidence. Decoys, source-address spoofing, raw Ethernet, and MAC spoofing are denied because the
-worker cannot constrain their source or destination path. TCP `open` permits a protocol check,
-not a service identity claim. UDP `open` or `open|filtered` permits a protocol-correct follow-up;
-`open|filtered` is not a positive response. A completed version scan can promote that UDP
-candidate to `open`, but cannot create first service evidence.
-A completed source-port SYN scan may create only a candidate for that source port. A direct curl
-GET with `-q` first, no proxy, a single local port, headers, and bounded timeouts can validate the
-candidate. Only a complete final HTTP response promotes that exact source-port route to `open`;
-the ordinary route stays separate. Nping UDP payloads require prior UDP port evidence and never
-promote a service state by packet count alone.
-A later closed result removes the permission. A command that cannot expose its connection route
-fails closed. `curl --http3-only` needs UDP evidence and `--http3` needs TCP and UDP evidence.
-The source-built runner curl supports HTTP/3; a completed HTTP/3 response with included headers
-promotes only that UDP route. A bounded `ike-scan --ikev2` handshake or notify can promote the
-observed UDP/500 or NAT-T UDP/4500 candidate. Silence and packet counts cannot promote either.
-An explicit DNS server needs evidence for both UDP and its possible TCP retry unless `dig +ignore`
-keeps it on UDP. DoT and DoH use TCP/853 and TCP/443 by default; `dig +trace` is denied because
-later name servers cannot be verified before dispatch.
-The single-address `curl --resolve` form checks both the named host and connected IP against scope
-while retaining the URL host for Host and SNI. The engagement store ties observations to command
-output, execution vantage, and observation time across resume. Native chat holds observations for
-one turn. A web action with no observation performs a scoped TCP connect before application data.
-A loopback proxy CONNECT is an alternate observation; it does not authorize the worker or web
-broker path.
-Nmap SCTP and IP-protocol scans remain diagnostic and never create TCP or UDP port permission.
-The pinned runner permits single-host `nmap -sn` discovery and bounded Nping packet comparisons.
-Nping accepts one literal IP, at most three rounds at one packet per second, one TCP or UDP port,
-and at most 512 hex payload bytes in UDP mode. Its raw modes run with `NET_RAW` after the native
-chat firewall is installed, or in the engagement raw worker. Nping output never creates service
-permission. Completed scanner forms are recorded with the full argv and vantage, and an exact
-repeat is denied for one hour. Firewall diagnostic scans require a completed ordinary same-vantage
-port baseline. The runner builds a checksum-pinned `ike-scan` and HTTP/3-capable curl. Large port ranges must be
-partitioned into scans that finish within the command timeout; no partial result proves a full
-inventory.
-This service check adds to the RoE and network scope controls; it does not expand either one.
-Network recon coverage uses the authorized command and its completed output. TCP and UDP sweeps
-are separate dimensions; a version scan and a default-script scan cover their own dimensions.
-Recorded prose or an incomplete scan cannot mark them complete. Without a current open or
-`open|filtered` port on a literal IP, version and script checks are audited as not applicable.
-An alternate source-port candidate still reaches the protocol-validation tier.
-Explicit local terminal actions and a configured MCP server's tools on the chat path are separate
-execution paths and do not inherit this built-in target tool service check. An engagement task's
-gated MCP request tools are the exception: they are authorized through `Gate.AuthorizeAPIRequest`,
-which runs the service check on both its policy and its no-policy branch, so the check applies to
-them as it does to the native web request tool.
+checks the command's connected endpoint, not the model's claimed prerequisite. This check adds to
+the RoE and network scope controls; it does not expand either one.
+
+Port evidence:
+
+- Only a completed Nmap scan supplies scanner-derived port states. Masscan is excluded because its
+  raw Ethernet packets bypassed the worker destination guard in a local fixture.
+- ACK, FIN, NULL, Xmas, idle, fragmented, and source-port scans do not supply positive service
+  evidence. Decoys, source-address spoofing, raw Ethernet, and MAC spoofing are denied because the
+  worker cannot constrain their source or destination path.
+- TCP `open` permits a protocol check, not a service identity claim. UDP `open` or `open|filtered`
+  permits a protocol-correct follow-up; `open|filtered` is not a positive response. A completed
+  version scan can promote that UDP candidate to `open`, but cannot create first service evidence.
+- A completed source-port SYN scan may create only a candidate for that source port. A direct curl
+  GET with `-q` first, no proxy, a single local port, headers, and bounded timeouts can validate the
+  candidate. Only a complete final HTTP response promotes that exact source-port route to `open`;
+  the ordinary route stays separate.
+- Nping UDP payloads require prior UDP port evidence and never promote a service state by packet
+  count alone.
+- A later closed result removes the permission. A command that cannot expose its connection route
+  fails closed.
+
+Protocol-specific routes:
+
+- `curl --http3-only` needs UDP evidence and `--http3` needs TCP and UDP evidence. The source-built
+  runner curl supports HTTP/3; a completed HTTP/3 response with included headers promotes only that
+  UDP route.
+- A bounded `ike-scan --ikev2` handshake or notify can promote the observed UDP/500 or NAT-T
+  UDP/4500 candidate. Silence and packet counts cannot promote either.
+- An explicit DNS server needs evidence for both UDP and its possible TCP retry unless `dig +ignore`
+  keeps it on UDP. DoT and DoH use TCP/853 and TCP/443 by default; `dig +trace` is denied because
+  later name servers cannot be verified before dispatch.
+- The single-address `curl --resolve` form checks both the named host and connected IP against
+  scope while retaining the URL host for Host and SNI.
+- A loopback proxy CONNECT is an alternate observation; it does not authorize the worker or web
+  broker path.
+- Nmap SCTP and IP-protocol scans remain diagnostic and never create TCP or UDP port permission.
+
+Observation lifetime and repeats:
+
+- The engagement store ties observations to command output, execution vantage, and observation time
+  across resume. Native chat holds observations for one turn. A web action with no observation
+  performs a scoped TCP connect before application data.
+- Completed scanner forms are recorded with the full argv and vantage, and an exact repeat is
+  denied for one hour. Firewall diagnostic scans require a completed ordinary same-vantage port
+  baseline.
+
+Runner tools:
+
+- The pinned runner permits single-host `nmap -sn` discovery and bounded Nping packet comparisons.
+  Nping accepts one literal IP, at most three rounds at one packet per second, one TCP or UDP port,
+  and at most 512 hex payload bytes in UDP mode. Its raw modes run with `NET_RAW` after the native
+  chat firewall is installed, or in the engagement raw worker. Nping output never creates service
+  permission.
+- The runner builds a checksum-pinned `ike-scan` and HTTP/3-capable curl. Large port ranges must be
+  partitioned into scans that finish within the command timeout; no partial result proves a full
+  inventory.
+
+Recon coverage:
+
+- Network recon coverage uses the authorized command and its completed output. TCP and UDP sweeps
+  are separate dimensions; a version scan and a default-script scan cover their own dimensions.
+  Recorded prose or an incomplete scan cannot mark them complete.
+- Without a current open or `open|filtered` port on a literal IP, version and script checks are
+  audited as not applicable. An alternate source-port candidate still reaches the
+  protocol-validation tier.
+
+Paths outside the check:
+
+- Explicit local terminal actions and a configured MCP server's tools on the chat path are separate
+  execution paths and do not inherit this built-in target tool service check.
+- An engagement task's gated MCP request tools are the exception: they are authorized through
+  `Gate.AuthorizeAPIRequest`, which runs the service check on both its policy and its no-policy
+  branch, so the check applies to them as it does to the native web request tool.
+
+### Footholds and pivoting
 
 The declared foothold is the one deliberate exception to the network half, and it is bounded. A
 command carried to an operator-declared foothold runs on a host whose egress is not ours to filter,
@@ -323,32 +461,40 @@ the guarded worker, whose firewall pins the foothold address. Raw shells use a l
 and Metasploit RPC uses a local loopback service. Every foothold address must be in scope. The
 declaration is sealed into the policy so a resume with a different foothold is refused, the surface
 of a task decides whether it pivots so no model or corpus text can move execution, and every pivoted
-action records its destination. Approved private CIDRs are held separately from the sealed RoE and
-apply only to foothold-covered surfaces. They do not expand the worker's direct network guard. On
-the web surface, the host-side broker validates every request and redirect against the pivot scope,
-resolves hostnames through the foothold, and dials the checked IP through the carrier. Exploit output
-alone cannot advance an external vantage to an internal
-foothold. An operator may attach a carrier to an evidenced armed exploit task after approving its
-private network. Resume validates the attachment, pins its IP in the guard, probes execution through
-the carrier, and only then advances the vantage. SSH and command carriers may cover the web surface.
-Raw, Metasploit RPC, and HTTP form carriers cover command surfaces only. A raw shell attachment uses
-a private workspace record and a separate loopback broker process. It retains one POSIX shell across
-stop and resume until the engagement wall budget expires. Metasploit RPC uses a loopback MessagePack
-service, checks the session peer against the approved foothold IP, and reads one command-shell
-session with a sequence pointer. The HTTP form carrier sends a bounded POST through the guarded
-worker to the approved IP and requires a command receipt. These three carriers do not provide the
-binary TCP stream used by the web broker. One consequence runs the other way:
-this host's PATH and symlinks describe this host, so a check that establishes a file's identity by
-resolving a path cannot speak for a file on the foothold. Such a check compares lexically for a
-pivoted command and fails closed
-on a spelling it cannot resolve. Do not widen this exception to a destination the operator did not
-declare.
+action records its destination.
+
+Approved private CIDRs are held separately from the sealed RoE and apply only to foothold-covered
+surfaces. They do not expand the worker's direct network guard. On the web surface, the host-side
+broker validates every request and redirect against the pivot scope, resolves hostnames through the
+foothold, and dials the checked IP through the carrier. Tools that send from this host, such as the
+Burp request tools and the upstream proxy, are refused on a pivoted web surface.
+
+Exploit output alone cannot advance an external vantage to an internal foothold. An operator may
+attach a carrier to an evidenced armed exploit task after approving its private network. Resume
+validates the attachment, pins its IP in the guard, probes execution through the carrier, and only
+then advances the vantage. SSH and command carriers may cover the web surface. Raw, Metasploit RPC,
+and HTTP form carriers cover command surfaces only. A raw shell attachment uses a private workspace
+record and a separate loopback broker process. It retains one POSIX shell across stop and resume
+until the engagement wall budget expires. Metasploit RPC uses a loopback MessagePack service, checks
+the session peer against the approved foothold IP, and reads one command-shell session with a
+sequence pointer. The HTTP form carrier sends a bounded POST through the guarded worker to the
+approved IP and requires a command receipt. These three carriers do not provide the binary TCP
+stream used by the web broker.
+
+One consequence runs the other way: this host's PATH and symlinks describe this host, so a check
+that establishes a file's identity by resolving a path cannot speak for a file on the foothold. Such
+a check compares lexically for a pivoted command and fails closed on a spelling it cannot resolve.
+Do not widen this exception to a destination the operator did not declare.
+
+### Cloud provider credentials
 
 AWS and GCP provider CLI commands require a separate operator approval tied to engagement evidence
 and a credential file path on a foothold that covers the matching cloud surface. The approval does
 not copy secret bytes into the workspace. The command gate authorizes the provider command before
 the carrier adds a clean environment and the credential file override. The runner cannot verify the file's contents or
 identity on the remote host; the operator approves that source and the RoE governs its use.
+
+### Bounds and external-surface sweeps
 
 Bound requests, output, rate, duration, and total work, and provide a reliable operator stop
 control. Credential use must not leak through logs or unrelated requests. An operator-approved
@@ -362,7 +508,9 @@ their own evidence. A failed probe records a gap; derived names do not expand sc
 broker and the isolated command worker have different network vantage points, so one cannot infer
 the other's reachability from its own response.
 
-### Specific controls
+### Component controls
+
+Retrieval and ingestion:
 
 - The SSRF guard in `index.py` for `blk add <url>` resolves and validates the host once, rejects
   private, loopback, link-local, reserved, multicast, and unspecified addresses, pins the validated
@@ -374,6 +522,13 @@ the other's reachability from its own response.
   model. Exposing it is a security decision to raise, not to implement quietly.
 - Secrets come from the environment only. Never hardcode or log a token. The local `.env` is
   untracked.
+- The corpus is adversarial: it holds payloads, prompt-injection strings, and special tokens. Local
+  chunks carry trusted-corpus provenance and web results carry unverified-external provenance.
+  Prompt instructions treat embedded instructions in both as data. No retrieved text may set
+  targets, authorize actions, arm tasks, or execute as code.
+
+HTTP API (`blk serve`):
+
 - `blk serve` (`cli/serve.go`, `cli/servesessions.go`, `cli/serveturns.go`) binds `127.0.0.1:8787`
   unless `--bind` says otherwise. A bind that is not loopback needs `--allow-remote` and a token
   from `BLKCHAIN_SERVE_TOKEN`, which is compared in constant time and never logged. A token that is
@@ -389,18 +544,28 @@ the other's reachability from its own response.
   a `localhost` that resolves off this machine cannot be served under the loopback rule. All three are
   header checks and a request without `Origin` passes the third, so none authenticates a local process;
   only the token does.
-- `tool_host: local` and `browser_cdp` over `blk serve` are granted only when the bind is loopback
-  and the peer address is loopback (`serveServer.callerVantage`). On any other bind they are
-  refused to every caller, because behind a tunnel, a published container port, or a local proxy
-  the peer address does not identify the originator. The grant is honest on loopback only because
-  the guard chain ran first; a change that lets a handler run ahead of it breaks that. Without a
-  token, any local process on a loopback bind still qualifies.
+- `tool_host: local` and `browser_cdp` over `blk serve` are granted only when the bind is loopback,
+  a token is set, and the peer address is loopback (`serveServer.callerVantage`). On any other bind
+  they are refused to every caller, because behind a tunnel, a published container port, or a local
+  proxy the peer address does not identify the originator. Without a token they are refused too: any
+  process on the machine reaches loopback, another local account's and a local SSRF included, so a loopback
+  peer shows the request came from this machine and not that the operator sent it. The grant is
+  honest only because the guard chain ran first, token included; a change that lets a handler run
+  ahead of it breaks that.
+- A `blk serve` turn writes to its client under a per-write deadline (`serveWriteTimeout`), on the
+  stream and on the JSON route. The server sets no `WriteTimeout`, so without it a client that keeps
+  the connection open and stops reading would block a write once the socket buffers fill, beyond the
+  reach of the turn's deadline and of a request context a live connection never cancels, and hold
+  its turn slot. A failed stream write ends the turn.
 - `blk serve` runs a turn only on a session id in its own `chatSessionOwner`, the type `chat`
   over MCP uses: the 128 most recently used ids it created, held in memory. Any session on disk is
   readable. Bounds, all in code: a 1 MiB request body, a 256 KiB message, one turn in flight per
   session, four across the server with no queue, the request timeout per turn (300 seconds by
   default), 32 MiB per stream, and 240 requests per minute with a burst of 32 for the whole
   process rather than per peer.
+
+Engagement instruments:
+
 - An outbound MCP tool reaches an engagement task only through the classifier in `cli/engagemcp.go`,
   whose zero value denies: a tool it does not name, and every tool of a server it does not name, is
   not registered for a task, so a server wired for interactive use offers an engagement nothing
@@ -413,7 +578,13 @@ the other's reachability from its own response.
   phase tier with its armed-task requirement for a state-changing method, the RoE action class, the
   service check, confirmation, rate, recheck, and audit. The origin-form request target from the raw
   request line is carried into that URL so a confirmation names a path; a target that is not origin
-  form, or that holds `//`, contributes none. `send_to_intruder` carries the `INTRUDER-FUZZ`
+  form, or that holds `//`, contributes none. `send_http2_request` has no raw request in Burp's
+  schema: its method and path are read from `pseudoHeaders` (`:method`, `:path`), and a `content`
+  field on it is refused, so the gate cannot be shown one request line while Burp sends another.
+  Every request tool is refused while a foothold carries the web surface: Burp sends from this
+  host, not through the foothold, and the pivot scope the gate applies on that surface admits
+  private networks that this host would reach on its own interfaces. `newWebBroker` refuses the
+  upstream proxy there for the same reason. `send_to_intruder` carries the `INTRUDER-FUZZ`
   sentinel, which the gate tiers as active whatever the request line says and whose hyphen the
   method pattern cannot match, so request content cannot forge the label; the call stages a request
   in an Intruder tab rather than sending it, so the fuzzing traffic leaves when an operator starts
@@ -470,6 +641,9 @@ the other's reachability from its own response.
   whatever is listening on that address, so the notice names the CA subject it accepted, and the
   certificate is fetched from `http://burp/cert` through the proxy unless `BLKCHAIN_WEB_PROXY_CA`
   names a file.
+
+Vulnerability analysis:
+
 - A dispatched `vuln-analysis` task with a recognized HTTP or HTTPS manifest URL fetches through
   the RoE command gate before model execution. The fixed `curl` request has a 10-second and 16 MiB
   transfer bound, does not follow redirects, and stages material only on HTTP 200. URL credentials,
@@ -480,16 +654,9 @@ the other's reachability from its own response.
   Scanner output is evidence linked to task and advisory records. A missing database or failed scan
   records a gap, not a clean result. A package/version match does not establish reachable code or
   attacker impact.
-- Hermes is a legacy one-shot run through `blk hermes`, `/hermes`, and `blk ask --hermes`. It runs
-  the `hermes` CLI as a subprocess with the prompt as a single argv element, never through a shell,
-  and writes no session. `--hermes` cannot be combined with `--session`, `--agent`, `--rag`,
-  `--web`, `--json`, or `--sources`.
-- Pin dependencies. Python dependencies are `==` pinned in `pyproject.toml`. Model downloads are
-  pinned to a revision in the README. The Qdrant image is pinned to a digest.
-- The corpus is adversarial: it holds payloads, prompt-injection strings, and special tokens. Local
-  chunks carry trusted-corpus provenance and web results carry unverified-external provenance.
-  Prompt instructions treat embedded instructions in both as data. No retrieved text may set
-  targets, authorize actions, arm tasks, or execute as code.
+
+Exploit-candidate grounding:
+
 - Exploit-candidate detection is retrieval-grounded rather than capped by a hardcoded catalog
   (`cli/correlate.go` and `cli/recon_live.go`). A discovered service becomes a candidate either
   through the code-owned catalog fast path or, for an uncatalogued product, when the corpus-grounded
@@ -500,6 +667,15 @@ the other's reachability from its own response.
   grounding fields are set or not. Candidates start unarmed. Only code may arm them, from the
   operator-approved policy. This is the chain-wide standard: ground decisions in retrieval while
   keeping execution authority code-derived and corpus-independent.
+
+Legacy paths and supply chain:
+
+- Hermes is a legacy one-shot run through `blk hermes`, `/hermes`, and `blk ask --hermes`. It runs
+  the `hermes` CLI as a subprocess with the prompt as a single argv element, never through a shell,
+  and writes no session. `--hermes` cannot be combined with `--session`, `--agent`, `--rag`,
+  `--web`, `--json`, or `--sources`.
+- Pin dependencies. Python dependencies are `==` pinned in `pyproject.toml`. Model downloads are
+  pinned to a revision in the README. The Qdrant image is pinned to a digest.
 
 ## Runtime behavior
 
@@ -526,20 +702,7 @@ the other's reachability from its own response.
 - Each chunk carries a `content_hash` in its payload. Re-indexing skips unchanged chunks, re-embeds
   changed ones by overwriting the same id, and inserts new ones.
 - Changing the stored `path` format changes chunk ids, so a path-scheme change needs a clean rebuild.
-  Drop the collection first or you get duplicate points.
-
-## Sessions and conversation memory
-
-A session is one append-only JSONL transcript under the blk data directory. The listing the resume
-and history pickers read is a row per session in the history database, so a picker does not open
-every transcript.
-
-The sessions directory is shared by every blk process, so these writes are cross-process. A turn
-appends its transcript lines and then commits the memory rows together with the transcript length
-they account for, in one transaction. That transaction is the turn's only commit point: bytes past
-the committed watermark belong to a turn that never committed, and the reader reconciles them away
-when the session is next opened. A listing row with no watermark recorded means the length is
-unknown, and then the whole transcript counts as committed and is never truncated.
+  Drop the collection first, or the rebuild leaves duplicate points.
 
 ## Testing
 
@@ -581,13 +744,15 @@ The harness runs `blk search --json` per case, and `blk ask --json` for the judg
 source and CWE constraints. Two unrelated queries check for false hits against the DOM XSS and JWT
 cases. The run reports hit rates, reciprocal rank, and negative-control false hits.
 
-## Coding standards
+## Contributing
+
+### Coding standards
 
 - State assumptions. If two readings of a task exist, surface both.
 - Simplicity first: the minimum code that solves the problem. No speculative abstractions, no
   configuration for fixed values, no error handling for impossible states.
 - Surgical changes. Touch only what the task needs and match the surrounding style. Remove the
-  imports and names your own change orphaned, and nothing else.
+  imports and names the change itself orphaned, and nothing else.
 - Turn a task into a verifiable check and prove it by running the command.
 - Prose and comments read as if a human wrote them: plain ASCII punctuation, direct and concise.
 - Comments are minimal and factual. A comment states what the code does, or why a non-obvious
@@ -597,17 +762,17 @@ cases. The run reports hit rates, reciprocal rank, and negative-control false hi
 - Validate untrusted input at the boundary, bound every resource, keep secrets in the environment,
   and pin dependencies.
 
-## Commit conventions
+### Commit conventions
 
 Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, plus a scope such as
 `config:` or `eval:`). Stage files explicitly by path.
 
-## Gotchas
+## Known pitfalls
 
 - Non-finite floats break strict JSON clients. Keep responses strict JSON.
 - A model swap that changes the embedding dimension needs a new collection. The default embedder is
   1024-dimensional and drop-in; a 768-dimensional model is not.
 - The 4-bit DWQ embedder emits bfloat16, so the float32 cast in `embed_server` is required.
-- After a path-scheme change, rebuild the index from a clean collection or you get duplicate points.
+- After a path-scheme change, rebuild the index from a clean collection, or duplicate points remain.
 - Building the full index re-embeds many chunks and takes real time. Run it in the background and
   watch the collection point count.
