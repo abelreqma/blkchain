@@ -146,14 +146,59 @@ func TestPolicyActiveWebActionAllowedByRoEWithoutPrompt(t *testing.T) {
 	if err := g.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if d := g.AuthorizeAPIRequest(context.Background(), APIRequest{Method: "POST", URL: "https://10.20.0.6/write"}); !d.Allowed {
+	if d := g.AuthorizeAPIRequest(context.Background(), APIRequest{Method: "POST", URL: "https://10.20.0.6/write", Armed: true}); !d.Allowed {
 		t.Fatalf("RoE-permitted API write denied: %+v", d)
 	}
-	if d := g.AuthorizeBrowser(context.Background(), BrowserAction{URL: "https://10.20.0.6/form", Active: true}); !d.Allowed {
+	if d := g.AuthorizeBrowser(context.Background(), BrowserAction{URL: "https://10.20.0.6/form", Active: true, Armed: true}); !d.Allowed {
 		t.Fatalf("RoE-permitted browser write denied: %+v", d)
 	}
 	if calls != 0 {
 		t.Fatalf("auto requested %d confirmations", calls)
+	}
+}
+
+// TestPolicyActiveWebActionRequiresArmedTask pins the tier arm requirement on
+// the policy branch. An engagement gate always carries a sealed policy, so a
+// state-changing web action reaching a target from an unarmed task is the
+// difference between the arm requirement being a rule and being a rule only for
+// a gate no engagement uses. The RoE here permits the action class and the mode
+// is Auto, so nothing but the arm requirement can deny it.
+func TestPolicyActiveWebActionRequiresArmedTask(t *testing.T) {
+	scope, err := ParseScope(strings.NewReader("10.20.0.6\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := DefaultPolicy()
+	p.Allowed = append(p.Allowed, "api-write", "browser-write")
+	calls := 0
+	g := &Gate{Mode: Auto, Scope: scope, Policy: p, Confirm: policyConfirmer{calls: &calls}}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		call func() Decision
+	}{
+		{"api write", func() Decision {
+			return g.AuthorizeAPIRequest(context.Background(), APIRequest{Method: "POST", URL: "https://10.20.0.6/write"})
+		}},
+		{"browser write", func() Decision {
+			return g.AuthorizeBrowser(context.Background(), BrowserAction{URL: "https://10.20.0.6/form", Active: true})
+		}},
+	} {
+		d := tc.call()
+		if d.Allowed {
+			t.Errorf("%s from an unarmed task was allowed under a sealed policy", tc.name)
+			continue
+		}
+		if !strings.Contains(d.Reason, "requires an armed task") {
+			t.Errorf("%s denied for %q, want the arm requirement", tc.name, d.Reason)
+		}
+	}
+	// A read-only action carries no arm requirement, so the rule above moves no
+	// recon verdict.
+	if d := g.AuthorizeAPIRequest(context.Background(), APIRequest{Method: "GET", URL: "https://10.20.0.6/read"}); !d.Allowed {
+		t.Errorf("unarmed GET denied under a sealed policy: %+v", d)
 	}
 }
 

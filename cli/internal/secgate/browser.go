@@ -106,6 +106,20 @@ func (g *Gate) AuthorizeAPIRequest(ctx context.Context, r APIRequest) Decision {
 	return g.authorizeWebAction(ctx, webActionCommand(label, r.URL, active, r.Armed))
 }
 
+// webArmDenyLocked denies an active web action from an unarmed task. An active
+// (state-changing or injecting) action is exploit tier and requires an armed
+// task, in both modes and whether or not a sealed policy is in force: a policy
+// authorizes targets and action classes, which is a different question from
+// whether the operator has armed the task to change state. Arming is a
+// precondition the operator sets; it relaxes no denylist. It assumes g.mu is
+// held, and runs before any check that reaches the network.
+func (g *Gate) webArmDenyLocked(c Command) (Decision, bool) {
+	if !c.Phase.requiresArm() || c.Armed {
+		return Decision{}, false
+	}
+	return g.deny("tier", c, "active web action (injection or state-changing) requires an armed task", "arm the task before an injecting or state-changing browser or API action"), true
+}
+
 // authorizeWebAction runs the shared deny pipeline for a web action: mode, caps,
 // phase tier, scope, and rate (all under g.mu), then the confirmation tail (which
 // releases g.mu), then the exec-time scope recheck. It mirrors
@@ -113,6 +127,10 @@ func (g *Gate) AuthorizeAPIRequest(ctx context.Context, r APIRequest) Decision {
 // which do not apply to a non-subprocess action. Everything else - the tier arm
 // requirement, mode-specific confirmation, scope, RoE rate, audit, and
 // resolve-and-recheck - is identical to the command path.
+//
+// A sealed policy replaces the episode caps and the scope layer with its own,
+// as it does on the command path. It does not replace the tier arm requirement,
+// which runs on both branches.
 func (g *Gate) authorizeWebAction(ctx context.Context, c Command) Decision {
 	g.mu.Lock()
 	if g.Episode == nil {
@@ -125,6 +143,10 @@ func (g *Gate) authorizeWebAction(ctx context.Context, c Command) Decision {
 	}
 	if g.Policy != nil {
 		if d := g.checkPolicyLocked(c); !d.Allowed {
+			g.mu.Unlock()
+			return d
+		}
+		if d, denied := g.webArmDenyLocked(c); denied {
 			g.mu.Unlock()
 			return d
 		}
@@ -157,11 +179,7 @@ func (g *Gate) authorizeWebAction(ctx context.Context, c Command) Decision {
 		g.mu.Unlock()
 		return d
 	}
-	// Phase tier: an active (state-changing or injecting) web action is exploit
-	// and requires an armed task, in both modes. Arming is a precondition the
-	// operator sets; it relaxes no denylist.
-	if c.Phase.requiresArm() && !c.Armed {
-		d := g.deny("tier", c, "active web action (injection or state-changing) requires an armed task", "arm the task before an injecting or state-changing browser or API action")
+	if d, denied := g.webArmDenyLocked(c); denied {
 		g.mu.Unlock()
 		return d
 	}
