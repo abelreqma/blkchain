@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"blkchain/cli/internal/ragconfig"
+	"blkchain/cli/internal/retrieval"
 
 	"github.com/tmc/langchaingo/llms"
 )
@@ -778,5 +779,90 @@ func TestANamedModelAnswersEveryCallOfTheTurn(t *testing.T) {
 		if c.model != "picked-model" {
 			t.Errorf("the %s call used model %q, want the named model", c.stage, c.model)
 		}
+	}
+}
+
+// TestATurnNamesNoModelAndCarriesBothChains pins the contract between
+// runNativeTurn and the answer path: the turn builds a chain per role and
+// leaves the named model empty, so the resolved default is never read further
+// down as an operator's pick.
+func TestATurnNamesNoModelAndCarriesBothChains(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	t.Setenv("OMLX_MODEL", "fallback-model")
+	old := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = old })
+	var got AnswerOpts
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		got = opts
+		return "fixture", nil, false, nil, 0, "skip", nil
+	}
+	cfg := answerCfg(2)
+	cfg.RouterModel = "router-model"
+	cfg.AssessmentModel = "assessment-model"
+	res, err := runNativeTurn(context.Background(), nil, cfg, turnRequest{Question: "a question"})
+	if err != nil {
+		t.Fatalf("runNativeTurn: %v", err)
+	}
+	if got.Model != "" {
+		t.Errorf("the turn named model %q, want none so the two roles stay apart", got.Model)
+	}
+	if got.routerChain == nil || got.assessmentChain == nil {
+		t.Fatalf("router chain = %v, assessment chain = %v, want a chain for each role", got.routerChain, got.assessmentChain)
+	}
+	if id := got.routerChain.primary(); id != "router-model" {
+		t.Errorf("the router chain leads with %q, want the router model", id)
+	}
+	if id := got.assessmentChain.primary(); id != "assessment-model" {
+		t.Errorf("the assessment chain leads with %q, want the assessment model", id)
+	}
+	if res.Model != "assessment-model" {
+		t.Errorf("the turn reports model %q, want the assessment model", res.Model)
+	}
+}
+
+// TestTheTUITurnCarriesOnlyTheOperatorsPick drives the TUI's own turn command.
+// The TUI calls runNativeTurn directly, so the nearest seam is the AnswerOpts
+// the turn hands the answer path: opts.Model is the request's Model trimmed,
+// and both chains are built from that same field. It does not cover what the
+// status line or the transcript then display.
+func TestTheTUITurnCarriesOnlyTheOperatorsPick(t *testing.T) {
+	useDeadServices(t)
+	t.Setenv("OMLX_MODEL", "fallback-model")
+	old := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = old })
+	var got AnswerOpts
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		got = opts
+		return "fixture", nil, false, nil, 0, "skip", nil
+	}
+	m := newKeyModel(t)
+	m.cfg.RouterModel = "router-model"
+	m.cfg.AssessmentModel = "assessment-model"
+	m.resolvedModel = "server-default"
+
+	got = AnswerOpts{}
+	if done, ok := m.streamCmd(context.Background(), "a question", "", m.turnStart, false)().(streamDoneMsg); !ok || done.err != nil {
+		t.Fatalf("turn did not complete: %#v", done)
+	}
+	if got.Model != "" {
+		t.Errorf("with no pick the TUI named model %q, want none", got.Model)
+	}
+	if got.routerChain.primary() != "router-model" || got.assessmentChain.primary() != "assessment-model" {
+		t.Errorf("TUI chains lead with %q and %q, want the router and assessment models",
+			got.routerChain.primary(), got.assessmentChain.primary())
+	}
+
+	m.ragModel = "  picked-model  "
+	got = AnswerOpts{}
+	if done, ok := m.streamCmd(context.Background(), "a question", "", m.turnStart, false)().(streamDoneMsg); !ok || done.err != nil {
+		t.Fatalf("turn did not complete: %#v", done)
+	}
+	if got.Model != "picked-model" {
+		t.Errorf("with a pick the TUI named model %q, want the pick", got.Model)
+	}
+	if got.routerChain.primary() != "picked-model" || got.assessmentChain.primary() != "picked-model" {
+		t.Errorf("a picked model gave chains %q and %q, want the pick for both roles",
+			got.routerChain.primary(), got.assessmentChain.primary())
 	}
 }

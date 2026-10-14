@@ -273,11 +273,15 @@ func adaptiveAnswer(ctx context.Context, rc searcher, cfg ragconfig.Config, ques
 	if routerChain == nil || assessmentChain == nil {
 		routerIDs, assessmentIDs := roleChains(cfg, opts.Model)
 		var err error
-		if routerChain, err = newModelChain(cfg, routerIDs); err != nil {
-			return "", nil, false, nil, 0, "", err
+		if routerChain == nil {
+			if routerChain, err = chainOrDefault(cfg, routerIDs, opts.Model); err != nil {
+				return "", nil, false, nil, 0, "", err
+			}
 		}
-		if assessmentChain, err = newModelChain(cfg, assessmentIDs); err != nil {
-			return "", nil, false, nil, 0, "", err
+		if assessmentChain == nil {
+			if assessmentChain, err = chainOrDefault(cfg, assessmentIDs, opts.Model); err != nil {
+				return "", nil, false, nil, 0, "", err
+			}
 		}
 	}
 	opts.llm = assessmentChain
