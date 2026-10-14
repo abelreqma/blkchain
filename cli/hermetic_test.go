@@ -28,6 +28,12 @@ import (
 // testStateRoot is the per-run directory both XDG variables point inside.
 var testStateRoot string
 
+// operatorMCPClientConfig is the operator's MCP client config path as exported
+// when the run started. TestMain clears the variable so no hermetic test drives
+// a real server; the opt-in suites read the path here through
+// useOperatorMCPConfig instead.
+var operatorMCPClientConfig string
+
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "blk-test-state-")
 	if err != nil {
@@ -72,6 +78,7 @@ func TestMain(m *testing.M) {
 	// variable names. An operator with it exported would otherwise have a test
 	// that builds one connect to their real servers, start a stdio server's
 	// command, and drive their own Burp.
+	operatorMCPClientConfig = os.Getenv(chatMCPConfigEnv)
 	if err := os.Unsetenv(chatMCPConfigEnv); err != nil {
 		panic("hermetic test state: " + err.Error())
 	}
@@ -143,4 +150,20 @@ func TestRecallStoreStartsEmptyInTests(t *testing.T) {
 	if path, ok := recallRoE(store.DB(), cwd); ok {
 		t.Errorf("a recalled ROE.md leaked into the tests: %q", path)
 	}
+}
+
+// useOperatorMCPConfig points this test at the operator's MCP client config,
+// skipping when none was exported or the file is missing. The variable reverts
+// when the test ends, so hermetic tests later in the run still see it unset.
+func useOperatorMCPConfig(t *testing.T) string {
+	t.Helper()
+	path := operatorMCPClientConfig
+	if path == "" {
+		t.Skipf("export %s as the operator's MCP client config; TestMain clears it for every other test", chatMCPConfigEnv)
+	}
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		t.Skipf("no MCP client config at %s", path)
+	}
+	t.Setenv(chatMCPConfigEnv, path)
+	return path
 }
