@@ -355,12 +355,31 @@ func openMCPSessions(ctx context.Context, servers []chatMCPServer, root string, 
 	return closeAll, nil
 }
 
-func registerChatMCPTools(ctx context.Context, registry *tooldef.Registry, root string) (func(), error) {
+func registerChatMCPTools(ctx context.Context, registry *tooldef.Registry, root string, v clientVantage) (func(), error) {
 	config, err := loadChatMCPConfig()
 	if err != nil {
 		return nil, err
 	}
-	return openMCPSessions(ctx, config.Servers, root, func(_, _ string, tool tooldef.Tool) error {
+	return openMCPSessions(ctx, chatMCPServersFor(config.Servers, v), root, func(_, _ string, tool tooldef.Tool) error {
 		return registry.Register(tool)
 	})
+}
+
+// chatMCPServersFor returns the configured servers a caller of vantage v is
+// offered. A local caller gets every server. Any other caller gets only stdio
+// servers that run in the sandbox container: a host-local stdio server runs on
+// this host with its network, and an HTTP server is dialed from this host with
+// the operator's bearer token, so either would give that caller the operator's
+// reach.
+func chatMCPServersFor(servers []chatMCPServer, v clientVantage) []chatMCPServer {
+	if v == vantageLocal {
+		return servers
+	}
+	var out []chatMCPServer
+	for _, server := range servers {
+		if server.Transport == "stdio" && server.Host != chatToolHostLocal {
+			out = append(out, server)
+		}
+	}
+	return out
 }

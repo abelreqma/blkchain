@@ -421,3 +421,31 @@ func TestCollapseActionsLeavesAnUnsettledCallRunning(t *testing.T) {
 		t.Fatalf("a lone running call = %+v, want it to stay running", lone)
 	}
 }
+
+// TestNativeTurnCarriesTheCallerVantage pins that the caller's vantage reaches
+// the tool registry's options, and that a request that does not set one is
+// remote, so a surface added without establishing its caller gets no tool that
+// reaches this host.
+func TestNativeTurnCarriesTheCallerVantage(t *testing.T) {
+	useDeadServices(t)
+	isolateUserDirs(t)
+	prev := adaptiveAnswerFn
+	t.Cleanup(func() { adaptiveAnswerFn = prev })
+	var seen clientVantage
+	adaptiveAnswerFn = func(_ context.Context, _ searcher, _ ragconfig.Config, _ string, _ enabledRoutes, _ bool, opts AnswerOpts) (string, []citation, bool, []retrieval.Result, int, string, error) {
+		seen = opts.vantage
+		return "an answer", []citation{}, false, nil, 1, "rag", nil
+	}
+	for _, c := range []struct {
+		req  clientVantage
+		want clientVantage
+	}{{vantageLocal, vantageLocal}, {vantageRemote, vantageRemote}, {clientVantage(0), vantageRemote}} {
+		seen = clientVantage(-1)
+		if _, err := runNativeTurn(context.Background(), nil, loadConfig(), turnRequest{Question: "q", Vantage: c.req}); err != nil {
+			t.Fatal(err)
+		}
+		if seen != c.want {
+			t.Errorf("request vantage %v reached the registry as %v, want %v", c.req, seen, c.want)
+		}
+	}
+}

@@ -61,7 +61,7 @@ func TestBurpMCPServerRegistersItsAllowlistedTools(t *testing.T) {
 		t.Skipf("the MCP client config at %s allowlists no tools", path)
 	}
 	registry := tooldef.NewRegistry()
-	closeMCP, err := registerChatMCPTools(context.Background(), registry, t.TempDir())
+	closeMCP, err := registerChatMCPTools(context.Background(), registry, t.TempDir(), vantageLocal)
 	if err != nil {
 		t.Fatalf("registration failed: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestBurpMCPServerRegistersItsAllowlistedTools(t *testing.T) {
 func TestBurpProxyCapturesEngageWebCollect(t *testing.T) {
 	requireBurpE2E(t)
 	registry := tooldef.NewRegistry()
-	closeMCP, err := registerChatMCPTools(context.Background(), registry, t.TempDir())
+	closeMCP, err := registerChatMCPTools(context.Background(), registry, t.TempDir(), vantageLocal)
 	if err != nil {
 		t.Fatalf("registration failed: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestBurpProxyCapturesEngageWebCollect(t *testing.T) {
 func TestBurpWebSocketHistoryCapturesAcquisition(t *testing.T) {
 	requireBurpE2E(t)
 	registry := tooldef.NewRegistry()
-	closeMCP, err := registerChatMCPTools(context.Background(), registry, t.TempDir())
+	closeMCP, err := registerChatMCPTools(context.Background(), registry, t.TempDir(), vantageLocal)
 	if err != nil {
 		t.Fatalf("registration failed: %v", err)
 	}

@@ -503,6 +503,9 @@ func TestServeTurnRefusesTheOperatorsReachInRemoteMode(t *testing.T) {
 	if rec := serveTurnDo(s, req); rec.Code != http.StatusOK {
 		t.Fatalf("a sandboxed turn in remote mode: status = %d; body %q", rec.Code, rec.Body.String())
 	}
+	if calls.opts.vantage != vantageRemote {
+		t.Errorf("a remote-mode turn reached the router with vantage %v, want %v", calls.opts.vantage, vantageRemote)
+	}
 }
 
 func TestServeTurnRequiresAJSONBody(t *testing.T) {
