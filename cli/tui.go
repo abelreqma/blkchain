@@ -434,6 +434,10 @@ type streamDoneMsg struct {
 	tokens          int // completion tokens when the transport exposed usage, else 0
 	llmCalls        []llmCallStats
 	llmCallsPartial bool
+	// answeredBy is the model the turn answered on, which is the only place a
+	// model reached by failover is named. Empty leaves the recorded model to the
+	// session's own (see recordTurn).
+	answeredBy string
 }
 
 // dequeueMsg drives the queue-while-busy auto-submit: after a turn completes with
@@ -519,6 +523,10 @@ type model struct {
 	// resolvedModel is the model a rag turn uses when none is picked, resolved
 	// once per session when the model list first loads; "" until then.
 	resolvedModel string
+
+	// answeredBy is the model the last completed turn answered on, as the turn
+	// itself reports it; "" when no turn has reported one.
+	answeredBy string
 
 	// prefs is the saved /models settings: hidden chat models and the reranker
 	// and web switches. Changes are kept here at once and saved in a command.
@@ -948,6 +956,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Println(b.String())
 		}
 		m.lastAnswer = full
+		m.answeredBy = msg.answeredBy
 		m.openTargets = citationTargets(msg.citations)
 		if msg.results != nil {
 			m.lastQuery, m.lastResults = m.pendingQ, msg.results
@@ -1602,7 +1611,12 @@ func (m *model) recordTurn(answer string) error {
 	}
 	defer m.sess.endTurn()
 	defer func() { m.pendingQ = "" }()
-	model := m.currentModel()
+	// The model the turn reports is what answered it, failover included; the
+	// session's own model is what a turn that reported none uses.
+	model := m.answeredBy
+	if strings.TrimSpace(model) == "" {
+		model = m.currentModel()
+	}
 	if err := m.sess.appendTurn(turnRecord{Role: roleUser, Content: m.pendingQ, Model: model}); err != nil {
 		return err
 	}
@@ -2521,14 +2535,18 @@ func (m model) dispatchCmd(ctx context.Context, verb, arg string, start time.Tim
 func (m model) streamCmd(ctx context.Context, question, preface string, start time.Time, force bool, explicitWeb ...bool) tea.Cmd {
 	webOnly := len(explicitWeb) > 0 && explicitWeb[0]
 	prog := m.prog
-	turnModel := m.ragTurnModel()
+	// The request carries only the operator's own pick. The resolved default is
+	// what a turn uses when nothing is picked, and passing it would read as a
+	// pick, which answers both of the turn's model roles with that one model.
+	pick := strings.TrimSpace(m.ragModel)
+	known := m.ragTurnModel()
 	return func() tea.Msg {
 		ctx, metrics := withCallMetrics(ctx)
-		if turnModel == "" {
-			// The list has not loaded yet: resolve the model here, and keep it
-			// for the session.
-			if turnModel = listedModel(); turnModel != "" && prog != nil {
-				prog.Send(modelResolvedMsg(turnModel))
+		if known == "" {
+			// The list has not loaded yet: resolve the model the session
+			// displays, and keep it for the session.
+			if id := listedModel(); id != "" && prog != nil {
+				prog.Send(modelResolvedMsg(id))
 			}
 		}
 		var rc *retrieval.Client
@@ -2543,7 +2561,7 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 		res, err := runNativeTurn(ctx, rc, m.cfg, turnRequest{
 			Question:   question,
 			Agent:      m.answerAgent,
-			Model:      turnModel,
+			Model:      pick,
 			ToolHost:   m.toolHost,
 			Browser:    m.browser,
 			BrowserCDP: m.browserCDP,
@@ -2579,7 +2597,7 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 			return errMsg{timeoutOrErr(err)}
 		}
 		calls, partial := metrics.snapshot()
-		return streamDoneMsg{full: res.Answer, citations: res.Citations, usedWeb: res.UsedWeb, results: res.Results, rerankOff: rc != nil && rc.SkipRerank, err: err, tokens: res.Usage.CompletionTokens, llmCalls: calls, llmCallsPartial: partial}
+		return streamDoneMsg{full: res.Answer, citations: res.Citations, usedWeb: res.UsedWeb, results: res.Results, rerankOff: rc != nil && rc.SkipRerank, err: err, tokens: res.Usage.CompletionTokens, llmCalls: calls, llmCallsPartial: partial, answeredBy: res.Model}
 	}
 }
 
@@ -2592,19 +2610,31 @@ var synthFromResultsFn = SynthesizeFromResults
 // returns a canceledMsg; ErrNoResults becomes a noResultsMsg.
 func (m model) generateCmd(ctx context.Context, question string, results []retrieval.Result, start time.Time) tea.Cmd {
 	prog := m.prog
-	turnModel := m.ragTurnModel()
+	pick := strings.TrimSpace(m.ragModel)
+	known := m.ragTurnModel()
 	cfg := m.cfg
 	return func() tea.Msg {
 		ctx, metrics := withCallMetrics(ctx)
-		if turnModel == "" {
-			if turnModel = listedModel(); turnModel != "" && prog != nil {
-				prog.Send(modelResolvedMsg(turnModel))
+		if known == "" {
+			if id := listedModel(); id != "" && prog != nil {
+				prog.Send(modelResolvedMsg(id))
 			}
+		}
+		// Synthesis is an answering call, so it runs on the assessment chain
+		// like every other one.
+		var assessment toolLoopModel
+		if _, ids := roleChains(cfg, pick); len(ids) > 0 {
+			chain, err := newModelChain(cfg, ids)
+			if err != nil {
+				return errMsg{err}
+			}
+			assessment = chain
 		}
 		streamed := false
 		full, cits, tokens, err := synthFromResultsFn(ctx, cfg, question, results, AnswerOpts{
 			Agent: m.answerAgent,
-			Model: turnModel,
+			Model: pick,
+			llm:   assessment,
 			Persona: func(domain string) {
 				if prog != nil {
 					prog.Send(personaMsg(domain))

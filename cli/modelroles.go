@@ -119,12 +119,20 @@ const maxChainModels = 4
 // answering from a different model would misreport the turn. Otherwise the
 // role's configured model leads and the resolved default follows, so an install
 // that configures neither role behaves exactly as one model does today.
+//
+// With no default to resolve, each role falls back to the other role's
+// configured model: a configured model is a usable model, so a role that names
+// none borrows one instead of leaving the turn with nothing.
 func roleChains(cfg ragconfig.Config, explicit string) (router, assessment []string) {
 	if id := strings.TrimSpace(explicit); id != "" {
 		return []string{id}, []string{id}
 	}
 	fallback := resolveModel(cfg)
-	return chainFor(cfg.RouterModel, fallback), chainFor(cfg.AssessmentModel, fallback)
+	routerFallback, assessmentFallback := fallback, fallback
+	if strings.TrimSpace(fallback) == "" {
+		routerFallback, assessmentFallback = cfg.AssessmentModel, cfg.RouterModel
+	}
+	return chainFor(cfg.RouterModel, routerFallback), chainFor(cfg.AssessmentModel, assessmentFallback)
 }
 
 // chainFor orders one role's chain: the configured model, then the fallback,
@@ -168,6 +176,21 @@ func newModelChain(cfg ragconfig.Config, ids []string) (*modelChain, error) {
 		clients = append(clients, c)
 	}
 	return &modelChain{ids: slices.Clone(ids), clients: clients}, nil
+}
+
+// chainOrDefault builds a chain over ids, or, when ids is empty, a one-model
+// chain over the client newOMLX builds for named. An install that configures no
+// model for either role and has no default to resolve then fails exactly where
+// one client fails, and reports the blank model id it reports today.
+func chainOrDefault(cfg ragconfig.Config, ids []string, named string) (*modelChain, error) {
+	if len(ids) > 0 {
+		return newModelChain(cfg, ids)
+	}
+	c, err := newOMLX(cfg, named)
+	if err != nil {
+		return nil, err
+	}
+	return &modelChain{clients: []toolLoopModel{c}}, nil
 }
 
 // primary is the id of the model the chain prefers. It answers unless a call

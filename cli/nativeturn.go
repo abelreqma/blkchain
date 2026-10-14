@@ -283,11 +283,13 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 	// pick with that one model for both roles.
 	routerIDs, assessmentIDs := roleChains(cfg, req.Model)
 	var routerChain, assessmentChain *modelChain
-	if len(routerIDs) > 0 && len(assessmentIDs) > 0 {
+	if len(routerIDs) > 0 {
 		routerChain, err = newModelChain(cfg, routerIDs)
 		if err != nil {
 			return turnResult{}, err
 		}
+	}
+	if len(assessmentIDs) > 0 {
 		assessmentChain, err = newModelChain(cfg, assessmentIDs)
 		if err != nil {
 			return turnResult{}, err
