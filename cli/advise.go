@@ -102,6 +102,12 @@ func classifyChatAction(ctx context.Context, m toolLoopModel, question string, h
 
 // adviseLoop answers an engagement-shaped turn with the native chat tools.
 func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig.Config, cat *skillcat.Catalog, question string, opts AnswerOpts) (string, int, error) {
+	// A caller that carries no chain gets a one-model chain over the client it
+	// passed, which behaves exactly as that client.
+	chain := opts.assessment
+	if chain == nil {
+		chain = &modelChain{ids: []string{""}, clients: []toolLoopModel{m}}
+	}
 	domain, err := answerAgentDomain(opts.Agent, domainFromQuestion(question))
 	if err != nil {
 		return "", 0, err
@@ -126,7 +132,9 @@ func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig
 	required := opts.requiredAction
 	requiredCalled, toolCalls := false, 0
 	observe := engageTelemetryFromContext(ctx)
-	caps := LoopCaps{MaxRounds: adviseMaxRounds, MaxCalls: adviseMaxCalls, ObserveResult: func(name string, outcome ToolOutcome) {
+	// One memo for the turn, shared by both loops below, so a tool that ran to
+	// completion is not run again when a failover restarts the loop.
+	caps := LoopCaps{MaxRounds: adviseMaxRounds, MaxCalls: adviseMaxCalls, ToolMemo: newToolMemo(), ObserveResult: func(name string, outcome ToolOutcome) {
 		if opts.Action != nil {
 			opts.Action(name, string(outcome))
 		}
@@ -162,14 +170,14 @@ func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig
 		}
 		return nil
 	}}
-	final, _, err := runToolLoop(ctx, m, reg, msgs, caps)
+	final, _, err := runToolLoopChain(ctx, chain, reg, msgs, caps)
 	if err == nil && required != "" && !requiredCalled {
 		if toolCalls < adviseMaxCalls {
 			reminder := "The user requested a tool action, but you did not call the required tool. Call it now using only the user-named target or file. Do not claim the action ran without a tool result."
 			msgs = append(msgs, llms.TextParts(llms.ChatMessageTypeSystem, reminder))
 			caps.MaxRounds = 3
 			caps.MaxCalls = adviseMaxCalls - toolCalls
-			final, _, err = runToolLoop(ctx, m, reg, msgs, caps)
+			final, _, err = runToolLoopChain(ctx, chain, reg, msgs, caps)
 		}
 		if err == nil && !requiredCalled {
 			return "", 0, errors.New("native chat: requested " + required + " was not performed; no " + required + " tool call")

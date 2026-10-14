@@ -3,17 +3,22 @@ package main
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
+
+	"blkchain/cli/internal/ragconfig"
 
 	"github.com/tmc/langchaingo/llms"
 )
@@ -548,5 +553,230 @@ func TestNewModelChainBuildsOneClientPerIDWithoutNetworkIO(t *testing.T) {
 	}
 	if c, err := newModelChain(cfg, nil); err == nil || c != nil {
 		t.Errorf("empty ids: got chain %v err %v, want nil and an error", c, err)
+	}
+}
+
+// toolLoopFailoverChain returns a two-model chain whose first model completes
+// one call of the tool "t" and then fails with first, and whose second model
+// requests the same call and answers, plus the tool and the second model.
+func toolLoopFailoverChain(first error) (*modelChain, *fakeTool, *fakeModel) {
+	a := &fakeModel{
+		queue: []*llms.ContentResponse{callResp("c1", "t", "{}"), textResp("unreached")},
+		errs:  []error{nil, first},
+	}
+	b := callThenAnswer()
+	chain := &modelChain{ids: []string{"a", "b"}, clients: []toolLoopModel{a, b}}
+	return chain, okTool(), b
+}
+
+// TestFailoverRunsACompletedToolExactlyOnce is the acceptance for the no-replay
+// record: the first model completes a tool call and then fails for a reason
+// that advances the chain, and the tool must not run again.
+func TestFailoverRunsACompletedToolExactlyOnce(t *testing.T) {
+	chain, tool, b := toolLoopFailoverChain(errors.New("API returned unexpected status code: 503: down"))
+	caps := LoopCaps{MaxRounds: 5, MaxCalls: 5, ToolMemo: newToolMemo()}
+	final, _, err := runToolLoopChain(context.Background(), chain, newLoopReg(t, tool), userMsgs(), caps)
+	if err != nil {
+		t.Fatalf("runToolLoopChain: %v", err)
+	}
+	if len(tool.ran) != 1 {
+		t.Errorf("tool ran %d times across the failover, want 1", len(tool.ran))
+	}
+	if b.calls == 0 {
+		t.Error("the second model was never called after an eligible failure")
+	}
+	if final == "" {
+		t.Error("the second model's answer did not reach the caller")
+	}
+}
+
+// TestFailoverDoesNotAdvanceOnADenial is the other half: an error that is not
+// the model's fault ends the turn, and the tool is not run a second time
+// against another model.
+func TestFailoverDoesNotAdvanceOnADenial(t *testing.T) {
+	chain, tool, b := toolLoopFailoverChain(errors.New("engagement scope refused: target outside scope"))
+	caps := LoopCaps{MaxRounds: 5, MaxCalls: 5, ToolMemo: newToolMemo()}
+	if _, _, err := runToolLoopChain(context.Background(), chain, newLoopReg(t, tool), userMsgs(), caps); err == nil {
+		t.Fatal("a denial was swallowed, want it returned")
+	}
+	if b.calls != 0 {
+		t.Errorf("the second model was called %d times after a denial", b.calls)
+	}
+	if len(tool.ran) != 1 {
+		t.Errorf("tool ran %d times, want 1", len(tool.ran))
+	}
+}
+
+// TestRunToolLoopChainRefusesAnEmptyChain pins that an empty chain is an error
+// rather than a silent empty answer.
+func TestRunToolLoopChainRefusesAnEmptyChain(t *testing.T) {
+	var nilChain *modelChain
+	for name, c := range map[string]*modelChain{"nil": nilChain, "empty": {}} {
+		final, _, err := runToolLoopChain(context.Background(), c, newLoopReg(t), userMsgs(), LoopCaps{})
+		if err == nil || final != "" {
+			t.Errorf("%s chain: got final %q err %v, want an empty answer and an error", name, final, err)
+		}
+	}
+}
+
+// TestRunToolLoopChainRecordsTheModelThatAnswered pins the provenance a turn
+// reports: after the first model fails over, the chain must name the second.
+func TestRunToolLoopChainRecordsTheModelThatAnswered(t *testing.T) {
+	chain, tool, _ := toolLoopFailoverChain(errors.New("API returned unexpected status code: 503: down"))
+	caps := LoopCaps{MaxRounds: 5, MaxCalls: 5, ToolMemo: newToolMemo()}
+	if _, _, err := runToolLoopChain(context.Background(), chain, newLoopReg(t, tool), userMsgs(), caps); err != nil {
+		t.Fatalf("runToolLoopChain: %v", err)
+	}
+	if got := chain.answered(); got != "b" {
+		t.Errorf("answered: got %q want %q", got, "b")
+	}
+	if got := chain.primary(); got != "a" {
+		t.Errorf("primary: got %q want %q", got, "a")
+	}
+}
+
+// roleCall is one request the role fixture server received: the model id the
+// request body carried and the turn stage that sent it.
+type roleCall struct {
+	model string
+	stage string
+}
+
+// roleLLM stands in for the model server and records the model id of every
+// request it receives, tagged by the stage that sent it. The action classifier
+// and the query router are the turn's decisions; a streamed request is its
+// answer. Each decision is answered with the one word that keeps the turn on
+// the skip route, so the turn makes exactly those three calls.
+//
+// The body is the oracle because it is what the turn actually sends: a model id
+// this code resolved but never used cannot appear here.
+func roleLLM(t *testing.T) (*httptest.Server, func() []roleCall) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []roleCall
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			http.NotFound(w, r)
+			return
+		}
+		raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "unreadable request", http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			Model  string `json:"model"`
+			Stream bool   `json:"stream"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			http.Error(w, "unreadable request", http.StatusBadRequest)
+			return
+		}
+		stage, reply := "other", "IRRELEVANT"
+		switch {
+		case body.Stream:
+			stage, reply = "answering", ""
+		case strings.Contains(string(raw), "Classify the current user request"):
+			stage, reply = "classify", "ADVICE"
+		case strings.Contains(string(raw), "You decide how to handle the user's message"):
+			stage, reply = "route", "SKIP"
+		}
+		mu.Lock()
+		seen = append(seen, roleCall{model: body.Model, stage: stage})
+		mu.Unlock()
+		if body.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"an answer\"}}]}\n\ndata: [DONE]\n\n")
+			return
+		}
+		content, _ := json.Marshal(reply)
+		fmt.Fprintf(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}]}`, content)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []roleCall {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(seen)
+	}
+}
+
+// roleTurnCfg points the LLM stack at srv and returns a config that names a
+// different model for each role, with the fallback resolved from the
+// environment so no model-list call is made.
+func roleTurnCfg(t *testing.T, srv *httptest.Server) ragconfig.Config {
+	t.Helper()
+	t.Setenv("OMLX_BASE_URL", srv.URL)
+	t.Setenv("OMLX_MODEL", "fallback-model")
+	t.Setenv("OMLX_API_KEY", "test-key")
+	t.Setenv("TAVILY_SETUP_TOKEN", "")
+	cfg := answerCfg(2)
+	cfg.RouterModel = "router-model"
+	cfg.AssessmentModel = "assessment-model"
+	return cfg
+}
+
+// TestATurnDecidesOnTheRouterModelAndAnswersOnTheAssessmentModel is the
+// acceptance for the whole plan: the two kinds of call a turn makes reach two
+// different models.
+func TestATurnDecidesOnTheRouterModelAndAnswersOnTheAssessmentModel(t *testing.T) {
+	srv, recorded := roleLLM(t)
+	cfg := roleTurnCfg(t, srv)
+
+	ans, _, _, _, _, route, err := adaptiveAnswer(context.Background(), &recSearcher{}, cfg,
+		"write a limerick", enabledRoutes{Local: true, Web: false}, false, AnswerOpts{})
+	if err != nil {
+		t.Fatalf("adaptiveAnswer: %v", err)
+	}
+	if route != "skip" || ans == "" {
+		t.Fatalf("route = %q answer = %q, want an answer on the skip route", route, ans)
+	}
+	decisions, answers := 0, 0
+	for _, c := range recorded() {
+		switch c.stage {
+		case "classify", "route":
+			decisions++
+			if c.model != "router-model" {
+				t.Errorf("the %s call used model %q, want the router model", c.stage, c.model)
+			}
+		case "answering":
+			answers++
+			if c.model != "assessment-model" {
+				t.Errorf("the answering call used model %q, want the assessment model", c.model)
+			}
+		default:
+			t.Errorf("unexpected %s call on model %q", c.stage, c.model)
+		}
+	}
+	if decisions != 2 {
+		t.Errorf("the turn made %d decision calls, want the action classifier and the query router", decisions)
+	}
+	if answers != 1 {
+		t.Errorf("the turn made %d answering calls, want 1", answers)
+	}
+}
+
+// TestANamedModelAnswersEveryCallOfTheTurn is the regression test from the
+// other side: an operator who names a model gets that model for every call,
+// whatever the two roles are configured to be.
+func TestANamedModelAnswersEveryCallOfTheTurn(t *testing.T) {
+	srv, recorded := roleLLM(t)
+	cfg := roleTurnCfg(t, srv)
+
+	ans, _, _, _, _, route, err := adaptiveAnswer(context.Background(), &recSearcher{}, cfg,
+		"write a limerick", enabledRoutes{Local: true, Web: false}, false, AnswerOpts{Model: "picked-model"})
+	if err != nil {
+		t.Fatalf("adaptiveAnswer: %v", err)
+	}
+	if route != "skip" || ans == "" {
+		t.Fatalf("route = %q answer = %q, want an answer on the skip route", route, ans)
+	}
+	calls := recorded()
+	if len(calls) != 3 {
+		t.Fatalf("the turn made %d calls, want the classifier, the router and the answer", len(calls))
+	}
+	for _, c := range calls {
+		if c.model != "picked-model" {
+			t.Errorf("the %s call used model %q, want the named model", c.stage, c.model)
+		}
 	}
 }

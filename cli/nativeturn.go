@@ -277,10 +277,27 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 	}
 	started := time.Now()
 
-	turnModel := strings.TrimSpace(req.Model)
-	if turnModel == "" {
-		turnModel = resolveModel(cfg)
+	// Both chains are resolved once here, and opts.Model carries only what the
+	// caller named. Resolving the model for the caller instead would make every
+	// turn look like an explicit pick to roleChains, which answers an explicit
+	// pick with that one model for both roles.
+	routerIDs, assessmentIDs := roleChains(cfg, req.Model)
+	var routerChain, assessmentChain *modelChain
+	if len(routerIDs) > 0 && len(assessmentIDs) > 0 {
+		routerChain, err = newModelChain(cfg, routerIDs)
+		if err != nil {
+			return turnResult{}, err
+		}
+		assessmentChain, err = newModelChain(cfg, assessmentIDs)
+		if err != nil {
+			return turnResult{}, err
+		}
 	}
+	// The turn reports the model that answers it, which is the assessment
+	// chain's: its primary until a call succeeds, then the model that answered.
+	// A chain is empty only when roleChains found no model at all, which is the
+	// blank id a turn records today.
+	turnModel := assessmentChain.primary()
 
 	var actions []turnAction
 	prefs := loadPrefs()
@@ -290,7 +307,7 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		ToolHost:   toolHost,
 		BrowserCDP: req.BrowserCDP,
 		Browser:    req.Browser,
-		Model:      turnModel,
+		Model:      strings.TrimSpace(req.Model),
 		History:    history,
 		Preface:    req.Preface,
 		NoWeb:      !prefs.Web,
@@ -307,11 +324,18 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 				req.Persona(domain)
 			}
 		},
+		routerChain:     routerChain,
+		assessmentChain: assessmentChain,
 	}
 
 	answer, cits, usedWeb, results, tokens, route, err := adaptiveAnswerFn(ctx, rc, cfg, question, askRoutes(prefs), req.ForceRag, opts)
 	if err != nil && strings.TrimSpace(answer) == "" {
 		return turnResult{}, err
+	}
+	if err == nil {
+		if answered := assessmentChain.answered(); answered != "" {
+			turnModel = answered
+		}
 	}
 
 	calls, partial := metrics.snapshot()
@@ -319,7 +343,7 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		Answer:    answer,
 		Citations: cits,
 		UsedWeb:   usedWeb,
-		Model:     opts.Model,
+		Model:     turnModel,
 		Agent:     chosenAgent,
 		Route:     route,
 		Actions:   collapseActions(actions),
@@ -342,7 +366,7 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		// would carry it into every turn that follows. The answer still reaches
 		// the caller with the error.
 		if err == nil {
-			if perr := persistTurn(sess, opts.Model, question, answer, tokens); perr != nil {
+			if perr := persistTurn(sess, turnModel, question, answer, tokens); perr != nil {
 				return res, fmt.Errorf("conversation save failed: %w", perr)
 			}
 		}

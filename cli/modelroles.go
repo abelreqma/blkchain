@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"blkchain/cli/internal/ragconfig"
+	"blkchain/cli/internal/tooldef"
 
 	"github.com/tmc/langchaingo/llms"
 )
@@ -236,4 +237,36 @@ func (c *modelChain) GenerateContent(ctx context.Context, msgs []llms.MessageCon
 		}
 	}
 	return resp, err
+}
+
+// runToolLoopChain drives the tool loop over one role's chain. The first
+// attempt uses the chain's first model; a failure that means the model could
+// not answer (see failoverEligible) advances to the next and RESTARTS the loop
+// from the same messages, rather than continuing a half-built tool
+// conversation the next model may not accept. caps.ToolMemo, when set, carries
+// the results of the calls that already ran to completion across those
+// restarts, so a tool with a side effect runs once for the turn. Every other
+// error, a cancellation included, is returned as it is.
+func runToolLoopChain(ctx context.Context, chain *modelChain, reg *tooldef.Registry, msgs []llms.MessageContent, caps LoopCaps, extra ...llms.CallOption) (string, int, error) {
+	if chain == nil || len(chain.clients) == 0 {
+		return "", 0, fmt.Errorf("no model available for the tool loop")
+	}
+	var final string
+	var rounds int
+	var err error
+	for i, m := range chain.clients {
+		if cerr := ctx.Err(); cerr != nil {
+			return "", rounds, cerr
+		}
+		caps.ToolMemo.beginAttempt()
+		final, rounds, err = runToolLoop(ctx, m, reg, msgs, caps, extra...)
+		if err == nil {
+			chain.markAnswered(i)
+			return final, rounds, nil
+		}
+		if i == len(chain.clients)-1 || !failoverEligible(err) {
+			return final, rounds, err
+		}
+	}
+	return final, rounds, err
 }

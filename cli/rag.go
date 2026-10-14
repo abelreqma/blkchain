@@ -232,8 +232,20 @@ type AnswerOpts struct {
 	History        []priorTurn
 	llm            toolLoopModel // reuse this client if set; nil builds one
 	requiredAction string
-	Browser        *chatBrowserState
-	webEvidence    *chatWebProvenance
+	// routerChain and assessmentChain are the turn's two model chains. When
+	// they are set the turn uses them; when they are nil adaptiveAnswer
+	// resolves them itself, so a caller that does not know about roles still
+	// works.
+	routerChain     *modelChain
+	assessmentChain *modelChain
+	// router grades retrieved context. nil falls back to the client that
+	// synthesizes, which is what every caller outside adaptiveAnswer does.
+	router toolLoopModel
+	// assessment drives the tool loop over its whole chain. nil makes
+	// adviseLoop build a one-model chain from the client it was passed.
+	assessment  *modelChain
+	Browser     *chatBrowserState
+	webEvidence *chatWebProvenance
 }
 
 // priorTurn is one earlier message in the conversation. Role is "human" or
@@ -378,6 +390,12 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 			return "", nil, false, results, 0, err
 		}
 	}
+	// Grading is a short decision, so it goes to the router when the caller
+	// named one. Every other caller grades with the client that synthesizes.
+	grader := opts.router
+	if grader == nil {
+		grader = l
+	}
 
 	searchQuery := question
 	// Automatic searches require saved permission and an available provider.
@@ -402,7 +420,7 @@ func AnswerLoop(ctx context.Context, rc searcher, cfg ragconfig.Config, question
 	}
 	for i := 0; i < maxLoops; i++ {
 		stage(stageGrading)
-		g, gerr := gradeContext(ctx, l, cfg, question, results)
+		g, gerr := gradeContext(ctx, grader, cfg, question, results)
 		if gerr != nil {
 			// Degrade: proceed to synthesis with whatever we already have.
 			break
