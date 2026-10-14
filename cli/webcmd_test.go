@@ -143,8 +143,16 @@ func TestRoEWebSocketSendNeedsWriteAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := webacquire.Request{Method: "WEBSOCKET", URL: "http://127.0.0.1/socket"}
-	if err := newWebBroker(gate, nil).Policy.Authorize(context.Background(), request); err == nil {
+	// A WebSocket send is an active action, so it carries the tier arm
+	// requirement as well as the action class. Both brokers are armed, so the
+	// verdicts below turn on the RoE action list alone.
+	armed := func() bool { return true }
+	err = newWebBroker(gate, armed).Policy.Authorize(context.Background(), request)
+	if err == nil {
 		t.Fatal("WebSocket message bypassed api-write RoE action")
+	}
+	if !strings.Contains(err.Error(), "api-write") {
+		t.Fatalf("denied for %q, want the missing api-write action", err)
 	}
 	allowed, err := ParseRoE(strings.NewReader("## In Scope\n127.0.0.1\n## Allowed Actions\napi-read\napi-write\n"))
 	if err != nil {
@@ -154,8 +162,12 @@ func TestRoEWebSocketSendNeedsWriteAction(t *testing.T) {
 	if err := allowedGate.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if err := newWebBroker(allowedGate, nil).Policy.Authorize(context.Background(), request); err != nil {
+	if err := newWebBroker(allowedGate, armed).Policy.Authorize(context.Background(), request); err != nil {
 		t.Fatalf("RoE-authorized WebSocket message denied: %v", err)
+	}
+	// Unarmed, the same RoE-authorized send is denied for its tier.
+	if err := newWebBroker(allowedGate, nil).Policy.Authorize(context.Background(), request); err == nil {
+		t.Fatal("unarmed WebSocket message was authorized")
 	}
 }
 
