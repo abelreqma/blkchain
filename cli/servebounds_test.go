@@ -146,8 +146,11 @@ func TestServeRefusesATurnPastTheConcurrencyCap(t *testing.T) {
 	if over.Code != http.StatusServiceUnavailable {
 		t.Fatalf("a turn past the cap of %d: status = %d, want %d; body %q", serveMaxConcurrentTurns, over.Code, http.StatusServiceUnavailable, over.Body.String())
 	}
-	if !strings.Contains(over.Body.String(), "already in flight") {
-		t.Errorf("the refusal body = %q, want it to name the turns in flight", over.Body.String())
+	// The server's own message, not the per-session one: "already in flight"
+	// alone is satisfied by the 409 as well, so it would not tell the two
+	// refusals apart.
+	if want := fmt.Sprintf("%d turns are already in flight", serveMaxConcurrentTurns); !strings.Contains(over.Body.String(), want) {
+		t.Errorf("the refusal body = %q, want it to name the %q bound", over.Body.String(), want)
 	}
 
 	h.finish()
@@ -203,8 +206,12 @@ func TestServeBoundsATurnByTheRequestTimeout(t *testing.T) {
 	}
 
 	// The turn released its gate slot on the way out, so the session is usable.
-	if _, err := s.turns.acquire(id); err != nil {
+	// The slot this check takes is released again, or the check would leak one.
+	release, err := s.turns.acquire(id)
+	if err != nil {
 		t.Errorf("the session is still held after the timeout: %v", err)
+	} else {
+		release()
 	}
 }
 
@@ -265,7 +272,7 @@ func TestServeStopsAnSSEStreamAtItsCapAndSaysSo(t *testing.T) {
 	for i := range deltas {
 		deltas[i] = chunk
 	}
-	installServeTurnRouter(t, serveTurnRouter{answer: "an answer", deltas: deltas, tokens: 1})
+	calls := installServeTurnRouter(t, serveTurnRouter{answer: "an answer", deltas: deltas, tokens: 1})
 
 	sink := &serveSSESink{}
 	s.handler().ServeHTTP(sink, serveTurnPost(t, serveBoundsTurnPath(id, serveTurnsStreamSuffix), "127.0.0.1:54321", `{"message":"q"}`))
@@ -298,6 +305,13 @@ func TestServeStopsAnSSEStreamAtItsCapAndSaysSo(t *testing.T) {
 	}
 	if got := sink.count("run.completed"); got != 0 {
 		t.Errorf("a cut stream also reported run.completed %d times", got)
+	}
+
+	// Half three: the turn is cut too. Past the cap every event is dropped, so a
+	// turn left running would spend the rest of its deadline producing output
+	// nothing writes.
+	if got := calls.streamed.Load(); got >= int32(offers) {
+		t.Errorf("the router offered %d of %d deltas, so reaching the cap did not cancel the turn", got, offers)
 	}
 }
 

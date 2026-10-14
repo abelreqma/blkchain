@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -49,7 +50,7 @@ func serveSessionIDFromPath(p string) (string, error) {
 
 // handleCreateSession starts a session and records it as one this server may
 // continue. The transcript file is written on the first turn, so the session is
-// listed immediately but has no transcript to read until then.
+// listed immediately and reads with no turns until then.
 func (s *serveServer) handleCreateSession(w http.ResponseWriter, _ *http.Request) {
 	sess, err := newSession()
 	if err == nil {
@@ -88,7 +89,13 @@ func (s *serveServer) handleListSessions(w http.ResponseWriter, _ *http.Request)
 // The body is the MCP session resource, so both transports bound a read the
 // same way: at most sessionResourceMaxBytes, keeping the newest turns, with
 // "trimmed": true in the body when anything was dropped or cut. A malformed id
-// is 400 and a well-formed id naming no session is 404.
+// is 400 and an id that names nothing is 404.
+//
+// A session with no transcript yet reads as 200 with no turns rather than 404.
+// The transcript is written by the first turn, so an id this server created, or
+// one the listing carries, names a session that exists and has nothing in it; a
+// client that creates a session and reads it back would otherwise have to treat
+// 404 as "it may exist".
 func (s *serveServer) handleReadSession(w http.ResponseWriter, r *http.Request) {
 	id, err := serveSessionIDFromPath(r.URL.Path)
 	if err != nil {
@@ -97,6 +104,8 @@ func (s *serveServer) handleReadSession(w http.ResponseWriter, r *http.Request) 
 	}
 	payload, err := mcpSessionResource(id)
 	switch {
+	case errors.Is(err, errSessionNotFound) && s.sessionExistsEmpty(id):
+		serveWriteJSON(w, http.StatusOK, serveEmptySessionBody(id))
 	case errors.Is(err, errSessionNotFound):
 		serveRefuse(w, http.StatusNotFound, "session not found")
 	case err != nil:
@@ -104,4 +113,29 @@ func (s *serveServer) handleReadSession(w http.ResponseWriter, r *http.Request) 
 	default:
 		serveWriteJSON(w, http.StatusOK, json.RawMessage(payload))
 	}
+}
+
+// sessionExistsEmpty reports whether an id with no transcript names a session
+// that exists: one this server created, or one the listing carries because
+// another surface opened it. An id that names neither is reported as missing.
+func (s *serveServer) sessionExistsEmpty(id string) bool {
+	if s.owned.has(id) {
+		return true
+	}
+	metas, err := listSessions()
+	if err != nil {
+		return false
+	}
+	return slices.ContainsFunc(metas, func(m sessionMeta) bool { return m.ID == id })
+}
+
+// serveEmptySessionBody is the read body for a session with nothing in it. The
+// keys are mcpSessionResource's, less the ones only a turn supplies: no title,
+// no model, no "trimmed", a zero count and an empty turn list.
+func serveEmptySessionBody(id string) any {
+	return struct {
+		ID       string        `json:"id"`
+		MsgCount int           `json:"msg_count"`
+		Turns    []sessionTurn `json:"turns"`
+	}{ID: id, Turns: []sessionTurn{}}
 }

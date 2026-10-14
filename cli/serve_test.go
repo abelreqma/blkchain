@@ -518,18 +518,23 @@ func TestServeHandlerGuardsEveryRoute(t *testing.T) {
 			want  int
 			says  string
 			shape func(*http.Request)
+			// sends is how many identical requests the probe makes, for a check
+			// that refuses on what came before rather than on one request. Zero
+			// means one.
+			sends int
 		}{
-			{"an oversize body", "", oversize, http.StatusRequestEntityTooLarge, "exceeds", nil},
+			{"an oversize body", "", oversize, http.StatusRequestEntityTooLarge, "exceeds", nil, 0},
 			{"a body that is not JSON", "", `{}`, http.StatusUnsupportedMediaType, "must be application/json", func(r *http.Request) {
 				r.Header.Set("Content-Type", "text/plain")
-			}},
+			}, 0},
 			{"a Host the bind does not serve", "", `{}`, http.StatusMisdirectedRequest, "must be loopback", func(r *http.Request) {
 				r.Host = "rebound.example"
-			}},
+			}, 0},
 			{"an Origin", "", `{}`, http.StatusForbidden, "no browser origin", func(r *http.Request) {
 				r.Header.Set("Origin", "http://evil.example")
-			}},
-			{"no bearer token", serveTestToken, `{}`, http.StatusUnauthorized, "authorization required", nil},
+			}, 0},
+			{"a burst past the rate limit", "", `{}`, http.StatusTooManyRequests, "rate limit", nil, serveRateLimitBurst + 1},
+			{"no bearer token", serveTestToken, `{}`, http.StatusUnauthorized, "authorization required", nil, 0},
 		} {
 			t.Run(method+" "+path+" with "+probe.name, func(t *testing.T) {
 				// The session handlers reach the store whenever the guard admits
@@ -539,15 +544,19 @@ func TestServeHandlerGuardsEveryRoute(t *testing.T) {
 				srv := httptest.NewServer(s.handler())
 				t.Cleanup(srv.Close)
 
-				req, err := http.NewRequest(method, srv.URL+path, strings.NewReader(probe.body))
-				if err != nil {
-					t.Fatal(err)
+				var resp *http.Response
+				var got string
+				for range max(probe.sends, 1) {
+					req, err := http.NewRequest(method, srv.URL+path, strings.NewReader(probe.body))
+					if err != nil {
+						t.Fatal(err)
+					}
+					req.Header.Set("Content-Type", "application/json")
+					if probe.shape != nil {
+						probe.shape(req)
+					}
+					resp, got = serveSend(t, req)
 				}
-				req.Header.Set("Content-Type", "application/json")
-				if probe.shape != nil {
-					probe.shape(req)
-				}
-				resp, got := serveSend(t, req)
 				if resp.StatusCode != probe.want {
 					t.Errorf("%s %s with %s: status = %d, want %d; body %q", method, path, probe.name, resp.StatusCode, probe.want, got)
 				}

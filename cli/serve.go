@@ -134,12 +134,19 @@ const (
 	serveRateLimitBurst     = 32
 )
 
-// serveRateLimiter is one server's token bucket. The limit is per process, not
+// serveRateLimiter is one server's token bucket. The limit is per server, not
 // per IP, because every caller this server admits reached the bind the exposure
 // decision allowed: on the default exposure that is loopback, so there is one
 // caller to bound and a per-IP bucket would be a bucket for the single address
 // 127.0.0.1. What needs bounding is this server's own work, not a peer's share
 // of it.
+//
+// The budget is shared, and the chain spends it ahead of the token check, so an
+// unauthenticated local process can spend it and leave the operator's own
+// authenticated client refused with 429. A request a browser defense refuses
+// costs no token, so a flood cannot deepen that through those paths, while one
+// that is admitted and then answered 401 does cost one. That is the trade
+// bounding an unauthenticated flood before the token comparison buys.
 type serveRateLimiter struct {
 	mu     sync.Mutex
 	tokens float64
@@ -449,9 +456,13 @@ func requireBindHost(r *http.Request, mode serveHostMode, bind string) (int, str
 }
 
 // rejectAnyOrigin rejects a request carrying an Origin header. No origin is
-// allowed, because a command-line client sends none and a browser always does,
-// and a loopback origin is still a browser. 403 is the status for a request the
-// server understands and refuses on the caller's identity.
+// allowed: a command-line client sends none, while a browser sends one on every
+// request it makes in CORS mode and on every request whose method is not GET or
+// HEAD, which is what makes this refusal close the mutating paths. A loopback
+// origin is still a browser. A no-cors GET a page issues as a subresource
+// carries no Origin and passes this control, which is why the Host rule and the
+// JSON content type each have to stand on their own. 403 is the status for a
+// request the server understands and refuses on the caller's identity.
 func rejectAnyOrigin(r *http.Request) (int, string) {
 	if len(r.Header.Values("Origin")) == 0 {
 		return 0, ""

@@ -112,6 +112,60 @@ func TestServeCreateSessionReturnsAnOwnedID(t *testing.T) {
 	}
 }
 
+// A session this server created reads as 200 with no turns before its first
+// turn, and an id that names nothing is still 404, so a client that creates a
+// session and reads it back does not have to treat 404 as "it may exist".
+func TestServeReadsACreatedSessionBeforeItsFirstTurn(t *testing.T) {
+	srv, _ := sessionTestServer(t)
+
+	resp, body := sessionDo(t, srv, http.MethodPost, "/v1/sessions")
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body %s", resp.StatusCode, body)
+	}
+	var meta sessionMeta
+	if err := json.Unmarshal([]byte(body), &meta); err != nil {
+		t.Fatalf("body is not a sessionMeta: %v: %s", err, body)
+	}
+	// The control: no transcript exists yet, so this is the empty read and not
+	// a read of a session some other write created.
+	if sessionExists(meta.ID) {
+		t.Fatalf("session %q already has a transcript, so the read below proves nothing", meta.ID)
+	}
+
+	resp, body = sessionDo(t, srv, http.MethodGet, "/v1/sessions/"+meta.ID)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("read status = %d, want 200; body %s", resp.StatusCode, body)
+	}
+	var out struct {
+		ID       string            `json:"id"`
+		MsgCount int               `json:"msg_count"`
+		Turns    []json.RawMessage `json:"turns"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("decode %s: %v", body, err)
+	}
+	if out.ID != meta.ID || out.MsgCount != 0 {
+		t.Errorf("read = id %q msg_count %d, want %q and 0", out.ID, out.MsgCount, meta.ID)
+	}
+	if out.Turns == nil || len(out.Turns) != 0 {
+		t.Errorf("turns = %v, want an empty list and not a missing key", out.Turns)
+	}
+}
+
+// The other half: an id this server did not create and the listing does not
+// carry names nothing, so it is 404 and not an empty session.
+func TestServeReadOfAnUnknownSessionIsNotFound(t *testing.T) {
+	srv, _ := sessionTestServer(t)
+
+	resp, body := sessionDo(t, srv, http.MethodGet, "/v1/sessions/20260101T000000-abcdef")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "session not found") {
+		t.Errorf("body = %s, want the refusal to say the session was not found", body)
+	}
+}
+
 func TestServeListSessionsIsBoundedAndReadsEverySession(t *testing.T) {
 	srv, s := sessionTestServer(t)
 	for i := 0; i < sessionResourceListCap+5; i++ {
