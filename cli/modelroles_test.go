@@ -866,3 +866,88 @@ func TestTheTUITurnCarriesOnlyTheOperatorsPick(t *testing.T) {
 			got.routerChain.primary(), got.assessmentChain.primary())
 	}
 }
+
+// generateServer answers every chat request with a streamed reply, records the
+// model id each request carried, and answers 503 for the ids in down.
+func generateServer(t *testing.T, down ...string) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			http.NotFound(w, r)
+			return
+		}
+		raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "unreadable request", http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			http.Error(w, "unreadable request", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		seen = append(seen, body.Model)
+		mu.Unlock()
+		if slices.Contains(down, body.Model) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"error":{"message":"upstream unavailable","type":"server_error"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"an answer\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(seen)
+	}
+}
+
+// TestGenerateAnswersOnTheAssessmentModelAndRecordsIt drives generateCmd with
+// the real SynthesizeFromResults against a recording server. The synthesis call
+// must reach the assessment model, and the streamDoneMsg must name the model
+// that answered, including after the assessment model fails over. It does not
+// cover the Update path that turns the message into a transcript record.
+func TestGenerateAnswersOnTheAssessmentModelAndRecordsIt(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		down       []string
+		wantCalled []string
+		wantBy     string
+	}{
+		{"assessment model answers", nil, []string{"assessment-model"}, "assessment-model"},
+		{"failover to the default", []string{"assessment-model"}, []string{"assessment-model", "fallback-model"}, "fallback-model"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv, recorded := generateServer(t, c.down...)
+			t.Setenv("OMLX_BASE_URL", srv.URL)
+			t.Setenv("OMLX_MODEL", "fallback-model")
+			t.Setenv("OMLX_API_KEY", "test-key")
+			m := newKeyModel(t)
+			m.cfg.RouterModel = "router-model"
+			m.cfg.AssessmentModel = "assessment-model"
+			m.resolvedModel = "fallback-model"
+
+			results := []retrieval.Result{chunk("wstg", "a.md", "s", "text")}
+			done, ok := m.generateCmd(context.Background(), "a question", results, m.turnStart)().(streamDoneMsg)
+			if !ok {
+				t.Fatal("generateCmd did not return a streamDoneMsg")
+			}
+			if done.err != nil || done.full == "" {
+				t.Fatalf("synthesis did not complete: err %v answer %q", done.err, done.full)
+			}
+			if got := recorded(); !slices.Equal(got, c.wantCalled) {
+				t.Errorf("synthesis reached models %v, want %v", got, c.wantCalled)
+			}
+			if done.answeredBy != c.wantBy {
+				t.Errorf("answeredBy = %q, want %q", done.answeredBy, c.wantBy)
+			}
+		})
+	}
+}
