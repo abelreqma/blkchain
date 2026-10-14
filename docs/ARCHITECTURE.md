@@ -309,7 +309,9 @@ Recorded prose or an incomplete scan cannot mark them complete. Without a curren
 `open|filtered` port on a literal IP, version and script checks are audited as not applicable.
 An alternate source-port candidate still reaches the protocol-validation tier.
 Explicit local terminal actions and configured MCP server tools are separate execution paths and
-do not inherit this built-in target tool service check.
+do not inherit this built-in target tool service check. An engagement task's gated MCP request
+tools are the exception: they run the whole web-action gate, so the service check applies to them
+as it does to the native web request tool.
 
 The declared foothold is the one deliberate exception to the network half, and it is bounded. A
 command carried to an operator-declared foothold runs on a host whose egress is not ours to filter,
@@ -396,6 +398,55 @@ the other's reachability from its own response.
   session, four across the server with no queue, the request timeout per turn (300 seconds by
   default), 32 MiB per stream, and 240 requests per minute with a burst of 32 for the whole
   process rather than per peer.
+- An outbound MCP tool reaches an engagement task only through the classifier in `cli/engagemcp.go`,
+  whose zero value denies: a tool it does not name, and every tool of a server it does not name, is
+  not registered for a task, so a server wired for interactive use does not follow into an
+  engagement until it is classified. Burp's three request tools are wrapped by `gatedMCPTool`, which
+  resolves the method and URL from the call's own `targetHostname` and `targetPort` rather than the
+  request's `Host` header, because the connection target is what the packet reaches, and authorizes
+  them through `Gate.AuthorizeAPIRequest`, the same path the native `web_api` tool uses: scope, the
+  phase tier with its armed-task requirement for a state-changing method, the service check,
+  confirmation, rate, recheck, and audit. The origin-form request target from the raw request line
+  is carried into that URL so a confirmation names a path; a target that is not origin form, or that
+  holds `//`, contributes none. `send_to_intruder` carries the `INTRUDER-FUZZ` sentinel, which the
+  gate tiers as active whatever the request line says and whose hyphen the method pattern cannot
+  match, so request content cannot forge the label. Burp's instrument-state tools and the two
+  `output_*` configuration dumps are denied because a task reads them without the per-call operator
+  attention the chat path has; the chat path keeps them. Registration keys on the task's surface
+  rather than on the running executor (`cli/engageintegrations.go`), because `genericExecutor.Run`
+  builds the web registry and is also the fallback for every surface with no registered executor.
+- A Burp read is not filtered by engagement scope. The proxy-history tools return the whole Burp
+  project's history, which can hold the operator's own browsing and another engagement's traffic
+  including credentials in headers, and `get_active_editor_contents` returns whatever request is
+  open in the instrument. Filtering it from outside Burp is not possible, and reading what Burp saw
+  is the point of the integration. `get_collaborator_interactions` is classified as a read and does
+  cause outbound traffic, because Burp polls its Collaborator server to answer it, with a
+  destination that is not caller-controlled. An outbound MCP tool's output is also not captured
+  output: `record_evidence` at every executor that registers these tools accepts only a quote the
+  task's captured store already holds, which the `run_command` tools, `cli/webcapture.go` and
+  `cli/webjobs.go` write, so a Burp read or an authorized Burp send has to be reproduced through
+  those before it can back a finding.
+- An MCP server that cannot be opened costs that server's tools and not the task. The gated tools
+  are registered only once every session has opened, so no degrade path leaves a tool over a closed
+  session; the engagement records `mcp-unavailable` through the audit seam and runs on, and a
+  failure to write that record fails the task. A malformed `mcp-clients.json` fails the task,
+  because a config written wrongly is not a transient instrument state. The chat path treats both as
+  fatal, where the failure is immediate feedback to an operator driving the turn.
+- The out-of-band tools (`cli/chatoob.go`) register for every engagement surface, because any
+  surface can be made to call out, and they take no scope check, because the interactsh server is
+  operator infrastructure in the same class as the model server and the vector store. Their bounds
+  are the control: four servers, four payloads, fifty interactions per report, a 256 KiB window over
+  the recorded interactions, an 8 KiB client log, and a thirty-minute session. A read that finds no
+  complete record inside the window says so rather than reporting no interactions. Injecting a
+  payload into a target is a separate action the gate authorizes.
+- The engagement web stack sends its own requests through a loopback intercepting proxy when one is
+  listening (`cli/webupstream.go`), on by default at `127.0.0.1:8080` and off when
+  `BLKCHAIN_WEB_PROXY` is `off`, when nothing is listening, or when the value is not a loopback IP
+  address and a TCP port. A hostname is refused because the address it resolves to is not checked
+  again before the proxy carries engagement traffic. A pivoted surface takes none
+  (`cli/webisolation.go`), because the foothold carrier it dials through is what an upstream proxy
+  would replace. The trust anchor is whatever is listening on that address, so the notice names the
+  CA subject it accepted.
 - A dispatched `vuln-analysis` task with a recognized HTTP or HTTPS manifest URL fetches through
   the RoE command gate before model execution. The fixed `curl` request has a 10-second and 16 MiB
   transfer bound, does not follow redirects, and stages material only on HTTP 200. URL credentials,
