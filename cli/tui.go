@@ -2622,19 +2622,20 @@ func (m model) generateCmd(ctx context.Context, question string, results []retri
 		}
 		// Synthesis is an answering call, so it runs on the assessment chain
 		// like every other one.
-		var assessment toolLoopModel
+		var assessment *modelChain
+		var llm toolLoopModel
 		if _, ids := roleChains(cfg, pick); len(ids) > 0 {
 			chain, err := newModelChain(cfg, ids)
 			if err != nil {
 				return errMsg{err}
 			}
-			assessment = chain
+			assessment, llm = chain, chain
 		}
 		streamed := false
 		full, cits, tokens, err := synthFromResultsFn(ctx, cfg, question, results, AnswerOpts{
 			Agent: m.answerAgent,
 			Model: pick,
-			llm:   assessment,
+			llm:   llm,
 			Persona: func(domain string) {
 				if prog != nil {
 					prog.Send(personaMsg(domain))
@@ -2661,6 +2662,10 @@ func (m model) generateCmd(ctx context.Context, question string, results []retri
 			}
 			return errMsg{timeoutOrErr(err)}
 		}
+		answeredBy := ""
+		if err == nil {
+			answeredBy = assessment.answered()
+		}
 		usedWeb := false
 		for _, result := range results {
 			if result.Payload.Source == webSource {
@@ -2669,7 +2674,7 @@ func (m model) generateCmd(ctx context.Context, question string, results []retri
 			}
 		}
 		calls, partial := metrics.snapshot()
-		return streamDoneMsg{full: full, citations: cits, results: results, usedWeb: usedWeb, tokens: tokens, llmCalls: calls, llmCallsPartial: partial}
+		return streamDoneMsg{full: full, citations: cits, results: results, usedWeb: usedWeb, tokens: tokens, llmCalls: calls, llmCallsPartial: partial, answeredBy: answeredBy}
 	}
 }
 
