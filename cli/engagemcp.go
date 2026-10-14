@@ -130,6 +130,7 @@ var (
 	errEngageMCPContent       = errors.New("content must be a string holding the raw request")
 	errEngageMCPHTTP2Content  = errors.New("send_http2_request takes its request line as pseudoHeaders, not content")
 	errEngageMCPPseudoHeaders = errors.New("pseudoHeaders must be an object whose :method and :path are strings")
+	errEngageMCPPivotedWeb    = errors.New("a foothold carries the web surface and this tool sends from this host, not through the foothold; use the web tools")
 )
 
 const (
@@ -371,6 +372,15 @@ func (t gatedMCPTool) Call(ctx context.Context, args string) (string, error) {
 		// stands here too rather than in the one constructor.
 		if t.gate == nil {
 			return t.Name() + ": no engagement gate to authorize a request", nil
+		}
+		// The instrument sends from this host. While a foothold carries the web
+		// surface the gate authorizes against the pivot scope, whose private
+		// networks are reached through the foothold, so an allow here would send
+		// to the same addresses on this host's own networks. newWebBroker refuses
+		// the upstream proxy on that surface for the same reason. The foothold is
+		// read per call because one can be attached while the task runs.
+		if t.gate.EffectiveFoothold().Covers(secgate.SurfaceWeb) {
+			return t.Name() + ": " + errEngageMCPPivotedWeb.Error(), nil
 		}
 		decision := t.gate.AuthorizeAPIRequest(ctx, secgate.APIRequest{
 			Method: target.Method,
