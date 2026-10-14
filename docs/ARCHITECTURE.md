@@ -175,7 +175,9 @@ chain for both roles, because a turn reports the model that answered it.
 
 A tool loop that fails over restarts from its first message. A call with the same tool and arguments
 as one that already ran without error is answered from the turn's record instead of running again, so
-a tool with a side effect runs once per turn. The record holds at most 64 calls and 4 MiB of results,
+an identical call with a side effect runs once for the turn, while a call the next model reformulates
+runs. The record also carries the turn's tool-call count, so the call cap bounds every attempt
+together rather than each attempt. The record holds at most 64 calls and 4 MiB of results,
 so a call past either bound runs again on a restart. A call that returned an error is not recorded,
 and two identical calls within one attempt both run. The record lives for one turn in one process and
 is never consulted on a later turn. Only the native chat tool loop keeps it.

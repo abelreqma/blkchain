@@ -11,6 +11,21 @@ import (
 	"time"
 )
 
+// TestMain keeps this package's tests off the operator's own role models. Load
+// reads BLKCHAIN_ROUTER_MODEL and BLKCHAIN_ASSESSMENT_MODEL, so an operator who
+// configures either would otherwise have that value stand in for the empty
+// default a test asserts. The floor is set once for every test in the package,
+// which also covers tests added later; a test that wants its own value still
+// sets it with t.Setenv, which takes precedence and is restored afterwards.
+func TestMain(m *testing.M) {
+	for _, name := range []string{"BLKCHAIN_ROUTER_MODEL", "BLKCHAIN_ASSESSMENT_MODEL"} {
+		if err := os.Unsetenv(name); err != nil {
+			panic("hermetic test state: " + err.Error())
+		}
+	}
+	os.Exit(m.Run())
+}
+
 func TestBuiltinDefaultsMatchContractFile(t *testing.T) {
 	// The built-in fallback must equal the committed rag.json so a standalone
 	// binary behaves identically to one run from the repo.

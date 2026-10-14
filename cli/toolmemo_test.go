@@ -188,6 +188,27 @@ func TestToolLoopWithNoMemoRunsEveryCall(t *testing.T) {
 	}
 }
 
+func TestToolLoopWithNoMemoCountsCallsPerLoop(t *testing.T) {
+	// Each engagement executor loop is its own step and passes no memo, so it
+	// spends its own cap and the cap message counts that loop's calls.
+	tool := okTool()
+	reg := newLoopReg(t, tool)
+	caps := LoopCaps{MaxRounds: 4, MaxCalls: 2}
+	for i := 0; i < 2; i++ {
+		m := &fakeModel{queue: []*llms.ContentResponse{callResp("c1", "t", `{"n":1}`), callResp("c2", "t", `{"n":2}`), textResp("done")}}
+		final, _, err := runToolLoop(context.Background(), m, reg, userMsgs(), caps)
+		if err != nil {
+			t.Fatalf("loop %d: %v", i, err)
+		}
+		if !strings.Contains(final, "tool call cap reached (2 calls)") {
+			t.Errorf("loop %d final = %q, want its own cap reached at 2 calls", i, final)
+		}
+	}
+	if len(tool.ran) != 4 {
+		t.Errorf("tool ran %d times across two loops, want 4", len(tool.ran))
+	}
+}
+
 func TestToolLoopRunsARepeatInsideOneAttemptWithAMemo(t *testing.T) {
 	tool := okTool()
 	memo := newToolMemo()

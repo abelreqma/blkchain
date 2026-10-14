@@ -94,25 +94,18 @@ func failoverEligible(err error) bool {
 	return code == 400 && contextWindowPattern.MatchString(msg)
 }
 
-// modelRole names which of a turn's two kinds of model calls a site makes.
-type modelRole int
-
-const (
-	// roleRouter decides and grades. Its calls are short, deterministic and
-	// frequent: action classification, routing, the corpus check, context
-	// grading and conversation compression.
-	roleRouter modelRole = iota
-	// roleAssessment answers. Its calls carry the turn's reasoning: the direct
-	// answer, the tool loop and grounded synthesis.
-	roleAssessment
-)
-
 // maxChainModels bounds one role's chain.
 const maxChainModels = 4
 
 // roleChains resolves both roles at once, so the fallback model is resolved
 // once per turn rather than once per role (resolveModel may ask the LLM server
 // which models it serves).
+//
+// The router role decides and grades. Its calls are short, deterministic and
+// frequent: action classification, routing, the corpus check, context grading
+// and conversation compression. The assessment role answers. Its calls carry
+// the turn's reasoning: the direct answer, the tool loop and grounded
+// synthesis.
 //
 // A model the caller named is the whole chain for both roles. An explicit pick
 // is an instruction, and a turn reports the model that answered it, so
@@ -268,9 +261,13 @@ func (c *modelChain) GenerateContent(ctx context.Context, msgs []llms.MessageCon
 // from the same messages, rather than continuing a half-built tool
 // conversation the next model may not accept. caps.ToolMemo, when set, carries
 // the results of the calls that already ran to completion across those
-// restarts, so a tool with a side effect runs once for the turn. Every other
+// restarts, so an identical call runs once for the turn, and carries the turn's
+// call count, so caps.MaxCalls bounds every attempt together. Every other
 // error, a cancellation included, is returned as it is.
-func runToolLoopChain(ctx context.Context, chain *modelChain, reg *tooldef.Registry, msgs []llms.MessageContent, caps LoopCaps, extra ...llms.CallOption) (string, int, error) {
+//
+// caps.BeginAttempt, when set, is called before each attempt, so state the
+// caller keeps about what one attempt did does not outlive it.
+func runToolLoopChain(ctx context.Context, chain *modelChain, reg *tooldef.Registry, msgs []llms.MessageContent, caps LoopCaps) (string, int, error) {
 	if chain == nil || len(chain.clients) == 0 {
 		return "", 0, fmt.Errorf("no model available for the tool loop")
 	}
@@ -281,8 +278,11 @@ func runToolLoopChain(ctx context.Context, chain *modelChain, reg *tooldef.Regis
 		if cerr := ctx.Err(); cerr != nil {
 			return "", rounds, cerr
 		}
+		if caps.BeginAttempt != nil {
+			caps.BeginAttempt()
+		}
 		caps.ToolMemo.beginAttempt()
-		final, rounds, err = runToolLoop(ctx, m, reg, msgs, caps, extra...)
+		final, rounds, err = runToolLoop(ctx, m, reg, msgs, caps)
 		if err == nil {
 			chain.markAnswered(i)
 			return final, rounds, nil

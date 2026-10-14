@@ -18,9 +18,14 @@ const (
 
 // toolMemo holds the results of tool calls that ran to completion in earlier
 // attempts of one turn's tool loop, so a failover that restarts the loop
-// replays those results instead of running the tools again. An nmap run, a
-// proxied request or a terminal command therefore executes once per turn even
-// when the model that drove it is replaced mid-turn.
+// replays those results instead of running the tools again. What runs once for
+// the turn is an identical call: the same nmap run, proxied request or terminal
+// command is replayed rather than run again, while a call the next model
+// reformulates is a different call and runs.
+//
+// The memo also counts the tool calls charged to the turn. It is the one object
+// with exactly the turn's lifetime, so a loop that restarts keeps the turn's
+// call cap instead of getting a fresh one per attempt.
 //
 // A lookup matches only a result recorded by an earlier attempt and re-stamps
 // it to the current attempt in place, so the nth identical call of a replay
@@ -39,6 +44,7 @@ type toolMemo struct {
 	done    map[string][]memoEntry
 	count   int
 	bytes   int
+	calls   int
 }
 
 // memoEntry is one recorded result and the attempt that recorded it.
@@ -58,6 +64,27 @@ func (t *toolMemo) beginAttempt() {
 	t.mu.Lock()
 	t.attempt++
 	t.mu.Unlock()
+}
+
+// spend charges one tool call to the turn. A replayed call is charged like one
+// that ran, which is what makes the count a bound on the turn's calls.
+func (t *toolMemo) spend() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+}
+
+// spent is the tool calls charged to the turn so far, counting every attempt.
+func (t *toolMemo) spent() int {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
 }
 
 // lookup returns the first result recorded for key by an earlier attempt and

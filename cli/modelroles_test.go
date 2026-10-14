@@ -608,6 +608,33 @@ func TestFailoverDoesNotAdvanceOnADenial(t *testing.T) {
 	}
 }
 
+// TestFailoverBoundsTheWholeTurnsToolCalls pins the bound the turn's record
+// carries: MaxCalls counts the calls of every attempt, so a second model that
+// requests calls the first never made does not get a further cap to spend.
+func TestFailoverBoundsTheWholeTurnsToolCalls(t *testing.T) {
+	tool := okTool()
+	// The first model spends two calls and then fails for a reason that
+	// advances the chain.
+	a := &fakeModel{
+		queue: []*llms.ContentResponse{callResp("a1", "t", `{"n":1}`), callResp("a2", "t", `{"n":2}`), textResp("unreached")},
+		errs:  []error{nil, nil, errors.New("API returned unexpected status code: 503: down")},
+	}
+	// The second requests different calls, so none of them replays.
+	var queue []*llms.ContentResponse
+	for n := 3; n <= 8; n++ {
+		queue = append(queue, callResp(fmt.Sprintf("b%d", n), "t", fmt.Sprintf(`{"n":%d}`, n)))
+	}
+	b := &fakeModel{queue: queue}
+	chain := &modelChain{ids: []string{"a", "b"}, clients: []toolLoopModel{a, b}}
+	caps := LoopCaps{MaxRounds: 8, MaxCalls: 4, ToolMemo: newToolMemo()}
+	if _, _, err := runToolLoopChain(context.Background(), chain, newLoopReg(t, tool), userMsgs(), caps); err != nil {
+		t.Fatalf("runToolLoopChain: %v", err)
+	}
+	if len(tool.ran) > caps.MaxCalls {
+		t.Errorf("the turn ran %d tool calls across two attempts, want at most %d", len(tool.ran), caps.MaxCalls)
+	}
+}
+
 // TestRunToolLoopChainRefusesAnEmptyChain pins that an empty chain is an error
 // rather than a silent empty answer.
 func TestRunToolLoopChainRefusesAnEmptyChain(t *testing.T) {
@@ -864,6 +891,31 @@ func TestTheTUITurnCarriesOnlyTheOperatorsPick(t *testing.T) {
 	if got.routerChain.primary() != "picked-model" || got.assessmentChain.primary() != "picked-model" {
 		t.Errorf("a picked model gave chains %q and %q, want the pick for both roles",
 			got.routerChain.primary(), got.assessmentChain.primary())
+	}
+}
+
+// TestTheStatusRibbonNamesTheModelThatAnswered covers what the turn test above
+// does not: with role models configured and no pick, the ribbon names the model
+// the turn answered on, not the resolved server default the turn never used. A
+// later pick is the whole chain for the next turn, so it takes the ribbon back.
+func TestTheStatusRibbonNamesTheModelThatAnswered(t *testing.T) {
+	m := layoutModel(t, 120, 24)
+	m.ragModel = ""
+	m.resolvedModel = "server-default"
+	if line := stripANSI(m.statusLine()); !strings.Contains(line, "server-default") {
+		t.Errorf("before the first turn the ribbon should name the resolved model: %q", line)
+	}
+	m.answeredBy = "assessment-model"
+	line := stripANSI(m.statusLine())
+	if !strings.Contains(line, "assessment-model") {
+		t.Errorf("the ribbon does not name the model that answered: %q", line)
+	}
+	if strings.Contains(line, "server-default") {
+		t.Errorf("the ribbon names a model the turn did not use: %q", line)
+	}
+	picked, _ := m.applyModel("picked-model")
+	if line := stripANSI(picked.(model).statusLine()); !strings.Contains(line, "picked-model") {
+		t.Errorf("a pick did not take the ribbon back: %q", line)
 	}
 }
 

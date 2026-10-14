@@ -130,11 +130,19 @@ func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig
 	prompt := personaFor(domain).preamble + "\n\n" + adviseMethodology
 	msgs := messagesWithHistory(prompt, opts.History, human)
 	required := opts.requiredAction
-	requiredCalled, toolCalls := false, 0
+	requiredCalled := false
 	observe := engageTelemetryFromContext(ctx)
 	// One memo for the turn, shared by both loops below, so a tool that ran to
-	// completion is not run again when a failover restarts the loop.
-	caps := LoopCaps{MaxRounds: adviseMaxRounds, MaxCalls: adviseMaxCalls, ToolMemo: newToolMemo(), ObserveResult: func(name string, outcome ToolOutcome) {
+	// completion is not run again when a failover restarts the loop, and the
+	// turn's call cap covers every attempt.
+	memo := newToolMemo()
+	// A restart answers from the original messages, so the model it restarts on
+	// has not seen the result of a call an earlier attempt completed. The guard
+	// proves the model that answered called the required tool, so it holds for
+	// one attempt only.
+	caps := LoopCaps{MaxRounds: adviseMaxRounds, MaxCalls: adviseMaxCalls, ToolMemo: memo, BeginAttempt: func() {
+		requiredCalled = false
+	}, ObserveResult: func(name string, outcome ToolOutcome) {
 		if opts.Action != nil {
 			opts.Action(name, string(outcome))
 		}
@@ -159,7 +167,6 @@ func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig
 			}
 		}
 		if action == "tool-call" {
-			toolCalls++
 			// oob_payload counts because registering a payload is the request
 			// that leaves this machine. oob_interactions does not: it reads a
 			// local file and can refuse, so crediting it would let a turn
@@ -172,11 +179,14 @@ func adviseLoop(ctx context.Context, m toolLoopModel, rc searcher, cfg ragconfig
 	}}
 	final, _, err := runToolLoopChain(ctx, chain, reg, msgs, caps)
 	if err == nil && required != "" && !requiredCalled {
-		if toolCalls < adviseMaxCalls {
+		// The retry keeps the turn's cap: the memo counts the calls of every
+		// attempt, so passing adviseMaxCalls again leaves the turn bounded by
+		// it. A turn that has already spent the cap has no call left to make
+		// the required one, so it reports the unperformed action instead.
+		if memo.spent() < adviseMaxCalls {
 			reminder := "The user requested a tool action, but you did not call the required tool. Call it now using only the user-named target or file. Do not claim the action ran without a tool result."
 			msgs = append(msgs, llms.TextParts(llms.ChatMessageTypeSystem, reminder))
 			caps.MaxRounds = 3
-			caps.MaxCalls = adviseMaxCalls - toolCalls
 			final, _, err = runToolLoopChain(ctx, chain, reg, msgs, caps)
 		}
 		if err == nil && !requiredCalled {
