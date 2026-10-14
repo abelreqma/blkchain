@@ -115,7 +115,7 @@ apply only to foothold-covered surfaces.
 
 ## Cross-cutting capabilities
 
-Two capabilities feed every surface rather than being surfaces of their own:
+Three capabilities feed every surface rather than being surfaces of their own:
 
 - External-surface sweeps (`cli/extsurface.go`, `cli/internal/webacquire`): when a
   recon task names an HTTP origin, code-owned probes characterize TLS, headers,
@@ -131,13 +131,26 @@ Two capabilities feed every surface rather than being surfaces of their own:
   task and advisory records. A missing database or failed scan records a gap, not
   a clean result. A package and version match does not establish reachable code or
   attacker impact.
+- The operator's own instruments (`cli/engagemcp.go`, `cli/engageintegrations.go`):
+  where an engagement runs with a gate and a store, a task is offered the
+  out-of-band callback tools on every surface, and a web-surface task is also
+  offered the tools of a configured Burp. Each outbound tool is classified in
+  code, the classification denies by default, and one that sends a request at a
+  host is authorized by the same gate as a native web request. These tools inform
+  a task and do not produce its evidence: a finding resting on one has to be
+  reproduced through `run_command` or the web tools before it can be recorded.
+  [The root README](../../README.md#operator-instruments-by-surface) carries the
+  per-tool reference and the limits.
 
 ## Evidence and chaining
 
 Every surface records exact-quote evidence for material findings into the
 engagement store (SQLite, with action records, surface records, advisory records,
-a provenance graph, and coverage records). A finding chains to the next task with
-`plan_add` and `basis_ids` set to the source task, so the engagement graph records
-why each step followed the last. Completion is recorded with the cited evidence;
-blkChain verifies that the cited evidence exists, not that the stated done-when
-condition is independently true.
+a provenance graph, and coverage records). Where `plan_add` is in a task's
+registry, a finding chains to the next task with `basis_ids` set to the source
+task, so the engagement graph records why each step followed the last; a task
+without it reports the follow-on with its source evidence instead, and the
+harness correlates it. `basis_ids` records provenance and does not create a
+scheduling dependency. Completion is recorded with the cited evidence; blkChain
+verifies that the cited evidence exists, not that the stated done-when condition
+is independently true.

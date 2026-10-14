@@ -15,16 +15,27 @@ for a `wifi`-kind task).
 - Service version fingerprinting using safe detection only (no arbitrary NSE
   scripts).
 - Finding-driven targeted enumeration from what the earlier steps found.
-- Run a bounded, audited tool set: DNS (`host`, `dig`, `nslookup`); SMB and
-  NetBIOS (`smbclient`, `rpcclient`, `nbtscan`, `showmount`); LDAP
-  (`ldapsearch`); SNMP (`snmpwalk`); HTTP and content discovery (`ffuf`,
-  `curl`); TLS (`sslscan`, `openssl s_client`); path and service interaction
-  (`traceroute`, `ncat`); and service detection (`nmap`, `masscan`).
-- Scan within enforced bounds: `nmap` takes `-n` and must carry a port or timing
-  bound (an unbounded `nmap` is refused); `-sS`, `-sU`, and `-O` are available
-  for a raw scan; `masscan` needs a port bound and an explicit `--rate`;
-  `tcpdump` needs a `-c` packet bound and a host filter. A CIDR range is a valid
-  target for either scanner when the policy authorizes it.
+- Run a bounded, audited tool set: DNS (`host`, `dig`, `nslookup`); registration
+  data (`whois`); SMB and NetBIOS (`smbclient`, `rpcclient`, `nbtscan`,
+  `showmount`); LDAP (`ldapsearch`); SNMP (`snmpwalk`); HTTP and content
+  discovery (`ffuf`, `curl`); TLS (`sslscan`, `openssl s_client`); path and
+  service interaction (`traceroute`, `ncat`, `nc`); packet capture (`tcpdump`);
+  and service detection and probing (`nmap`, `nping`, `ike-scan`).
+- Scan within enforced bounds. `nmap` takes `-n` and must carry a port bound
+  (`-p` with a port spec, `--top-ports`, or `-F`) or be a `-sn` host-discovery
+  scan of exactly one host; an otherwise unbounded `nmap` is refused. `-sS`,
+  `-sU`, and `-O` are available for a raw scan, and `--script` and `--datadir`
+  are denied because NSE runs arbitrary Lua. `nping` takes one literal IP, one
+  port, `-c 1-3` and `--rate 1`, with up to 512 hex bytes of UDP `--data`.
+  `ike-scan` runs only against a UDP port already observed. `tcpdump` needs a
+  `-c` packet bound and a host filter. Decoy and spoofed-source packet paths are
+  denied, because the worker cannot constrain their source. A CIDR range is a
+  valid `nmap` target when the policy authorizes that range.
+- Separate what a probe establishes from what it suggests: a completed `nmap`
+  result can establish a port state, while ACK, FIN, NULL, Xmas, idle,
+  fragmented, and source-port diagnostic scans explain a filter rather than
+  establish service reachability, and a TCP accept permits a protocol check
+  without identifying the service.
 - Shift technique emphasis by vantage: from an external vantage, host, port, and
   service enumeration; from an internal foothold, internal SMB, LDAP, and SNMP
   exposure and lateral-movement surface.
@@ -51,6 +62,10 @@ foothold.
   and lateral-movement mapping are code-structured rather than prompt-steered.
 - Protocol-specific finding parsers, so findings derive from dedicated parsers
   rather than leaning on a single tool's output shape.
+- A guarded fast port scanner. `masscan` is deliberately absent: its raw Ethernet
+  packets leave the worker's destination guard behind, so bounded `nmap` scans
+  are the guarded equivalent today and a request for `masscan` is refused with
+  that reason.
 
 The shared engagement model (the command gate, the Auto and Safe arming modes,
 vantage reachability, the isolated runner, foothold carriers, and evidence

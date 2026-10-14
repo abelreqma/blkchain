@@ -68,6 +68,24 @@ External-surface sweep:
   methods, metadata paths, and subdomains, TLS first because its certificate names
   feed subdomain derivation.
 
+Burp, where the operator runs one:
+
+- A direct surface's brokered HTTP and WebSocket requests traverse a loopback
+  intercepting proxy when one is listening, on by default at `127.0.0.1:8080`, so
+  Burp sees the requests the stack makes. The isolated browser's own page loads
+  are not proxied. A pivoted surface takes no upstream proxy, because the foothold
+  carrier it dials through is what an upstream proxy would replace.
+- A web-surface task is additionally offered the tools of a configured Burp MCP
+  server, and only a web-surface task is. Its three request tools go through the
+  same gate as a native web request, so an out-of-scope host, an unarmed
+  state-changing method, an action class the RoE does not list, and a port recon
+  has not observed are each refused. Its reads of proxy history, scanner issues
+  and Collaborator interactions are available and are not filtered by engagement
+  scope. Its instrument-state and configuration-dump tools are not registered.
+- `send_to_intruder` stages a request in an Intruder tab; the fuzzing traffic
+  leaves when an operator starts the attack in Burp, outside the gate and the
+  engagement's caps.
+
 Recon and the collection above are read-only. Actions that need credentials,
 state change, or deeper validation move to an exploit or post-exploitation task,
 which is arm-gated. The surface is carried from a foothold over SSH and command
@@ -84,6 +102,9 @@ carriers, which forward the binary TCP stream the web broker needs.
   as explicit recon steps rather than finding-driven probes.
 - GraphQL introspection and operation reconstruction as a first-class step, given
   the metadata sweep already probes the `/graphql` path.
+- Scope-filtered Burp reads, so proxy history returned to a task carries only the
+  engagement's own traffic. The wrapper passes Burp's text through unaltered
+  today, because the shape it would have to parse changes with Burp.
 
 The shared engagement model (the command gate, the Auto and Safe arming modes,
 vantage reachability, the isolated runner, foothold carriers, and evidence

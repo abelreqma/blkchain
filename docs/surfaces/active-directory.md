@@ -37,7 +37,7 @@ Credential guessing or spraying requires an explicit account set, rate, and test
 window. The persona does not modify directory state or perform high-impact
 replication during recon; those run as separate evidence-linked, arm-gated tasks
 that record the exact output, the affected principal and object, the privilege
-gained, and any cleanup need, chained with `basis_ids`. The surface is typically
+gained, and any cleanup need, carrying the source task as their basis. The surface is typically
 reached after a foothold, and SSH and command carriers cover it.
 
 ## Future expansion

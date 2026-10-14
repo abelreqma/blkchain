@@ -9,6 +9,10 @@ boundary, the embedding-server wire contract, the parameter contract in `blkchai
 the command output shapes the evaluation harness parses, and the security invariants. This file is
 the short version and defers to it on every detail.
 
+Read [docs/surfaces/README.md](docs/surfaces/README.md) before changing an engagement surface: it
+documents the executor, recon ladder and persona each surface registers, the shared execution model
+they inherit, and the pivot and vantage chain that connects them.
+
 ## What this is
 
 blkChain is a local-first framework for authorized security assessment. Its core, `blk engage`, is a
