@@ -197,6 +197,11 @@ func newChatToolRegistry(ctx context.Context, rc searcher, cfg ragconfig.Config,
 		if opts.ToolHost == chatToolHostLocal {
 			return nil, nil, fmt.Errorf("file transfer requires the sandbox tool host")
 		}
+		// Transfer reads and writes this host's working directory, which is the
+		// operator's reach, not the sandbox's.
+		if opts.vantage != vantageLocal {
+			return nil, nil, fmt.Errorf("file transfer reaches this host's files and requires a local caller")
+		}
 		local, localErr := chatWorkspaceRoot(chatToolHostLocal)
 		if localErr != nil {
 			return nil, nil, localErr
@@ -210,7 +215,7 @@ func newChatToolRegistry(ctx context.Context, rc searcher, cfg ragconfig.Config,
 	if err != nil {
 		return nil, nil, err
 	}
-	closeMCP, err := registerChatMCPTools(ctx, reg, root)
+	closeMCP, err := registerChatMCPTools(ctx, reg, root, opts.vantage)
 	if err != nil {
 		return nil, nil, err
 	}

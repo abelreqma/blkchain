@@ -161,7 +161,7 @@ func (s *serveServer) serveTurnClient() *retrieval.Client {
 // serveRunTurn runs one gated turn under cfg.RequestTimeout, the same bound the
 // three local surfaces and the MCP server use, and records ownership of the
 // session the turn returns.
-func (s *serveServer) serveRunTurn(ctx context.Context, id string, in serveTurnIn, stream func([]byte), action func(tool, status string)) (turnResult, error) {
+func (s *serveServer) serveRunTurn(ctx context.Context, id string, in serveTurnIn, v clientVantage, stream func([]byte), action func(tool, status string)) (turnResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout())
 	defer cancel()
 	res, err := runNativeTurn(ctx, s.serveTurnClient(), s.cfg, turnRequest{
@@ -174,6 +174,7 @@ func (s *serveServer) serveRunTurn(ctx context.Context, id string, in serveTurnI
 		WebOnly:    in.WebOnly,
 		Stream:     stream,
 		Action:     action,
+		Vantage:    v,
 	})
 	s.owned.own(res.SessionID)
 	return res, timeoutOrErr(err)
@@ -225,7 +226,7 @@ func (s *serveServer) handleTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	res, err := s.serveRunTurn(r.Context(), id, in, nil, nil)
+	res, err := s.serveRunTurn(r.Context(), id, in, s.callerVantage(r), nil, nil)
 	if err != nil && strings.TrimSpace(res.Answer) == "" {
 		code, msg := serveTurnRefusal(err)
 		serveRefuse(w, code, msg)
@@ -285,7 +286,7 @@ func (s *serveServer) handleTurnStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	res, err := s.serveRunTurn(ctx, id, in,
+	res, err := s.serveRunTurn(ctx, id, in, s.callerVantage(r),
 		func(chunk []byte) {
 			if len(chunk) > 0 {
 				st.emit("assistant.delta", map[string]string{"delta": string(chunk)})

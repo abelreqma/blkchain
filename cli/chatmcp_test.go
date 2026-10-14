@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +43,7 @@ func TestChatMCPClientExposesOnlyAllowlistedHTTPTools(t *testing.T) {
 	}
 	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", path)
 	registry := tooldef.NewRegistry()
-	closeTools, err := registerChatMCPTools(context.Background(), registry, t.TempDir())
+	closeTools, err := registerChatMCPTools(context.Background(), registry, t.TempDir(), vantageLocal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +205,7 @@ func TestChatMCPClientConnectsToLocalStdioWhenConfigured(t *testing.T) {
 	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", path)
 	t.Setenv("BLKCHAIN_MCP_TEST_HELPER", "1")
 	registry := tooldef.NewRegistry()
-	closeTools, err := registerChatMCPTools(context.Background(), registry, t.TempDir())
+	closeTools, err := registerChatMCPTools(context.Background(), registry, t.TempDir(), vantageLocal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +260,7 @@ func TestChatMCPClientConnectsToSandboxStdio(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	registry := tooldef.NewRegistry()
-	closeTools, err := registerChatMCPTools(ctx, registry, root)
+	closeTools, err := registerChatMCPTools(ctx, registry, root, vantageLocal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,5 +272,64 @@ func TestChatMCPClientConnectsToSandboxStdio(t *testing.T) {
 	out, err := tool.Call(ctx, `{"message":"sandbox-mcp-value"}`)
 	if err != nil || !strings.Contains(out, "sandbox-mcp-value") {
 		t.Fatalf("sandbox MCP call failed: out=%q err=%v", out, err)
+	}
+}
+
+// TestChatMCPServersForARemoteCallerAreSandboxedOnly pins which configured MCP
+// servers a caller that is not local is offered: only stdio servers that run in
+// the sandbox container. A host-local stdio server runs on this host with its
+// network, and an HTTP server is dialed from this host with the operator's
+// bearer token, so either would give a remote caller the operator's reach.
+func TestChatMCPServersForARemoteCallerAreSandboxedOnly(t *testing.T) {
+	servers := []chatMCPServer{
+		{Name: "sandboxed", Transport: "stdio", Command: "srv"},
+		{Name: "sandboxed_explicit", Transport: "stdio", Host: chatToolHostSandbox, Command: "srv"},
+		{Name: "host_local", Transport: "stdio", Host: chatToolHostLocal, Command: "/usr/bin/srv"},
+		{Name: "over_http", Transport: "http", URL: "http://127.0.0.1:9876/mcp"},
+	}
+	names := func(in []chatMCPServer) []string {
+		var out []string
+		for _, s := range in {
+			out = append(out, s.Name)
+		}
+		return out
+	}
+	if got := names(chatMCPServersFor(servers, vantageLocal)); !slices.Equal(got, []string{"sandboxed", "sandboxed_explicit", "host_local", "over_http"}) {
+		t.Errorf("a local caller is offered %v, want every server", got)
+	}
+	for _, v := range []clientVantage{vantageRemote, clientVantage(0)} {
+		if got := names(chatMCPServersFor(servers, v)); !slices.Equal(got, []string{"sandboxed", "sandboxed_explicit"}) {
+			t.Errorf("vantage %v is offered %v, want the sandboxed servers only", v, got)
+		}
+	}
+}
+
+// TestChatMCPHostLocalServerIsNotRegisteredForARemoteCaller drives the same
+// host-local stdio fixture TestChatMCPClientConnectsToLocalStdioWhenConfigured
+// connects to, and pins that a remote caller's registry holds none of its tools.
+func TestChatMCPHostLocalServerIsNotRegisteredForARemoteCaller(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp-clients.json")
+	config := chatMCPConfig{Servers: []chatMCPServer{{
+		Name: "stdio_fixture", Transport: "stdio", Host: "local", Command: os.Args[0],
+		Args: []string{"-test.run=^TestChatMCPStdioHelper$"}, AllowTools: []string{"echo"},
+		Env: map[string]string{"BLKCHAIN_MCP_TEST_HELPER": "BLKCHAIN_MCP_TEST_HELPER"},
+	}}}
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BLKCHAIN_MCP_CLIENT_CONFIG", path)
+	t.Setenv("BLKCHAIN_MCP_TEST_HELPER", "1")
+	registry := tooldef.NewRegistry()
+	closeTools, err := registerChatMCPTools(context.Background(), registry, t.TempDir(), vantageRemote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTools()
+	if _, ok := registry.Get("mcp__stdio_fixture__echo"); ok {
+		t.Fatal("a host-local MCP tool was registered for a remote caller")
 	}
 }

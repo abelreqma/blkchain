@@ -246,6 +246,10 @@ type AnswerOpts struct {
 	assessment  *modelChain
 	Browser     *chatBrowserState
 	webEvidence *chatWebProvenance
+	// vantage is the caller's, which decides whether the tools that reach this
+	// host's files and host-local MCP servers are offered. The zero value is
+	// remote, so a path that does not establish its caller is not offered them.
+	vantage clientVantage
 }
 
 // priorTurn is one earlier message in the conversation. Role is "human" or

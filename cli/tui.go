@@ -2584,6 +2584,7 @@ func (m model) streamCmd(ctx context.Context, question, preface string, start ti
 			WebFirst:   !force,
 			WebOnly:    webOnly,
 			History:    m.conversationHistory(),
+			Vantage:    vantageLocal,
 			Persona: func(domain string) {
 				if prog != nil {
 					prog.Send(personaMsg(domain))

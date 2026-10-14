@@ -57,6 +57,7 @@ func plainAsk(m *model, query string, c *replClient, history []priorTurn, prefac
 		WebFirst:   !force,
 		Preface:    preface,
 		Browser:    c.browser,
+		Vantage:    vantageLocal,
 		History:    history,
 		Stream:     newAskStream(os.Stdout, &full),
 		Stage: func(stage string) {

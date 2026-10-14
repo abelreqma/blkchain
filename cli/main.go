@@ -575,6 +575,7 @@ func askWithPreface(rc *retrieval.Client, history []priorTurn, args []string, pr
 		Preface:    preface,
 		History:    history,
 		Browser:    browser,
+		Vantage:    vantageLocal,
 	}
 
 	// Only the plain text path streams: --json needs the full struct and

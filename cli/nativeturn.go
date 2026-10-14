@@ -53,6 +53,8 @@ type turnRequest struct {
 	Persona func(domain string)
 	// Browser carries browser state across turns in one session.
 	Browser *chatBrowserState
+	// Vantage is the caller's. The zero value is remote; see clientVantage.
+	Vantage clientVantage
 }
 
 // Session selectors for turnRequest.SessionID. Any other non-empty value is a
@@ -337,6 +339,7 @@ func runNativeTurn(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		},
 		routerChain:     routerChain,
 		assessmentChain: assessmentChain,
+		vantage:         req.Vantage,
 	}
 
 	answer, cits, usedWeb, results, tokens, route, err := adaptiveAnswerFn(ctx, rc, cfg, question, askRoutes(prefs), req.ForceRag, opts)

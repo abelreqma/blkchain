@@ -33,7 +33,8 @@ func driveChatThroughMCPTool(t *testing.T, tool, args string) (turnResult, *fake
 		answer, tokens, err := adviseLoop(ctx, model, rc, cfg, nil, question, opts)
 		return answer, []citation{}, false, nil, tokens, "rag", err
 	}
-	res, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "Use the MCP server"}, vantageRemote)
+	// The stdio transport is the one blk mcp serves, and its client is local.
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "Use the MCP server"}, vantageLocal)
 	return res, model, err
 }
 

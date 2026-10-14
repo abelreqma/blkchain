@@ -160,7 +160,8 @@ func (pm *parityModel) take(t *testing.T, label string) []string {
 }
 
 // wantRegistry is the independent expectation: the registry newChatToolRegistry
-// builds for the case's classified action, host and endpoint.
+// builds for the case's classified action, host and endpoint, for a local
+// caller, which every surface here is.
 func wantRegistry(t *testing.T, c parityCase) []string {
 	t.Helper()
 	host := c.host
@@ -168,7 +169,7 @@ func wantRegistry(t *testing.T, c parityCase) []string {
 		host = chatToolHostSandbox
 	}
 	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, loadConfig(), nil, c.question, nil,
-		AnswerOpts{ToolHost: host, BrowserCDP: c.cdp, requiredAction: c.action})
+		AnswerOpts{ToolHost: host, BrowserCDP: c.cdp, requiredAction: c.action, vantage: vantageLocal})
 	if err != nil {
 		t.Fatalf("%s: registry: %v", c.name, err)
 	}
@@ -246,7 +247,7 @@ func paritySurfaces(t *testing.T) []paritySurface {
 				return err
 			}
 			defer release()
-			_, err = s.serveRunTurn(context.Background(), gated, in, nil, nil)
+			_, err = s.serveRunTurn(context.Background(), gated, in, s.callerVantage(req), nil, nil)
 			return err
 		}},
 	}

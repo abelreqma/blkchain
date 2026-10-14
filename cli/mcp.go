@@ -481,6 +481,7 @@ func mcpChatResult(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Conf
 		BrowserCDP: in.BrowserCDP,
 		ForceRag:   in.ForceRag,
 		WebOnly:    in.WebOnly,
+		Vantage:    v,
 	})
 	owned.own(res.SessionID)
 	return res, timeoutOrErr(err)
