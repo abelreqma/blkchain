@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"unicode/utf8"
 
 	"blkchain/cli/internal/ragconfig"
@@ -87,18 +86,13 @@ const mcpChatMaxSessions = 128
 // as a session:// resource is unrestricted.
 var errChatForeignSession = errors.New("chat: session was not created by this server")
 
-// errChatLocalHostRefused refuses tool_host local on a server that does not
-// serve stdio.
+// errChatLocalHostRefused refuses tool_host local to a caller that is not a
+// local process.
 var errChatLocalHostRefused = errors.New("chat: tool_host local is only available over the stdio transport")
 
-// errChatBrowserCDPRefused refuses browser_cdp on a server that does not serve
-// stdio.
+// errChatBrowserCDPRefused refuses browser_cdp to a caller that is not a local
+// process.
 var errChatBrowserCDPRefused = errors.New("chat: browser_cdp is only available over the stdio transport")
-
-// mcpServesStdio records that this process serves its MCP client over stdio.
-// Only runMCP sets it. Its zero value is false, so a transport added without
-// setting it is refused tool_host local.
-var mcpServesStdio atomic.Bool
 
 // chatSessionOwner is the set of session ids the chat tool created on one
 // server. It lives in memory only, so after a restart no earlier session can be
@@ -149,8 +143,8 @@ func (o *chatSessionOwner) touch(id string) bool {
 
 // mcpChatIn is chat's tool input. An empty SessionID opens a new session;
 // supplying one continues it. ToolHost accepts local and BrowserCDP accepts an
-// endpoint only while mcpServesStdio is set. ForceRag and WebOnly are routing
-// hints and are mutually exclusive.
+// endpoint only from a local caller (see clientVantage). ForceRag and WebOnly
+// are routing hints and are mutually exclusive.
 type mcpChatIn struct {
 	Message    string `json:"message" jsonschema:"the message for this turn"`
 	SessionID  string `json:"session_id,omitempty" jsonschema:"continue this session; omit to start a new one"`
@@ -344,15 +338,16 @@ func runMCP(_ []string) error {
 		return err
 	}
 
-	s := newMCPServer(rc, cfg, cat)
-	mcpServesStdio.Store(true)
+	// The client of a stdio server is the process that spawned it, so the caller
+	// is local.
+	s := newMCPServer(rc, cfg, cat, vantageLocal)
 	return s.Run(context.Background(), &mcp.StdioTransport{MaxLineLength: 1 << 20})
 }
 
 // newMCPServer builds the blkchain MCP server and registers its tools.
 // runMCP and the round-trip test both use it, so the test covers the real
-// registration.
-func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Catalog) *mcp.Server {
+// registration. vantage applies to every caller of the returned server.
+func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Catalog, vantage clientVantage) *mcp.Server {
 	v, _, _, _ := versionInfo()
 	s := mcp.NewServer(&mcp.Implementation{Name: "blkchain", Version: v}, nil)
 	// One set of chat slots and one owned-session set per server, so a test's
@@ -396,7 +391,7 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 			return nil, nil, err
 		}
 		defer release()
-		res, err := mcpChatResult(ctx, followPrefs(rc, loadPrefs()), cfg, owned, in)
+		res, err := mcpChatResult(ctx, followPrefs(rc, loadPrefs()), cfg, owned, in, vantage)
 		if err != nil && strings.TrimSpace(res.Answer) == "" {
 			return nil, nil, err
 		}
@@ -446,26 +441,9 @@ func newMCPServer(rc *retrieval.Client, cfg ragconfig.Config, cat *skillcat.Cata
 // session id is always an id, never a selector: new and last are rejected so
 // a client cannot attach to whichever session was used most recently, and it
 // must be one this server created (see errChatForeignSession).
-func mcpChatResult(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Config, owned *chatSessionOwner, in mcpChatIn) (turnResult, error) {
-	// tool_host local runs the terminal and process tools directly on the host,
-	// outside the sandbox container. That is acceptable only when the client is
-	// a local process already holding the operator's privileges, which is true
-	// of stdio and of nothing else.
-	if in.ToolHost == chatToolHostLocal && !mcpServesStdio.Load() {
-		return turnResult{}, errChatLocalHostRefused
-	}
-	// browser_cdp hands the agent the operator's signed-in browser session, which
-	// is at least as sensitive as the local tool host, so it has the same gate.
-	if in.BrowserCDP != "" {
-		if !mcpServesStdio.Load() {
-			return turnResult{}, errChatBrowserCDPRefused
-		}
-		if len(in.BrowserCDP) > mcpChatMaxBrowserCDP {
-			return turnResult{}, usageErr("chat: browser_cdp exceeds %d bytes", mcpChatMaxBrowserCDP)
-		}
-		if err := webValidateCDPEndpoint(in.BrowserCDP); err != nil {
-			return turnResult{}, usageErr("chat: %s", err)
-		}
+func mcpChatResult(ctx context.Context, rc *retrieval.Client, cfg ragconfig.Config, owned *chatSessionOwner, in mcpChatIn, v clientVantage) (turnResult, error) {
+	if err := checkChatVantage(v, in.ToolHost, in.BrowserCDP); err != nil {
+		return turnResult{}, err
 	}
 	if in.ForceRag && in.WebOnly {
 		return turnResult{}, usageErr("chat: web_only cannot be combined with force_rag")

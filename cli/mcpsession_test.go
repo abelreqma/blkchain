@@ -68,7 +68,7 @@ func TestMCPSessionResourceReturnsTheTranscript(t *testing.T) {
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "resource answer", nil)
 
-	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "resource question"})
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "resource question"}, vantageRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,12 +129,12 @@ func TestMCPSessionResourceIsBounded(t *testing.T) {
 	// ever running.
 	stubAdaptiveAnswer(t, strings.Repeat("y", 32<<10), nil)
 
-	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"})
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"}, vantageRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 19; i++ {
-		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: res.SessionID}); err != nil {
+		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: res.SessionID}, vantageRemote); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -177,12 +177,12 @@ func TestMCPSessionResourceBoundHoldsForEscapedContent(t *testing.T) {
 	answer := strings.Repeat(`"`, 80<<10)
 	stubAdaptiveAnswer(t, answer, nil)
 
-	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"})
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"}, vantageRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: res.SessionID}); err != nil {
+		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: res.SessionID}, vantageRemote); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -218,7 +218,7 @@ func TestMCPSessionResourceCutsAnOversizeNewestTurn(t *testing.T) {
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, strings.Repeat("\u00e9", 300<<10), nil)
 
-	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"})
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"}, vantageRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestMCPServerExposesSessionsAsResources(t *testing.T) {
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "listed answer", nil)
 
-	first, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "listed question"})
+	first, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "listed question"}, vantageRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestMCPServerExposesSessionsAsResources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := newMCPServer(&retrieval.Client{}, ragconfig.Config{}, cat)
+	srv := newMCPServer(&retrieval.Client{}, ragconfig.Config{}, cat, vantageRemote)
 
 	ctx := context.Background()
 	st, ct := mcp.NewInMemoryTransports()
@@ -303,7 +303,7 @@ func TestMCPServerExposesSessionsAsResources(t *testing.T) {
 
 	// A session created after the server started is not enumerated, but the
 	// template still serves it.
-	second, err := mcpChatResult(ctx, nil, loadConfig(), owner, mcpChatIn{Message: "later question"})
+	second, err := mcpChatResult(ctx, nil, loadConfig(), owner, mcpChatIn{Message: "later question"}, vantageRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +343,7 @@ func TestMCPSessionResourceKeepsContentOfAnEscapedOversizeNewestTurn(t *testing.
 			isolateUserDirs(t)
 			stubAdaptiveAnswer(t, strings.Repeat(tc.ch, tc.size), nil)
 
-			res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"})
+			res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"}, vantageRemote)
 			if err != nil {
 				t.Fatal(err)
 			}

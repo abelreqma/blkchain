@@ -33,7 +33,7 @@ func driveChatThroughMCPTool(t *testing.T, tool, args string) (turnResult, *fake
 		answer, tokens, err := adviseLoop(ctx, model, rc, cfg, nil, question, opts)
 		return answer, []citation{}, false, nil, tokens, "rag", err
 	}
-	res, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "Use the MCP server"})
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "Use the MCP server"}, vantageRemote)
 	return res, model, err
 }
 

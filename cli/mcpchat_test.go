@@ -22,7 +22,7 @@ func TestMCPChatOpensAndContinuesASession(t *testing.T) {
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "mcp answer", nil)
 
-	first, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q1"})
+	first, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q1"}, vantageRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestMCPChatOpensAndContinuesASession(t *testing.T) {
 
 	var opts AnswerOpts
 	stubAdaptiveAnswer(t, "mcp second", &opts)
-	second, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q2", SessionID: first.SessionID})
+	second, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q2", SessionID: first.SessionID}, vantageRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestMCPChatSessionIsReadableAsAnOrdinarySession(t *testing.T) {
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "from mcp", nil)
 
-	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"})
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q"}, vantageRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestMCPChatRejectsHostileSessionIDs(t *testing.T) {
 	// Well-formed ids this server never created are refused as foreign before
 	// any lookup.
 	for _, id := range []string{"20260101T000000-aaaaaa", "with space"} {
-		_, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: id})
+		_, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: id}, vantageRemote)
 		if !errors.Is(err, errChatForeignSession) {
 			t.Fatalf("unknown session id %q: error = %v, want a foreign-session refusal", id, err)
 		}
@@ -86,7 +86,7 @@ func TestMCPChatRejectsHostileSessionIDs(t *testing.T) {
 	// Path-shaped ids must be rejected before the lookup. An error that wraps
 	// errSessionNotFound means the id reached the file-path code.
 	for _, id := range []string{"../../etc/passwd", "a/b", "..", `a\b`} {
-		_, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: id})
+		_, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: id}, vantageRemote)
 		if err == nil {
 			t.Fatalf("session id %q was accepted", id)
 		}
@@ -105,7 +105,7 @@ func TestMCPChatSessionIDIsNotASelector(t *testing.T) {
 	// A rejected id must not reach the lookup: a not-found error would mean the
 	// length bound or the selector check did not run.
 	for _, id := range []string{sessionTargetNew, sessionTargetLast, strings.Repeat("a", mcpChatMaxSessionID+1)} {
-		_, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: id})
+		_, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", SessionID: id}, vantageRemote)
 		if err == nil {
 			t.Fatalf("session id %q was accepted", id)
 		}
@@ -129,7 +129,7 @@ func TestMCPChatRejectsEmptyMessage(t *testing.T) {
 	stubAdaptiveAnswer(t, "unused", nil)
 
 	for _, msg := range []string{"", "   "} {
-		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: msg}); err == nil {
+		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: msg}, vantageRemote); err == nil {
 			t.Fatalf("message %q was accepted", msg)
 		}
 	}
@@ -142,7 +142,7 @@ func TestMCPChatRejectsOversizeMessage(t *testing.T) {
 	stubAdaptiveAnswer(t, "unused", nil)
 
 	big := strings.Repeat("a", mcpChatMaxMessage+1)
-	if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: big}); err == nil {
+	if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: big}, vantageRemote); err == nil {
 		t.Fatal("oversize message accepted")
 	}
 }
@@ -153,7 +153,7 @@ func TestMCPChatRejectsUnknownAgent(t *testing.T) {
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "unused", nil)
 
-	_, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", Agent: "nope"})
+	_, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q", Agent: "nope"}, vantageRemote)
 	if err == nil {
 		t.Fatal("unknown agent accepted")
 	}
@@ -175,7 +175,7 @@ func TestMCPChatRefusesASessionItDidNotCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := newChatSessionOwner()
-	_, err = mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "planted turn", SessionID: elsewhere.SessionID})
+	_, err = mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "planted turn", SessionID: elsewhere.SessionID}, vantageRemote)
 	if !errors.Is(err, errChatForeignSession) {
 		t.Fatalf("continuing a foreign session: error = %v, want a foreign-session refusal", err)
 	}
@@ -190,11 +190,11 @@ func TestMCPChatRefusesASessionItDidNotCreate(t *testing.T) {
 		t.Fatalf("the refused turn changed the transcript: %+v", recs)
 	}
 
-	own, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q1"})
+	own, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q1"}, vantageRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q2", SessionID: own.SessionID}); err != nil {
+	if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q2", SessionID: own.SessionID}, vantageRemote); err != nil {
 		t.Fatalf("continuing its own session: %v", err)
 	}
 
@@ -214,11 +214,11 @@ func TestMCPChatOwnedSessionsDoNotSurviveARestart(t *testing.T) {
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "an answer", nil)
 
-	first, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q1"})
+	first, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q1"}, vantageRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q2", SessionID: first.SessionID})
+	_, err = mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q2", SessionID: first.SessionID}, vantageRemote)
 	if !errors.Is(err, errChatForeignSession) {
 		t.Fatalf("after a restart: error = %v, want a foreign-session refusal", err)
 	}
@@ -280,7 +280,7 @@ func TestMCPChatTurnKeepsItsSessionOwned(t *testing.T) {
 	isolateUserDirs(t)
 	stubAdaptiveAnswer(t, "an answer", nil)
 
-	first, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q1"})
+	first, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q1"}, vantageRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestMCPChatTurnKeepsItsSessionOwned(t *testing.T) {
 		filler = append(filler, fmt.Sprintf("20260101T000000-%06x", i))
 		owner.own(filler[i])
 	}
-	if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q2", SessionID: first.SessionID}); err != nil {
+	if _, err := mcpChatResult(context.Background(), nil, loadConfig(), owner, mcpChatIn{Message: "q2", SessionID: first.SessionID}, vantageRemote); err != nil {
 		t.Fatal(err)
 	}
 	owner.own("20260101T000000-ffffff")
@@ -355,7 +355,7 @@ func TestMCPChatKeepsTheAnswerWhenPersistenceFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := newMCPServer(&retrieval.Client{}, loadConfig(), cat)
+	srv := newMCPServer(&retrieval.Client{}, loadConfig(), cat, vantageRemote)
 	ctx := context.Background()
 	st, ct := mcp.NewInMemoryTransports()
 	ss, err := srv.Connect(ctx, st, nil)
@@ -435,7 +435,7 @@ func TestMCPChatBoundsATurnByTheRequestTimeout(t *testing.T) {
 	cfg.RequestTimeoutSeconds = 1
 
 	start := time.Now()
-	_, err := mcpChatResult(context.Background(), nil, cfg, newChatSessionOwner(), mcpChatIn{Message: "q"})
+	_, err := mcpChatResult(context.Background(), nil, cfg, newChatSessionOwner(), mcpChatIn{Message: "q"}, vantageRemote)
 	if !errors.Is(err, errRequestTimeout) {
 		t.Fatalf("error = %v, want the request-timeout error", err)
 	}
@@ -444,25 +444,17 @@ func TestMCPChatBoundsATurnByTheRequestTimeout(t *testing.T) {
 	}
 }
 
-func setMCPServesStdio(t *testing.T, v bool) {
-	t.Helper()
-	prev := mcpServesStdio.Load()
-	mcpServesStdio.Store(v)
-	t.Cleanup(func() { mcpServesStdio.Store(prev) })
-}
-
-// Without the stdio fact, tool_host local is refused with its own error class
+// From a remote caller, tool_host local is refused with its own error class
 // before any turn runs, and the sandbox host is unaffected.
-func TestMCPChatRefusesLocalToolHostWithoutStdio(t *testing.T) {
+func TestMCPChatRefusesLocalToolHostFromRemoteCaller(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
-	setMCPServesStdio(t, false)
 	var opts AnswerOpts
 	stubAdaptiveAnswer(t, "sandboxed", &opts)
 
-	_, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", ToolHost: "local"})
+	_, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", ToolHost: "local"}, vantageRemote)
 	if !errors.Is(err, errChatLocalHostRefused) {
-		t.Fatalf("local without stdio: error = %v, want errChatLocalHostRefused", err)
+		t.Fatalf("local from a remote caller: error = %v, want errChatLocalHostRefused", err)
 	}
 	if errors.Is(err, errChatForeignSession) || errors.Is(err, errChatBusy) {
 		t.Fatalf("the refusal is not distinguishable from another class: %v", err)
@@ -472,7 +464,7 @@ func TestMCPChatRefusesLocalToolHostWithoutStdio(t *testing.T) {
 	}
 
 	for _, host := range []string{"", "sandbox"} {
-		res, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", ToolHost: host})
+		res, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", ToolHost: host}, vantageRemote)
 		if err != nil || res.Answer != "sandboxed" {
 			t.Fatalf("host %q: answer=%q err=%v", host, res.Answer, err)
 		}
@@ -482,25 +474,18 @@ func TestMCPChatRefusesLocalToolHostWithoutStdio(t *testing.T) {
 	}
 }
 
-func TestMCPChatAcceptsLocalToolHostOverStdio(t *testing.T) {
+func TestMCPChatAcceptsLocalToolHostFromLocalCaller(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
-	setMCPServesStdio(t, true)
 	var opts AnswerOpts
 	stubAdaptiveAnswer(t, "on the host", &opts)
 
-	res, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", ToolHost: "local"})
+	res, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", ToolHost: "local"}, vantageLocal)
 	if err != nil || res.Answer != "on the host" {
 		t.Fatalf("answer=%q err=%v", res.Answer, err)
 	}
 	if opts.ToolHost != "local" {
 		t.Fatalf("the router saw host %q, want local", opts.ToolHost)
-	}
-}
-
-func TestMCPServesStdioIsOffByDefault(t *testing.T) {
-	if mcpServesStdio.Load() {
-		t.Fatal("mcpServesStdio is set outside runMCP; a transport that does not opt in must be refused")
 	}
 }
 
@@ -522,7 +507,6 @@ const testLoopbackCDP = "http://127.0.0.1:9222"
 func TestMCPChatThreadsBrowserCDPAndRoutingHints(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
-	setMCPServesStdio(t, true)
 	var opts AnswerOpts
 	var force bool
 	var reached int
@@ -530,7 +514,7 @@ func TestMCPChatThreadsBrowserCDPAndRoutingHints(t *testing.T) {
 	run := func(in mcpChatIn) {
 		t.Helper()
 		in.Message = "q"
-		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), in); err != nil {
+		if _, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), in, vantageLocal); err != nil {
 			t.Fatalf("%+v: %v", in, err)
 		}
 	}
@@ -563,13 +547,12 @@ func TestMCPChatThreadsBrowserCDPAndRoutingHints(t *testing.T) {
 func TestMCPChatToolCallCarriesBrowserCDPAndRoutingHints(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
-	setMCPServesStdio(t, true)
 	var opts AnswerOpts
 	var force bool
 	var reached int
 	captureTurnInputs(t, &opts, &force, &reached)
 
-	srv := newMCPServer(&retrieval.Client{}, loadConfig(), nil)
+	srv := newMCPServer(&retrieval.Client{}, loadConfig(), nil, vantageLocal)
 	ctx := context.Background()
 	st, ct := mcp.NewInMemoryTransports()
 	ss, err := srv.Connect(ctx, st, nil)
@@ -610,18 +593,17 @@ func TestMCPChatToolCallCarriesBrowserCDPAndRoutingHints(t *testing.T) {
 	}
 }
 
-func TestMCPChatRefusesBrowserCDPWithoutStdio(t *testing.T) {
+func TestMCPChatRefusesBrowserCDPFromRemoteCaller(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
-	setMCPServesStdio(t, false)
 	var opts AnswerOpts
 	var force bool
 	var reached int
 	captureTurnInputs(t, &opts, &force, &reached)
 
-	_, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", BrowserCDP: testLoopbackCDP})
+	_, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", BrowserCDP: testLoopbackCDP}, vantageRemote)
 	if !errors.Is(err, errChatBrowserCDPRefused) {
-		t.Fatalf("browser_cdp without stdio: error = %v, want errChatBrowserCDPRefused", err)
+		t.Fatalf("browser_cdp from a remote caller: error = %v, want errChatBrowserCDPRefused", err)
 	}
 	if errors.Is(err, errChatLocalHostRefused) {
 		t.Fatalf("the refusal is not distinguishable from the tool_host refusal: %v", err)
@@ -630,7 +612,7 @@ func TestMCPChatRefusesBrowserCDPWithoutStdio(t *testing.T) {
 		t.Fatal("a refused turn reached the router")
 	}
 
-	if _, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q"}); err != nil {
+	if _, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q"}, vantageRemote); err != nil {
 		t.Fatalf("a turn without browser_cdp: %v", err)
 	}
 }
@@ -638,7 +620,6 @@ func TestMCPChatRefusesBrowserCDPWithoutStdio(t *testing.T) {
 func TestMCPChatRefusesInvalidBrowserCDPEndpoint(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
-	setMCPServesStdio(t, true)
 	var opts AnswerOpts
 	var force bool
 	var reached int
@@ -652,7 +633,7 @@ func TestMCPChatRefusesInvalidBrowserCDPEndpoint(t *testing.T) {
 		"no scheme":          "127.0.0.1:9222",
 		"oversized":          "http://127.0.0.1:9222/" + strings.Repeat("a", mcpChatMaxBrowserCDP),
 	} {
-		_, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", BrowserCDP: endpoint})
+		_, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", BrowserCDP: endpoint}, vantageLocal)
 		if err == nil {
 			t.Errorf("%s: %q was accepted", name, endpoint)
 			continue
@@ -669,13 +650,12 @@ func TestMCPChatRefusesInvalidBrowserCDPEndpoint(t *testing.T) {
 func TestMCPChatRefusesForceRagWithWebOnly(t *testing.T) {
 	useDeadServices(t)
 	isolateUserDirs(t)
-	setMCPServesStdio(t, false)
 	var opts AnswerOpts
 	var force bool
 	var reached int
 	captureTurnInputs(t, &opts, &force, &reached)
 
-	_, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", ForceRag: true, WebOnly: true})
+	_, err := mcpChatResult(context.Background(), nil, loadConfig(), newChatSessionOwner(), mcpChatIn{Message: "q", ForceRag: true, WebOnly: true}, vantageRemote)
 	if err == nil || !strings.Contains(err.Error(), "web_only cannot be combined with force_rag") {
 		t.Fatalf("force_rag with web_only: error = %v", err)
 	}
