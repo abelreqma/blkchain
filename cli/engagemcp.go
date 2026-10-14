@@ -56,6 +56,13 @@ var engageMCPActions = map[string]map[string]engageMCPAction{
 		// get_collaborator_interactions does cause outbound traffic, because Burp
 		// polls its Collaborator server to answer it; the destination is not
 		// caller-controlled, so it is in the same class as the interactsh server.
+		//
+		// A read is not filtered by engagement scope. The proxy-history tools
+		// return the whole Burp project's history, which can hold the operator's
+		// own browsing and another engagement's traffic, credentials in headers
+		// included, and get_active_editor_contents returns whatever request is
+		// open in the instrument. Denying the two output_* tools below removes the
+		// configuration dump, not this exposure.
 		"get_proxy_http_history":            engageMCPRead,
 		"get_proxy_http_history_regex":      engageMCPRead,
 		"get_proxy_websocket_history":       engageMCPRead,
@@ -244,6 +251,9 @@ func engageMCPTargetFromArgs(tool, args string) (engageMCPRequestTarget, error) 
 	if !ok || (net.ParseIP(host) == nil && !engageMCPHostPattern.MatchString(host)) {
 		return engageMCPRequestTarget{}, errEngageMCPHost
 	}
+	// The range check precedes the integrality check, and so precedes every
+	// conversion to int: a JSON body can carry 1e30, and converting a float64
+	// outside the int range to int is undefined in Go.
 	port, ok := values["targetPort"].(float64)
 	if !ok || port < 1 || port > 65535 || port != float64(int(port)) {
 		return engageMCPRequestTarget{}, errEngageMCPPort
@@ -262,8 +272,14 @@ func engageMCPTargetFromArgs(tool, args string) (engageMCPRequestTarget, error) 
 	// form in the host moves the authority net/url reads to what follows the '@';
 	// a path in the host narrows it to the prefix before the '/'; a second
 	// authority in the path replaces it outright.
+	//
+	// It is a belt: no host the check above accepts can produce any of those
+	// forms, because a net.ParseIP value and an engageMCPHostPattern match both
+	// exclude '@' and '/', and engageMCPRequestPath contributes no path unless it
+	// is origin form without "//". The readback stays so that loosening either
+	// check cannot move the authority without failing here.
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.User != nil || parsed.Scheme != scheme ||
+	if err != nil || parsed.User != nil ||
 		!strings.EqualFold(parsed.Hostname(), host) ||
 		parsed.Port() != strconv.Itoa(int(port)) {
 		return engageMCPRequestTarget{}, errEngageMCPHost

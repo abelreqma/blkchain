@@ -72,7 +72,7 @@ func TestMain(m *testing.M) {
 	// variable names. An operator with it exported would otherwise have a test
 	// that builds one connect to their real servers, start a stdio server's
 	// command, and drive their own Burp.
-	if err := os.Unsetenv("BLKCHAIN_MCP_CLIENT_CONFIG"); err != nil {
+	if err := os.Unsetenv(chatMCPConfigEnv); err != nil {
 		panic("hermetic test state: " + err.Error())
 	}
 	code := m.Run()
@@ -116,6 +116,14 @@ func TestPackageStateResolvesInsideTheTestRoot(t *testing.T) {
 		if strings.HasPrefix(path, filepath.Join(home, ".config")) || strings.HasPrefix(path, filepath.Join(home, ".local")) {
 			t.Errorf("%s resolves into the operator's own state at %q", name, path)
 		}
+	}
+
+	// The resolvers above are redirected by the two XDG variables, so they fail
+	// if TestMain stops setting either. Nothing above depends on the MCP client
+	// config being unset, so that one is asserted directly: with it exported, a
+	// registry built in this suite opens the operator's own MCP servers.
+	if path := os.Getenv(chatMCPConfigEnv); path != "" {
+		t.Errorf("%s is set to %q, so a registry built in this suite would open the operator's own MCP servers", chatMCPConfigEnv, path)
 	}
 }
 

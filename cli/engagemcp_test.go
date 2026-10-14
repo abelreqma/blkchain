@@ -285,6 +285,10 @@ func TestEngageMCPTargetRefusesMalformedArguments(t *testing.T) {
 		{"port below the range", engageMCPRequestArgs(`GET / HTTP/1.1`, "app.example", 0, true), errEngageMCPPort},
 		{"port above the range", engageMCPRequestArgs(`GET / HTTP/1.1`, "app.example", 65536, true), errEngageMCPPort},
 		{"missing port", `{"content":"GET / HTTP/1.1","targetHostname":"app.example","usesHttps":true}`, errEngageMCPPort},
+		// Raw arguments, because the helper's int parameter cannot carry a JSON
+		// number outside the int range. The range check has to refuse it before
+		// any conversion: converting such a float64 to int is undefined in Go.
+		{"port beyond the int range", `{"content":"GET / HTTP/1.1","targetHostname":"app.example","targetPort":1e30}`, errEngageMCPPort},
 		{"non-string content", `{"content":5,"targetHostname":"app.example","targetPort":443}`, errEngageMCPContent},
 		{"not json", `targetHostname=app.example`, errEngageMCPArgs},
 	}

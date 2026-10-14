@@ -9,9 +9,9 @@ import (
 )
 
 // engageintegrations.go gives one engagement executor's registry the two
-// operator instruments that until now reached only the chat path: the outbound
-// MCP tools, each wrapped by newGatedMCPTool so a tool that sends a request is
-// authorized by the engagement gate, and the out-of-band tools.
+// operator instruments the chat path also carries: the outbound MCP tools, each
+// wrapped by newGatedMCPTool so a tool that sends a request is authorized by
+// the engagement gate, and the out-of-band tools.
 //
 // Registration has one home so the authorization logic is not restated per
 // executor, and each executor's participation is one line. The session setup
@@ -38,6 +38,17 @@ const engageMCPUnavailableAction = "mcp-unavailable"
 // openEngageMCPTools opens one session per server and registers every tool
 // newGatedMCPTool reports ok for. It returns the closer for the sessions it
 // opened, and on an error it has closed them itself.
+//
+// The sink buffers the gated tools and reg is written only once openMCPSessions
+// has returned a nil error. Several of its error returns fire after earlier
+// tools have already reached the sink: the check that each server offered every
+// allowlisted tool, which runs after that server's loop, the tool-count and
+// schema-size bounds, a list error mid-iteration, and any failure on a later
+// server. openMCPSessions closes every session it opened before returning any
+// of them, so a sink that registered as the walk proceeded would leave those
+// tools in reg over closed sessions, and the caller's degrade would then offer
+// the model a send tool whose session is dead: the gate would authorize, prompt
+// and audit a request the call cannot dispatch.
 func openEngageMCPTools(ctx context.Context, reg *tooldef.Registry, servers []chatMCPServer, gate *secgate.Gate, armed bool) (func(), error) {
 	// The sandbox workspace is the root the chat path resolves with no explicit
 	// tool host, and it is what a stdio server's command runs in. The engagement
@@ -47,13 +58,25 @@ func openEngageMCPTools(ctx context.Context, reg *tooldef.Registry, servers []ch
 	if err != nil {
 		return nil, err
 	}
-	return openMCPSessions(ctx, servers, root, func(server, remote string, tool tooldef.Tool) error {
+	var gatedTools []tooldef.Tool
+	closeMCP, err := openMCPSessions(ctx, servers, root, func(server, remote string, tool tooldef.Tool) error {
 		gated, ok := newGatedMCPTool(tool, server, remote, gate, armed)
 		if !ok {
 			return nil
 		}
-		return reg.Register(gated)
+		gatedTools = append(gatedTools, gated)
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	for _, gated := range gatedTools {
+		if err := reg.Register(gated); err != nil {
+			closeMCP()
+			return nil, err
+		}
+	}
+	return closeMCP, nil
 }
 
 // registerEngageIntegrations adds the outbound MCP tools and the out-of-band

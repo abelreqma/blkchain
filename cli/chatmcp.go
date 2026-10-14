@@ -21,6 +21,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// chatMCPConfigEnv names the outbound MCP client config, overriding the default
+// path beside the preferences file.
+const chatMCPConfigEnv = "BLKCHAIN_MCP_CLIENT_CONFIG"
+
 const (
 	chatMCPConfigMaxBytes = 64 << 10
 	chatMCPMaxServers     = 8
@@ -66,7 +70,7 @@ type chatMCPConfig struct {
 }
 
 func chatMCPConfigPath() (string, error) {
-	if path := strings.TrimSpace(os.Getenv("BLKCHAIN_MCP_CLIENT_CONFIG")); path != "" {
+	if path := strings.TrimSpace(os.Getenv(chatMCPConfigEnv)); path != "" {
 		return path, nil
 	}
 	path, err := prefsPath()
