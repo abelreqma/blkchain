@@ -134,6 +134,11 @@ func (e aiSecExecutor) aiSecRunReconPhase(ctx context.Context, task engagement.T
 			return "", err
 		}
 	}
+	closeIntegrations, err := registerEngageIntegrations(ctx, reg, e.d, task)
+	if err != nil {
+		return "", err
+	}
+	defer closeIntegrations()
 
 	// The executor always runs the ai-security persona regardless of the task's
 	// exact kind, because executorFor selects it by surface.

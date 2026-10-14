@@ -133,6 +133,11 @@ func (e localExecutor) localRunTargetAnalysis(ctx context.Context, task engageme
 			return "", err
 		}
 	}
+	closeIntegrations, err := registerEngageIntegrations(ctx, reg, e.d, task)
+	if err != nil {
+		return "", err
+	}
+	defer closeIntegrations()
 
 	beforeRows, err := e.d.Store.EvidenceRowsFor(task.ID)
 	if err != nil {
