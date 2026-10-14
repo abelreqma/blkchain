@@ -386,14 +386,16 @@ func TestServeTurnRefusesLocalToolHostFromANonLoopbackPeer(t *testing.T) {
 	}
 }
 
-func TestServeTurnAllowsLocalToolHostFromALoopbackPeer(t *testing.T) {
+func TestServeTurnAllowsLocalToolHostFromAnAuthenticatedLoopbackPeer(t *testing.T) {
 	const endpoint = "http://127.0.0.1:9222"
-	s, id := serveTurnServer(t, serveOpts{}, "")
+	s, id := serveTurnServer(t, serveOpts{}, serveTestToken)
 	calls := installServeTurnRouter(t, serveTurnRouter{answer: "an answer"})
 	path := serveSessionsPath + "/" + id + serveTurnsSuffix
 
 	body := `{"message":"q","tool_host":"local","browser_cdp":"` + endpoint + `"}`
-	rec := serveTurnDo(s, serveTurnPost(t, path, "127.0.0.1:54321", body))
+	req := serveTurnPost(t, path, "127.0.0.1:54321", body)
+	req.Header.Set("Authorization", "Bearer "+serveTestToken)
+	rec := serveTurnDo(s, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body %q", rec.Code, http.StatusOK, rec.Body.String())
 	}
@@ -403,8 +405,49 @@ func TestServeTurnAllowsLocalToolHostFromALoopbackPeer(t *testing.T) {
 	if calls.opts.BrowserCDP != endpoint {
 		t.Errorf("the router saw browser_cdp %q, want %q", calls.opts.BrowserCDP, endpoint)
 	}
+	if calls.opts.vantage != vantageLocal {
+		t.Errorf("the router saw vantage %v, want %v", calls.opts.vantage, vantageLocal)
+	}
 	if got := s.callerVantage(serveTurnPost(t, path, "[::1]:54321", body)); got != vantageLocal {
 		t.Errorf("callerVantage for an IPv6 loopback peer = %v, want %v", got, vantageLocal)
+	}
+}
+
+// TestServeTurnRefusesTheOperatorsReachWithoutAToken pins that a loopback peer
+// alone is not the operator. With no token any process on the machine can call
+// a loopback server, another local account's included, so the operator-reach
+// options are refused and the turn that is admitted runs with a remote vantage,
+// which keeps the tools that reach this host's files and host-local MCP servers
+// out of it.
+func TestServeTurnRefusesTheOperatorsReachWithoutAToken(t *testing.T) {
+	s, id := serveTurnServer(t, serveOpts{}, "")
+	calls := installServeTurnRouter(t, serveTurnRouter{answer: "an answer"})
+	path := serveSessionsPath + "/" + id + serveTurnsSuffix
+
+	for _, peer := range []string{"127.0.0.1:54321", "[::1]:54321"} {
+		if got := s.callerVantage(serveTurnPost(t, path, peer, `{}`)); got != vantageRemote {
+			t.Errorf("callerVantage with no token for peer %q = %v, want %v", peer, got, vantageRemote)
+		}
+	}
+	for _, body := range []string{
+		`{"message":"q","tool_host":"local"}`,
+		`{"message":"q","browser_cdp":"http://127.0.0.1:9222"}`,
+	} {
+		rec := serveTurnDo(s, serveTurnPost(t, path, "127.0.0.1:54321", body))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s with no token: status = %d, want %d; body %q", body, rec.Code, http.StatusForbidden, rec.Body.String())
+		}
+	}
+	if calls.ran.Load() != 0 {
+		t.Errorf("a refused turn reached the router %d times", calls.ran.Load())
+	}
+
+	rec := serveTurnDo(s, serveTurnPost(t, path, "127.0.0.1:54321", `{"message":"q"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a sandboxed turn with no token: status = %d; body %q", rec.Code, rec.Body.String())
+	}
+	if calls.opts.vantage != vantageRemote {
+		t.Errorf("the admitted turn reached the router with vantage %v, want %v", calls.opts.vantage, vantageRemote)
 	}
 }
 
@@ -434,9 +477,10 @@ func TestServeTurnRequiresTheThreeDefensesBeforeTheVantageGrant(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, id := serveTurnServer(t, serveOpts{}, "")
+			s, id := serveTurnServer(t, serveOpts{}, serveTestToken)
 			calls := installServeTurnRouter(t, serveTurnRouter{answer: "an answer"})
 			req := serveTurnPost(t, serveSessionsPath+"/"+id+serveTurnsSuffix, "127.0.0.1:54321", body)
+			req.Header.Set("Authorization", "Bearer "+serveTestToken)
 			tc.shape(req)
 			rec := serveTurnDo(s, req)
 			if rec.Code != tc.want {
@@ -455,9 +499,11 @@ func TestServeTurnRequiresTheThreeDefensesBeforeTheVantageGrant(t *testing.T) {
 
 	// With all three satisfied the same request runs and does get the reach, so
 	// the cases above fail on their defense and not on something else.
-	s, id := serveTurnServer(t, serveOpts{}, "")
+	s, id := serveTurnServer(t, serveOpts{}, serveTestToken)
 	calls := installServeTurnRouter(t, serveTurnRouter{answer: "an answer"})
-	rec := serveTurnDo(s, serveTurnPost(t, serveSessionsPath+"/"+id+serveTurnsSuffix, "127.0.0.1:54321", body))
+	req := serveTurnPost(t, serveSessionsPath+"/"+id+serveTurnsSuffix, "127.0.0.1:54321", body)
+	req.Header.Set("Authorization", "Bearer "+serveTestToken)
+	rec := serveTurnDo(s, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body %q", rec.Code, http.StatusOK, rec.Body.String())
 	}

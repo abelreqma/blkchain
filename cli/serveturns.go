@@ -54,8 +54,15 @@ var errServeBadBody = errors.New("the request body is not a turn")
 // nothing about who originated the request. The bind's rule is read from the
 // field computed once in newServeServer, so this can never be laxer than the
 // exposure that was opened.
+//
+// A loopback bind with no token is remote too. Any process on the machine can
+// reach loopback, another local account's and a local SSRF included, so the
+// peer address says the request came from this machine and not that the
+// operator sent it.
+// The token is what does: once one is set it is required on every request, so
+// a request that reaches a handler has presented it.
 func (s *serveServer) callerVantage(r *http.Request) clientVantage {
-	if s.hostMode != serveHostLoopback {
+	if s.hostMode != serveHostLoopback || s.token == "" {
 		return vantageRemote
 	}
 	return vantageForRemoteAddr(r.RemoteAddr)
