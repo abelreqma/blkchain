@@ -40,6 +40,7 @@ var wordingDescs = map[string]string{
 	"logs":       "show the embed_server log; -f follows it",
 	"hermes":     "legacy: run one Hermes agent turn (no session)",
 	"mcp":        "serve the agent and knowledge base over MCP (stdio)",
+	"serve":      "serve the agent over a loopback HTTP API",
 	"engage":     "plan and run a gated, multi-step assessment",
 	"store":      "inspect stored engagements and cite answers",
 	"kg":         "query the engagement knowledge graph",
@@ -54,7 +55,7 @@ var wordingGroups = [][]string{
 	{"engage", "store", "kg"},
 	{"ask", "search", "web", "sources", "open", "add"},
 	{"up", "down", "status", "health", "doctor", "models", "logs"},
-	{"hermes", "mcp", "analyze"},
+	{"hermes", "mcp", "serve", "analyze"},
 	{"install", "completion", "version", "help"},
 }
 
@@ -88,6 +89,19 @@ func assertASCII(t *testing.T, label, s string) {
 func lineWith(s, sub string) string {
 	for _, ln := range strings.Split(s, "\n") {
 		if strings.Contains(ln, sub) {
+			return ln
+		}
+	}
+	return ""
+}
+
+// lineStarting returns the first line of s with the given prefix. A command row
+// is looked up by prefix rather than by substring because a command's name can
+// also appear inside another command's description column, where a substring
+// search would return that other row.
+func lineStarting(s, prefix string) string {
+	for _, ln := range strings.Split(s, "\n") {
+		if strings.HasPrefix(ln, prefix) {
 			return ln
 		}
 	}
@@ -344,7 +358,7 @@ func TestUsageLayout(t *testing.T) {
 		for _, name := range names {
 			c, _ := lookupCommand(name)
 			sig := strings.TrimSpace(name + " " + c.args)
-			row := lineWith(sec, sig+" ")
+			row := lineStarting(sec, "   "+sig+" ")
 			if !strings.HasPrefix(row, "   "+sig+" ") {
 				t.Errorf("row for %q is %q, want it to start with its signature %q", name, row, sig)
 				continue
@@ -459,7 +473,7 @@ func TestUsageContentAtEveryWidth(t *testing.T) {
 				continue
 			}
 			sig := strings.TrimSpace(c.name + " " + c.args)
-			if !strings.HasPrefix(lineWith(out, "   "+sig+" "), "   "+sig+" ") {
+			if !strings.HasPrefix(lineStarting(out, "   "+sig+" "), "   "+sig+" ") {
 				t.Errorf("width %d: no row starts with %q", w, sig)
 			}
 			if !strings.Contains(collapse(out), c.desc) {
