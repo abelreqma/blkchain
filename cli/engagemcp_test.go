@@ -681,3 +681,45 @@ func TestEngageMCPHTTP2ReadsThePseudoHeaders(t *testing.T) {
 		t.Errorf("a second authority in :path: url = %q, want the authority alone", second.URL)
 	}
 }
+
+// TestGatedMCPRequestToolRefusesAPivotedWebSurface pins that Burp's request
+// tools are refused while a foothold carries the web surface. Burp sends from
+// the operator's host, not through the foothold, so the pivot scope the gate
+// applies on that surface would authorize addresses on the operator's own
+// networks. The control is the same request with no foothold, which reaches the
+// remote tool.
+func TestGatedMCPRequestToolRefusesAPivotedWebSurface(t *testing.T) {
+	args := map[string]string{
+		"send_http1_request": engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: x\r\n\r\n`, "10.0.0.5", 443, true),
+		"send_to_intruder":   engageMCPRequestArgs(`GET /a HTTP/1.1\r\nHost: x\r\n\r\n`, "10.0.0.5", 443, true),
+		"send_http2_request": engageMCPHTTP2Args(t, map[string]any{":method": "GET", ":path": "/a"}, "10.0.0.5", 443, true),
+	}
+	for remote, call := range args {
+		pivoted := autoGate(t)
+		pivoted.AttachedFoothold = &secgate.Foothold{Host: "10.0.0.9", Surfaces: []secgate.Surface{secgate.SurfaceWeb}}
+		inner := &recordingMCPTool{name: "mcp__burp__" + remote, output: "sent"}
+		tool, ok := newGatedMCPTool(inner, "burp", remote, pivoted, true)
+		if !ok {
+			t.Fatalf("%s: a request tool with a gate must be registered", remote)
+		}
+		out, err := tool.Call(context.Background(), call)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if inner.calls != 0 {
+			t.Errorf("%s reached the remote tool on a pivoted web surface", remote)
+		}
+		if !strings.Contains(out, "foothold") {
+			t.Errorf("%s: refusal %q must name the foothold", remote, out)
+		}
+
+		direct := &recordingMCPTool{name: "mcp__burp__" + remote, output: "sent"}
+		control, _ := newGatedMCPTool(direct, "burp", remote, autoGate(t), true)
+		if _, err := control.Call(context.Background(), call); err != nil {
+			t.Fatal(err)
+		}
+		if direct.calls != 1 {
+			t.Errorf("%s: the same call with no foothold reached the remote tool %d times, want 1", remote, direct.calls)
+		}
+	}
+}
