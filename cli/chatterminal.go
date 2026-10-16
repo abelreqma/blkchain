@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"blkchain/cli/internal/secgate"
@@ -151,8 +152,18 @@ func chatTerminalCall(ctx context.Context, root, host string, in chatTerminalArg
 		var data bytes.Buffer
 		writer := &lockedWriter{w: &cappedWriter{cap: chatTerminalMaxOutput, buf: &data}}
 		cmd.Stdout, cmd.Stderr = writer, writer
+		// The command runs in its own process group so a timeout, and the
+		// return of the call, end every process it started, not only sh.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return cmd.Process.Kill()
+		}
 		cmd.WaitDelay = 2 * time.Second
 		err = cmd.Run()
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
 		output = data.String()
 	} else {
 		args := []string{"exec"}
