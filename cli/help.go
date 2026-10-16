@@ -516,6 +516,27 @@ func commandFlagSet(c cmdSpec) *flag.FlagSet {
 	return fs
 }
 
+// flagSetSpec describes a subcommand that has no registry entry, such as
+// "engage approve-network", from its own flag set, and points to the parent
+// command's help for what it does.
+func flagSetSpec(fs *flag.FlagSet) cmdSpec {
+	parent := strings.Fields(fs.Name())
+	desc := ""
+	if len(parent) > 1 {
+		desc = `See "blk help ` + parent[0] + `" for what it does.`
+	}
+	return cmdSpec{
+		name: fs.Name(),
+		desc: desc,
+		flags: func(dst *flag.FlagSet) {
+			fs.VisitAll(func(f *flag.Flag) {
+				dst.Var(f.Value, f.Name, f.Usage)
+				dst.Lookup(f.Name).DefValue = f.DefValue
+			})
+		},
+	}
+}
+
 // parseFlags parses args. A help flag prints the command's help to stdout and
 // returns flag.ErrHelp (exit 0, no error line). Any other flag error becomes a
 // usage error that points to the command's help.
@@ -525,9 +546,11 @@ func parseFlags(fs *flag.FlagSet, args []string) error {
 	case err == nil:
 		return nil
 	case errors.Is(err, flag.ErrHelp):
-		if c, ok := lookupCommand(fs.Name()); ok {
-			printCommandHelp(os.Stdout, c)
+		c, ok := lookupCommand(fs.Name())
+		if !ok {
+			c = flagSetSpec(fs)
 		}
+		printCommandHelp(os.Stdout, c)
 		return flag.ErrHelp
 	default:
 		msg := err.Error()
