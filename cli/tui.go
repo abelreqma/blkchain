@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -1104,7 +1105,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Println(canceledOutput(partial, m.renderWidth()))
 
 	case execDoneMsg:
-		if msg.err != nil {
+		if msg.err != nil && !errors.Is(msg.err, flag.ErrHelp) {
 			return m, tea.Println(styleErr(msg.err))
 		}
 		return m, nil
@@ -2188,6 +2189,11 @@ func (m model) dispatchInput(q string) (tea.Model, tea.Cmd) {
 			args, err := engageApprovalArgs(arg)
 			if err != nil {
 				return m, tea.Sequence(tea.Println(echo), tea.Println(styleErr(err)))
+			}
+			// Help prints straight to the terminal, so it runs with the
+			// terminal handed over rather than under the TUI's rendering.
+			if slices.ContainsFunc(args[1:], func(a string) bool { return helpRequested([]string{a}) }) {
+				return m, tea.Sequence(tea.Println(echo), execFuncCmd(func() error { return runEngage(args) }))
 			}
 			m.working = true
 			m.tickGen++
