@@ -545,7 +545,7 @@ The bind's text decides that exposure, and a name in it resolves only when the l
 
 `tool_host: local` and `browser_cdp` grant the operator's own reach: the host's terminal and files outside the sandbox, and the signed-in browser. A turn may use them only when the bind is loopback, `BLKCHAIN_SERVE_TOKEN` is set, and the request's peer address is loopback. Without a token they are refused with 403: any process on this machine can reach loopback, another local account's included, so a loopback peer address does not show that the operator sent the request. On a bind that is not loopback they are refused to every caller with 403, because behind a tunnel, a published container port or a local proxy a loopback peer address does not show who sent the request.
 
-A turn refused that reach is still a full sandboxed turn, with two more tools withheld because they also reach this host: `file_import` and `file_export`, which read and write the server's working directory, and every MCP server that does not run in the sandbox container, which is a host-local stdio server or an HTTP server.
+A turn refused that reach is still a full sandboxed turn, with two more tools withheld because they also reach this host: `file_import` and `file_export`, which read and write the server's working directory, and every MCP server that does not run in the sandbox container, which is a host-local stdio server or an HTTP server. Its web requests and browser control also refuse this host's own addresses (loopback, link-local, unspecified, multicast, broadcast, and the host's interface addresses), even when the turn names one.
 
 #### Browser defenses
 

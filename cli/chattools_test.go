@@ -17,6 +17,47 @@ import (
 	"blkchain/cli/internal/secgate"
 )
 
+func TestChatWebBrokerKeepsRemoteCallersOffThisHost(t *testing.T) {
+	scope, err := secgate.BuildScope(secgate.ScopeSpec{In: []string{"127.0.0.1", "::1", "169.254.169.254", "0.0.0.0", "93.184.216.34"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &secgate.Gate{Mode: secgate.Auto, Scope: scope}
+	armed := func() bool { return true }
+	remote := newChatWebBroker(gate, armed, vantageRemote)
+	local := newChatWebBroker(gate, armed, vantageLocal)
+	for _, address := range []string{"127.0.0.1", "::1", "169.254.169.254", "0.0.0.0"} {
+		ip := net.ParseIP(address)
+		if remote.Policy.IPAllowed(address, ip) {
+			t.Errorf("remote caller's broker reaches host address %s", address)
+		}
+		if !local.Policy.IPAllowed(address, ip) {
+			t.Errorf("local caller's broker lost explicitly scoped %s", address)
+		}
+	}
+	interfaces, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, addr := range interfaces {
+		ip, _, err := net.ParseCIDR(addr.String())
+		if err != nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		withHost, err := secgate.BuildScope(secgate.ScopeSpec{In: []string{ip.String()}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		broker := newChatWebBroker(&secgate.Gate{Mode: secgate.Auto, Scope: withHost}, armed, vantageRemote)
+		if broker.Policy.IPAllowed(ip.String(), ip) {
+			t.Errorf("remote caller's broker reaches operator interface address %s", ip)
+		}
+	}
+	if !remote.Policy.IPAllowed("93.184.216.34", net.ParseIP("93.184.216.34")) {
+		t.Error("remote caller's broker lost an in-scope public address")
+	}
+}
+
 func TestChatTargetsComeFromTheUserConversation(t *testing.T) {
 	got := chatTargetEntries("Scan https://app.example.test:8443/login and 192.0.2.5", nil)
 	for _, want := range []string{"app.example.test", "192.0.2.5"} {
@@ -268,15 +309,22 @@ func TestChatWebAPIUsesNamedLoopbackFixture(t *testing.T) {
 		return runResult{Output: "Nmap scan report for " + host + "\nPORT STATE SERVICE\n" + port + "/tcp open http\n" + nmapDone}
 	}
 	t.Cleanup(func() { execRunner = old })
-	reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "POST to "+srv.URL, nil, AnswerOpts{})
-	if err != nil {
-		t.Fatal(err)
+	call := func(vantage clientVantage) (string, error) {
+		reg, closeTools, err := newChatToolRegistry(context.Background(), nil, ragconfig.Config{}, nil, "POST to "+srv.URL, nil, AnswerOpts{vantage: vantage})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeTools()
+		tool, _ := reg.Get("web_api")
+		return tool.Call(context.Background(), `{"method":"POST","url":"`+srv.URL+`","body":"test"}`)
 	}
-	defer closeTools()
-	tool, _ := reg.Get("web_api")
-	out, err := tool.Call(context.Background(), `{"method":"POST","url":"`+srv.URL+`","body":"test"}`)
+	out, err := call(vantageLocal)
 	if err != nil || hits != 1 || !strings.Contains(out, "fixture receipt") {
 		t.Fatalf("hits=%d out=%q err=%v", hits, out, err)
+	}
+	out, err = call(vantageRemote)
+	if hits != 1 || !strings.Contains(out, "outside scope") {
+		t.Fatalf("remote caller reached the loopback fixture: hits=%d out=%q err=%v", hits, out, err)
 	}
 }
 

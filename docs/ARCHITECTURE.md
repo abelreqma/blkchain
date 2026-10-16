@@ -175,6 +175,10 @@ Vantage decides which tools may reach this host:
 - A remote caller is offered only the MCP servers that run in the sandbox container. A host-local
   stdio server runs with this host's network, and an HTTP server is dialed from this host with the
   operator's bearer token.
+- The chat web broker behind `web_api`, `web_browser` and browser control dials from this host. For
+  a remote caller it refuses loopback, link-local, unspecified, multicast and broadcast addresses
+  and this host's interface addresses, even when the request names one, as the sandboxed command
+  executor does.
 
 `turnRequest.Vantage` carries the decision into the tool registry.
 
