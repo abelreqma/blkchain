@@ -5,11 +5,47 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestChatTerminalLocalHostLeavesNoChildRunning(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command string
+		timeout int
+	}{
+		{"background after exit", "sleep 30 >/dev/null 2>&1 & echo $! > child.pid", 5},
+		{"forked child at timeout", "sleep 30 & echo $! > child.pid; wait", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if _, err := chatTerminalCall(context.Background(), root, chatToolHostLocal, chatTerminalArgs{Command: tc.command, TimeoutSeconds: tc.timeout}); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(root, "child.pid"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil || pid <= 1 {
+				t.Fatalf("child pid %q: %v", data, err)
+			}
+			t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+			deadline := time.Now().Add(3 * time.Second)
+			for syscall.Kill(pid, 0) == nil {
+				if time.Now().After(deadline) {
+					t.Fatalf("child process %d still running after the terminal call returned", pid)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		})
+	}
+}
 
 func TestChatTerminalBoundsAndExplicitLocalHost(t *testing.T) {
 	root := t.TempDir()
