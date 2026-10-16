@@ -135,6 +135,42 @@ func chatTargetScope(ctx context.Context, targets []string) (*secgate.Scope, err
 	return scope, nil
 }
 
+// newChatWebBroker is the turn's web broker. The broker dials from this host,
+// so for a caller that is not local it also refuses this host's own addresses,
+// as the sandboxed command executor does: a target named in the request cannot
+// turn the broker into a client of the operator's local services.
+func newChatWebBroker(gate *secgate.Gate, armed webArmedFunc, vantage clientVantage) *webacquire.Broker {
+	broker := newWebBroker(gate, armed)
+	if vantage == vantageLocal {
+		return broker
+	}
+	allowed := broker.Policy.IPAllowed
+	broker.Policy.IPAllowed = func(host string, ip net.IP) bool {
+		return !chatHostAddress(ip) && allowed(host, ip)
+	}
+	return broker
+}
+
+// chatHostAddress reports whether ip reaches this host rather than a remote
+// one: loopback, unspecified, link-local, multicast, broadcast, or an address
+// on one of this host's interfaces. An unreadable interface list counts as a
+// match.
+func chatHostAddress(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.Equal(net.IPv4bcast) {
+		return true
+	}
+	addresses, err := net.InterfaceAddrs()
+	if err != nil {
+		return true
+	}
+	for _, address := range addresses {
+		if local, _, err := net.ParseCIDR(address.String()); err == nil && local.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 type chatScopedTool struct {
 	tooldef.Tool
 	scope *secgate.Scope
@@ -330,7 +366,7 @@ func newChatToolRegistry(ctx context.Context, rc searcher, cfg ragconfig.Config,
 		func() string { return "" }, nil,
 		secgate.Command{Phase: secgate.PhaseExploit, Surface: secgate.SurfaceNetwork, Armed: true}, nil)
 	armed := func() bool { return true }
-	driver := &chatWebDriver{broker: newWebBroker(gate, armed)}
+	driver := &chatWebDriver{broker: newChatWebBroker(gate, armed, opts.vantage)}
 	closeBrowser := func() {}
 	if opts.requiredAction == "browser_control" || opts.requiredAction == "browser_vision" {
 		state, closeState := chatBrowserForOpts(opts)
