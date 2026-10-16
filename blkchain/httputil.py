@@ -9,14 +9,48 @@ thread on a bad header and allowed a memory-DoS on a huge one.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import os
 import sys
 import time
 import traceback
+from urllib.parse import urlsplit
 
 BODY_READ_SECONDS = 15.0
+
+_WILDCARD_HOSTS = ("", "0.0.0.0", "::")
+
+
+def json_content_type(headers) -> bool:
+    """Report whether the request declares an application/json body. A web page
+    cannot send that type to another origin without a CORS preflight, which
+    this server never answers."""
+    ctype = str(headers.get("Content-Type", "") or "").split(";")[0].strip().lower()
+    return ctype == "application/json"
+
+
+def host_allowed(headers, bind_host: str) -> bool:
+    """Report whether the Host header names this server: a loopback address,
+    localhost, or the configured bind host. A page reaching the server through
+    a rebound DNS name sends that name and is refused. A wildcard bind accepts
+    any Host, since its clients' Host cannot be predicted from the bind."""
+    bind = bind_host.strip().lower().strip("[]")
+    if bind in _WILDCARD_HOSTS:
+        return True
+    raw = str(headers.get("Host", "") or "").strip()
+    if not raw or any(c in raw for c in "@/\\ \t"):
+        return False
+    name = urlsplit("//" + raw).hostname
+    if not name:
+        return False
+    if name in ("localhost", bind):
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
 
 
 def _json_sanitize(obj):

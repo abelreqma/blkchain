@@ -16,7 +16,7 @@ import time
 import unittest
 from unittest import mock
 
-from blkchain.httputil import _json_sanitize, read_json_body, send_json
+from blkchain.httputil import _json_sanitize, host_allowed, json_content_type, read_json_body, send_json
 
 MAX = 1024  # small cap so an "oversized" body is cheap to construct
 
@@ -249,6 +249,33 @@ class StrictJsonTest(unittest.TestCase):
         body = json.loads(h.wfile.getvalue(), parse_constant=reject)
         self.assertEqual(h.status, 200)
         self.assertEqual(body, {"scores": [None, 0.5, None]})
+
+
+
+class RequestOriginTest(unittest.TestCase):
+    def test_json_content_type(self):
+        for value, want in (("application/json", True), ("Application/JSON; charset=utf-8", True),
+                            ("text/plain", False), ("application/x-www-form-urlencoded", False),
+                            ("multipart/form-data; boundary=x", False), (None, False)):
+            with self.subTest(value=value):
+                headers = {} if value is None else {"Content-Type": value}
+                self.assertEqual(json_content_type(headers), want)
+
+    def test_host_allowed_on_a_loopback_bind(self):
+        for value, want in (("127.0.0.1:8100", True), ("localhost:8100", True), ("LOCALHOST", True),
+                            ("[::1]:8100", True), ("127.0.0.2", True),
+                            ("evil.example:8100", False), ("localhost.evil.example", False),
+                            ("evil@127.0.0.1", False), ("127.0.0.1/x", False), ("", False), (None, False),
+                            ("192.168.1.10:8100", False)):
+            with self.subTest(value=value):
+                headers = {} if value is None else {"Host": value}
+                self.assertEqual(host_allowed(headers, "127.0.0.1"), want)
+
+    def test_host_allowed_on_other_binds(self):
+        self.assertTrue(host_allowed({"Host": "10.0.0.5:8100"}, "10.0.0.5"))
+        self.assertFalse(host_allowed({"Host": "evil.example"}, "10.0.0.5"))
+        self.assertTrue(host_allowed({"Host": "evil.example"}, "0.0.0.0"))
+        self.assertTrue(host_allowed({"Host": "evil.example"}, "::"))
 
 
 if __name__ == "__main__":

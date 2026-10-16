@@ -22,7 +22,8 @@ import numpy as np
 import mlx.core as mx
 
 from blkchain import config, embed_wire
-from blkchain.httputil import BODY_READ_SECONDS, max_body_bytes, read_json_body, send_error, send_json
+from blkchain.httputil import (BODY_READ_SECONDS, host_allowed, json_content_type, max_body_bytes,
+                               read_json_body, send_error, send_json)
 
 # /embed legitimately posts many texts in one batch, so allow a larger body
 # than the retrieval API while still bounding it against a memory-DoS.
@@ -111,24 +112,24 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, obj: dict):
         send_json(self, code, obj)
 
+    def _host_ok(self) -> bool:
+        return host_allowed(self.headers, config.EMBED_SERVER_HOST)
+
     def do_GET(self):
+        if not self._host_ok():
+            return self._send(421, {"error": "Host must name this server"})
         if self.path == "/health":
             self._send(200, embed_wire.health_response(_RERANKER_OK))
         else:
             self._send(404, {"error": "not found"})
 
-    def _content_type_ok(self) -> bool:
-        """On a non-loopback bind, require an application/json Content-Type so a
-        cross-origin form/simple POST is rejected. On loopback (the default
-        single-user model) any content type is accepted, preserving callers that
-        do not set the header."""
-        if config.EMBED_SERVER_HOST in ("127.0.0.1", "::1", "localhost"):
-            return True
-        ctype = str(self.headers.get("Content-Type", "")).split(";")[0].strip().lower()
-        return ctype == "application/json"
-
     def do_POST(self):
-        if not self._content_type_ok():
+        # A web page open in the operator's browser can reach loopback, so the
+        # Host and Content-Type checks apply on every bind: they refuse a
+        # rebound hostname and a cross-origin simple POST before any inference.
+        if not self._host_ok():
+            return self._send(421, {"error": "Host must name this server"})
+        if not json_content_type(self.headers):
             return self._send(415, {"error": "Content-Type must be application/json"})
         req, err_code, err_msg = read_json_body(self, _MAX_BODY_BYTES)
         if err_code is not None:
