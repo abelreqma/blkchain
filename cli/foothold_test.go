@@ -655,7 +655,7 @@ func TestFootholdPromptNamesTheDestination(t *testing.T) {
 // carrier secrets belong there.
 func TestActionScopedRunnerCarriesNoFoothold(t *testing.T) {
 	key := writeKeyFile(t)
-	roe, err := ParseRoE(strings.NewReader("## In Scope\n10.10.5.21\n*.example.test\n\n## Foothold\n10.10.5.21 user=svc key=" + key + "\n"))
+	roe, err := ParseRoE(strings.NewReader("## In Scope\n10.10.5.21\n10.20.0.6\n*.example.test\n\n## Foothold\n10.10.5.21 user=svc key=" + key + "\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

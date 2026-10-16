@@ -285,6 +285,68 @@ func TestWildcardCannotInheritPinnedSpecialAddress(t *testing.T) {
 	}
 }
 
+var internalTestAddresses = []string{
+	"10.0.0.5", "172.16.0.1", "192.168.1.10", "100.64.0.1", "198.18.0.1", "0.1.2.3", "240.0.0.1",
+	"127.0.0.1", "169.254.169.254", "fd00::1", "fe80::1", "::1", "fec0::1",
+	"::ffff:192.168.1.10", "2002:c0a8:010a::1", "64:ff9b::c0a8:10a", "64:ff9b:1::a00:5", "2001:0:4136:e378::1",
+}
+
+func TestInternalAddress(t *testing.T) {
+	for _, address := range internalTestAddresses {
+		if !InternalAddress(net.ParseIP(address)) {
+			t.Errorf("InternalAddress(%s) = false, want true", address)
+		}
+	}
+	for _, address := range []string{"8.8.8.8", "93.184.216.34", "2606:4700::1111", "2002:5db8:d822::1", "64:ff9b::808:808"} {
+		if InternalAddress(net.ParseIP(address)) {
+			t.Errorf("InternalAddress(%s) = true, want false", address)
+		}
+	}
+	if !InternalAddress(nil) {
+		t.Error("InternalAddress(nil) = false, want true")
+	}
+}
+
+func TestHostnameScopeNeedsExplicitEntryForInternalAddress(t *testing.T) {
+	for _, address := range internalTestAddresses {
+		ip := net.ParseIP(address)
+		wildcard, err := BuildScope(ScopeSpec{In: []string{"*.example.test"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wildcard.WebAddressAllowed("rebind.example.test", ip) {
+			t.Errorf("wildcard entry authorized internal address %s", address)
+		}
+		exact, err := BuildScope(ScopeSpec{In: []string{"app.example.test"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := exact.PinNetwork([]string{ip.String()}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if exact.WebAddressAllowed("app.example.test", ip) || exact.WebAddressAllowed(ip.String(), ip) {
+			t.Errorf("hostname entry authorized the internal address %s it resolved to", address)
+		}
+	}
+	explicit, err := BuildScope(ScopeSpec{In: []string{"*.example.test", "192.168.1.0/24"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !explicit.WebAddressAllowed("rebind.example.test", net.ParseIP("192.168.1.10")) {
+		t.Error("explicit private CIDR entry no longer authorizes a wildcard host inside it")
+	}
+	public, err := BuildScope(ScopeSpec{In: []string{"app.example.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := public.PinNetwork([]string{"93.184.216.34"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !public.WebAddressAllowed("app.example.test", net.ParseIP("93.184.216.34")) {
+		t.Error("hostname entry lost its pinned public address")
+	}
+}
+
 func TestBuildScopeMalformedFailsClosed(t *testing.T) {
 	if s, err := BuildScope(ScopeSpec{In: []string{"not a host!!"}}); err == nil || s != nil {
 		t.Errorf("malformed in-scope entry must error and yield nil scope; got scope=%v err=%v", s, err)

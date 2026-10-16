@@ -69,7 +69,7 @@ func TestRoEExecutionCannotFallBackToHost(t *testing.T) {
 }
 
 func TestWildcardCommandUsesActionGuardAndRecordsEvidence(t *testing.T) {
-	roe, err := ParseRoE(strings.NewReader("## In Scope\n*.example.test\n## Allowed Actions\ncommand\n"))
+	roe, err := ParseRoE(strings.NewReader("## In Scope\n*.example.test\n10.20.0.6\n## Allowed Actions\ncommand\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestWildcardCommandUsesActionGuardAndRecordsEvidence(t *testing.T) {
 }
 
 func TestWildcardStagedScanRunsBeforeActionWorkerCloses(t *testing.T) {
-	roe, err := ParseRoE(strings.NewReader("## In Scope\n*.example.test\n## Allowed Actions\ncommand\n"))
+	roe, err := ParseRoE(strings.NewReader("## In Scope\n*.example.test\n10.20.0.6\n## Allowed Actions\ncommand\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

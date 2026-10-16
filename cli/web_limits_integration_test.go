@@ -113,7 +113,7 @@ func TestExactReplayThroughSharedWebCommand(t *testing.T) {
 
 func TestWebBrokerWildcardAddressPolicy(t *testing.T) {
 	scope, err := secgate.BuildScope(secgate.ScopeSpec{
-		In:  []string{"*.example.test"},
+		In:  []string{"*.example.test", "10.20.0.5"},
 		Out: []string{"blocked.example.test", "10.20.0.7"},
 	})
 	if err != nil {
@@ -126,6 +126,7 @@ func TestWebBrokerWildcardAddressPolicy(t *testing.T) {
 		want     bool
 	}{
 		{"api.example.test", "10.20.0.5", true},
+		{"api.example.test", "10.20.0.9", false},
 		{"deep.api.example.test", "8.8.8.8", true},
 		{"example.test", "8.8.8.8", false},
 		{"blocked.example.test", "8.8.8.8", false},

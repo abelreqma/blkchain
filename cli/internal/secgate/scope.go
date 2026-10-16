@@ -315,7 +315,9 @@ func (s *Scope) WebAddressAllowed(host string, ip net.IP) bool {
 			return false
 		}
 	}
-	if !ip.IsGlobalUnicast() {
+	// An internal address needs its own IP or CIDR entry: neither a hostname
+	// entry, its pinned resolution, nor a wildcard authorizes one.
+	if InternalAddress(ip) {
 		explicit := false
 		for _, matcher := range s.in {
 			if !matcher.pinned && (matcher.ip != nil || matcher.cidr != nil) && matcher.matches(address) {

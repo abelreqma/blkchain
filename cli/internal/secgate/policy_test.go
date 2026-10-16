@@ -72,7 +72,7 @@ func TestPolicyPrivateScopeExclusionsAndRate(t *testing.T) {
 }
 
 func TestPolicyDNSChangeAndProtectedDestination(t *testing.T) {
-	scope, err := ParseScope(strings.NewReader("example.test\n"))
+	scope, err := ParseScope(strings.NewReader("example.test\n10.20.0.6\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestPolicyDNSChangeAndProtectedDestination(t *testing.T) {
 }
 
 func TestPolicyWildcardCommandRequiresMatchingPinnedHostname(t *testing.T) {
-	scope, err := BuildScope(ScopeSpec{In: []string{"*.example.test"}, Out: []string{"blocked.example.test", "10.20.0.7"}})
+	scope, err := BuildScope(ScopeSpec{In: []string{"*.example.test", "10.20.0.6"}, Out: []string{"blocked.example.test", "10.20.0.7"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,13 +121,14 @@ func TestPolicyWildcardCommandRequiresMatchingPinnedHostname(t *testing.T) {
 		"bad.example.test":       {net.ParseIP("10.20.0.7")},
 		"protected.example.test": {net.ParseIP("10.20.0.1")},
 		"mixed.example.test":     {net.ParseIP("8.8.8.8"), net.ParseIP("169.254.169.254")},
+		"lan.example.test":       {net.ParseIP("192.168.1.10")},
 	}, nil)
 	for _, host := range []string{"api.example.test", "deep.api.example.test"} {
 		if d := gate.Authorize(context.Background(), Command{Binary: "curl", Args: []string{"http://" + host + "/"}}); !d.Allowed {
 			t.Errorf("wildcard command to %s denied: %s", host, d.Reason)
 		}
 	}
-	for _, host := range []string{"blocked.example.test", "bad.example.test", "protected.example.test", "mixed.example.test", "example.test", "evil-example.test", "10.20.0.6"} {
+	for _, host := range []string{"blocked.example.test", "bad.example.test", "protected.example.test", "mixed.example.test", "lan.example.test", "example.test", "evil-example.test", "10.20.0.9"} {
 		if d := gate.Authorize(context.Background(), Command{Binary: "curl", Args: []string{"http://" + host + "/"}}); d.Allowed {
 			t.Errorf("command to %s bypassed wildcard scope", host)
 		}
@@ -404,7 +405,8 @@ func TestPolicyByteCapSurvivesRestore(t *testing.T) {
 
 func TestPolicyHostnameOnlyScopeUsesBrokerForWebAndRequiresIPForCommands(t *testing.T) {
 	old := lookupIPFn
-	lookupIPFn = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("10.20.0.6")}, nil }
+	resolved := "8.8.8.8"
+	lookupIPFn = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP(resolved)}, nil }
 	t.Cleanup(func() { lookupIPFn = old })
 	makeGate := func(entries string) *Gate {
 		t.Helper()
@@ -416,7 +418,7 @@ func TestPolicyHostnameOnlyScopeUsesBrokerForWebAndRequiresIPForCommands(t *test
 		if err := policy.Seal("", nil, scope); err != nil {
 			t.Fatal(err)
 		}
-		if err := scope.PinNetwork([]string{"10.20.0.6"}, nil); err != nil {
+		if err := scope.PinNetwork([]string{resolved}, nil); err != nil {
 			t.Fatal(err)
 		}
 		gate := &Gate{Mode: Auto, Scope: scope, Allow: NewAllowlist("curl", "wget", "id"), Policy: policy}
@@ -427,15 +429,23 @@ func TestPolicyHostnameOnlyScopeUsesBrokerForWebAndRequiresIPForCommands(t *test
 	}
 	hostOnly := makeGate("example.test\n")
 	command := Command{Binary: "curl", Args: []string{"https://example.test/"}}
+	request := APIRequest{Method: "GET", URL: "https://example.test/"}
 	if d := hostOnly.Authorize(context.Background(), command); d.Allowed || !strings.Contains(d.Reason, "explicit in-scope IP") {
 		t.Fatalf("hostname-only command escaped IP scope: %+v", d)
 	}
-	if d := hostOnly.AuthorizeAPIRequest(context.Background(), APIRequest{Method: "GET", URL: "https://example.test/"}); !d.Allowed {
+	if d := hostOnly.AuthorizeAPIRequest(context.Background(), request); !d.Allowed {
 		t.Fatalf("hostname-scoped broker request denied: %+v", d)
 	}
-	withIP := makeGate("example.test\n10.20.0.0/24\n")
+	withIP := makeGate("example.test\n8.8.8.0/24\n")
 	if d := withIP.Authorize(context.Background(), command); !d.Allowed {
 		t.Fatalf("hostname and explicit IP command denied: %+v", d)
+	}
+	resolved = "10.20.0.6"
+	if d := makeGate("example.test\n").AuthorizeAPIRequest(context.Background(), request); d.Allowed {
+		t.Fatalf("hostname-only broker request reached the private address it resolves to: %+v", d)
+	}
+	if d := makeGate("example.test\n10.20.0.0/24\n").AuthorizeAPIRequest(context.Background(), request); !d.Allowed {
+		t.Fatalf("hostname with explicit private CIDR broker request denied: %+v", d)
 	}
 }
 
