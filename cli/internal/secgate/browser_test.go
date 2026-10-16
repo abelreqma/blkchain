@@ -164,7 +164,7 @@ func TestAuthorizeWebRedirectInScopeAllowed(t *testing.T) {
 }
 
 func TestWildcardPolicyChecksAPIAndRedirectAddresses(t *testing.T) {
-	scope, err := BuildScope(ScopeSpec{In: []string{"*.example.test"}, Out: []string{"blocked.example.test", "10.20.0.7"}})
+	scope, err := BuildScope(ScopeSpec{In: []string{"*.example.test", "10.20.0.6"}, Out: []string{"blocked.example.test", "10.20.0.7"}})
 	if err != nil {
 		t.Fatal(err)
 	}

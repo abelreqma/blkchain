@@ -134,7 +134,7 @@ func TestRunnerScopeDoesNotResolveWildcardPattern(t *testing.T) {
 
 func TestPlanWildcardEgressPinsOnlyActionTargets(t *testing.T) {
 	scope, err := secgate.BuildScope(secgate.ScopeSpec{
-		In:  []string{"*.example.test", "10.20.0.9"},
+		In:  []string{"*.example.test", "10.20.0.6", "10.20.0.9"},
 		Out: []string{"10.20.0.7", "blocked.example.test"},
 	})
 	if err != nil {
@@ -171,6 +171,22 @@ func TestPlanWildcardEgressPinsOnlyActionTargets(t *testing.T) {
 	for _, host := range []string{"bad.example.test", "protected.example.test", "mixed.example.test", "blocked.example.test", "evil-example.test"} {
 		if _, err := planWildcardEgress(context.Background(), scope, []pipelineStage{{Binary: "curl", Args: []string{"http://" + host + "/"}}}, resolve); err == nil {
 			t.Errorf("wildcard plan accepted %s", host)
+		}
+	}
+}
+
+func TestPlanWildcardEgressRefusesUnlistedPrivateAddress(t *testing.T) {
+	scope, err := secgate.BuildScope(secgate.ScopeSpec{In: []string{"*.example.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, address := range []string{"192.168.1.10", "10.0.0.5", "172.16.0.1", "100.64.0.1", "fd00::1"} {
+		resolve := func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP(address)}}, nil
+		}
+		stages := []pipelineStage{{Binary: "curl", Args: []string{"http://rebind.example.test/"}}}
+		if plan, err := planWildcardEgress(context.Background(), scope, stages, resolve); err == nil {
+			t.Errorf("wildcard plan pinned unlisted internal address %s: %+v", address, plan)
 		}
 	}
 }
