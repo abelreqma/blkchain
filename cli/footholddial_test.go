@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +49,50 @@ func TestFootholdStreamThroughGuardedWorker(t *testing.T) {
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1024))
 	if err != nil || response.StatusCode != http.StatusOK || string(body) != "pivot-stream-fixture" {
 		t.Fatalf("stream response status=%d body=%q err=%v", response.StatusCode, body, err)
+	}
+}
+
+func TestFootholdStreamDeliversOutputWrittenBeforeCarrierExits(t *testing.T) {
+	const size = 200000
+	bin := t.TempDir()
+	script := "#!/bin/sh\nhead -c " + strconv.Itoa(size) + " /dev/zero | tr '\\000' a\n"
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	runner := &engageRunner{
+		foothold:   &footholdTransport{name: "command", prefix: []string{"kubectl", "exec", "-i", "fixture", "--"}, quote: "argv"},
+		workers:    map[string]string{"web-pivot": "fixture-worker"},
+		pivotSlots: make(chan struct{}, 1),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := runner.DialFoothold(ctx, "10.7.0.7:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	total, buf := 0, make([]byte, 4096)
+	for {
+		n, err := conn.Read(buf)
+		total += n
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("stream read failed after %d of %d bytes: %v", total, size, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if total != size {
+		t.Fatalf("stream delivered %d of %d bytes", total, size)
+	}
+	_ = conn.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(runner.pivotSlots) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("stream slot was not released after the carrier exited")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

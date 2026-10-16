@@ -82,13 +82,13 @@ func (r *engageRunner) DialFoothold(ctx context.Context, address string) (net.Co
 		_, _ = io.Copy(stdin, bridge)
 		_ = stdin.Close()
 	}()
+	// Wait closes stdout, so it runs only after the copy has drained it. The
+	// client end stays open: closing the bridge already ends the stream with
+	// EOF, and closing the client would turn an unread EOF into an error.
 	go func() {
 		_, _ = io.Copy(bridge, stdout)
 		_ = bridge.Close()
-	}()
-	go func() {
 		_ = cmd.Wait()
-		_ = conn.Close()
 		release()
 	}()
 	return conn, nil
