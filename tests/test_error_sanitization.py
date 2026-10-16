@@ -90,10 +90,12 @@ def _embed_server(reranker, generate=None):
         yield importlib.import_module("blkchain.embed_server")
 
 
-def _post(embed_server, path: str, body: bytes, content_length=None) -> FakeHandler:
+def _post(embed_server, path: str, body: bytes, content_length=None, headers=None) -> FakeHandler:
     h = FakeHandler(body, path, content_length)
+    h.headers.update({"Content-Type": "application/json", "Host": "127.0.0.1:8100"})
+    h.headers.update(headers or {})
     h._send = types.MethodType(embed_server.Handler._send, h)
-    h._content_type_ok = types.MethodType(embed_server.Handler._content_type_ok, h)
+    h._host_ok = types.MethodType(embed_server.Handler._host_ok, h)
     embed_server.Handler.do_POST(h)
     return h
 
@@ -217,6 +219,32 @@ class EmbedElementValidationTest(unittest.TestCase):
         with _embed_server(_working_reranker(lambda q, d: [0.0])) as embed_server:
             h = _post(embed_server, "/rerank", b'{"query": "q", "documents": [{"x": 1}]}')
         self.assertEqual(h.status, 400)
+
+
+
+class EmbedServerCrossSiteRequestTest(unittest.TestCase):
+    """A request a web page can make without a preflight, or one sent under a
+    rebound hostname, is refused before any inference."""
+
+    def test_cross_site_requests_are_refused_before_inference(self):
+        calls = []
+
+        def generate(*a, **kw):
+            calls.append(a)
+            return None
+
+        cases = (
+            ({"Content-Type": "text/plain"}, 415),
+            ({"Content-Type": "application/x-www-form-urlencoded"}, 415),
+            ({"Content-Type": ""}, 415),
+            ({"Host": "rebound.example:8100"}, 421),
+        )
+        with _embed_server(_working_reranker(lambda q, d: [0.0]), generate) as embed_server:
+            for headers, status in cases:
+                with self.subTest(headers=headers):
+                    h = _post(embed_server, "/embed", b'{"texts": ["x"]}', headers=headers)
+                    self.assertEqual(h.status, status)
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":
