@@ -83,6 +83,13 @@ func runEngage(args []string) error {
 		case "resume":
 			return runEngageResume(args[1:])
 		case "setup":
+			fs := newFlagSet("engage setup")
+			if err := parseFlags(fs, args[1:]); err != nil {
+				return err
+			}
+			if fs.NArg() != 0 {
+				return usageErr(`engage setup takes no arguments. See "blk help engage".`)
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
 			return setupEngageRunner(ctx)

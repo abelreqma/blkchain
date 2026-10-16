@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,36 @@ import (
 	"blkchain/cli/internal/histstore"
 	"blkchain/cli/internal/secgate"
 )
+
+func TestEngageSubcommandHelpPrintsHelpAndRunsNothing(t *testing.T) {
+	// An empty PATH makes any subcommand that ignored --help fail at its first
+	// docker call instead of building or downloading anything.
+	t.Setenv("PATH", t.TempDir())
+	t.Chdir(t.TempDir())
+	for _, tc := range []struct {
+		sub  string
+		flag string
+	}{
+		{"approve-network", "--workspace"},
+		{"approve-cloud-identity", "--workspace"},
+		{"attach-foothold", "--workspace"},
+		{"listen-shell", "--port"},
+		{"close-shell", "--workspace"},
+		{"setup", ""},
+	} {
+		var err error
+		out := captureStdout(t, func() { err = runEngage([]string{tc.sub, "--help"}) })
+		if !errors.Is(err, flag.ErrHelp) {
+			t.Errorf("engage %s --help returned %v, want flag.ErrHelp", tc.sub, err)
+		}
+		if !strings.Contains(out, "blk engage "+tc.sub) || !strings.Contains(out, tc.flag) {
+			t.Errorf("engage %s --help printed %q", tc.sub, out)
+		}
+	}
+	if err := runEngage([]string{"setup", "extra"}); err == nil || errors.Is(err, flag.ErrHelp) {
+		t.Errorf("engage setup accepted an argument: %v", err)
+	}
+}
 
 func TestEngageAutoRequiresScope(t *testing.T) {
 	// runEngage reads the working directory to find ROE.md and, finding none, writes
