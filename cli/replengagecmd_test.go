@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -188,6 +189,23 @@ func TestTUIEngageApprovalUsesOperatorCommandPath(t *testing.T) {
 	next, cmd = m.Update(engageApprovalDoneMsg{kind: "approve-network"})
 	if next.(model).working || cmd == nil || !strings.Contains(fmt.Sprint(cmd()), "approve-network saved") {
 		t.Fatal("approval completion did not return to the TUI")
+	}
+}
+
+func TestTUIEngageApprovalHelpRunsOutsideTheTUI(t *testing.T) {
+	for _, input := range []string{"/engage approve-network --help", "/engage listen-shell -h"} {
+		m := newTestModel(t)
+		next, cmd := m.dispatchInput(input)
+		if next.(model).working || cmd == nil {
+			t.Errorf("%s started an approval turn instead of printing help", input)
+		}
+	}
+	m := newTestModel(t)
+	if _, cmd := m.Update(execDoneMsg{err: flag.ErrHelp}); cmd != nil {
+		t.Errorf("a help request was reported as an error: %v", cmd())
+	}
+	if _, cmd := m.Update(execDoneMsg{err: errors.New("boom")}); cmd == nil {
+		t.Error("a real command error was not reported")
 	}
 }
 
