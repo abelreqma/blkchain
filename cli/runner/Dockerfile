@@ -1,4 +1,4 @@
-FROM alpine:3.23.6@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0 AS toolbuild
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS toolbuild
 ARG TARGETARCH
 COPY build-packages-${TARGETARCH}.lock /packages.lock
 RUN set -eu; mkdir /packages; cd /packages; \
@@ -22,7 +22,7 @@ RUN set -eu; mkdir /src; cd /src; \
     ./configure --prefix=/opt/ike --with-openssl CFLAGS='-O2 -std=gnu11'; \
     make -j2; make install
 
-FROM alpine:3.23.6@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 ARG TARGETARCH
 COPY packages-${TARGETARCH}.lock /packages.lock
 RUN set -eu; mkdir /packages; cd /packages; \
